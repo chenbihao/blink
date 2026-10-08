@@ -9,7 +9,7 @@
  *
  * 云端 STT 架构（独立模式）：
  * - 配置完全独立于 AIConfig——用户在语音设置页直接配置 kind/base_url/model_id
- * - API Key 用 stt:cloud 前缀存在 Credential Manager 里，不与 AI 供应商共用
+ * - API Key 独立存在 Credential Manager（blink:stt:cloud:key，0.25.15 前为 stt:cloud 别名），不与 AI 供应商共用
  * - 支持预设快捷填充（OpenAI / Groq / MiMo）
  */
 import {commandErrorText, invoke, listen} from "../../shared/tauri.js";

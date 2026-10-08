@@ -186,9 +186,18 @@ function renderSettingField(field, value, useSettingRow = false) {
             control = `<div class="number-input-wrapper"><input type="number" class="plugin-field" data-key="${field.key}" value="${escapeAttr(val ?? "")}" ${field.min != null ? `min="${field.min}"` : ""} ${field.max != null ? `max="${field.max}"` : ""} /><div class="number-spinner"><button type="button" class="spinner-up" aria-label="${t("spinner.increase")}">▲</button><button type="button" class="spinner-down" aria-label="${t("spinner.decrease")}">▼</button></div></div>`;
             break;
         case "string":
-        default:
-            control = `<input type="text" class="plugin-field" data-key="${field.key}" value="${escapeAttr(val ?? "")}" />`;
+        default: {
+            // 0.25.16: secret 字段渲染 password + 不回显——真实值在系统凭据管理器，
+            // 输入框恒空（空=未修改）；掩码 hint 由 bindSecretFields 异步填充 placeholder。
+            // 非 secret 字段保持原样回显 settings 值。
+            if (field.secret) {
+                control = `<input type="password" class="plugin-field plugin-secret-field" data-key="${field.key}" value="" autocomplete="new-password" placeholder="${escapeAttr(t("plugin.secret_placeholder"))}" />` +
+                    `<button type="button" class="btn-small plugin-secret-clear" data-key="${escapeAttr(field.key)}">${escapeHtml(t("plugin.secret_clear"))}</button>`;
+            } else {
+                control = `<input type="text" class="plugin-field" data-key="${field.key}" value="${escapeAttr(val ?? "")}" />`;
+            }
             break;
+        }
     }
     const descIcon = field.description
         ? `<span class="field-hint-icon" title="${escapeAttr(field.description)}">ⓘ</span>`
@@ -489,6 +498,14 @@ function bindPluginCardEvents(plugin) {
         const enabled = enabledOverride !== undefined ? enabledOverride : card.querySelector(".plugin-enabled").checked;
         try {
             await saveConfig("plugin_config", {pluginId: id, enabled, settings});
+            // 0.25.16:密钥已转存 CM——清空输入框并回填掩码 hint（值不再回显，
+            // 也避免后续其他字段触发的自动保存重复提交同一密钥）
+            card.querySelectorAll(".plugin-field.plugin-secret-field").forEach((el) => {
+                if (el.value !== "") {
+                    el.value = "";
+                    el._refreshHint?.();
+                }
+            });
             return true;
         } catch (err) {
             console.error("update_plugin_config failed:", err);
@@ -512,6 +529,9 @@ function bindPluginCardEvents(plugin) {
 
     // 密钥类字段（no_space）空格提示：红字 + 一键移除按钮，不自动改写输入
     bindNoSpaceHints(card, schema);
+
+    // 密钥字段（secret）：掩码 hint 回填 placeholder + 清除按钮（0.25.16）
+    bindSecretFields(card, id, schema);
 
     // 条件显隐初算（如"降级顺序"仅在"允许降级"开启时显示）
     applyFieldVisibility(card, schema);
@@ -643,6 +663,9 @@ function collectSettings(card, schema) {
         }
         const el = card.querySelector(`.plugin-field[data-key="${f.key}"]`);
         if (!el) continue;
+        // 0.25.16: secret 字段空 = 未修改（不发送，后端不动 CM）；
+        // 非空 = 新密钥（发送，后端转存 CM 并脱敏落库）
+        if (f.secret && el.value === "") continue;
         switch (f.type) {
             case "boolean":
                 settings[f.key] = el.checked;
@@ -655,6 +678,48 @@ function collectSettings(card, schema) {
         }
     }
     return settings;
+}
+
+/**
+ * 密钥字段绑定（0.25.16）：掩码 hint 回填 placeholder + 清除按钮。
+ *
+ * 真实密钥在系统凭据管理器，前端只拿 format_hint 掩码（如 sk-a••••cdef）。
+ * 清除走专门 invoke（不走 settings 保存——settings 里的空串语义是"未修改"）。
+ */
+function bindSecretFields(card, pluginId, schema) {
+    for (const f of schema) {
+        if (f.type !== "string" || !f.secret) continue;
+        const input = card.querySelector(`.plugin-field.plugin-secret-field[data-key="${f.key}"]`);
+        if (!input) continue;
+        const refreshHint = async () => {
+            try {
+                const hint = await invoke("get_plugin_secret_hint", {pluginId, fieldKey: f.key});
+                input.placeholder = hint
+                    ? `${hint} — ${t("plugin.secret_keep_hint")}`
+                    : t("plugin.secret_placeholder");
+            } catch (err) {
+                console.error("get_plugin_secret_hint failed:", err);
+            }
+        };
+        input._refreshHint = refreshHint; // save() 转存 CM 后回填掩码用
+        refreshHint();
+
+        const clearBtn = card.querySelector(`.plugin-secret-clear[data-key="${f.key}"]`);
+        clearBtn?.addEventListener("click", async () => {
+            clearBtn.disabled = true;
+            try {
+                await invoke("clear_plugin_secret", {pluginId, fieldKey: f.key});
+                input.value = "";
+                await refreshHint();
+                flash(card, t("plugin.secret_cleared"), false, 1500);
+            } catch (err) {
+                console.error("clear_plugin_secret failed:", err);
+                flash(card, t("common.save_failed_msg", {err}), true, 5000);
+            } finally {
+                clearBtn.disabled = false;
+            }
+        });
+    }
 }
 
 /**

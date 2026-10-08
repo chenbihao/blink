@@ -135,7 +135,8 @@ impl Capability for PluginCapabilityAdapter {
             .ok_or_else(|| CapabilityError::Internal {
                 detail: "当前运行模式未初始化插件引擎".into(),
             })?;
-        let settings = plugin_engine.get_settings(plugin_id);
+        // 0.25.16:喂插件进程用 resolved（CM 密钥已还原明文）——与 query_subset 同口径
+        let settings = plugin_engine.resolved_settings(plugin_id);
 
         tracing::debug!(
             plugin = %plugin_id,

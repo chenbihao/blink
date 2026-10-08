@@ -1029,6 +1029,11 @@ export const en = {
     "plugin.saved_msg": "Saved",
     "plugin.field_space_hint": "Contains spaces: API keys never contain spaces",
     "plugin.field_space_fix": "Remove spaces",
+    // Secret fields (0.25.16: real value lives in system credential manager, never echoed)
+    "plugin.secret_placeholder": "Enter key (stored in system credential manager)",
+    "plugin.secret_keep_hint": "leave empty to keep",
+    "plugin.secret_clear": "Clear",
+    "plugin.secret_cleared": "Secret cleared",
     "plugin.load_failed": "Failed to load plugins",
     "plugin.empty": "No plugins loaded",
     // Trigger keyword config

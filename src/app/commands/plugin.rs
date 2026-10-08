@@ -14,6 +14,33 @@ pub async fn get_plugins(app: tauri::AppHandle) -> Vec<serde_json::Value> {
     engine.list_plugins(&lang)
 }
 
+/// 读插件密钥字段的首尾掩码（设置页 placeholder，0.25.16）。
+///
+/// 不返回明文——只返回 `format_hint` 掩码（如 `sk-a••••cdef`）；未配置返回 None。
+/// 字段必须在 manifest 声明 `secret:true`（防任意字段探测）。
+#[tauri::command]
+pub async fn get_plugin_secret_hint(
+    app: tauri::AppHandle,
+    plugin_id: String,
+    field_key: String,
+) -> Result<Option<String>, String> {
+    let engine = app.state::<std::sync::Arc<crate::domain::plugin::PluginEngine>>();
+    Ok(engine.secret_hint(&plugin_id, &field_key))
+}
+
+/// 清除插件密钥字段（设置页密钥框「清除」按钮，0.25.16）。幂等——未配置视为已删。
+#[tauri::command]
+pub async fn clear_plugin_secret(
+    app: tauri::AppHandle,
+    plugin_id: String,
+    field_key: String,
+) -> Result<(), String> {
+    let engine = app.state::<std::sync::Arc<crate::domain::plugin::PluginEngine>>();
+    engine.clear_secret(&plugin_id, &field_key)?;
+    tracing::info!(plugin = %plugin_id, field = %field_key, "插件密钥已清除");
+    Ok(())
+}
+
 /// 列出所有已发现的 Skill 条目（设置页展示用）。
 ///
 /// 0.13.6: 返回带 `disabled` 标记的 SkillEntryWithStatus，前端用此渲染复选框。

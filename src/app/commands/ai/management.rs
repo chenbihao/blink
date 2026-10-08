@@ -42,7 +42,7 @@ pub async fn save_ai_secret(
 ) -> Result<(), String> {
     // 立即包进 SecretString——之后再也不用明文引用
     let secret_wrapped = crate::infra::platform::secret::SecretString::new(secret);
-    crate::infra::platform::secret::save_secret(&provider_id, "key", &secret_wrapped)
+    crate::infra::platform::secret::save_secret(&crate::infra::platform::secret::SecretRef::ai(&provider_id), &secret_wrapped)
         .map_err(|e| e.to_string())?;
     // Bump registry 内的密钥 epoch —— 让下次 reload invalidate 所有旧实例,
     // 保证"改密钥立即生效"(前端保存密钥后会紧接着调 set_config('ai_config') 触发 reload)。
@@ -72,7 +72,7 @@ pub async fn delete_ai_secret(provider_id: String, app: tauri::AppHandle) -> Res
             reg.bump_secret_epoch();
         }
     };
-    match crate::infra::platform::secret::delete_secret(&provider_id, "key") {
+    match crate::infra::platform::secret::delete_secret(&crate::infra::platform::secret::SecretRef::ai(&provider_id)) {
         Ok(()) => {
             bump();
             tracing::info!(%provider_id, "AI Provider 密钥已从 CM 删除");
@@ -94,7 +94,7 @@ pub async fn delete_ai_secret(provider_id: String, app: tauri::AppHandle) -> Res
 /// 用于设置页初始化时判断 Provider 卡片显示"已配置"标记。
 #[tauri::command]
 pub async fn has_ai_secret(provider_id: String) -> Result<bool, String> {
-    match crate::infra::platform::secret::load_secret(&provider_id, "key") {
+    match crate::infra::platform::secret::load_secret(&crate::infra::platform::secret::SecretRef::ai(&provider_id)) {
         Ok(_) => Ok(true),
         Err(crate::infra::platform::secret::SecretError::NotFound(_)) => Ok(false),
         Err(e) => Err(e.to_string()),
@@ -106,7 +106,7 @@ pub async fn has_ai_secret(provider_id: String) -> Result<bool, String> {
 /// 不返回明文——仅返回 `format_hint` 结果。密钥不存在返回 `None`。
 #[tauri::command]
 pub async fn get_ai_secret_hint(provider_id: String) -> Result<Option<String>, String> {
-    match crate::infra::platform::secret::load_secret(&provider_id, "key") {
+    match crate::infra::platform::secret::load_secret(&crate::infra::platform::secret::SecretRef::ai(&provider_id)) {
         Ok(secret) => Ok(Some(crate::infra::platform::secret::format_hint(
             secret.expose(),
         ))),
@@ -165,7 +165,7 @@ pub async fn fetch_ai_models(
         if !key.trim().is_empty() {
             key.trim().to_string()
         } else if let Some(pid) = provider_id.as_deref() {
-            match crate::infra::platform::secret::load_secret(pid, "key") {
+            match crate::infra::platform::secret::load_secret(&crate::infra::platform::secret::SecretRef::ai(pid)) {
                 Ok(s) => {
                     _cm_secret = Some(s);
                     _cm_secret.as_ref().unwrap().expose().to_string()
@@ -179,7 +179,7 @@ pub async fn fetch_ai_models(
             return Ok(Vec::new());
         }
     } else if let Some(pid) = provider_id.as_deref() {
-        match crate::infra::platform::secret::load_secret(pid, "key") {
+        match crate::infra::platform::secret::load_secret(&crate::infra::platform::secret::SecretRef::ai(pid)) {
             Ok(s) => {
                 _cm_secret = Some(s);
                 _cm_secret.as_ref().unwrap().expose().to_string()
@@ -396,7 +396,7 @@ pub async fn test_ai_provider(
     let effective_key = if !api_key.trim().is_empty() {
         api_key.trim().to_string()
     } else if let Some(pid) = provider_id.as_deref() {
-        match crate::infra::platform::secret::load_secret(pid, "key") {
+        match crate::infra::platform::secret::load_secret(&crate::infra::platform::secret::SecretRef::ai(pid)) {
             Ok(s) => {
                 _cm_secret = Some(s);
                 _cm_secret.as_ref().unwrap().expose().to_string()

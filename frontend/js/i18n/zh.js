@@ -1023,6 +1023,11 @@ export const zh = {
     "plugin.saved_msg": "已保存",
     "plugin.field_space_hint": "含空格：密钥不含空格",
     "plugin.field_space_fix": "移除空格",
+    // 密钥字段（0.25.16：真实值存系统凭据管理器，输入框不回显）
+    "plugin.secret_placeholder": "输入密钥（存入系统凭据管理器）",
+    "plugin.secret_keep_hint": "留空保持不变",
+    "plugin.secret_clear": "清除",
+    "plugin.secret_cleared": "密钥已清除",
     "plugin.load_failed": "加载插件列表失败",
     "plugin.empty": "暂无已加载插件",
     // 触发关键字配置

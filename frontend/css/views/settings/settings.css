@@ -1603,7 +1603,8 @@ details.plugin-group .plugin-group-body {
 
 /* 配置输入控件(统一宽度和高度) */
 .plugin-field-row select,
-.plugin-field-row input[type="text"] {
+.plugin-field-row input[type="text"],
+.plugin-field-row input[type="password"] {
     width: 220px;
     flex-shrink: 0;
     background: var(--surface);
@@ -1613,6 +1614,16 @@ details.plugin-group .plugin-group-body {
     padding: 6px 10px;
     font-size: var(--text-md);
     height: 32px;
+}
+
+/* 密钥字段（0.25.16）：password 输入 + 清除按钮 */
+.plugin-field-row .plugin-secret-field {
+    font-family: var(--font-mono, monospace);
+    letter-spacing: 0.5px;
+}
+
+.plugin-field-row .plugin-secret-clear {
+    flex-shrink: 0;
 }
 
 /* 插件配置中的数字输入框（已包装在 number-input-wrapper 内） */

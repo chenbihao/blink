@@ -169,7 +169,7 @@ impl AgentProvider {
         // 0.17.8: 密钥缺失用 SecretMissing 而非 NotConfigured，区分"档位悬空"与"密钥丢失"，
         // 让前端能给用户更精准的修复引导。
         let key_str: String = if entry.kind.requires_secret() {
-            let key = secret::load_secret(&entry.id, "key").map_err(|e| {
+            let key = secret::load_secret(&secret::SecretRef::ai(&entry.id)).map_err(|e| {
                 tracing::debug!(
                     target: blink_infra::utils::perf::ai_slo::TARGET,
                     "AgentProvider: {} 密钥未配置 ({e})",

@@ -828,10 +828,13 @@ pub async fn get_cleanup_info() -> serde_json::Value {
         0
     };
 
-    // Credential Manager 中 blink/* 密钥条数
+    // Credential Manager 中 blink 密钥条数
+    // 0.25.16-fix: 全量枚举 + Rust 端 contains 过滤——原 `blink*` 前缀过滤自 0.17.11
+    // 起漏计 v1 命名（{pid}/key.blink）；而 `*blink*` 通配 CredEnumerateW 不支持
+    // （ERROR_NOT_FOUND 被当空列表），故不依赖 CM 通配语法，三代命名一处覆盖
     #[cfg(target_os = "windows")]
     let secret_count = {
-        match crate::infra::platform::secret::enumerate_blink_secrets() {
+        match crate::infra::platform::secret::enumerate_blink_secrets_anywhere() {
             Ok(secrets) => secrets.len(),
             Err(e) => {
                 tracing::warn!(error = %e, "get_cleanup_info: 枚举密钥失败");
@@ -869,20 +872,32 @@ pub async fn cleanup_all_data(app: tauri::AppHandle) -> serde_json::Value {
 
     // 0.17.11: 先读 AIConfig 拿到要清理的 provider id 列表
     // （删数据目录后配置不可读，delete_all_blink_secrets 需要这个列表）
-    let provider_ids: Vec<String> = {
+    use crate::infra::platform::secret::SecretRef;
+    let secret_refs: Vec<SecretRef> = {
         let pools = app.state::<crate::infra::data::DbPools>();
         let ai_config =
             crate::app::config::ConfigStore::get::<crate::app::ai_config::AIConfig>(&pools.config)
                 .await;
-        let mut ids: Vec<String> = ai_config
+        let mut refs: Vec<SecretRef> = ai_config
             .providers
             .iter()
             .filter(|p| p.kind.requires_secret())
-            .map(|p| p.id.clone())
+            .map(|p| SecretRef::ai(&p.id))
             .collect();
-        // STT 云端密钥也需清理（固定别名 stt:cloud）
-        ids.push("stt:cloud".to_string());
-        ids
+        // STT 云端密钥也需清理（SecretRef::stt_cloud，v2 命名 blink:stt:cloud:key）
+        refs.push(SecretRef::stt_cloud());
+        // 插件密钥字段也需清理（0.25.16——从已加载 manifest 的 secret 字段收集；
+        // 删数据目录后插件配置不可读，但 manifest 在内存 PluginEngine 里仍可用）
+        if let Some(engine) =
+            app.try_state::<std::sync::Arc<crate::domain::plugin::PluginEngine>>()
+        {
+            for plugin in engine.all_plugins() {
+                for f in plugin.manifest().settings_schema.iter().filter(|f| f.secret) {
+                    refs.push(SecretRef::plugin(plugin.id(), &f.key));
+                }
+            }
+        }
+        refs
     };
 
     // 1. 关闭 DB 连接池（释放文件占用，否则 remove_dir_all 会失败）
@@ -922,11 +937,11 @@ pub async fn cleanup_all_data(app: tauri::AppHandle) -> serde_json::Value {
         results.push(("数据目录".to_string(), Ok(()))); // 目录不存在视为成功
     }
 
-    // 3. 清理密钥（0.17.11: 按步骤 0 读到的 provider id 列表逐个删）
+    // 3. 清理密钥（0.17.11: 按步骤 0 读到的引用列表逐个删；0.25.15 入参改 SecretRef）
     #[cfg(target_os = "windows")]
     {
         let delete_results =
-            crate::infra::platform::secret::delete_all_blink_secrets(&provider_ids);
+            crate::infra::platform::secret::delete_all_blink_secrets(&secret_refs);
         let mut secret_ok = true;
         let mut secret_errors = Vec::new();
         for (target, result) in delete_results {

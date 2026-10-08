@@ -18,12 +18,14 @@
 ;   - $APPDATA\blink                — 存在（4 DB + logs + python + skills），需本钩子清理
 ;   - $LOCALAPPDATA\blink           — 不存在，保留 RMDir 防御性处理
 ;
-; ## 凭据清理（0.18.5 修复）
-;   0.17.11 密钥存储从自写 FFI (CM target = "blink/{pid}/{purpose}")
-;   切换到 keyring crate (CM target = "{pid}/{purpose}.blink")。
-;   旧 findstr "blink/" 对新 keyring 条目完全失效；旧 tokens=2 delims=:
-;   对新格式 "Target: LegacyGeneric:target=xxx.blink" 会截断为 "LegacyGeneric"。
-;   修复：findstr "blink" 覆盖两种模式 + tokens=1,* delims=: 取完整 target name。
+; ## 凭据清理（0.18.5 修复 / 0.25.15 注释更新）
+;   密钥命名历经三代（详见 crates/blink-infra/src/platform/secret/mod.rs）：
+;   - v0：自写 FFI，CM target = "blink/{pid}/{purpose}"
+;   - v1：keyring crate（0.17.11），CM target = "{pid}/{purpose}.blink"（应用名在尾部）
+;   - v2：keyring target modifier（0.25.15），CM target = "blink:{module}:{subject}:{purpose}"
+;   卸载清理用 findstr "blink" 同时命中三种命名（v0 前缀 / v1 后缀 / v2 前缀）；
+;   tokens=1,* delims=: 取首个冒号后的完整 target name——v1/v2 target 自身含
+;   冒号（stt:cloud、blink:ai:…）不受影响（0.18.5 已实机验证该解析对含冒号 target 成立）。
 ;
 ; ## 版本耦合
 ;   此钩子依赖 Tauri 2.11.5 默认 installer.nsi 提供的 $UpdateMode / $DeleteAppDataCheckboxState
@@ -43,9 +45,10 @@
     RMDir /r "$LOCALAPPDATA\blink"
 
     ; 2. 清理 Credential Manager 中 Blink 密钥
-    ;    覆盖两种命名：
-    ;    - 老 CM 条目：blink/{provider_id}/{purpose}（findstr "blink" 匹配 "blink/" 前缀）
-    ;    - 新 keyring 条目：{provider_id}/{purpose}.blink（findstr "blink" 匹配 ".blink" 后缀）
+    ;    覆盖三代命名：
+    ;    - v0 CM 条目：blink/{provider_id}/{purpose}（findstr "blink" 匹配 "blink/" 前缀）
+    ;    - v1 keyring 条目：{provider_id}/{purpose}.blink（findstr "blink" 匹配 ".blink" 后缀）
+    ;    - v2 target modifier 条目：blink:{module}:{subject}:{purpose}（findstr "blink" 匹配 "blink:" 前缀）
     ;    cmdkey 不支持通配符删除，写临时批处理枚举 + 过滤 + 逐条删除
     FileOpen $0 "$TEMP\blink_cred_cleanup.bat" w
     FileWrite $0 `@echo off$\r$\n`

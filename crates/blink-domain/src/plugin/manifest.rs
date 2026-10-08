@@ -443,6 +443,15 @@ pub struct SettingField {
     /// (如阿里 MT 网关 404 = AccessKey 不存在)。default false。
     #[serde(default)]
     pub no_space: bool,
+    /// 声明该字段是密钥/凭据（0.25.16 激活——标记本身自 0.7 起就写在翻译插件
+    /// manifest 里，此前未被解析）。
+    ///
+    /// 宿主在 `plugin_config` 写入咽喉把非空值转存 Credential Manager
+    /// （`blink:plugin:{plugin_id}:{key}`），SQLite settings 只留空串占位；
+    /// 喂插件进程前由宿主从 CM 还原明文（插件二进制与协议零改动）。
+    /// 前端渲染 password input + 掩码 hint，不回显。default false。
+    #[serde(default)]
+    pub secret: bool,
     /// 条件显隐(可选):引用的设置字段满足条件时设置页才显示本字段。
     /// 例: `"visible_when": {"key": "allow_fallback", "equals": true}`
     /// ——降级顺序仅在"允许降级"开启时显示。
@@ -791,6 +800,23 @@ mod tests {
         let m: PluginManifest = serde_json::from_str(json).unwrap();
         assert!(m.settings_schema[0].no_space);
         assert!(!m.settings_schema[1].no_space);
+    }
+
+    #[test]
+    fn secret_field_parses() {
+        // 0.25.16 激活 manifest 的 secret 标记（翻译插件自 0.7 起就在写，此前被忽略）。
+        // 老 manifest 缺省 false。
+        let json = r#"{
+            "schema_version": 1, "id": "x", "name": "X", "version": "0",
+            "runtime": {"exec": "x.exe"},
+            "settings_schema": [
+                {"key":"deepl_api_key","type":"string","title":"DeepL API Key","secret":true},
+                {"key":"default_city","type":"string","title":"默认城市"}
+            ]
+        }"#;
+        let m: PluginManifest = serde_json::from_str(json).unwrap();
+        assert!(m.settings_schema[0].secret);
+        assert!(!m.settings_schema[1].secret);
     }
 
     #[test]

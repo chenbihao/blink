@@ -503,6 +503,9 @@ fn main() {
             tauri::async_runtime::block_on(infra::data::config::migrate_camelcase_to_snake(&pools.config));
             // 加载/初始化每个插件配置(不存在则写默认 {enabled, settings:null})。
             tauri::async_runtime::block_on(plugin_engine.init_configs());
+            // 0.25.16:存量插件密钥搬迁——settings 里明文存的密钥字段转存 CM,SQLite 只留占位。
+            // 必须在设置页 get_plugins 之前(防明文回显);幂等由构造保证,无 marker。
+            tauri::async_runtime::block_on(plugin_engine.migrate_secret_fields_to_cm());
 
             // 0.8.2 §3.4：把 PluginEngine 作为 PluginSettingResolver 后置注入 RuleRouter,
             // 让 Context 触发能读插件 target_lang(如翻译)。同步 app_language 快照。
@@ -715,6 +718,14 @@ fn main() {
             // 必须在 AIConfig 读取前执行——AIConfig 加载会触发密钥读取,需先迁到 keyring 新命名。
             tauri::async_runtime::block_on(
                 crate::infra::platform::secret::migrate::migrate_legacy_cm_to_keyring(&pools.config),
+            );
+
+            // 0.25.15: keyring v1 命名({pid}/key.blink)→v2 命名(blink:{module}:{subject}:{purpose})
+            // 启动期自动收编,幂等自愈(0.25.16-fix 去 marker——枚举全量+Rust 过滤,
+            // 见 migrate_v2.rs 头注释);同样必须在 AIConfig/密钥读取前执行。
+            // 顺序:v0→新命名(v1)在前——从 0.17.11 前直接升级的用户经它落地即已是 v2。
+            tauri::async_runtime::block_on(
+                crate::infra::platform::secret::migrate_v2::migrate_keyring_v1_to_v2(),
             );
 
             // 0.9.2 Phase 5b:AIProviderRegistry 用 RigFactory 真接 rig-core。
@@ -1527,6 +1538,8 @@ app::commands::generate_palette_schemes,
             app::commands::probe_everything,
             app::commands::get_engine_config,
             app::commands::get_plugins,
+            app::commands::get_plugin_secret_hint,
+            app::commands::clear_plugin_secret,
             app::commands::get_context_config,
             app::commands::open_containing_folder,
             app::commands::open_lnk_target,

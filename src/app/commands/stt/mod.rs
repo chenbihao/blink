@@ -59,7 +59,7 @@ pub async fn resize_voice_overlay(
 #[tauri::command]
 pub async fn save_stt_secret(secret: String) -> Result<(), String> {
     let secret_wrapped = crate::infra::platform::secret::SecretString::new(secret);
-    crate::infra::platform::secret::save_secret("stt:cloud", "key", &secret_wrapped)
+    crate::infra::platform::secret::save_secret(&crate::infra::platform::secret::SecretRef::stt_cloud(), &secret_wrapped)
         .map_err(|e| e.to_string())?;
     tracing::info!("STT 密钥已保存到 Credential Manager");
     Ok(())
@@ -68,7 +68,7 @@ pub async fn save_stt_secret(secret: String) -> Result<(), String> {
 /// 从 Credential Manager 删除 STT API Key。
 #[tauri::command]
 pub async fn delete_stt_secret() -> Result<(), String> {
-    match crate::infra::platform::secret::delete_secret("stt:cloud", "key") {
+    match crate::infra::platform::secret::delete_secret(&crate::infra::platform::secret::SecretRef::stt_cloud()) {
         Ok(()) => {
             tracing::info!("STT 密钥已从 CM 删除");
             Ok(())
@@ -84,7 +84,7 @@ pub async fn delete_stt_secret() -> Result<(), String> {
 /// 检查 STT 是否已配 API Key(不返回明文,只返 true/false)。
 #[tauri::command]
 pub async fn has_stt_secret() -> Result<bool, String> {
-    match crate::infra::platform::secret::load_secret("stt:cloud", "key") {
+    match crate::infra::platform::secret::load_secret(&crate::infra::platform::secret::SecretRef::stt_cloud()) {
         Ok(_) => Ok(true),
         Err(crate::infra::platform::secret::SecretError::NotFound(_)) => Ok(false),
         Err(e) => Err(e.to_string()),
@@ -94,7 +94,7 @@ pub async fn has_stt_secret() -> Result<bool, String> {
 /// 获取 STT 密钥的首尾掩码(如 `"sk-a••••cdef"`),供设置页占位展示。
 #[tauri::command]
 pub async fn get_stt_secret_hint() -> Result<Option<String>, String> {
-    match crate::infra::platform::secret::load_secret("stt:cloud", "key") {
+    match crate::infra::platform::secret::load_secret(&crate::infra::platform::secret::SecretRef::stt_cloud()) {
         Ok(secret) => Ok(Some(crate::infra::platform::secret::format_hint(
             secret.expose(),
         ))),

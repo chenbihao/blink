@@ -76,7 +76,7 @@ impl ProviderFactory for RigFactory {
         // 1. 读密钥——本地 provider (ollama) 不需要密钥,跳过。
         //    云端 provider 缺密钥 = SecretMissing（区别于 NotConfigured 档位悬空）。
         let key_str: String = if entry.kind.requires_secret() {
-            let key = secret::load_secret(&entry.id, "key").map_err(|e| {
+            let key = secret::load_secret(&secret::SecretRef::ai(&entry.id)).map_err(|e| {
                 tracing::debug!(
                     target: blink_infra::utils::perf::ai_slo::TARGET,
                     "AI factory: {} 密钥未配置 ({e})",

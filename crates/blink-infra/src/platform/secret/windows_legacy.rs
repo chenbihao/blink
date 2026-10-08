@@ -302,6 +302,12 @@ pub fn delete_secret(provider_id: &str, purpose: &str) -> Result<(), SecretError
 /// 使用 `CredEnumerateW` 的通配符过滤（`"blink*"`），返回 target name 列表。
 /// **不返回密钥内容**——只供清理展示与确认。
 ///
+/// **注意（0.25.16-fix）**：`blink*` 前缀过滤只匹配 v0（`blink/…`）与 v2（`blink:…`）
+/// 命名，匹配不到 v1 命名（`{pid}/key.blink`——应用名在尾部）。需要跨三代命名的
+/// 场景（迁移 / 计数）用 `enumerate_all_secrets` + 调用方 Rust 端过滤——
+/// **不要给 CredEnumerateW 传前导通配模式**（实测 `*blink*` 直接 ERROR_NOT_FOUND
+/// 被误当"无条目"，`*.blink` 反而可用，语法子集不可依赖）。
+///
 /// # 错误
 /// - `Platform`:`CredEnumerateW` 系统 API 返回失败
 pub fn enumerate_blink_secrets() -> Result<Vec<SecretInfo>, SecretError> {
@@ -330,6 +336,52 @@ pub fn enumerate_blink_secrets() -> Result<Vec<SecretInfo>, SecretError> {
         )));
     }
 
+    collect_target_names(count, creds_ptr)
+}
+
+/// 枚举当前用户 Credential Manager 全部凭据的元信息（0.25.16-fix）。
+///
+/// 不过滤，只返回 target name 列表（**不含密钥内容**）。凭据量级为数十条，
+/// 枚举后由调用方在 Rust 端做包含过滤——绕开 CredEnumerateW 通配符语法
+/// 的不可依赖子集（见 `enumerate_blink_secrets` 的注意段）。
+///
+/// # 错误
+/// - `Platform`:`CredEnumerateW` 系统 API 返回失败
+pub fn enumerate_all_secrets() -> Result<Vec<SecretInfo>, SecretError> {
+    let mut count: u32 = 0;
+    let mut creds_ptr: *mut *mut CREDENTIALW = ptr::null_mut();
+
+    // Safety: count/creds_ptr 是栈上合法输出参数;filter 为 NULL 表示枚举全部
+    let result = unsafe {
+        CredEnumerateW(
+            windows::core::PCWSTR(ptr::null()),
+            Some(CRED_ENUMERATE_FLAGS(0)),
+            &mut count,
+            &mut creds_ptr,
+        )
+    };
+
+    if let Err(e) = result {
+        if e.code() == windows::core::HRESULT::from_win32(ERROR_NOT_FOUND.0) {
+            return Ok(Vec::new());
+        }
+        return Err(SecretError::Platform(format!(
+            "CredEnumerateW(全部) 失败: {}",
+            e.code()
+        )));
+    }
+
+    collect_target_names(count, creds_ptr)
+}
+
+/// 从 CredEnumerateW 的输出数组提取 target name 并释放 CM 内存（公共收尾）。
+///
+/// Safety 契约：`creds_ptr` 为 CM 分配的 `count` 个 `*mut CREDENTIALW` 数组
+/// （可为 null/0 计数，视为空），本函数负责 CredFree。
+fn collect_target_names(
+    count: u32,
+    creds_ptr: *mut *mut CREDENTIALW,
+) -> Result<Vec<SecretInfo>, SecretError> {
     if creds_ptr.is_null() || count == 0 {
         return Ok(Vec::new());
     }
@@ -358,7 +410,7 @@ pub fn enumerate_blink_secrets() -> Result<Vec<SecretInfo>, SecretError> {
     // 释放 CM 分配的凭据数组
     unsafe { CredFree(creds_ptr as _) };
 
-    tracing::debug!(count = secrets.len(), "枚举到 blink/* 密钥条目");
+    tracing::debug!(count = secrets.len(), "CM 凭据枚举完成");
     Ok(secrets)
 }
 

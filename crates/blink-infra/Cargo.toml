@@ -19,6 +19,9 @@ dirs-next = "2.0"
 futures = "0.3"
 image = { version = "0.25", default-features = false, features = ["png"] }
 keyring = { version = "4", features = ["v1"] }
+# keyring-core: secret/store.rs 生产代码直接使用（v2 命名的 Entry::new_with_modifiers target modifier，
+# 0.25.15 起从 dev-deps 转正式依赖；单测内存 store 也基于其 api traits）
+keyring-core = "1"
 # nucleo: fuzzy 匹配（search 相关 infra 工具用，与根同版本）
 nucleo = "0.5.0"
 # oar-ocr: PP-OCRv6 pipeline（与根同款锁定，禁 download-binaries）
@@ -93,6 +96,4 @@ windows = { version = "0.62.2", features = [
 zip = "2.2"
 
 [dev-dependencies]
-# keyring-core: secret/store.rs 单测 mock store（与根 dev-deps 同源）
-keyring-core = "1"
 tempfile = "3"

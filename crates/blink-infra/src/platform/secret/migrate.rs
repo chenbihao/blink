@@ -69,8 +69,10 @@ pub async fn migrate_legacy_cm_to_keyring(pool: &SqlitePool) {
         // 3b. 从老 CM 读明文（用 raw 接口,直接按 target 读）
         match windows_legacy::load_secret_raw(target) {
             Ok(secret) => {
-                // 3c. 写入 keyring 新命名
-                match crate::platform::secret::save_secret(pid, purpose, &secret) {
+                // 3c. 写入新命名（0.25.15 起经 store 落地即为 v2 命名;
+                //     from_legacy_pid 恢复模块归属:stt:cloud → Stt,其余 → Ai）
+                let r = crate::platform::secret::SecretRef::from_legacy_pid(pid, purpose);
+                match crate::platform::secret::save_secret(&r, &secret) {
                     Ok(()) => {
                         // 3d. 删老 CM 条目（写成功后才删,单向流动）
                         if let Err(e) = windows_legacy::delete_secret_raw(target) {

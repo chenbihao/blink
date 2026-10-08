@@ -104,6 +104,10 @@ impl PluginEngine {
                         if f.no_space {
                             field["no_space"] = serde_json::json!(true);
                         }
+                        // secret 透传给设置页做 password 渲染 + 掩码（0.25.16），默认 false 不输出
+                        if f.secret {
+                            field["secret"] = serde_json::json!(true);
+                        }
                         // 条件显隐透传（设置页联动显隐，如降级顺序仅在允许降级时显示）
                         if let Some(ref vw) = f.visible_when {
                             field["visible_when"] =
@@ -174,7 +178,9 @@ impl PluginEngine {
             let plugin_id = id.clone();
             let arg = arg.clone();
             let context = context.clone();
-            let settings = self.get_settings(id);
+            // 0.25.16:喂插件进程的 settings 用 resolved（CM 密钥已还原明文），
+            // 插件二进制与协议零改动——SQLite 侧只有空串占位。
+            let settings = self.resolved_settings(id);
             set.spawn(async move {
                 match plugin.query(&arg, &context, settings.as_ref()).await {
                     Ok(items) => items
@@ -248,12 +254,16 @@ impl PluginEngine {
     }
 
     /// 更新插件配置:写 DB + 更新内存 map(command 层 `update_plugin_config` 调)。
+    ///
+    /// 0.25.16:持久化前先过 `sanitize_config_secrets`——manifest `secret:true` 字段的
+    /// 非空值转存 Credential Manager，SQLite settings 只留空串占位。
     pub async fn update_config(
         &self,
         plugin_id: &str,
-        config: crate::config::PluginConfig,
+        mut config: crate::config::PluginConfig,
         router: Option<&crate::intent::RuleRouter>,
     ) -> Result<(), String> {
+        self.sanitize_config_secrets(plugin_id, &mut config);
         crate::config::set_plugin_config(&self.pool, plugin_id, &config).await?;
         self.configs
             .write()
@@ -355,6 +365,10 @@ impl PluginEngine {
     }
 
     /// 取插件 settings(None = 无配置或 settings 为 null)。
+    ///
+    /// **返回脱敏版**——manifest `secret:true` 字段在 SQLite 里只有空串占位
+    /// （真实值在 Credential Manager，见 `resolved_settings`）。设置页回显、
+    /// setting_bindings 注入等对前端/AI 暴露的路径必须用本函数。
     pub fn get_settings(&self, id: &str) -> Option<serde_json::Value> {
         self.configs
             .read()
@@ -362,6 +376,198 @@ impl PluginEngine {
             .get(id)
             .map(|c| c.settings.clone())
             .filter(|s| !s.is_null())
+    }
+
+    // ── 密钥字段管理（0.25.16）──────────────────────────────────────────────
+
+    /// 插件 manifest 声明的密钥字段 key 列表（`secret:true`），无则空。
+    fn secret_field_keys(&self, plugin_id: &str) -> Vec<String> {
+        self.get_manifest(plugin_id)
+            .map(|m| {
+                m.settings_schema
+                    .iter()
+                    .filter(|f| f.secret)
+                    .map(|f| f.key.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// 密钥字段落地 CM + settings 脱敏（写入咽喉用，0.25.16）。
+    ///
+    /// settings 中 `secret:true` 字段出现非空字符串值 → 存 CM
+    /// （`blink:plugin:{plugin_id}:{key}`）并把该字段改为空串占位——SQLite 永不落明文。
+    /// 空串/缺省 → 不动 CM（前端密钥框不回显，空 = 未修改，见 collectSettings 契约）。
+    /// 非 Windows 平台无 secret 持久层，原样放行（与 AI 密钥同策略）。
+    ///
+    /// 返回转存条数。单条 CM 写失败仅 warn 不阻断——settings 侧仍脱敏（宁丢配置不落明文），
+    /// 用户重存即可。
+    fn sanitize_config_secrets(
+        &self,
+        plugin_id: &str,
+        config: &mut crate::config::PluginConfig,
+    ) -> usize {
+        let secret_keys = self.secret_field_keys(plugin_id);
+        if secret_keys.is_empty() {
+            return 0;
+        }
+        #[cfg(target_os = "windows")]
+        {
+            use blink_infra::platform::secret::{SecretRef, SecretString, save_secret};
+            let mut moved = 0usize;
+            if let Some(obj) = config.settings.as_object_mut() {
+                for key in &secret_keys {
+                    let non_empty = obj
+                        .get(key)
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|s| !s.trim().is_empty());
+                    if !non_empty {
+                        continue;
+                    }
+                    let raw = obj.get(key).and_then(|v| v.as_str()).unwrap_or_default();
+                    let r = SecretRef::plugin(plugin_id, key);
+                    match save_secret(&r, &SecretString::new(raw.to_string())) {
+                        Ok(()) => moved += 1,
+                        Err(e) => {
+                            tracing::warn!(plugin = %plugin_id, field = %key, error = %e, "插件密钥转存 CM 失败");
+                        }
+                    }
+                    obj.insert(key.clone(), serde_json::Value::String(String::new()));
+                }
+            }
+            if moved > 0 {
+                tracing::info!(plugin = %plugin_id, count = moved, "插件密钥字段已转存 CM");
+            }
+            moved
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = (plugin_id, &mut *config);
+            0
+        }
+    }
+
+    /// 取插件 settings 并还原密钥字段明文（**只供喂插件进程的路径**，0.25.16）。
+    ///
+    /// `get_settings` 脱敏版 + CM 明文覆盖。调用方：`query_subset` /
+    /// `PluginCapabilityAdapter`（喂子进程 stdin）。**禁止**用于设置页回显、
+    /// setting_bindings 注入等对前端/AI 暴露的路径。CM 无值的占位保持空串（=未配置）。
+    pub fn resolved_settings(&self, id: &str) -> Option<serde_json::Value> {
+        let mut settings = self.get_settings(id)?;
+        let secret_keys = self.secret_field_keys(id);
+        if secret_keys.is_empty() {
+            return Some(settings);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            use blink_infra::platform::secret::{SecretRef, load_secret};
+            let Some(obj) = settings.as_object_mut() else {
+                return Some(settings);
+            };
+            for key in &secret_keys {
+                if let Ok(secret) = load_secret(&SecretRef::plugin(id, key)) {
+                    obj.insert(
+                        key.clone(),
+                        serde_json::Value::String(secret.expose().to_owned()),
+                    );
+                }
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        let _ = &secret_keys;
+        Some(settings)
+    }
+
+    /// 存量明文密钥搬迁到 CM（启动期一次性，0.25.16；幂等由构造保证）。
+    ///
+    /// 0.25.16 之前密钥字段明文存在 SQLite `plugin:{id}` 的 settings JSON 里。
+    /// 本方法扫描每个插件：`secret:true` 字段有非空存量值 → 复用
+    /// `sanitize_config_secrets` 转存 CM → 回写 DB。搬迁后 settings 只剩空串占位，
+    /// 再次启动扫描为空自然 no-op——无需 marker。
+    pub async fn migrate_secret_fields_to_cm(&self) {
+        for plugin in &self.plugins {
+            let id = plugin.id();
+            let mut config = match self.configs.read().unwrap().get(id).cloned() {
+                Some(c) => c,
+                None => continue,
+            };
+            let has_plain = self.secret_field_keys(id).iter().any(|key| {
+                config
+                    .settings
+                    .get(key)
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| !s.trim().is_empty())
+            });
+            if !has_plain {
+                continue;
+            }
+            let moved = self.sanitize_config_secrets(id, &mut config);
+            if moved == 0 {
+                continue;
+            }
+            match crate::config::set_plugin_config(&self.pool, id, &config).await {
+                Ok(()) => {
+                    self.configs.write().unwrap().insert(id.to_string(), config);
+                    tracing::info!(plugin = %id, count = moved, "存量插件密钥已搬迁到 CM");
+                }
+                Err(e) => {
+                    // DB 回写失败:CM 已有新值,SQLite 明文残留——下次启动重扫重搬（幂等）
+                    tracing::warn!(plugin = %id, error = %e, "存量密钥搬迁:回写 DB 失败,下次启动重试");
+                }
+            }
+        }
+    }
+
+    /// 读插件密钥字段的首尾掩码（设置页 placeholder 用，0.25.16）。
+    ///
+    /// 不返回明文——只返回 `format_hint` 结果；未配置返回 None。
+    pub fn secret_hint(&self, plugin_id: &str, field_key: &str) -> Option<String> {
+        #[cfg(target_os = "windows")]
+        {
+            use blink_infra::platform::secret::{SecretRef, format_hint, load_secret};
+            // 只对 manifest 声明的 secret 字段放行——防任意字段探测
+            if !self
+                .secret_field_keys(plugin_id)
+                .iter()
+                .any(|k| k == field_key)
+            {
+                return None;
+            }
+            load_secret(&SecretRef::plugin(plugin_id, field_key))
+                .ok()
+                .map(|s| format_hint(s.expose()))
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = (plugin_id, field_key);
+            None
+        }
+    }
+
+    /// 删除插件密钥字段（设置页「清除」按钮，0.25.16）。幂等——NotFound 视为已删。
+    pub fn clear_secret(&self, plugin_id: &str, field_key: &str) -> Result<(), String> {
+        #[cfg(target_os = "windows")]
+        {
+            use blink_infra::platform::secret::{SecretRef, delete_secret};
+            if !self
+                .secret_field_keys(plugin_id)
+                .iter()
+                .any(|k| k == field_key)
+            {
+                return Err(format!("字段未声明为密钥: {field_key}"));
+            }
+            match delete_secret(&SecretRef::plugin(plugin_id, field_key)) {
+                Ok(()) => Ok(()),
+                // NotFound 视为已删（幂等）
+                Err(blink_infra::platform::secret::SecretError::NotFound(_)) => Ok(()),
+                Err(e) => Err(e.to_string()),
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = (plugin_id, field_key);
+            Ok(())
+        }
     }
 }
 
@@ -418,5 +624,66 @@ fn to_search_item(plugin_id: &str, item: PluginItem) -> SearchItem {
         score_detail: Some(format!("plugin={:.2}", score)),
         context_aware: false,
         color_list_hex: None,
+    }
+}
+
+// ── 单测（0.25.16）────────────────────────────────────────────────────────────
+//
+// 只覆盖**不触 Credential Manager** 的路径（无 manifest / 无 secret 字段——
+// 涉及 CM 读写的 sanitize/迁移属集成路径，与 secret 迁移同策略不自动化，
+// 见 spec-backend §二"单测绝不修改真实系统状态"）。
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn test_engine() -> PluginEngine {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("内存 SQLite 应可用");
+        PluginEngine::new(vec![], pool, None)
+    }
+
+    #[tokio::test]
+    async fn secret_field_keys_empty_without_manifest() {
+        let engine = test_engine().await;
+        // 未加载 manifest 的插件无密钥字段
+        assert!(engine.secret_field_keys("no.such.plugin").is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolved_settings_passthrough_when_no_secret_fields() {
+        // 无 secret 字段：resolved 与 get_settings 同值（不触 CM 的早退路径）
+        let engine = test_engine().await;
+        engine.configs.write().unwrap().insert(
+            "no.such.plugin".into(),
+            crate::config::PluginConfig {
+                settings: serde_json::json!({"target_lang": "zh"}),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            engine.resolved_settings("no.such.plugin").unwrap(),
+            serde_json::json!({"target_lang": "zh"})
+        );
+        // settings 为 null → get_settings 返回 None → resolved 同样 None
+        engine.configs.write().unwrap().insert(
+            "null.settings".into(),
+            crate::config::PluginConfig::default(),
+        );
+        assert!(engine.resolved_settings("null.settings").is_none());
+    }
+
+    #[tokio::test]
+    async fn sanitize_config_secrets_noop_without_secret_fields() {
+        // 无 secret 字段：settings 原样通过（0 转存）
+        let engine = test_engine().await;
+        let mut config = crate::config::PluginConfig {
+            settings: serde_json::json!({"target_lang": "en"}),
+            ..Default::default()
+        };
+        let moved = engine.sanitize_config_secrets("no.such.plugin", &mut config);
+        assert_eq!(moved, 0);
+        assert_eq!(config.settings, serde_json::json!({"target_lang": "en"}));
     }
 }

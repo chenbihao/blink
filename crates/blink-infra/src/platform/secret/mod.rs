@@ -1,19 +1,31 @@
-//! 密钥存储（0.9.1 Phase 2 → 0.17.11 keyring 重构）——AI Provider API Key 唯一可信持久层。
+//! 密钥存储（0.9.1 Phase 2 → 0.17.11 keyring 重构 → 0.25.15 v2 命名）——AI Provider /
+//! STT / 插件密钥唯一可信持久层。
 //!
-//! **架构**（0.17.11 起）：
+//! **架构**（0.25.15 起）：
 //!
-//! - **持久层**：`keyring` crate（v1 API）→ Windows 后端走 Credential Manager
-//!   （DPAPI 加密、账户级隔离，与旧实现同等安全级别）
+//! - **持久层**：`keyring` crate（v1 API 初始化平台默认 store）+
+//!   `keyring_core::Entry::new_with_modifiers` 的 `target` modifier——显式指定完整
+//!   CM target name，绕开 keyring 默认 `{user}.{service}` 拼接（应用名在尾部的反序形状）
+//! - **命名**：`build_target_name_v2(SecretRef)` 产出 `blink:{module}:{subject}:{purpose}`
+//!   （如 `blink:ai:{uuid}:key` / `blink:stt:cloud:key`），应用前缀置首
 //! - **内存层**：`SecretString` newtype 包 `Zeroizing<String>`，drop 时按字节清零
-//! - **SQLite**：**绝不**存 raw Key，只存 `secret_ref` 别名（如 `"blink/openai/key1"`）
+//! - **SQLite**：**绝不**存 raw Key，只存 `secret_ref` 别名
 //! - **tracing/log**：`Debug` impl 输出 `"<redacted>"`，`Display` 输出掩码 `••••{last4}`
-//! - **前端**：只在"输入 → save_ai_secret invoke → 写 keyring → 内存清零"这一次窗口里持有明文
+//! - **前端**：只在"输入 → save invoke → 写 keyring → 内存清零"这一次窗口里持有明文
+//!
+//! **命名演进**（详见 `build_target_name_v2`）：
+//! - v0 `blink/{pid}/{purpose}`（自写 FFI，0.17.11 前）
+//! - v1 `{pid}/{purpose}.blink`（keyring v1 拼接，0.17.11–0.25.14）
+//! - v2 `blink:{module}:{subject}:{purpose}`（0.25.15 起）
 //!
 //! **0.17.11 keyring 重构**：
 //! - `store.rs` — keyring 后端，提供 `save_secret`/`load_secret`/`delete_secret`（跨平台）
 //! - `windows_legacy.rs` — 保留 `CredEnumerateW` 枚举 + raw 读删（迁移 + 诊断用）
-//! - `migrate.rs` — 启动期一次性迁移老 CM `blink/*` 条目到 keyring 新命名
-//! - 单测用 keyring mock store，绝不碰真实 CM（根除 `cargo test` 清空生产 CM 的元凶）
+//! - `migrate.rs` — 启动期一次性迁移 v0 老 CM `blink/*` 条目到新命名
+//! - `migrate_v2.rs` — 启动期自愈收编 v1 `{pid}/key.blink` 条目到 v2 命名（0.25.15；
+//!   0.25.16-fix 去 marker——每次启动全量枚举扫描，无残留即 no-op）
+//! - 单测用自写内存 store（支持 target modifier），绝不碰真实 CM
+//!   （根除 `cargo test` 清空生产 CM 的元凶）
 //!
 //! **五条铁则**（§5.1）：
 //! 1. SQLite 只存 secret_ref，不存 raw Key
@@ -22,7 +34,8 @@
 //! 4. tracing/log/Debug 三通路都不能出现原文
 //! 5. serde 序列化 Provider 类型必须 `#[serde(skip)]` secret 字段
 //!
-//! **纯逻辑抽出**：`build_target_name` / `format_masked` 是纯函数，跨平台单测覆盖。
+//! **纯逻辑抽出**：`build_target_name` / `build_target_name_v2` / `format_masked`
+//! 是纯函数，跨平台单测覆盖。
 
 use std::fmt;
 use zeroize::Zeroizing;
@@ -34,36 +47,49 @@ mod store; // keyring 后端（0.17.11 起，替换 windows.rs 的 unsafe FFI）
 mod windows_legacy; // 原 windows.rs 改名，保留 enumerate + 迁移用 raw 读删
 
 #[cfg(target_os = "windows")]
-pub mod migrate; // CM→keyring 一次性迁移（0.17.11）
+pub mod migrate; // v0 CM→keyring 一次性迁移（0.17.11）
 
-// 生产密钥读写——从 store.rs re-export（调用方零改动）
+#[cfg(target_os = "windows")]
+pub mod migrate_v2; // keyring v1 命名→v2 命名启动期自愈收编（0.25.15；0.25.16-fix 无 marker）
+
+// 生产密钥读写——从 store.rs re-export（0.25.15 签名改 SecretRef 入参）
 #[cfg(target_os = "windows")]
 pub use store::{delete_secret, load_secret, save_secret};
 
 // 枚举老 CM 条目——从 windows_legacy.rs re-export（诊断 + 迁移用）
 #[cfg(target_os = "windows")]
-pub use windows_legacy::enumerate_blink_secrets;
+pub use windows_legacy::enumerate_all_secrets;
 
-/// 批量删除全部密钥（0.17.11 改为遍历配置逐个删）。
+// 全量枚举 + Rust 端 contains 过滤——跨三代命名的迁移/计数用（0.25.16-fix）
+#[cfg(target_os = "windows")]
+pub fn enumerate_blink_secrets_anywhere() -> Result<Vec<SecretInfo>, SecretError> {
+    Ok(windows_legacy::enumerate_all_secrets()?
+        .into_iter()
+        .filter(|s| s.target_name.contains(REF_NAMESPACE))
+        .collect())
+}
+
+/// 批量删除全部密钥（0.17.11 改为遍历配置逐个删；0.25.15 入参改 `SecretRef` 列表）。
 ///
 /// **0.17.11 前**：此函数用 `CredEnumerateW` 枚举 CM 中所有 `blink/*` 条目后逐个删。
-/// **0.17.11 起**：改为接受 provider id 列表，逐个调 `store::delete_secret`。
+/// **0.17.11 起**：改为接受密钥引用列表，逐个调 `store::delete_secret`。
 /// 这样：
 /// - 清理的是 keyring 新命名下的条目（与生产存储一致）
 /// - 不会误删其他应用的 `blink/*` 条目（更可控）
 /// - `cleanup_all_data` 调用时，调用方需在删数据目录前先读出 provider id 列表
 ///
-/// `provider_ids` 应包含所有需要密钥的 provider id + STT 常量 `stt:cloud`。
+/// `refs` 应包含所有需要清理的密钥引用——AI 各 provider（`SecretRef::ai`）+
+/// STT 云端（`SecretRef::stt_cloud()`）+ 插件密钥字段（`SecretRef::plugin`，0.25.16）。
 /// `NotFound` 视为成功（幂等——可能被其他途径已删）。
 ///
 /// # 返回
 /// `Vec<(target_name, Result<(), SecretError>)>`
 #[cfg(target_os = "windows")]
-pub fn delete_all_blink_secrets(provider_ids: &[String]) -> Vec<(String, Result<(), SecretError>)> {
-    let mut results = Vec::with_capacity(provider_ids.len());
-    for pid in provider_ids {
-        let target = format!("{pid}/key");
-        match store::delete_secret(pid, "key") {
+pub fn delete_all_blink_secrets(refs: &[SecretRef]) -> Vec<(String, Result<(), SecretError>)> {
+    let mut results = Vec::with_capacity(refs.len());
+    for r in refs {
+        let target = build_target_name_v2(r).unwrap_or_else(|_| r.subject.clone());
+        match store::delete_secret(r) {
             Ok(()) => {
                 tracing::debug!(target = %target, "批量删除密钥成功");
                 results.push((target, Ok(())));
@@ -185,12 +211,115 @@ impl std::error::Error for SecretError {}
 
 // ── 纯逻辑（跨平台可单测） ────────────────────────────────────────────────────
 
-/// 命名空间前缀——所有 blink 存的密钥别名都是 `"blink/{provider_id}/{purpose}"`。
+/// 命名空间前缀——v2 命名 `blink:{module}:{subject}:{purpose}` 的第一段（0.25.15）。
 ///
-/// 这样即使用户装了别的应用往 Credential Manager 塞了同名条目,也不会互相覆盖;
-/// 卸载脚本按此前缀批量清理无遗漏。
-#[allow(dead_code)] // 0.9.1 Phase 2 定义,Phase 5 消费
+/// 历史：v0 命名 `blink/{provider_id}/{purpose}`（自写 FFI 时代）；
+/// v1 命名 `{provider_id}/{purpose}.blink`（keyring v1 API 的 `{user}.{service}` 拼接，
+/// 应用名跑到尾部）；v2 起应用前缀置首，与常见应用习惯一致。
 pub const REF_NAMESPACE: &str = "blink";
+
+/// 密钥所属模块——CM target name 的命名空间段（0.25.15）。
+///
+/// 显式建模取代 0.17.11 前的"pid 字符串约定"（`stt:cloud` 这种魔法前缀），
+/// 模块归属在类型层面钉死，写入/迁移/清理共用同一份语义。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretModule {
+    /// AI Provider 密钥（subject = provider id：UUID 或历史 slug）
+    Ai,
+    /// STT 云端密钥（subject 固定 `"cloud"`，承接历史别名 `stt:cloud`）
+    Stt,
+    /// 插件 settings 密钥字段（subject = plugin_id，purpose = 字段 key，0.25.16）
+    Plugin,
+}
+
+impl SecretModule {
+    /// target name 中的段名。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ai => "ai",
+            Self::Stt => "stt",
+            Self::Plugin => "plugin",
+        }
+    }
+}
+
+/// 密钥引用——`(模块, 主体, 用途)` 三元组，唯一确定一条 CM 条目（0.25.15）。
+///
+/// 取代 0.25.15 前 `save_secret(provider_id, purpose)` 的裸字符串签名：
+/// provider_id 曾身兼两职（AI 的 UUID / STT 的 `stt:cloud` 魔法别名），
+/// 现在模块归属显式化，`build_target_name_v2` 据此产出应用前缀置首的 target。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecretRef {
+    pub module: SecretModule,
+    pub subject: String,
+    pub purpose: String,
+}
+
+impl SecretRef {
+    /// AI Provider 主密钥（purpose 固定 `"key"`，扩展位留给 secondary_key 等）。
+    pub fn ai(provider_id: &str) -> Self {
+        Self {
+            module: SecretModule::Ai,
+            subject: provider_id.to_string(),
+            purpose: "key".to_string(),
+        }
+    }
+
+    /// STT 云端密钥（承接历史固定别名 `stt:cloud`）。
+    pub fn stt_cloud() -> Self {
+        Self {
+            module: SecretModule::Stt,
+            subject: "cloud".to_string(),
+            purpose: "key".to_string(),
+        }
+    }
+
+    /// 插件 settings 密钥字段（0.25.16 前端/宿主写入拦截用）。
+    pub fn plugin(plugin_id: &str, field_key: &str) -> Self {
+        Self {
+            module: SecretModule::Plugin,
+            subject: plugin_id.to_string(),
+            purpose: field_key.to_string(),
+        }
+    }
+
+    /// 从 0.25.15 前的 pid 恢复命名空间（两代迁移共用）。
+    ///
+    /// 历史 pid 只有两类：`stt:cloud`（STT 固定别名）与其余（AI provider id——
+    /// UUID 或 0.14.6–0.17.11 期间的显示名 slug，如 `sensenova`）。
+    pub fn from_legacy_pid(pid: &str, purpose: &str) -> Self {
+        if pid == "stt:cloud" {
+            Self::stt_cloud()
+        } else {
+            Self {
+                module: SecretModule::Ai,
+                subject: pid.to_string(),
+                purpose: purpose.to_string(),
+            }
+        }
+    }
+}
+
+/// 构造 v2 CM target name：`blink:{module}:{subject}:{purpose}`（0.25.15）。
+///
+/// 纯函数——单测直接断言字符串形状。`subject`/`purpose` 禁止 `:` 与 `\0`
+/// （保证 target 可按段解析回 SecretRef；AI UUID/slug、`cloud`、plugin_id、
+/// settings 字段 key 均天然满足）。
+pub fn build_target_name_v2(r: &SecretRef) -> Result<String, SecretError> {
+    for (name, seg) in [("subject", &r.subject), ("purpose", &r.purpose)] {
+        if seg.is_empty() || seg.contains(':') || seg.contains('\0') {
+            return Err(SecretError::InvalidRef(format!(
+                "SecretRef {name} 非法: {seg:?}"
+            )));
+        }
+    }
+    Ok(format!(
+        "{REF_NAMESPACE}:{}:{}:{}",
+        r.module.as_str(),
+        r.subject,
+        r.purpose
+    ))
+}
 
 /// 构造 CM target name(存进 `CREDENTIALW.TargetName`)。
 ///
@@ -198,6 +327,9 @@ pub const REF_NAMESPACE: &str = "blink";
 /// - `purpose`:通常是 `"key"`,预留 `"secondary_key"` 等扩展位
 ///
 /// 返回值形如 `"blink/1a2b3c/key"`。
+///
+/// **0.25.15 起为 v0 legacy 命名**——仅 `windows_legacy.rs`（迁移 + raw 读删）使用，
+/// 生产读写走 `build_target_name_v2`。
 #[allow(dead_code)]
 pub fn build_target_name(provider_id: &str, purpose: &str) -> Result<String, SecretError> {
     if provider_id.is_empty() || provider_id.contains('/') || provider_id.contains('\0') {
@@ -312,6 +444,65 @@ mod tests {
         assert_eq!(
             build_target_name("abc123", "key").unwrap(),
             "blink/abc123/key"
+        );
+    }
+
+    // ── 0.25.15 v2 命名 ─────────────────────────────────────────────────────
+
+    #[test]
+    fn build_target_name_v2_shapes() {
+        // AI：UUID provider
+        assert_eq!(
+            build_target_name_v2(&SecretRef::ai("28f6b24c-2e22-4abc-b919-76cf62a4644f")).unwrap(),
+            "blink:ai:28f6b24c-2e22-4abc-b919-76cf62a4644f:key"
+        );
+        // AI：历史 slug provider（0.14.6–0.17.11 期间创建）
+        assert_eq!(
+            build_target_name_v2(&SecretRef::ai("sensenova")).unwrap(),
+            "blink:ai:sensenova:key"
+        );
+        // STT
+        assert_eq!(
+            build_target_name_v2(&SecretRef::stt_cloud()).unwrap(),
+            "blink:stt:cloud:key"
+        );
+        // 插件（0.25.16 消费；plugin_id 含点合法）
+        assert_eq!(
+            build_target_name_v2(&SecretRef::plugin("builtin.translate", "deepl_api_key")).unwrap(),
+            "blink:plugin:builtin.translate:deepl_api_key"
+        );
+    }
+
+    #[test]
+    fn build_target_name_v2_rejects_bad_segments() {
+        // subject/purpose 含 : 或为空 → InvalidRef（保证可按段解析）
+        for r in [
+            SecretRef::ai("a:b"),
+            SecretRef::ai(""),
+            SecretRef::plugin("p", "field:key"),
+            SecretRef::plugin("p", ""),
+            SecretRef::ai("a\0b"),
+        ] {
+            assert!(
+                matches!(build_target_name_v2(&r), Err(SecretError::InvalidRef(_))),
+                "应拒绝非法 SecretRef: {r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn from_legacy_pid_maps_stt_and_ai() {
+        assert_eq!(
+            SecretRef::from_legacy_pid("stt:cloud", "key"),
+            SecretRef::stt_cloud()
+        );
+        assert_eq!(
+            SecretRef::from_legacy_pid("sensenova", "key"),
+            SecretRef::ai("sensenova")
+        );
+        assert_eq!(
+            SecretRef::from_legacy_pid("550e8400-e29b-41d4-a716-446655440000", "key"),
+            SecretRef::ai("550e8400-e29b-41d4-a716-446655440000")
         );
     }
 

@@ -17,7 +17,8 @@
 //! ## 独立配置模式
 //!
 //! STT 云端配置完全独立于 AIConfig——`SttCloudProvider` 直接存储 kind/base_url/model_id。
-//! API Key 用 `stt:cloud` 前缀存在 Credential Manager 里，不与 AI 供应商共用。
+//! API Key 独立存在 Credential Manager（`SecretRef::stt_cloud()`，v2 命名
+//! `blink:stt:cloud:key`；0.25.15 前为 `stt:cloud` 别名），不与 AI 供应商共用。
 //!
 //! `resolve_stt_endpoint` + `send_stt_request` 是 `finalize` 与 `test_cloud_stt`
 //! 的共用路径，保证测试按钮与实际识别走同一配置解析与发送逻辑。
@@ -27,12 +28,6 @@ use std::sync::Mutex;
 use blink_infra::platform::secret;
 
 use super::{SttEngine, SttError};
-
-/// Credential Manager 中 STT 密钥的 target_id。
-///
-/// 独立于 AI 供应商的密钥（AI 用 `{provider_id}` 作 target_id，STT 用 `stt:cloud`）。
-/// 复用 Credential Manager 体系但不交叉引用。
-const STT_SECRET_ID: &str = "stt:cloud";
 
 /// 云端 STT 引擎。
 ///
@@ -106,7 +101,7 @@ pub struct ResolvedSttEndpoint { // 0.25.3 crate 化：跨 crate 可见
 }
 
 /// 解析云端 STT endpoint：直接从 `SttCloudProvider` 读取 kind/base_url/model_id，
-/// API Key 从 Credential Manager 的 `stt:cloud` 加载。
+/// API Key 从 Credential Manager 的 `blink:stt:cloud:key`（`SecretRef::stt_cloud()`）加载。
 ///
 /// `finalize` 与 `test_cloud_stt` 共用此函数。
 pub fn resolve_stt_endpoint(
@@ -118,7 +113,7 @@ pub fn resolve_stt_endpoint(
         .ok_or(SttError::NotInitialized)?;
 
     let api_key = Some(
-        secret::load_secret(STT_SECRET_ID, "key")
+        secret::load_secret(&secret::SecretRef::stt_cloud())
             .map_err(|e| SttError::Engine(format!("STT API key 未配置: {e}")))?
             .expose()
             .to_owned(),
