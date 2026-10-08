@@ -125,7 +125,7 @@
       "key": "fallback_order",
       "type": "sortable_list",
       "title": { "zh": "降级顺序", "en": "Fallback order" },
-        "visible_when": {"key": "allow_fallback", "equals": true},
+      "visible_when": {"key": "allow_fallback", "equals": true},
       "description": { "zh": "主引擎失败时按此顺序尝试，拖动调整顺序", "en": "Tried in this order when the main engine fails; drag to reorder" },
       "options": [
         { "value": "tencent", "label": { "zh": "腾讯翻译", "en": "Tencent" } },

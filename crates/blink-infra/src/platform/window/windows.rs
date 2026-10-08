@@ -1154,11 +1154,8 @@ fn is_self_foreground(_app: &AppHandle, fg: windows::Win32::Foundation::HWND) ->
 /// 用 `rcWork`（工作区，排除任务栏）而非 `rcMonitor`，与
 /// `clamp_to_work_area` 行为一致：任务栏放屏顶部/侧边时也不会视觉偏移。
 ///
-/// **跨 DPI 屏关键**：物理尺寸 **不能读 `outer_size()`**——它反映的是
-/// 「窗口当前所在屏」的 DPI 换算结果，而我们要去的可能是另一块 DPI 不同的屏。
-/// 一旦 `set_position` 把窗口移过去，Windows 发 `WM_DPICHANGED` 让 winit
 /// 取当前光标的虚拟屏幕物理像素坐标（0.25.14-fix：注入截图 overlay 会话，
-/// 供前端窗口列表就绪后的主动补预选定位）。
+/// 供前端窗口列表就绪后的主动补预选定位；副屏在左侧时坐标为负）。
 fn cursor_pos_virtual() -> Option<(i32, i32)> {
     unsafe {
         let mut pt = POINT { x: 0, y: 0 };
@@ -1170,6 +1167,9 @@ fn cursor_pos_virtual() -> Option<(i32, i32)> {
     }
 }
 
+/// **跨 DPI 屏关键**：物理尺寸 **不能读 `outer_size()`**——它反映的是
+/// 「窗口当前所在屏」的 DPI 换算结果，而我们要去的可能是另一块 DPI 不同的屏。
+/// 一旦 `set_position` 把窗口移过去，Windows 发 `WM_DPICHANGED` 让 winit
 /// 按目标屏 DPI **rescale 尺寸但不动位置**，就会视觉偏移。
 /// 正确做法：`GetDpiForMonitor(目标屏) × 基准逻辑尺寸` 直接算目标屏物理尺寸，
 /// 位置随之对齐——首次跨屏也一步到位。

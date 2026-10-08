@@ -91,8 +91,9 @@ export const ss = {
     // 0.15.8 R2：吸附窗口的 HWND，供长截图优先使用
     snappedHwnd: null,
     // 0.25.14 A1：截图就绪前的拖选起点缓存——P5 暗罩可见但 ss.screenshot 未赋值时
-    // pointerdown 不再丢弃，记 { startX, startY, endX, endY, pointerId } 并 capture；
-    // 就绪后首个仍按住的 pointermove 衔接为正常 isDragging，松手视为放弃。
+    // pointerdown 不再丢弃，记 { startX, startY, pointerId } 并 capture；ready 前
+    // move 以当前指针位置直接刷新拖选预览，就绪后首个仍按住的 pointermove 衔接为
+    // 正常 isDragging，松手视为放弃。
     _predragStart: null,
     // 0.25.14 A2：整屏暗罩是否已提交（drawDimmed 跑过）。懒加载屏的局部重绘
     // 以此为前提——否则会把 resetState 画的 P5 纯黑罩擦出一块无暗罩的亮斑。

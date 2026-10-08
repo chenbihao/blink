@@ -1467,8 +1467,6 @@ canvas.addEventListener('pointerdown', (e) => {
             ss._predragStart = {
                 startX: prePoint.offsetX,
                 startY: prePoint.offsetY,
-                endX: prePoint.offsetX,
-                endY: prePoint.offsetY,
                 pointerId: e.pointerId,
             };
             capturePointer(canvas, e);
@@ -1583,8 +1581,9 @@ canvas.addEventListener('pointermove', (e) => {
     if (moveLongImagePan(e)) return;
 
     // 0.25.14 A1：就绪前拖选缓存的衔接/更新（见 pointerdown 的 A1 注释）。
-    // ready 前只更新缓存终点；ready 后首个仍按住（buttons&1）的 move 衔接为
-    // 正常 isDragging 并落地首帧选区预览；已松手则放弃缓存。
+    // ready 前每次 move 直接以当前指针位置刷新拖选预览（无需缓存终点）；
+    // ready 后首个仍按住（buttons&1）的 move 衔接为正常 isDragging 并落地
+    // 首帧选区预览；已松手则放弃缓存。
     if (ss._predragStart) {
         const st = ss._predragStart;
         if (!(e.buttons & 1)) {
@@ -1606,8 +1605,6 @@ canvas.addEventListener('pointermove', (e) => {
         }
         if (ss._predragStart) {
             const p = pointerPoint(e);
-            st.endX = p.offsetX;
-            st.endY = p.offsetY;
             // ready 前也显示拖选框：live-selection 层不依赖底图，P5 黑罩上即有
             // 蓝框几何反馈（洞内仍是黑底，底图 ready 后自然透亮）。renderScale
             // 尚未实测同步时 getRenderScale 兜底 devicePixelRatio，无 NaN。
