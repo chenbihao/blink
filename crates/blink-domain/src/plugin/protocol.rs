@@ -8,6 +8,10 @@
 //!
 //! 流式(stream/delta/done)/ attachments 暂不实现。
 //!
+//! **stderr 级别标记约定**：core 逐行转发插件 stderr 到 tracing,默认 debug。
+//! 行内含 `[error]`/`[warn]`/`[info]` 方括号标记时（如 `[translate][error] ...`）
+//! 按标记级别转发,让引擎失败等真实错误在默认日志级别（warn+）可见,无需开 trace。
+//!
 //! bin crate 无 lib target,示例插件目前各持一份本 struct 的副本(后续抽 SDK crate)。
 
 use serde::{Deserialize, Serialize};
@@ -140,6 +144,11 @@ pub struct RawToolResult {
     /// 执行错误（成功时为 None）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<PluginErrorPayload>,
+    /// 给人看的元信息（成功时可带，如翻译插件标注实际使用的引擎）。
+    /// core 注入 `CapabilityResult.desc`——AI 出口不读 desc，展示/命令层可读。
+    /// 老插件不带此字段（serde default，向后兼容）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desc: Option<String>,
 }
 
 impl RawToolResult {
@@ -150,6 +159,7 @@ impl RawToolResult {
             id: id.into(),
             data,
             error: None,
+            desc: None,
         }
     }
 
@@ -163,6 +173,7 @@ impl RawToolResult {
                 code: code.into(),
                 message: message.into(),
             }),
+            desc: None,
         }
     }
 }

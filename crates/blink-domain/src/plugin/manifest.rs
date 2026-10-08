@@ -437,6 +437,26 @@ pub struct SettingField {
     /// - 对象: `"group": { "title": "有道智云", "description": "..." }`
     #[serde(default, deserialize_with = "deserialize_group")]
     pub group: Option<GroupConfig>,
+    /// 声明"值不含空格"(密钥/凭据类字段)。设置页据此检测:输入含空格时在字段下方
+    /// 显示红字提示 + "移除空格"按钮(用户主动点击才修改,不自动改写输入)——浏览器把
+    /// 多行文本粘贴进单行输入框时换行会转成空格,密钥中段被插入空格会导致认证失败
+    /// (如阿里 MT 网关 404 = AccessKey 不存在)。default false。
+    #[serde(default)]
+    pub no_space: bool,
+    /// 条件显隐(可选):引用的设置字段满足条件时设置页才显示本字段。
+    /// 例: `"visible_when": {"key": "allow_fallback", "equals": true}`
+    /// ——降级顺序仅在"允许降级"开启时显示。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_when: Option<VisibleWhen>,
+}
+
+/// 设置字段的条件显隐规则(设置页联动显隐用)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VisibleWhen {
+    /// 引用的设置字段 key。
+    pub key: String,
+    /// 该字段需满足的条件值(布尔/字符串等值比较)。
+    pub equals: serde_json::Value,
 }
 
 /// 配置项分组。
@@ -755,6 +775,41 @@ mod tests {
         let m: PluginManifest = serde_json::from_str(json).unwrap();
         assert!(m.settings_schema.is_empty());
         assert!(m.default_settings().is_null());
+    }
+
+    #[test]
+    fn no_space_flag_parses_with_default_false() {
+        // 密钥类字段声明 no_space(设置页空格检测用);老 manifest 缺省 false
+        let json = r#"{
+            "schema_version": 1, "id": "x", "name": "X", "version": "0",
+            "runtime": {"exec": "x.exe"},
+            "settings_schema": [
+                {"key":"ali_access_key_id","type":"string","title":"AccessKey ID","no_space":true},
+                {"key":"default_city","type":"string","title":"默认城市"}
+            ]
+        }"#;
+        let m: PluginManifest = serde_json::from_str(json).unwrap();
+        assert!(m.settings_schema[0].no_space);
+        assert!(!m.settings_schema[1].no_space);
+    }
+
+    #[test]
+    fn visible_when_parses() {
+        // 条件显隐:引用字段 + 等值条件;老 manifest 缺省 None
+        let json = r#"{
+            "schema_version": 1, "id": "x", "name": "X", "version": "0",
+            "runtime": {"exec": "x.exe"},
+            "settings_schema": [
+                {"key":"fallback_order","type":"sortable_list","title":"降级顺序",
+                 "visible_when":{"key":"allow_fallback","equals":true}},
+                {"key":"default_city","type":"string","title":"默认城市"}
+            ]
+        }"#;
+        let m: PluginManifest = serde_json::from_str(json).unwrap();
+        let vw = m.settings_schema[0].visible_when.as_ref().unwrap();
+        assert_eq!(vw.key, "allow_fallback");
+        assert_eq!(vw.equals, serde_json::json!(true));
+        assert!(m.settings_schema[1].visible_when.is_none());
     }
 
     #[test]

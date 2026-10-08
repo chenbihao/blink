@@ -181,6 +181,54 @@ export function syncPanelTranslatedFromOverlay() {
     translatedTa.removeAttribute('data-stale');
     const tab = panel.querySelector('.ocr-tab[data-tab="translated"]');
     if (tab) tab.removeAttribute('data-stale');
+    // 翻译就绪后按钮统一变"重新翻译"。覆盖工具栏[翻译]直达路径——该路径走
+    // requestOverlayTranslation（不经过面板 doTranslate 的轮询），按钮文案不会自更新
+    const btn = panel.querySelector('#ocr-translate');
+    if (btn) {
+        btn.textContent = '重新翻译';
+        btn.disabled = false;
+    }
+    updatePanelEngineBadge();
+}
+
+/**
+ * 更新 OCR 面板顶部引擎徽标：原文 tab 显示 OCR 引擎，译文 tab 显示实际翻译供应商
+ * （`ss.translateEngine` 由插件 desc 带出，降级时含"已降级"标记——方便用户发现降级）。
+ */
+function updatePanelEngineBadge() {
+    const panel = document.getElementById('ocr-panel');
+    const badge = panel?.querySelector('.ocr-engine-badge');
+    if (!badge) return;
+    const tabTranslated = panel.querySelector('.ocr-tab[data-tab="translated"]');
+    const onTranslated = !!(tabTranslated && tabTranslated.classList.contains('active'));
+
+    if (onTranslated) {
+        if (ss.translateEngine) {
+            badge.textContent = `翻译：${ss.translateEngine}`;
+            badge.title = ss.translateEngine;
+            badge.hidden = false;
+        } else {
+            badge.hidden = true;
+        }
+        return;
+    }
+
+    const result = ss.ocrResultCache;
+    const used = result && result.backend_used;
+    if (used === 'paddleocr') {
+        badge.textContent = 'PaddleOCR（本地）';
+        badge.hidden = false;
+    } else if (used === 'windows') {
+        badge.textContent = 'Windows OCR';
+        badge.hidden = false;
+    } else {
+        badge.hidden = true;
+    }
+    if (!badge.hidden && result?.backend_fallback_reason) {
+        badge.title = `已回退：${result.backend_fallback_reason}`;
+    } else {
+        badge.title = '';
+    }
 }
 
 /** 兼容包装：同步工具栏按钮 + 面板译文。 */
@@ -453,11 +501,11 @@ export async function doTranslateAndPin() {
             ss.ocrResultCache = ocrResult;
         }
 
-        // 2c. 翻译
+        // 2c. 翻译（0.25 起返回 {lines, engine, failed}；全失败时 reject）
         const srcs = lines.map((ln) => ln.srcText);
         let translations;
         try {
-            translations = await translateLines(srcs, null);
+            translations = (await translateLines(srcs, null)).lines;
         } catch (e) {
             console.warn('[screenshot] translateAndPin: translateLines 失败，降级逐行', e);
             translations = [];
@@ -637,6 +685,9 @@ function activateOverlay(result, opts = {}) {
         mode,
     });
     ss.ocrResultCache = result;
+    // 新 OCR 结果 → 旧译文与引擎/错误信息作废（译文徽标、失败提示不残留）
+    ss.translateEngine = null;
+    ss.lastTranslateError = null;
     // 划词已激活（如预热静默激活过）则不重建，保留用户已划的选区
     if (!ss.reading && result && Array.isArray(result.words) && result.words.length > 0) {
         enterReadingMode(result);
@@ -660,6 +711,7 @@ function activateOverlay(result, opts = {}) {
 function requestOverlayTranslation(targetLang) {
     const revision = ++ss.translationRevision;
     ss.translationBusy = true;
+    ss.lastTranslateError = null;
     updateOutputButtonsDisabled();
     // 互斥：doTranslate 路径已激活 canvas loading (Loading B) 时，
     // 跳过 DOM spinner (Loading A)；仅 0.15 redo 路径（无 canvas loading）才用 DOM spinner。
@@ -668,8 +720,19 @@ function requestOverlayTranslation(targetLang) {
     translateOverlayLines(targetLang, revision)
         .catch((e) => {
             if (revision !== ss.translationRevision) return;
-            showTransientHint(commandErrorText(e, '翻译失败'), {isError: true});
+            ss.lastTranslateError = commandErrorText(e, '翻译失败');
+            showTransientHint(ss.lastTranslateError, {isError: true, duration: 3000});
             console.error('[screenshot] overlay translate 失败', e);
+            // 自动路径（工具栏[翻译]直达，无 doTranslate 轮询）在译文区直接呈现失败原因；
+            // doTranslate 路径（data-loading=true）由其轮询负责展示
+            const panel = document.getElementById('ocr-panel');
+            const translatedTa = panel?.querySelector('#ocr-textarea-translated');
+            if (translatedTa
+                && translatedTa.getAttribute('data-loading') !== 'true'
+                && !hasText(translatedTa.value)) {
+                translatedTa.value = `翻译失败：${ss.lastTranslateError}`;
+                translatedTa.setAttribute('data-stale', 'true');
+            }
         })
         .finally(() => {
             if (revision !== ss.translationRevision) return;
@@ -692,12 +755,17 @@ async function translateOverlayLines(targetLang, revision = ++ss.translationRevi
 
     const started = performance.now();
     let dsts;
+    let failedCount = 0;
     try {
-        dsts = await translateLines(srcs, targetLang || null);
+        const res = await translateLines(srcs, targetLang || null);
+        dsts = res.lines;
+        if (res.engine) ss.translateEngine = res.engine;
+        failedCount = res.failed || 0;
     } catch (e) {
         const err = normalizeError(e);
         console.warn(`[screenshot] translateLines 失败 [${err.code}],降级到逐行单调`);
         dsts = [];
+        let lineFailed = 0;
         for (let i = 0; i < srcs.length; i++) {
             if (!hasText(srcs[i])) {
                 dsts.push('');
@@ -706,9 +774,13 @@ async function translateOverlayLines(targetLang, revision = ++ss.translationRevi
             try {
                 dsts.push(await translateText(srcs[i], targetLang || null));
             } catch (_) {
+                lineFailed++;
                 dsts.push(srcs[i]);
             }
         }
+        // 全部行失败 → 上抛让调用方展示失败原因，不再拿原文冒充译文
+        if (lineFailed >= needCount) throw e;
+        failedCount = lineFailed;
     }
     if (selectionAtStart !== ss.selectionRevision || revision !== ss.translationRevision) {
         console.debug('[screenshot] 丢弃过期翻译结果', {revision, current: ss.translationRevision});
@@ -720,7 +792,10 @@ async function translateOverlayLines(targetLang, revision = ++ss.translationRevi
     annot.setOverlayTranslations(merged, targetLang || null);
     redrawAnnotFull();
     updateOverlayButtonsActive();
-    tracing_debug('translateOverlayLines 完成', {lines: needCount, ms: Math.round(performance.now() - started)});
+    if (failedCount > 0) {
+        showTransientHint(`部分行翻译失败（${failedCount}/${needCount}），已保留原文`, {isError: true, duration: 2500});
+    }
+    tracing_debug('translateOverlayLines 完成', {lines: needCount, failed: failedCount, ms: Math.round(performance.now() - started)});
 }
 
 // ════════════════════════════════════════════════════════════
@@ -776,21 +851,8 @@ export function showOcrResult(result, options = {}) {
   `;
     document.body.appendChild(panel);
 
-    // 0.22.10: 实际引擎标注（后端 OcrResult.backend_used 可选字段；缺省不渲染）
-    const engineBadge = panel.querySelector('.ocr-engine-badge');
-    if (engineBadge) {
-        const used = result && result.backend_used;
-        if (used === 'paddleocr') {
-            engineBadge.textContent = 'PaddleOCR（本地）';
-            engineBadge.hidden = false;
-        } else if (used === 'windows') {
-            engineBadge.textContent = 'Windows OCR';
-            engineBadge.hidden = false;
-        }
-        if (!engineBadge.hidden && result.backend_fallback_reason) {
-            engineBadge.title = `已回退：${result.backend_fallback_reason}`;
-        }
-    }
+    // 0.22.10: 实际引擎标注——按当前 tab 显示 OCR 引擎或翻译供应商（见 updatePanelEngineBadge）
+    updatePanelEngineBadge();
 
     if (initialTab !== 'translated') {
         const advSection = panel.querySelector('.ocr-panel-adv');
@@ -998,6 +1060,8 @@ export function showOcrResult(result, options = {}) {
             }
         }
         updateToolbarButtonActive();
+        // 引擎徽标随 tab 切换：原文显示 OCR 引擎，译文显示翻译供应商
+        updatePanelEngineBadge();
     };
     tabSource.addEventListener('click', () => showTab('source'));
     tabTranslated.addEventListener('click', () => showTab('translated'));
@@ -1147,7 +1211,11 @@ export function showOcrResult(result, options = {}) {
             translateBtn.textContent = '重新翻译';
             translatedTa.removeAttribute('data-loading');
             if (!ss.translationBusy && !(latest && latest.lines.some((l) => hasText(l.dstText)))) {
-                translatedTa.value = '翻译失败，请重试';
+                // 0.25：带上后端/插件给出的失败原因（如 "ali: InvalidAccessKeyId.NotFound"）
+                translatedTa.value = ss.lastTranslateError
+                    ? `翻译失败：${ss.lastTranslateError}`
+                    : '翻译失败，请重试';
+                markTranslatedStale(true);
             }
         };
         if (translationPollTimer) clearTimeout(translationPollTimer);

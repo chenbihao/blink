@@ -1019,6 +1019,8 @@ export const zh = {
     "plugin.section": "配置",
     "plugin.save": "保存配置",
     "plugin.saved_msg": "已保存",
+    "plugin.field_space_hint": "含空格：密钥不含空格",
+    "plugin.field_space_fix": "移除空格",
     "plugin.load_failed": "加载插件列表失败",
     "plugin.empty": "暂无已加载插件",
     // 触发关键字配置

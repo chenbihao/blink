@@ -1744,6 +1744,19 @@ details.plugin-group .plugin-group-body {
     min-height: 16px;
 }
 
+/* no_space 字段（密钥类）的空格提示：红字 + 一键移除按钮（plugins.js 动态显隐） */
+.plugin-field-warn {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 4px;
+    font-size: var(--text-base);
+}
+
+.plugin-field-warn .plugin-field-warn-fix {
+    flex-shrink: 0;
+}
+
 
 /* ── 触发关键字配置（极简标签设计）──────────────────────────────────────────────── */
 

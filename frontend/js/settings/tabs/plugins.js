@@ -194,20 +194,31 @@ function renderSettingField(field, value, useSettingRow = false) {
         ? `<span class="field-hint-icon" title="${escapeAttr(field.description)}">ⓘ</span>`
         : "";
 
+    // no_space 字段（密钥类）：输入含空格时显示红字提示 + 一键移除按钮。
+    // 不自动改写用户输入——密钥是否含空格由用户确认，避免静默修改引入意外。
+    const spaceWarn = field.type === "string" && field.no_space
+        ? `<div class="plugin-field-warn hidden" data-warn-key="${escapeAttr(field.key)}">
+             <span class="plugin-field-warn-text msg-error"></span>
+             <button type="button" class="btn-small plugin-field-warn-fix">${t("plugin.field_space_fix")}</button>
+           </div>`
+        : "";
+
     if (useSettingRow) {
         return `
-      <div class="setting-row">
+      <div class="setting-row" data-key="${escapeAttr(field.key)}">
         <label class="setting-label">${escapeHtml(field.title)}${descIcon}</label>
         ${control}
+        ${spaceWarn}
       </div>`;
     }
 
     return `
-    <div class="plugin-field-row">
+    <div class="plugin-field-row" data-key="${escapeAttr(field.key)}">
       <div class="field-head">
         <span class="field-title">${escapeHtml(field.title)}${descIcon}</span>
         ${control}
       </div>
+      ${spaceWarn}
     </div>`;
 }
 
@@ -409,12 +420,14 @@ function renderConfigSection(title, schema, values, opts = {}) {
     </details>`;
     }).join("");
 
+    // 反馈消息 span 必须存在（flash 依赖）：有保存按钮时嵌在保存行，
+    // 无按钮时单独渲染——空 span 不占位（min-height:0），出现提示才撑开
     const saveRow = opts.saveLabel
         ? `<div class="plugin-save-row">
          <button class="btn-small plugin-save">${escapeHtml(opts.saveLabel)}</button>
          <span class="plugin-save-msg"></span>
        </div>`
-        : "";
+        : `<span class="plugin-save-msg"></span>`;
 
     if (opts.flat) {
         return `<div class="plugin-section-title">${escapeHtml(title)}</div>
@@ -479,7 +492,7 @@ function bindPluginCardEvents(plugin) {
             return true;
         } catch (err) {
             console.error("update_plugin_config failed:", err);
-            flash(card, t("common.save_failed_msg", {err}), true);
+            flash(card, t("common.save_failed_msg", {err}), true, 5000);
             return false;
         }
     };
@@ -489,12 +502,19 @@ function bindPluginCardEvents(plugin) {
         if (!ok) e.target.checked = !e.target.checked;
     });
 
-    // 字段变更 → 自动保存
+    // 字段变更 → 自动保存 + 重算条件显隐
     card.querySelectorAll(".plugin-field").forEach((el) => {
         el.addEventListener("change", async () => {
+            applyFieldVisibility(card, schema);
             await save();
         });
     });
+
+    // 密钥类字段（no_space）空格提示：红字 + 一键移除按钮，不自动改写输入
+    bindNoSpaceHints(card, schema);
+
+    // 条件显隐初算（如"降级顺序"仅在"允许降级"开启时显示）
+    applyFieldVisibility(card, schema);
 
     // 默认触发词的 ban/恢复按钮
     card.querySelectorAll(".trigger-tag-btn:not(.trigger-tag-btn-delete)").forEach((btn) => {
@@ -637,6 +657,57 @@ function collectSettings(card, schema) {
     return settings;
 }
 
+/**
+ * 对 schema 声明 no_space 的字符串字段绑定空格提示（密钥/凭据类）。
+ *
+ * 空格来源:多行文本粘贴进单行输入框时换行被浏览器转成空格(密钥中段插入空格),
+ * 或复制时带入首尾空白——密钥类值绝不含空格,混入即认证失败(如阿里 404=AccessKey 不存在)。
+ *
+ * 行为:输入含空格 → 该字段下方显示红字提示 + "移除空格"按钮(用户主动点击才修改,
+ * 想保留空格也可直接无视);移除后触发 change 走自动保存。
+ */
+function bindNoSpaceHints(card, schema) {
+    for (const f of schema) {
+        if (f.type !== "string" || !f.no_space) continue;
+        const el = card.querySelector(`.plugin-field[data-key="${f.key}"]`);
+        const warnBox = card.querySelector(`.plugin-field-warn[data-warn-key="${f.key}"]`);
+        const warnText = warnBox?.querySelector(".plugin-field-warn-text");
+        const fixBtn = warnBox?.querySelector(".plugin-field-warn-fix");
+        if (!el || !warnBox || !warnText) continue;
+
+        const refresh = () => {
+            const dirty = /\s/.test(el.value ?? "");
+            warnBox.classList.toggle("hidden", !dirty);
+            if (dirty) {
+                warnText.textContent = t("plugin.field_space_hint");
+            }
+        };
+        el.addEventListener("input", refresh);
+        refresh();
+        fixBtn?.addEventListener("click", () => {
+            el.value = (el.value ?? "").replace(/\s+/g, "");
+            refresh();
+            el.dispatchEvent(new Event("change", {bubbles: true}));
+        });
+    }
+}
+
+/**
+ * 应用 schema 的条件显隐（visible_when）：引用字段值等于条件值时才显示该行。
+ * 例:翻译插件"降级顺序"仅在"允许降级"开关开启时显示。
+ */
+function applyFieldVisibility(card, schema) {
+    for (const f of schema) {
+        if (!f.visible_when) continue;
+        const row = card.querySelector(`[data-key="${CSS.escape(f.key)}"].plugin-field-row, [data-key="${CSS.escape(f.key)}"].setting-row`);
+        if (!row) continue;
+        const ref = card.querySelector(`.plugin-field[data-key="${CSS.escape(f.visible_when.key)}"]`);
+        if (!ref) continue;
+        const current = ref.type === "checkbox" ? ref.checked : ref.value;
+        row.classList.toggle("hidden", String(current) !== String(f.visible_when.equals));
+    }
+}
+
 // ── 全局事件委托（数字 spinner / 外链）─────────────────────────────────────────
 
 /**
@@ -722,8 +793,8 @@ async function openExternalUrl(url) {
     }
 }
 
-/** 卡片内显示一行反馈（2s 后清除） */
-function flash(card, msg, isError) {
+/** 卡片内显示一行反馈（默认 2s 后清除；警告/错误类可传更长时长） */
+function flash(card, msg, isError, duration = 2000) {
     const el = card.querySelector(".plugin-save-msg");
     if (!el) return;
     el.textContent = msg;
@@ -732,5 +803,5 @@ function flash(card, msg, isError) {
     el._t = setTimeout(() => {
         el.textContent = "";
         el.className = "plugin-save-msg";
-    }, 2000);
+    }, duration);
 }

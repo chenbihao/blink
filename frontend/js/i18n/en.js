@@ -1025,6 +1025,8 @@ export const en = {
     "plugin.section": "Configuration",
     "plugin.save": "Save",
     "plugin.saved_msg": "Saved",
+    "plugin.field_space_hint": "Contains spaces: API keys never contain spaces",
+    "plugin.field_space_fix": "Remove spaces",
     "plugin.load_failed": "Failed to load plugins",
     "plugin.empty": "No plugins loaded",
     // Trigger keyword config

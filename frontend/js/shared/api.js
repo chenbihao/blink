@@ -566,8 +566,10 @@ export function translateText(text, targetLang) {
 }
 
 /**
- * 0.11.10-g:批量翻译多行文本。输入 `lines[i]` → 输出 `results[i]`。
- * 单行失败降级到原文（无错误传播），保序。
+ * 0.11.10-g:批量翻译多行文本。输入 `lines[i]` → 输出 `res.lines[i]`（保序）。
+ * 部分行失败降级到原文并计入 `res.failed`；全部失败时 reject（错误信息含供应商原因）。
+ * `res.engine` 为实际使用的翻译引擎（降级时带"已降级"标记）。
+ * @returns {Promise<{lines: string[], engine: string?, failed: number, error: string?}>}
  */
 export function translateLines(lines, targetLang) {
     return invoke("translate_lines", {lines, targetLang: targetLang ?? null});

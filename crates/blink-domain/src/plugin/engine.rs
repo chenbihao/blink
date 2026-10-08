@@ -100,6 +100,15 @@ impl PluginEngine {
                                 serde_json::json!(group.title)
                             };
                         }
+                        // no_space 透传给设置页做空格检测（密钥类字段），默认 false 不输出
+                        if f.no_space {
+                            field["no_space"] = serde_json::json!(true);
+                        }
+                        // 条件显隐透传（设置页联动显隐，如降级顺序仅在允许降级时显示）
+                        if let Some(ref vw) = f.visible_when {
+                            field["visible_when"] =
+                                serde_json::json!({ "key": vw.key, "equals": vw.equals });
+                        }
                         field
                     })
                     .collect();

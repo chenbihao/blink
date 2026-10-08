@@ -347,12 +347,25 @@ impl PluginProcess {
         }
 
         // stderr reader:逐行汇入 tracing。
+        // 行内带 [error]/[warn]/[info] 方括号标记时按标记级别转发（约定见 protocol.rs），
+        // 无标记保持 debug——插件 stderr 是常规诊断输出的默认归宿，默认级别下只露错误。
         {
             let id = plugin_id.to_string();
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    tracing::debug!(plugin = %id, "stderr: {}", line);
+                    match stderr_line_level(&line) {
+                        tracing::Level::ERROR => {
+                            tracing::error!(plugin = %id, "stderr: {}", line);
+                        }
+                        tracing::Level::WARN => {
+                            tracing::warn!(plugin = %id, "stderr: {}", line);
+                        }
+                        tracing::Level::INFO => {
+                            tracing::info!(plugin = %id, "stderr: {}", line);
+                        }
+                        _ => tracing::debug!(plugin = %id, "stderr: {}", line),
+                    }
                 }
             });
         }
@@ -416,7 +429,7 @@ impl PluginProcess {
             Ok(Ok(resp)) => {
                 // 插件返回 error 时，转成特殊的 PluginItem 让前端显示错误信息
                 if let Some(err) = resp.error {
-                    tracing::debug!(id = %req_id, error = %err.message, "插件返回错误信息");
+                    tracing::warn!(id = %req_id, error = %err.message, "插件返回错误信息");
                     return Ok(vec![PluginItem {
                         title: err.message,
                         subtitle: None,
@@ -845,5 +858,58 @@ async fn execute_http_request(
             }
         }
         Err(e) => (0, None, Some(e.to_string())),
+    }
+}
+
+/// 解析插件 stderr 行的级别标记（stderr reader 转发用）。
+///
+/// 约定：插件在 stderr 行内嵌入方括号级别标记（如 `[translate][error] ali HTTP error: ...`），
+/// core 按标记升级转发级别；无标记视为 debug——插件 stderr 的常规诊断输出默认不打扰用户，
+/// 但引擎失败等原因不明的错误必须在默认日志级别（info+）可见。
+fn stderr_line_level(line: &str) -> tracing::Level {
+    if line.contains("[error]") {
+        tracing::Level::ERROR
+    } else if line.contains("[warn]") {
+        tracing::Level::WARN
+    } else if line.contains("[info]") {
+        tracing::Level::INFO
+    } else {
+        tracing::Level::DEBUG
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stderr_line_level;
+
+    #[test]
+    fn stderr_level_markers_map_to_levels() {
+        assert_eq!(
+            stderr_line_level("[translate][error] ali HTTP error: status=404"),
+            tracing::Level::ERROR
+        );
+        assert_eq!(
+            stderr_line_level("[translate][warn] 降级到: 百度翻译 (baidu)"),
+            tracing::Level::WARN
+        );
+        assert_eq!(
+            stderr_line_level("[translate][info] ready"),
+            tracing::Level::INFO
+        );
+    }
+
+    #[test]
+    fn stderr_level_unmarked_defaults_to_debug() {
+        // 无标记的常规诊断行保持 debug
+        assert_eq!(
+            stderr_line_level("[translate] tool_call: id=tc_2, target=zh"),
+            tracing::Level::DEBUG
+        );
+        // 单词 error 不带方括号不误升级
+        assert_eq!(
+            stderr_line_level("[translate] ali HTTP error: status=404"),
+            tracing::Level::DEBUG
+        );
+        assert_eq!(stderr_line_level(""), tracing::Level::DEBUG);
     }
 }

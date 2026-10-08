@@ -1481,6 +1481,17 @@ pub async fn translate_text(
     text: String,
     target_lang: Option<String>,
 ) -> Result<String, crate::app::command_error::CommandError> {
+    translate_text_impl(app, &text, target_lang.as_deref())
+        .await
+        .map(|(translated, _)| translated)
+}
+
+/// `translate_text` 的实现——额外带出插件 desc（实际使用的翻译引擎，供 UI 显示）。
+async fn translate_text_impl(
+    app: tauri::AppHandle,
+    text: &str,
+    target_lang: Option<&str>,
+) -> Result<(String, Option<String>), crate::app::command_error::CommandError> {
     use crate::app::command_error::CommandError;
 
     let trimmed = text.trim();
@@ -1546,9 +1557,9 @@ pub async fn translate_text(
 
     match result {
         crate::domain::capability::CapabilityResult::Items { items } => {
-            // 0.14: 优先读 data.translated（干净译文）
-            let translated = items
-                .first()
+            // 0.14: 优先读 data.translated（干净译文）；desc 是插件带出的引擎标注
+            let first = items.first();
+            let translated = first
                 .and_then(|it| {
                     it.data
                         .get("translated")
@@ -1557,16 +1568,24 @@ pub async fn translate_text(
                 })
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| CommandError::new("internal_error", "翻译插件返回空结果", false))?;
+            let engine = first.and_then(|it| it.desc.clone());
             tracing::info!(
                 src_len = trimmed.chars().count(),
                 dst_len = translated.chars().count(),
+                engine = engine.as_deref().unwrap_or(""),
                 "translate_text 完成"
             );
-            Ok(translated)
+            Ok((translated, engine))
         }
-        crate::domain::capability::CapabilityResult::Text { content, .. } => {
+        crate::domain::capability::CapabilityResult::Text { content, desc } => {
             // 兼容:如果插件未来改走 Text 结果,也取到译文
-            Ok(content)
+            tracing::info!(
+                src_len = trimmed.chars().count(),
+                dst_len = content.chars().count(),
+                engine = desc.as_deref().unwrap_or(""),
+                "translate_text 完成"
+            );
+            Ok((content, desc))
         }
         other => {
             tracing::warn!(?other, "translate_text: 翻译插件返回意外的结果");
@@ -1579,6 +1598,21 @@ pub async fn translate_text(
     }
 }
 
+/// `translate_lines` 的结构化结果——译文之外带出引擎与失败信息，供前端展示。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TranslateLinesResult {
+    /// 保序译文（失败行回退原文）
+    pub lines: Vec<String>,
+    /// 实际使用的翻译引擎（插件 desc 带出，降级时含"已降级"标记）；批量部分失败时为最后成功的引擎
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engine: Option<String>,
+    /// 译文失败回退原文的行数（unique 计数）
+    pub failed: usize,
+    /// 失败原因摘要（failed > 0 时给出，含供应商错误码）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// 0.11.10-g:批量翻译多行文本。
 ///
 /// 首选一次调用插件 `translate_batch` tool，由插件加 tag 后单次请求翻译引擎并保序拆回。
@@ -1586,14 +1620,21 @@ pub async fn translate_text(
 /// 保证截图翻译功能不因批量优化失败而不可用。
 ///
 /// **0.14.7 W3**：返回 `CommandError`（结构化错误协议）。
+/// 全部行都翻译失败时返回 Err（前端给出失败提示）而非静默回退原文；
+/// 部分失败返回 Ok + `failed` 计数（前端可提示"部分行已保留原文"）。
 #[tauri::command]
 pub async fn translate_lines(
     app: tauri::AppHandle,
     lines: Vec<String>,
     target_lang: Option<String>,
-) -> Result<Vec<String>, crate::app::command_error::CommandError> {
+) -> Result<TranslateLinesResult, crate::app::command_error::CommandError> {
     if lines.is_empty() {
-        return Ok(Vec::new());
+        return Ok(TranslateLinesResult {
+            lines: Vec::new(),
+            engine: None,
+            failed: 0,
+            error: None,
+        });
     }
     let n = lines.len();
     tracing::debug!(count = n, ?target_lang, "translate_lines: 批量翻译开始");
@@ -1627,7 +1668,12 @@ pub async fn translate_lines(
             skipped,
             "translate_lines: 无有效文本，跳过翻译请求"
         );
-        return Ok(lines);
+        return Ok(TranslateLinesResult {
+            lines,
+            engine: None,
+            failed: 0,
+            error: None,
+        });
     }
     tracing::debug!(
         count = n,
@@ -1674,7 +1720,7 @@ pub async fn translate_lines(
             .await
         {
             Ok(result) => {
-                if let Some(batch_results) =
+                if let Some((batch_results, engine)) =
                     parse_translate_batch_payload(&result, unique_texts.len())
                 {
                     let mut results = lines.clone();
@@ -1687,9 +1733,15 @@ pub async fn translate_lines(
                     tracing::info!(
                         count = n,
                         elapsed_ms = started.elapsed().as_millis() as u64,
+                        engine = engine.as_deref().unwrap_or(""),
                         "translate_lines 完成（单次批量 tool）"
                     );
-                    return Ok(results);
+                    return Ok(TranslateLinesResult {
+                        lines: results,
+                        engine,
+                        failed: 0,
+                        error: None,
+                    });
                 }
                 tracing::warn!("translate_lines: 批量 tool 返回结构异常，降级为单行顺序调用");
             }
@@ -1702,25 +1754,55 @@ pub async fn translate_lines(
     }
 
     let mut results = lines;
+    let mut failed = 0usize;
+    let mut last_engine: Option<String> = None;
+    let mut last_error: Option<crate::app::command_error::CommandError> = None;
+    let total_unique = unique_texts.len();
     for (unique_idx, text) in unique_texts.into_iter().enumerate() {
-        let translated = match translate_text(app.clone(), text.clone(), target_lang.clone()).await
-        {
-            Ok(dst) => dst,
-            Err(e) => {
-                tracing::warn!(line = positions[unique_idx][0], error = %e, "translate_lines: 单行翻译失败，降级到原文");
-                text
-            }
-        };
+        let (translated, engine) =
+            match translate_text_impl(app.clone(), &text, target_lang.as_deref()).await {
+                Ok(pair) => pair,
+                Err(e) => {
+                    failed += 1;
+                    tracing::warn!(
+                        line = positions[unique_idx][0],
+                        error = %e,
+                        "translate_lines: 单行翻译失败，降级到原文"
+                    );
+                    last_error = Some(e);
+                    (text, None)
+                }
+            };
+        if engine.is_some() {
+            last_engine = engine;
+        }
         for idx in &positions[unique_idx] {
             results[*idx] = translated.clone();
         }
     }
     tracing::info!(
         count = n,
+        failed,
         elapsed_ms = started.elapsed().as_millis() as u64,
         "translate_lines 完成（单行顺序降级）"
     );
-    Ok(results)
+    // 全部行失败 → 报错（前端给出失败提示），不再静默回退原文
+    if failed > 0 && failed == total_unique {
+        let e = last_error.unwrap_or_else(|| {
+            crate::app::command_error::CommandError::new("translate_failed", "翻译失败", false)
+        });
+        return Err(e);
+    }
+    Ok(TranslateLinesResult {
+        lines: results,
+        engine: last_engine,
+        failed,
+        error: if failed > 0 {
+            last_error.map(|e| e.message.clone())
+        } else {
+            None
+        },
+    })
 }
 
 /// 0.11.7：设置/清除标注模式（前端通知后端）。
@@ -2428,27 +2510,30 @@ fn is_batch_translation_candidate(text: &str) -> bool {
 fn parse_translate_batch_payload(
     result: &crate::domain::capability::CapabilityResult,
     expected: usize,
-) -> Option<Vec<String>> {
+) -> Option<(Vec<String>, Option<String>)> {
     let crate::domain::capability::CapabilityResult::Items { items } = result else {
         return None;
     };
+    // desc 是插件带出的引擎标注（如 "阿里翻译 (ali)"），随译文一起返回
+    let engine = items.first().and_then(|it| it.desc.clone());
     if items.len() == expected {
         let direct: Option<Vec<String>> = items
             .iter()
             .map(|item| item.data.as_str().map(str::to_string))
             .collect();
-        if direct.is_some() {
-            return direct;
+        if let Some(direct) = direct {
+            return Some((direct, engine));
         }
     }
     let legacy = items.first()?.data.get("results")?.as_array()?;
     if legacy.len() != expected {
         return None;
     }
-    legacy
+    let lines = legacy
         .iter()
         .map(|value| value.as_str().map(str::to_string))
-        .collect()
+        .collect::<Option<Vec<String>>>()?;
+    Some((lines, engine))
 }
 
 #[cfg(test)]
@@ -2482,7 +2567,7 @@ mod translate_batch_tests {
         };
         assert_eq!(
             parse_translate_batch_payload(&result, 2),
-            Some(vec!["更改".into(), "配置".into()])
+            Some((vec!["更改".into(), "配置".into()], None))
         );
     }
 
@@ -2493,7 +2578,24 @@ mod translate_batch_tests {
         };
         assert_eq!(
             parse_translate_batch_payload(&result, 2),
-            Some(vec!["更改".into(), "配置".into()])
+            Some((vec!["更改".into(), "配置".into()], None))
+        );
+    }
+
+    #[test]
+    fn parses_engine_desc_from_first_item() {
+        // 插件带出的引擎标注（desc 注入在首项）随译文一起返回
+        let mut first = item(json!("更改"));
+        first.desc = Some("已降级: 百度翻译 (baidu)".into());
+        let result = CapabilityResult::Items {
+            items: vec![first, item(json!("配置"))],
+        };
+        assert_eq!(
+            parse_translate_batch_payload(&result, 2),
+            Some((
+                vec!["更改".into(), "配置".into()],
+                Some("已降级: 百度翻译 (baidu)".into())
+            ))
         );
     }
 

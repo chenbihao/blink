@@ -72,12 +72,17 @@ pub struct PluginResponse {
 }
 
 /// 轨道 A 纯数据 tool 结果（0.14.3）——插件只吐纯 data，投影规则在 manifest。
+///
+/// `desc`（可选）：给人看的元信息（如实际使用的翻译引擎），core 注入
+/// CapabilityResult.desc——AI 出口不读 desc，展示/命令层可读。
 #[derive(Debug, Serialize)]
 pub struct RawToolResult {
     pub id: String,
     pub data: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<PluginError>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub desc: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

@@ -115,9 +115,17 @@
       "default": "ali"
     },
     {
+      "key": "allow_fallback",
+      "type": "boolean",
+      "title": {"zh": "允许降级到其他引擎", "en": "Allow fallback to other engines"},
+      "description": {"zh": "主引擎失败时按降级顺序尝试其他引擎；关闭则主引擎失败直接报错", "en": "Try other engines in fallback order when the primary fails; off = fail fast"},
+      "default": false
+    },
+    {
       "key": "fallback_order",
       "type": "sortable_list",
       "title": { "zh": "降级顺序", "en": "Fallback order" },
+        "visible_when": {"key": "allow_fallback", "equals": true},
       "description": { "zh": "主引擎失败时按此顺序尝试，拖动调整顺序", "en": "Tried in this order when the main engine fails; drag to reorder" },
       "options": [
         { "value": "tencent", "label": { "zh": "腾讯翻译", "en": "Tencent" } },
@@ -131,6 +139,7 @@
     {
       "key": "ali_access_key_id",
       "type": "string",
+      "no_space": true,
       "title": "AccessKey ID",
       "group": {
         "title": "阿里机器翻译",
@@ -140,6 +149,7 @@
     {
       "key": "ali_access_key_secret",
       "type": "string",
+      "no_space": true,
       "title": "AccessKey Secret",
       "group": "阿里机器翻译",
       "secret": true
@@ -147,6 +157,7 @@
     {
       "key": "baidu_app_id",
       "type": "string",
+      "no_space": true,
       "title": "APP ID",
       "group": {
         "title": "百度翻译",
@@ -156,6 +167,7 @@
     {
       "key": "baidu_app_key",
       "type": "string",
+      "no_space": true,
       "title": "密钥 (APP Key)",
       "group": "百度翻译",
       "secret": true
@@ -163,6 +175,7 @@
     {
       "key": "tencent_secret_id",
       "type": "string",
+      "no_space": true,
       "title": "SecretId",
       "group": {
         "title": "腾讯云机器翻译",
@@ -172,6 +185,7 @@
     {
       "key": "tencent_secret_key",
       "type": "string",
+      "no_space": true,
       "title": "SecretKey",
       "group": "腾讯云机器翻译",
       "secret": true
@@ -179,6 +193,7 @@
     {
       "key": "youdao_app_key",
       "type": "string",
+      "no_space": true,
       "title": "应用ID (appKey)",
       "group": {
         "title": "有道智云",
@@ -188,6 +203,7 @@
     {
       "key": "youdao_app_secret",
       "type": "string",
+      "no_space": true,
       "title": "应用密钥 (appSecret)",
       "group": "有道智云",
       "secret": true
@@ -195,6 +211,7 @@
     {
       "key": "deepl_api_key",
       "type": "string",
+      "no_space": true,
       "title": "DeepL API Key",
       "group": {
         "title": "DeepL",

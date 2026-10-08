@@ -59,6 +59,25 @@ fn engine_display_name(id: &str) -> &str {
         .unwrap_or(id)
 }
 
+/// 构造给用户看的引擎描述（RawToolResult.desc，随结果带出供 UI 显示实际供应商）。
+/// fell_back=true（降级后成功）时带"已降级"标记，方便用户发现降级发生。
+fn engine_desc(engine_id: &str, fell_back: bool) -> String {
+    if fell_back {
+        format!("已降级: {} ({})", engine_display_name(engine_id), engine_id)
+    } else {
+        format!("{} ({})", engine_display_name(engine_id), engine_id)
+    }
+}
+
+/// 是否允许降级到其他引擎（settings.allow_fallback，默认 false——主引擎失败直接报错，
+/// 用户显式开启后才按 fallback_order 降级）。
+fn allow_fallback(settings: &Value) -> bool {
+    settings
+        .get("allow_fallback")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 /// 获取引擎实例（按 id）
 fn get_engine(id: &str) -> Option<Box<dyn TranslateEngine>> {
     match id {
@@ -249,6 +268,23 @@ fn parse_digit_mixed(s: &str) -> Option<usize> {
     normalized.parse::<usize>().ok()
 }
 
+/// 从引擎错误响应体提取供应商错误详情。
+///
+/// 阿里云 MT 网关对鉴权/参数类错误返回非 200 + 根级
+/// `{"Code":"InvalidAccessKeyId.NotFound","Message":"..."}` JSON
+/// （实测 404 = AccessKey 不存在）；其他引擎多为 200 + 业务错误字段或纯文本,
+/// 解析不出根级 Code 时返回 None,由调用方用"HTTP {status}"兜底。
+fn extract_provider_error_detail(body: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(body).ok()?;
+    let code = v.get("Code").and_then(Value::as_str)?;
+    let message = v.get("Message").and_then(Value::as_str).unwrap_or("");
+    Some(if message.is_empty() {
+        code.to_string()
+    } else {
+        format!("{code}: {message}")
+    })
+}
+
 /// 待处理的 HTTP 请求上下文（发 http_request 后等 http_response 恢复）。
 struct PendingTranslate {
     query_id: String,
@@ -269,6 +305,12 @@ struct PendingTranslate {
     /// tag 拼接是否已被某引擎破坏过。true 后续不再尝试 tag,直接走单行并发兜底。
     /// (一家引擎破坏 tag,换一家大概率也破坏;tag 在多引擎间不可靠)
     tag_poisoned: bool,
+    /// 最近一次引擎失败的详情（HTTP 状态/供应商错误码）。全部引擎失败时附加到最终错误,
+    /// 避免用户只看到"翻译失败"却不知道是哪家引擎的什么原因(如阿里 404=AccessKey 不存在)。
+    last_error_detail: Option<String>,
+    /// 是否允许降级到其他引擎(settings.allow_fallback,默认 false)。
+    /// false 时主引擎失败(未配置/HTTP 错误/解析失败)直接返回错误,不尝试 fallback_order。
+    fallback_allowed: bool,
 }
 
 fn main() {
@@ -286,7 +328,7 @@ fn main() {
         let msg: CoreToPlugin = match serde_json::from_str(&line) {
             Ok(m) => m,
             Err(e) => {
-                eprintln!("invalid message: {e}");
+                eprintln!("[translate][error] invalid message: {e}");
                 continue;
             }
         };
@@ -412,6 +454,7 @@ fn handle_tool_call<W: Write>(
                 code: "UNKNOWN_TOOL".into(),
                 message: format!("未知 tool: {tool_name}"),
             }),
+            desc: None,
         });
         send_message(writer, &resp);
         return;
@@ -440,6 +483,7 @@ fn handle_tool_call<W: Write>(
                     code: "MISSING_ARG".into(),
                     message: "缺少 texts 参数".into(),
                 }),
+                desc: None,
             });
             send_message(writer, &resp);
             return;
@@ -458,6 +502,7 @@ fn handle_tool_call<W: Write>(
                     code: "MISSING_ARG".into(),
                     message: "texts 必须是非空字符串数组".into(),
                 }),
+                desc: None,
             });
             send_message(writer, &resp);
             return;
@@ -498,6 +543,7 @@ fn handle_tool_call<W: Write>(
                 code: "MISSING_ARG".into(),
                 message: "缺少 text 参数".into(),
             }),
+            desc: None,
         });
         send_message(writer, &resp);
         return;
@@ -558,7 +604,7 @@ fn parse_fallback_order(settings: &Value) -> Vec<String> {
     }
 }
 
-/// 尝试翻译：主引擎失败则按 fallback_order 降级。
+/// 尝试翻译：主引擎失败则按 fallback_order 降级（allow_fallback=false 时不降级）。
 fn try_translate<W: Write>(
     writer: &mut W,
     pending: &mut HashMap<String, PendingTranslate>,
@@ -583,11 +629,13 @@ fn try_translate<W: Write>(
             target_lang,
             engine_id,
             fallback_order,
+            fallback_allowed: allow_fallback(&settings),
             settings,
             tried_engines: vec![],
             batch_originals: None,
             batch_native: false,
             tag_poisoned: false,
+            last_error_detail: None,
         },
     );
 }
@@ -611,11 +659,13 @@ fn try_translate_batch<W: Write>(
         target_lang,
         engine_id,
         fallback_order,
+        fallback_allowed: allow_fallback(&settings),
         settings,
         tried_engines: vec![],
         batch_originals: Some(originals),
         batch_native: false,
         tag_poisoned: false,
+        last_error_detail: None,
     };
     dispatch_batch_by_engine(writer, pending, ctx);
 }
@@ -693,7 +743,7 @@ fn dispatch_single_line_fallback<W: Write>(
         _ => return,
     };
     eprintln!(
-        "[translate] 批量 tag 失效,降级单行并发: engine={}, lines={}",
+        "[translate][warn] 批量 tag 失效,降级单行并发: engine={}, lines={}",
         ctx.engine_id,
         originals.len()
     );
@@ -710,6 +760,7 @@ fn dispatch_single_line_fallback<W: Write>(
                 ctx.tried_engines.len()
             ),
         }),
+        desc: None,
     });
     send_message(writer, &resp);
 }
@@ -731,10 +782,20 @@ fn issue_translate_request<W: Write>(
         }
     };
 
-    // 引擎配置缺失（如 API key 为空）→ engine.build_request 返回 None
+    // 引擎配置缺失（如 API key 为空）→ engine.build_request 返回 None。
+    // 记录详情让终局错误能说明"主引擎未配置",而非笼统的"翻译失败"
     let req = match engine.build_request(&ctx.text, &ctx.target_lang, &ctx.settings) {
         Some(r) => r,
         None => {
+            eprintln!(
+                "[translate][warn] {} 未配置 API 密钥,跳过",
+                ctx.engine_id
+            );
+            ctx.last_error_detail = Some(format!(
+                "{} ({}) 未配置 API 密钥",
+                engine_display_name(&ctx.engine_id),
+                ctx.engine_id
+            ));
             ctx.tried_engines.push(ctx.engine_id.clone());
             try_next_fallback(writer, pending, ctx);
             return;
@@ -768,11 +829,23 @@ fn issue_http_request<W: Write>(
 }
 
 /// 主引擎失败后，按 fallback_order 尝试下一个未试过的引擎。
+///
+/// `allow_fallback=false`（默认）时不降级——任何失败（未配置/HTTP 错误/解析失败）
+/// 直接走终局报错，让用户立刻看到"哪家引擎、什么原因"，而不是静默换引擎掩盖配置问题。
 fn try_next_fallback<W: Write>(
     writer: &mut W,
     pending: &mut HashMap<String, PendingTranslate>,
     mut ctx: PendingTranslate,
 ) {
+    if !ctx.fallback_allowed {
+        eprintln!(
+            "[translate][warn] 降级已关闭,主引擎失败即返回错误 engine={}",
+            ctx.engine_id
+        );
+        send_final_error(writer, ctx);
+        return;
+    }
+
     let next = ctx
         .fallback_order
         .iter()
@@ -798,32 +871,47 @@ fn try_next_fallback<W: Write>(
             // 所有引擎都试过了
             // 如果是批量请求且还没走过单行并发 → 最后兜底走单行并发
             if ctx.batch_originals.is_some() && !ctx.tag_poisoned {
-                eprintln!("[translate] 所有引擎批量均失败,兜底单行并发");
+                eprintln!("[translate][warn] 所有引擎批量均失败,兜底单行并发");
                 dispatch_single_line_fallback(writer, pending, ctx);
                 return;
             }
-            // 真正失败 → 返回错误
-            // 0.14.3: tool-call 走轨道 A（RawResult），query 走旧协议（Response）
-            let error = PluginError {
-                code: "TRANSLATE_FAILED".into(),
-                message: "翻译失败，请检查 API 配置或网络连接".into(),
-            };
-            let resp = if ctx.is_tool_call {
-                PluginToCore::RawResult(RawToolResult {
-                    id: ctx.query_id,
-                    data: serde_json::Value::Null,
-                    error: Some(error),
-                })
-            } else {
-                PluginToCore::Response(PluginResponse {
-                    id: ctx.query_id,
-                    items: vec![],
-                    error: Some(error),
-                })
-            };
-            send_message(writer, &resp);
+            send_final_error(writer, ctx);
         }
     }
+}
+
+/// 终局失败：带上最近一次引擎失败详情返回错误（工具调用走轨道 A，查询走旧协议）。
+fn send_final_error<W: Write>(writer: &mut W, ctx: PendingTranslate) {
+    // 带上最近一次引擎失败详情(状态码/供应商错误码),让"翻译失败"能定位到
+    // 具体引擎的具体原因(如 ali: InvalidAccessKeyId.NotFound)
+    let message = match ctx.last_error_detail.as_deref() {
+        Some(detail) => format!("翻译失败（{detail}）"),
+        None => "翻译失败，请检查 API 配置或网络连接".into(),
+    };
+    eprintln!(
+        "[translate][error] 翻译失败 fallback_allowed={} detail={:?}",
+        ctx.fallback_allowed, ctx.last_error_detail
+    );
+    let error = PluginError {
+        code: "TRANSLATE_FAILED".into(),
+        message,
+    };
+    // 0.14.3: tool-call 走轨道 A（RawResult），query 走旧协议（Response）
+    let resp = if ctx.is_tool_call {
+        PluginToCore::RawResult(RawToolResult {
+            id: ctx.query_id,
+            data: serde_json::Value::Null,
+            error: Some(error),
+            desc: None,
+        })
+    } else {
+        PluginToCore::Response(PluginResponse {
+            id: ctx.query_id,
+            items: vec![],
+            error: Some(error),
+        })
+    };
+    send_message(writer, &resp);
 }
 
 /// 处理 HTTP 响应：查 pending 恢复上下文 → 解析 → 成功则返回结果，失败则降级。
@@ -836,7 +924,7 @@ fn handle_http_response<W: Write>(
     error: Option<String>,
 ) {
     let Some(mut ctx) = pending.remove(&id) else {
-        eprintln!("[translate] http response for unknown request: {id}");
+        eprintln!("[translate][warn] http response for unknown request: {id}");
         return;
     };
 
@@ -844,10 +932,23 @@ fn handle_http_response<W: Write>(
 
     // HTTP 层错误 → 直接降级
     if error.is_some() || status != 200 {
+        // 响应体常带失败根因(阿里 MT 网关对 AccessKey 不存在返回 404 + Code/Message JSON),
+        // 必须打进日志并透传到最终错误,否则只剩一个裸状态码无从排查
+        let body_preview: String = body
+            .as_deref()
+            .map(|b| b.chars().take(300).collect())
+            .unwrap_or_default();
+        let detail = extract_provider_error_detail(&body_preview);
         eprintln!(
-            "[translate] {} HTTP error: status={status}, error={:?}",
-            ctx.engine_id, error
+            "[translate][error] {} HTTP error: status={status}, error={:?}, body={}",
+            ctx.engine_id, error, body_preview
         );
+        ctx.last_error_detail = Some(match (&detail, &error) {
+            // 供应商错误码优先;传输层错误(超时/DNS)时 status=0,用错误文本而非"HTTP 0"
+            (Some(d), _) => format!("{}: {}", ctx.engine_id, d),
+            (None, Some(e)) => format!("{}: {}", ctx.engine_id, e),
+            (None, None) => format!("{}: HTTP {}", ctx.engine_id, status),
+        });
         try_next_fallback(writer, pending, ctx);
         return;
     }
@@ -862,21 +963,24 @@ fn handle_http_response<W: Write>(
                 .as_ref()
                 .and_then(|e| e.parse_batch_response(&body, expected))
             {
-                // 0.14.3: tool-call 走轨道 A，返回纯 data（译文数组）
+                // 0.14.3: tool-call 走轨道 A，返回纯 data（译文数组）。
+                // desc 带实际引擎（降级发生过则标记）,供 UI 显示供应商
                 let data = serde_json::Value::Array(
                     results.into_iter().map(serde_json::Value::String).collect(),
                 );
+                let fell_back = ctx.tried_engines.len() > 1;
                 let resp = PluginToCore::RawResult(RawToolResult {
                     id: ctx.query_id,
                     data,
                     error: None,
+                    desc: Some(engine_desc(&ctx.engine_id, fell_back)),
                 });
                 send_message(writer, &resp);
                 return;
             }
             // 原生批量解析失败 → 降级到 tag 拼接,用同一引擎重试一次
             eprintln!(
-                "[translate] {} batch parse failed, fallback to tagged. body: {}",
+                "[translate][warn] {} batch parse failed, fallback to tagged. body: {}",
                 ctx.engine_id,
                 body.chars().take(500).collect::<String>()
             );
@@ -898,7 +1002,7 @@ fn handle_http_response<W: Write>(
     let Some(result) = translated else {
         let preview: String = body.chars().take(500).collect();
         eprintln!(
-            "[translate] {} parse failed, body: {}",
+            "[translate][warn] {} parse failed, body: {}",
             ctx.engine_id, preview
         );
         try_next_fallback(writer, pending, ctx);
@@ -913,7 +1017,7 @@ fn handle_http_response<W: Write>(
             let Some(results) = parse_tagged_batch(&result, originals.len()) else {
                 // tag 被引擎破坏 → 标记 poisoned,后续不再尝试 tag,直接单行并发。
                 eprintln!(
-                    "[translate] {} tag 解析失败,标记 tag_poisoned,降级单行并发",
+                    "[translate][warn] {} tag 解析失败,标记 tag_poisoned,降级单行并发",
                     ctx.engine_id
                 );
                 ctx.tag_poisoned = true;
@@ -929,6 +1033,8 @@ fn handle_http_response<W: Write>(
             id: ctx.query_id,
             data,
             error: None,
+            // desc 带实际引擎（降级发生过则标记）,供 UI 显示供应商
+            desc: Some(engine_desc(&ctx.engine_id, ctx.tried_engines.len() > 1)),
         });
         send_message(writer, &resp);
     } else {
@@ -936,7 +1042,7 @@ fn handle_http_response<W: Write>(
         let items = if let Some(originals) = ctx.batch_originals.as_ref() {
             let Some(results) = parse_tagged_batch(&result, originals.len()) else {
                 eprintln!(
-                    "[translate] {} tag 解析失败,标记 tag_poisoned,降级单行并发",
+                    "[translate][warn] {} tag 解析失败,标记 tag_poisoned,降级单行并发",
                     ctx.engine_id
                 );
                 ctx.tag_poisoned = true;
@@ -1036,6 +1142,43 @@ fn build_result_items(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn engine_desc_marks_fallback() {
+        assert_eq!(engine_desc("ali", false), "阿里翻译 (ali)");
+        assert_eq!(
+            engine_desc("baidu", true),
+            "已降级: 百度翻译 (baidu)"
+        );
+        // 未知引擎回退 id 本身作显示名
+        assert_eq!(engine_desc("xxx", false), "xxx (xxx)");
+    }
+
+    #[test]
+    fn allow_fallback_defaults_to_false() {
+        // 缺省/非布尔 → false(主引擎失败直接报错);显式 true 才降级
+        assert!(!allow_fallback(&serde_json::json!({})));
+        assert!(!allow_fallback(&serde_json::json!({"allow_fallback": "true"})));
+        assert!(allow_fallback(&serde_json::json!({"allow_fallback": true})));
+    }
+
+    #[test]
+    fn provider_error_detail_from_ali_gateway_json() {
+        // 阿里 MT 网关 404 响应体(实测):根级 Code/Message
+        let body = r#"{"RequestId":"01A1","Message":"Specified access key is not found.","Recommend":"https://api.aliyun.com/troubleshoot?q=InvalidAccessKeyId.NotFound&product=alimt","HostId":"mt.aliyuncs.com","Code":"InvalidAccessKeyId.NotFound"}"#;
+        assert_eq!(
+            extract_provider_error_detail(body).unwrap(),
+            "InvalidAccessKeyId.NotFound: Specified access key is not found."
+        );
+    }
+
+    #[test]
+    fn provider_error_detail_non_ali_body_returns_none() {
+        // HTML 404 页 / 正常译文结构 / 空体 → None(走 "HTTP {status}" 兜底)
+        assert!(extract_provider_error_detail("<html>404</html>").is_none());
+        assert!(extract_provider_error_detail(r#"{"translation":["你好"]}"#).is_none());
+        assert!(extract_provider_error_detail("").is_none());
+    }
 
     #[test]
     fn tagged_batch_roundtrip_preserves_input_order() {

@@ -43,6 +43,16 @@ fn lang_direct(target_lang: &str) -> &'static str {
     }
 }
 
+/// 读取引擎凭据字段：取字符串 + trim + 非空校验。
+///
+/// 设置值从配置 UI 粘贴而来，首尾空白会参与签名/被服务端当作 key 的一部分，
+/// 让同一把 key 在不同机器上"一台正常一台认证失败"（如阿里 404=AccessKey 不存在）。
+/// 统一 trim 后再判空；缺失/空 → None（调用方视为该引擎未配置，直接降级）。
+fn cred<'a>(settings: &'a Value, key: &str) -> Option<&'a str> {
+    let v = settings.get(key)?.as_str()?.trim();
+    if v.is_empty() { None } else { Some(v) }
+}
+
 // ── 有道智云 ──────────────────────────────────────────────────────────────────
 
 /// 有道签名 input 规则：长度 > 20 时截取为 前10字符 + 长度 + 后10字符。
@@ -66,17 +76,12 @@ impl TranslateEngine for YoudaoEngine {
         target_lang: &str,
         settings: &Value,
     ) -> Option<EngineRequest> {
-        let app_key = settings
-            .get("youdao_app_key")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let app_secret = settings
-            .get("youdao_app_secret")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        if app_key.is_empty() || app_secret.is_empty() {
+        let Some(app_key) = cred(settings, "youdao_app_key") else {
             return None;
-        }
+        };
+        let Some(app_secret) = cred(settings, "youdao_app_secret") else {
+            return None;
+        };
 
         let salt: u32 = 10000 + chrono::Local::now().timestamp_subsec_nanos() % 90000;
         let curtime = chrono::Utc::now().timestamp();
@@ -137,17 +142,12 @@ impl TranslateEngine for BaiduEngine {
         target_lang: &str,
         settings: &Value,
     ) -> Option<EngineRequest> {
-        let app_id = settings
-            .get("baidu_app_id")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let app_key = settings
-            .get("baidu_app_key")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        if app_id.is_empty() || app_key.is_empty() {
+        let Some(app_id) = cred(settings, "baidu_app_id") else {
             return None;
-        }
+        };
+        let Some(app_key) = cred(settings, "baidu_app_key") else {
+            return None;
+        };
 
         let salt: u32 = 10000 + chrono::Local::now().timestamp_subsec_nanos() % 90000;
         let sign_str = format!("{app_id}{text}{salt}{app_key}");
@@ -203,13 +203,9 @@ impl TranslateEngine for DeeplEngine {
         target_lang: &str,
         settings: &Value,
     ) -> Option<EngineRequest> {
-        let api_key = settings
-            .get("deepl_api_key")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        if api_key.is_empty() {
+        let Some(api_key) = cred(settings, "deepl_api_key") else {
             return None;
-        }
+        };
 
         let tgt = lang_map("deepl", target_lang);
         let params = json!({
@@ -252,17 +248,12 @@ impl TranslateEngine for AliEngine {
         target_lang: &str,
         settings: &Value,
     ) -> Option<EngineRequest> {
-        let access_key_id = settings
-            .get("ali_access_key_id")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let access_key_secret = settings
-            .get("ali_access_key_secret")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        if access_key_id.is_empty() || access_key_secret.is_empty() {
+        let Some(access_key_id) = cred(settings, "ali_access_key_id") else {
             return None;
-        }
+        };
+        let Some(access_key_secret) = cred(settings, "ali_access_key_secret") else {
+            return None;
+        };
 
         let tgt = lang_direct(target_lang);
         let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
@@ -311,17 +302,12 @@ impl TranslateEngine for AliEngine {
             return None;
         }
 
-        let access_key_id = settings
-            .get("ali_access_key_id")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let access_key_secret = settings
-            .get("ali_access_key_secret")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        if access_key_id.is_empty() || access_key_secret.is_empty() {
+        let Some(access_key_id) = cred(settings, "ali_access_key_id") else {
             return None;
-        }
+        };
+        let Some(access_key_secret) = cred(settings, "ali_access_key_secret") else {
+            return None;
+        };
 
         // SourceText 是 JSON 对象:{"0":"line0","1":"line1",...}
         // key 用纯数字字符串,作为 translateId 回传时与输入对齐。
@@ -451,17 +437,12 @@ impl TranslateEngine for TencentEngine {
         target_lang: &str,
         settings: &Value,
     ) -> Option<EngineRequest> {
-        let secret_id = settings
-            .get("tencent_secret_id")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let secret_key = settings
-            .get("tencent_secret_key")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        if secret_id.is_empty() || secret_key.is_empty() {
+        let Some(secret_id) = cred(settings, "tencent_secret_id") else {
             return None;
-        }
+        };
+        let Some(secret_key) = cred(settings, "tencent_secret_key") else {
+            return None;
+        };
 
         let service = "tmt";
         let host = "tmt.tencentcloudapi.com";

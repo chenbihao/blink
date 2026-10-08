@@ -69,6 +69,11 @@ export const ss = {
     // 0.18.2：控件提示列表 generation（与 windowListGen 独立，控件列表异步加载）
     controlHintsGen: 0,
     ocrResultCache: null,      // OCR 结果缓存
+    // 实际使用的翻译引擎（插件 desc 带出，如 "阿里翻译 (ali)"，降级时带"已降级"前缀）。
+    // 新 OCR 结果/会话时清空；OCR 面板译文 tab 的引擎徽标读取
+    translateEngine: null,
+    // 最近一次翻译失败的错误文本（翻译启动时清空；面板失败态展示用）
+    lastTranslateError: null,
 
     // ── 选区交互状态 ──────────────────────────────────────────
     selectionInteraction: null, // move/resize/new

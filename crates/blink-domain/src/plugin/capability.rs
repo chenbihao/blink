@@ -174,7 +174,28 @@ impl Capability for PluginCapabilityAdapter {
             "插件 tool-call 完成（轨道 A 纯数据）"
         );
 
-        Ok(crate::capability::normalize(&raw.data, projection))
+        let mut result = crate::capability::normalize(&raw.data, projection);
+        // 插件带的 desc（如翻译引擎标注）注入结果——AI 出口不读 desc，命令/展示层可读
+        if let Some(desc) = raw.desc.as_ref() {
+            apply_result_desc(&mut result, desc);
+        }
+        Ok(result)
+    }
+}
+
+/// 把插件侧 desc 注入规范化结果（Text 写 desc 字段；Items 写首项 desc）。
+///
+/// desc 是"给人看的元信息"通道：`to_rig_tool_result`（AI 出口）不读 desc，
+/// 命令层（如 translate_text 读实际使用的引擎）与展示出口可以读。
+fn apply_result_desc(result: &mut CapabilityResult, desc: &str) {
+    match result {
+        CapabilityResult::Text { desc: d, .. } => *d = Some(desc.to_string()),
+        CapabilityResult::Items { items } => {
+            if let Some(first) = items.first_mut() {
+                first.desc = Some(desc.to_string());
+            }
+        }
+        _ => {}
     }
 }
 
@@ -233,5 +254,41 @@ mod tests {
             id.chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
         );
+    }
+
+    #[test]
+    fn apply_result_desc_injects_text_and_items() {
+        use crate::capability::{normalize, ProjectionRule, ResultShape};
+
+        // Text 形态：desc 写入 Text.desc
+        let rule = ProjectionRule {
+            result_shape: Some(ResultShape::Text),
+            ..Default::default()
+        };
+        let mut text = normalize(&serde_json::json!("你好"), &rule);
+        apply_result_desc(&mut text, "阿里翻译 (ali)");
+        match &text {
+            CapabilityResult::Text { desc, .. } => {
+                assert_eq!(desc.as_deref(), Some("阿里翻译 (ali)"))
+            }
+            _ => panic!("应是 Text"),
+        }
+
+        // Items 形态：desc 写入首项
+        let rule = ProjectionRule {
+            result_shape: Some(ResultShape::Items),
+            items_pointer: Some("$".into()),
+            ..Default::default()
+        };
+        let mut items = normalize(&serde_json::json!(["a", "b"]), &rule);
+        apply_result_desc(&mut items, "已降级: 百度翻译 (baidu)");
+        match &items {
+            CapabilityResult::Items { items } => {
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[0].desc.as_deref(), Some("已降级: 百度翻译 (baidu)"));
+                assert!(items[1].desc.is_none());
+            }
+            _ => panic!("应是 Items"),
+        }
     }
 }

@@ -386,7 +386,7 @@ impl CapabilityRegistry {
                 return outcome;
             }
             Err(CapabilityError::Timeout { .. }) => {
-                tracing::debug!(
+                tracing::warn!(
                     target: blink_infra::utils::perf::ai_slo::TARGET,
                     capability = id,
                     elapsed_ms = elapsed as u64,
@@ -402,7 +402,9 @@ impl CapabilityRegistry {
                 "timeout"
             }
             Err(e) => {
-                tracing::debug!(
+                // 失败/超时用 warn 而非 debug：默认日志级别（error+warn+info）下必须能看到
+                // capability 失败及原因，否则用户不开 trace 时排障无线索（spec-backend §3.1）
+                tracing::warn!(
                     target: blink_infra::utils::perf::ai_slo::TARGET,
                     capability = id,
                     elapsed_ms = elapsed as u64,
