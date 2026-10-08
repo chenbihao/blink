@@ -106,6 +106,7 @@ export class EditorAdapter {
 
         if (!this.gate.allowed) {
             // 弱内容/超限：不自动进入 MD，但允许用户手动进入只读预览
+            console.info(`[editor-adapter] gate 拒绝自动进入 MD: reason=${this.gate.reason}`);
             this._callbacks.onNotice?.(
                 this.gate.reason === "large" ? "editor.gate.large" : "editor.gate.readonly",
             );
@@ -149,6 +150,7 @@ export class EditorAdapter {
             this._enterView("markdown", {initialText: current});
             if (!this.gate.allowed) {
                 // 结构门是**无损门**：安全降级——允许预览、禁止富文本编辑，并说明原因
+                console.info(`[editor-adapter] gate 结构拒绝 → MD 只读预览: reason=${this.gate.reason}`);
                 this._callbacks.onNotice?.("editor.gate.readonly");
             } else if (this.isMdReadOnly()) {
                 this._callbacks.onNotice?.("editor.md.readOnly");
@@ -424,13 +426,23 @@ export class EditorAdapter {
      * MD 延迟物化：把文档变更以**最小块级 patch** 落到 canonical buffer。
      * - 无变更 / 只读预览 → 不动；
      * - 块级无损成立 → 只改变更窗口；
-     * - 无法保证无损（罕见结构）→ 引擎撤销本次富文本投影并进入只读，
+     * - 复核失败但**内容可保全**（0.25.18 序列化兜底）→ canonical 前进到
+     *   整篇序列化结果（格式可能被规范化，明确提示），投影保持可编辑，
+     *   **绝不回滚用户输入**；
+     * - 序列化器自身异常（最后防线）→ 引擎撤销本次富文本投影并进入只读，
      *   canonical buffer 不发生任何改变。
      */
     _materializeMd() {
         if (this.view !== "markdown" || !this.engine) return;
         const result = this.engine.takeSourcePatch?.(this.buffer.text);
         if (!result) return;
+        if (result.normalized === true && typeof result.text === "string") {
+            // 兜底物化：内容完整，未编辑区间格式可能被规范化重写
+            this.buffer.load(result.text);
+            this._callbacks.onNotice?.("editor.md.normalized");
+            this._callbacks.onMdModeChanged?.();
+            return;
+        }
         if (result.exact !== true || typeof result.text !== "string") {
             // `exact:false` is a rejection, never a candidate正文.  The engine
             // has already rebuilt its projection from canonical source and made

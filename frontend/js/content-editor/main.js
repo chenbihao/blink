@@ -440,9 +440,14 @@ async function init() {
 
     const win = getCurrentWindow();
     if (win) {
+        // 窗口显隐由 Rust 侧统一管理（show_content_editor_window：新窗
+        // visible(true)、复用路径显式 show）。前端 init 不得调 win.show()——
+        // 启动预热以 visible(false) 建窗时页面同样会跑 init，此前该调用被
+        // ACL 拒绝而「恰好」无害，0.25.18 放行 core:window:allow-show 后
+        // 会在每次启动把预热窗口弹出来（0.25.18 修复）。
+        // onFocusChanged 注册必须无条件执行：曾被 show() 异常连带跳过，
+        // 听写恢复链路因此断过（0.25.18）。
         try {
-            await win.show();
-            await win.setFocus();
             // 0.23.3：窗口重新聚焦时补齐听写段（§3.6 恢复/重新聚焦拉 snapshot）
             win.onFocusChanged?.(({payload: focused}) => {
                 if (focused) {
@@ -453,7 +458,7 @@ async function init() {
                 }
             });
         } catch (e) {
-            console.error("[content-editor] show window 失败:", e);
+            console.error("[content-editor] 注册焦点监听失败:", e);
         }
     }
 

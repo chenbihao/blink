@@ -108,6 +108,8 @@
     align-items: center;
     gap: 6px;
     flex-shrink: 0;
+    /* 只读徽章的悬浮定位锚点（徽章不参与本容器布局，见 .editor-readonly-badge） */
+    position: relative;
     -webkit-app-region: no-drag;
 }
 
@@ -242,9 +244,14 @@
 }
 
 /* ── 修复：MD 只读预览徽标（无法保证无损编辑的结构安全降级）──
-   非颜色双通道：文案 + 描边，不依赖单一颜色表达状态。 */
-
+   非颜色双通道：文案 + 描边，不依赖单一颜色表达状态。
+   悬浮于切换按钮左侧（不占布局流）：出现/消失不得推移切换按钮
+   与来源徽标（spec-frontend §3.3 弱信号绝不撑布局，0.25.18）。 */
 .editor-readonly-badge {
+    position: absolute;
+    right: calc(100% + 8px);
+    top: 50%;
+    transform: translateY(-50%);
     padding: 3px 8px;
     border: 1px dashed var(--surface-2);
     border-radius: var(--radius-sm);
@@ -252,7 +259,6 @@
     font-size: 12px;
     font-style: normal;
     white-space: nowrap;
-    flex-shrink: 0;
 }
 
 /* ── 0.23.2：更多动作菜单 ── */
@@ -577,7 +583,11 @@
 }
 
 .editor-tiptap-container .ProseMirror {
-    min-height: 100%;
+    /* 固定容器高度 + 内部滚动（与便签 .sticky-editor .ProseMirror 同模式）：
+       min-height:100% 只设下限，内容超高时 ProseMirror 随之撑高，自身永远
+       不溢出 → overflow-y:auto 不触发 → 被容器 overflow:hidden 裁掉无滚动。 */
+    height: 100%;
+    min-height: 0;
     padding: 16px 20px;
     outline: none;
     background: var(--bg);

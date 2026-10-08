@@ -164,6 +164,20 @@ test("diffTopNodes: 取最小变更窗口（公共前后缀不重叠）", () => 
     assert.ok(!jsonEqual({a: [1, {b: 2}]}, {a: [1, {b: 3}]}));
 });
 
+test("jsonEqual: undefined 值 key 视为不存在（parse 脏 key vs toJSON 口径，0.25.18）", () => {
+    // @tiptap/markdown 解析 codeBlock 内 text node 产出 `marks: undefined`（脏 key），
+    // ProseMirror `toJSON()` 产出不含该 key。两者必须判等，否则任何含代码块的
+    // 文档都会在对齐验证中误判"块不匹配"而锁定只读。
+    assert.ok(jsonEqual(
+        {type: "text", text: "code", marks: undefined},
+        {type: "text", text: "code"},
+    ), "undefined 值 key 不得参与键数比较");
+    assert.ok(!jsonEqual(
+        {type: "text", text: "code", marks: []},
+        {type: "text", text: "code"},
+    ), "undefined 之外的值（含空数组）照常参与比较");
+});
+
 // ── 核心：局部编辑不改未编辑区间 ────────────────────────────────────────────
 
 test("patch: MD 局部编辑只改写变更块——列表符号与 Setext 逐字节保留", () => {
@@ -354,6 +368,118 @@ test("patch: 空文档插入首块（不产生伪造的前导空段落）", () =
     assert.deepEqual(apply(blank, blankPatches).text, "首段");
 });
 
+// ── 空段落参与变更的编辑形态（0.25.18 回归：此前 6 分支拼 gap 丢/多空段落）──
+
+/** 空段落形态专用假体：paragraph 节点，文本取 content[0].text */
+const shapeDoc = (nodes) => ({type: "doc", content: nodes});
+const shapePara = (t) => (t === null ? {type: "paragraph", content: []} : {
+    type: "paragraph",
+    content: [{type: "text", text: t}],
+});
+const shapeParse = (t) => shapePara(t);
+const shapeSerialize = (n) => n.content?.[0]?.text ?? "";
+
+/**
+ * 形态回归骨架：src 载入对齐 → before/after 节点序列 → patch → 断言
+ * 「apply 后的源文重新对齐出 after 的块结构」与「未编辑前缀逐字节保留」。
+ * 空段落在真实 Tiptap 下的映射（parse 探测锚定）：块间 E 空段 ↔ 2(E+1) 换行、
+ * 文档首/尾 E 空段 ↔ 2E 换行——假体直接按该映射构造对齐两侧。
+ */
+function shapeCase(label, src, before, after, {expect} = {}) {
+    const map = buildBlockMap(src, shapeDoc(before), shapeParse);
+    assert.equal(map.ok, true, `${label}：源文与 before 节点必须可对齐`);
+    const patches = planSourcePatch({
+        sourceText: src,
+        blocks: map.blocks,
+        beforeNodes: before,
+        afterNodes: after,
+        serializeNode: shapeSerialize,
+    });
+    const {ok, text} = apply(src, patches);
+    assert.equal(ok, true, `${label}：patch 必须可应用`);
+    if (expect !== undefined) {
+        assert.deepEqual(text, expect, `${label}：候选源文`);
+    }
+    return text;
+}
+
+test("shape: 尾部多空行打字（倒数第 2 空行）不丢尾部空段落", () => {
+    // 用户实测形态：文末多个空行处打字其一。旧实现 postEmpties 计数循环
+    // 以 `seenAfter < blockCount - bi1` 为界，窗口在文末时恒为 0 次迭代，
+    // 尾部空段落被静默吞掉 → 整篇复核必败误锁只读。
+    shapeCase(
+        "尾部2空行打字第1个",
+        "A\n\n\n\n",
+        [shapePara("A"), shapePara(null), shapePara(null)],
+        [shapePara("A"), shapePara("x"), shapePara(null)],
+        {expect: "A\n\nx\n\n"},
+    );
+});
+
+test("shape: 块间空行打字（A-e-B 后打字尾空行）不注入幽灵空段落", () => {
+    // 旧实现 preEmpties 回扫以 `seen < bi0` 为界，跨过了紧邻内容块 B 把
+    // A/B 之间的空段落也计入 → 候选源文凭空多出空段落 → 复核必败。
+    shapeCase(
+        "A-e-B-e 打字末空行",
+        "A\n\n\n\nB\n\n",
+        [shapePara("A"), shapePara(null), shapePara("B"), shapePara(null)],
+        [shapePara("A"), shapePara(null), shapePara("B"), shapePara("x")],
+        {expect: "A\n\n\n\nB\n\nx"},
+    );
+});
+
+test("shape: 删除段落文本留下空段落（唯一段/末段/中段/首段）不丢空段落", () => {
+    // 旧实现整体删除分支「吸掉左侧 gap」把存活空段落一并吸掉。
+    shapeCase(
+        "删唯一段文本",
+        "B",
+        [shapePara("B")],
+        [shapePara(null)],
+        {expect: "\n\n"},
+    );
+    shapeCase(
+        "删末段文本",
+        "A\n\nB",
+        [shapePara("A"), shapePara("B")],
+        [shapePara("A"), shapePara(null)],
+        {expect: "A\n\n"},
+    );
+    shapeCase(
+        "删中段文本",
+        "A\n\nB\n\nC",
+        [shapePara("A"), shapePara("B"), shapePara("C")],
+        [shapePara("A"), shapePara(null), shapePara("C")],
+        {expect: "A\n\n\n\nC"},
+    );
+    shapeCase(
+        "删首段文本",
+        "A\n\nB",
+        [shapePara("A"), shapePara("B")],
+        [shapePara(null), shapePara("B")],
+        {expect: "\n\nB"},
+    );
+});
+
+test("shape: 全空行文档中部空行打字保留前导空段落", () => {
+    shapeCase(
+        "全空行打字",
+        "\n\n\n\n",
+        [shapePara(null), shapePara(null)],
+        [shapePara(null), shapePara("x")],
+        {expect: "\n\nx"},
+    );
+});
+
+test("shape: 内容块删除后跟空段落（节点级删除留空段）", () => {
+    shapeCase(
+        "删末节点留空段",
+        "A\n\nB",
+        [shapePara("A"), shapePara("B")],
+        [shapePara("A"), shapePara(null)],
+        {expect: "A\n\n"},
+    );
+});
+
 // ── 真实 Tiptap 集成（依赖缺失时显式跳过）───────────────────────────────────
 
 let engineMod = null;
@@ -381,10 +507,103 @@ function makeRealAdapters(manager) {
     };
     const serializeNode = (node) => {
         const raw = manager.serialize({type: "doc", content: [node]});
-        return typeof raw === "string" ? raw.replace(/^\n+/, "").replace(/\s+$/, "") : "";
+        // 与生产 _serializeNodeText 同口径：不做空白剃除（尾随空格是用户
+        // 内容，0.25.18），首尾换行剥除由 nodeText 统一负责
+        return typeof raw === "string" ? raw : "";
     };
     return {parseBlock, serializeNode};
 }
+
+realTiptapTest("real-tiptap: 生产快照口径（doc.toJSON vs 单块 parse）下含代码块文档对齐通过", async () => {
+    // 生产 MarkdownIrEngine 的对齐比较是「单块源文 manager.parse 产物」对
+    // 「ProseMirror 文档节点 toJSON() 快照」。此前测试两侧都用 manager.parse
+    // 口径，掩盖了 codeBlock 内 text node 的 `marks: undefined` 脏 key 差异
+    // （任何含代码块文档载入即锁只读，0.25.18）。本用例复刻生产口径锁回归。
+    const {join} = await import("node:path");
+    const {pathToFileURL} = await import("node:url");
+    const manager = await engineMod.createManager();
+    const schema = await engineMod.createSchema();
+    const {Node} = await import(pathToFileURL(
+        join(engineMod.DEPS_DIR, "node_modules", "@tiptap", "pm", "dist", "model", "index.js"),
+    ).href);
+    const {parseBlock} = makeRealAdapters(manager);
+
+    // 与生产 _topSnapshot 相同口径：文档顶层节点 toJSON 后再比较
+    const topSnapshot = (md) => {
+        const doc = Node.fromJSON(schema, manager.parse(md));
+        const out = [];
+        for (let i = 0; i < doc.childCount; i += 1) out.push(doc.child(i).toJSON());
+        return out;
+    };
+
+    const samples = [
+        "```js\nconst a = 1;\n```\n",
+        "# 标题\n\n说明文字。\n\n```js\nconst a = 1;\n```\n\n结尾段落。\n",
+        "- item\n\n```py\nprint(1)\n```\n\n```js\nx();\n```\n\n尾段。",
+        "```js\nconst a = 1;\n\nconst b = 2;\n```\n",
+        "说明：\n\n```html\n<div>样例</div>\n```\n\n完。",
+    ];
+    for (const src of samples) {
+        const docJson = {type: "doc", content: topSnapshot(src)};
+        const map = buildBlockMap(src, docJson, parseBlock);
+        assert.equal(map.ok, true, `含代码块文档在生产快照口径下必须可对齐: ${JSON.stringify(src)}`);
+    }
+});
+
+realTiptapTest("real-tiptap: 生产口径下含尾部空行的文档编辑后复核通过（toJSON 空段落无 content key，0.25.18）", async () => {
+    // 复刻用户实测：单代码块 + 尾部空行（文档含空段落）。toJSON 对空段落
+    // 省略 content，parse 产物显式 content: []——整篇复核两侧口径不一致曾使
+    // 任何编辑都复核失败并误转只读。normalizeNodeJson 统一口径后必须通过。
+    const {normalizeNodeJson} = await import("./md-source-patch.js");
+    const {join} = await import("node:path");
+    const {pathToFileURL} = await import("node:url");
+    const manager = await engineMod.createManager();
+    const schema = await engineMod.createSchema();
+    const {Node} = await import(pathToFileURL(
+        join(engineMod.DEPS_DIR, "node_modules", "@tiptap", "pm", "dist", "model", "index.js"),
+    ).href);
+    const {EditorState} = await import(pathToFileURL(
+        join(engineMod.DEPS_DIR, "node_modules", "@tiptap", "pm", "dist", "state", "index.js"),
+    ).href);
+    const {parseBlock, serializeNode} = makeRealAdapters(manager);
+    const {CanonicalBuffer} = await import("./canonical-buffer.js");
+
+    const topSnapshot = (mdOrState) => {
+        const doc = typeof mdOrState === "string"
+            ? Node.fromJSON(schema, manager.parse(mdOrState))
+            : mdOrState.doc;
+        const out = [];
+        for (let i = 0; i < doc.childCount; i += 1) out.push(normalizeNodeJson(doc.child(i).toJSON()));
+        return out;
+    };
+
+    const samples = [
+        "```python\ndef f():\n    return 1\n```\n\n",
+        "前言\n\n```\ncode\n```\n\n\n尾段。\n\n",
+        "```js\nconst a = 1;\n```\n",
+    ];
+    for (const src of samples) {
+        const state = EditorState.create({schema, doc: Node.fromJSON(schema, manager.parse(src))});
+        const before = topSnapshot(src);
+        const map = buildBlockMap(src, {type: "doc", content: before}, parseBlock);
+        assert.equal(map.ok, true, `含空段落文档应可对齐: ${JSON.stringify(src)}`);
+
+        // 在文档末尾追加一个字（模拟用户打字触发物化）
+        const afterState = state.apply(state.tr.insertText("X", state.doc.content.size - 1));
+        const after = topSnapshot(afterState);
+        const patches = planSourcePatch({
+            sourceText: src, blocks: map.blocks, beforeNodes: before, afterNodes: after, serializeNode,
+        });
+        const buf = new CanonicalBuffer(src);
+        const applied = patches.length > 0 ? buf.applyPatches(patches) : false;
+        const candidate = applied ? buf.text : src;
+        const exact = jsonEqual(
+            normalizeNodeJson(manager.parse(candidate)),
+            {type: "doc", content: after},
+        );
+        assert.equal(exact, true, `编辑后整篇复核必须通过: ${JSON.stringify(src)}`);
+    }
+});
 
 realTiptapTest("real-tiptap: 规范化结构（列表符号/Setext/强调）仍可对齐验证", async () => {
     const manager = await engineMod.createManager();
@@ -582,4 +801,231 @@ realTiptapTest("real-tiptap: 未编辑时反复扫描-对齐是幂等的（切�
         });
         assert.deepEqual(patches, [], "未编辑时不得产生 patch");
     }
+});
+
+// ── 0.25.18 回归：空段落参与变更的编辑形态必须整篇复核通过 ─────────────────
+//
+// 复刻用户实测（0.25.18 后仍复现）：MD 模式在文末空行处打字——Enter 产出
+// 空段落（纯空段插入，复核通过），随后打字把空段落变为内容段落，旧实现的
+// 特例分支丢失/多算相邻空段落 → parse(candidate) ≠ 当前文档 → 回滚误锁只读。
+// 以下用真实 parse/serialize 全链路验证：patch 候选源文必须解析回编辑后文档。
+
+realTiptapTest("real-tiptap: 文末空行打字（多轮 Enter+打字序列）复核通过", async () => {
+    const {normalizeNodeJson} = await import("./md-source-patch.js");
+    const manager = await engineMod.createManager();
+    const {parseBlock, serializeNode} = makeRealAdapters(manager);
+    const {CanonicalBuffer} = await import("./canonical-buffer.js");
+
+    // (源文, 编辑后节点构造器) 对：after 直接复刻 parse(src) 的节点序列再施加
+    // 目标变换，保证两侧都是真实 Tiptap 口径
+    const cases = [
+        // 尾部 2 空行，打字第 1 个（存活 1 个尾部空段）
+        ["A\n\n\n\n", (nodes) => {nodes[1] = {type: "paragraph", content: [{type: "text", text: "x"}]}; return nodes;}],
+        // 尾部 2 空行，打字最后 1 个
+        ["A\n\n\n\n", (nodes) => {nodes[2] = {type: "paragraph", content: [{type: "text", text: "x"}]}; return nodes;}],
+        // 块间空行 + 尾空行，打字尾空行（preEmpties 越界计数回归）
+        ["A\n\n\n\nB\n\n", (nodes) => {nodes[3] = {type: "paragraph", content: [{type: "text", text: "x"}]}; return nodes;}],
+        // 前导空行打字
+        ["\n\nA", (nodes) => {nodes[0] = {type: "paragraph", content: [{type: "text", text: "x"}]}; return nodes;}],
+        // 全空行文档打字其一
+        ["\n\n\n\n", (nodes) => {nodes[1] = {type: "paragraph", content: [{type: "text", text: "x"}]}; return nodes;}],
+        // 代码块 + 尾空行打字（用户 0.25.18 实测文档形态）
+        ["```\ncode\n```\n\n\n\n", (nodes) => {nodes[1] = {type: "paragraph", content: [{type: "text", text: "x"}]}; return nodes;}],
+    ];
+    for (const [src, mutate] of cases) {
+        const before = manager.parse(src).content.map((n) => normalizeNodeJson(n));
+        const map = buildBlockMap(src, {type: "doc", content: before}, parseBlock);
+        assert.equal(map.ok, true, `${JSON.stringify(src)} 载入对齐`);
+        const after = mutate(before.map((n) => structuredClone(n))).map((n) => normalizeNodeJson(n));
+        const patches = planSourcePatch({
+            sourceText: src, blocks: map.blocks, beforeNodes: before, afterNodes: after, serializeNode,
+        });
+        const buf = new CanonicalBuffer(src);
+        const applied = patches.length > 0 ? buf.applyPatches(patches) : false;
+        const candidate = applied ? buf.text : src;
+        assert.equal(
+            jsonEqual(normalizeNodeJson(manager.parse(candidate)), {type: "doc", content: after}),
+            true,
+            `${JSON.stringify(src)} 打字后整篇复核必须通过，candidate=${JSON.stringify(candidate)}`,
+        );
+    }
+});
+
+realTiptapTest("real-tiptap: 段落尾随空格是用户内容，tier1 无损物化（0.25.18）", async () => {
+    // 用户实测形态（blocks=0 nodes=22 误锁只读的构成之一）：序列化链路
+    // 此前对单节点序列化结果做 `\s+$` 剃除，段落尾随空格被静默丢弃 →
+    // parse-back ≠ 当前文档 → 复核必败。@tiptap/markdown 的 parser 逐字
+    // 保留尾随空格，序列化口径不剃空白后 tier1 必须直接无损通过。
+    const {normalizeNodeJson} = await import("./md-source-patch.js");
+    const manager = await engineMod.createManager();
+    const {parseBlock, serializeNode} = makeRealAdapters(manager);
+    const {CanonicalBuffer} = await import("./canonical-buffer.js");
+
+    const cases = [
+        // 空文档打出含尾随空格段的多块正文（用户 22 节点场景的最小化）
+        ["", [
+            {type: "paragraph", content: [{type: "text", text: "第一段"}]},
+            {type: "paragraph", content: [{type: "text", text: "abc "}]},
+            {type: "paragraph", content: [{type: "text", text: "第三段"}]},
+        ]],
+        // 已有内容文档编辑出尾随空格
+        ["前言\n\n正文", [
+            {type: "paragraph", content: [{type: "text", text: "前言"}]},
+            {type: "paragraph", content: [{type: "text", text: "正文 "}]},
+        ]],
+    ];
+    for (const [src, afterRaw] of cases) {
+        const before = src === ""
+            ? []
+            : manager.parse(src).content.map((n) => normalizeNodeJson(n));
+        const map = buildBlockMap(src, {type: "doc", content: before}, parseBlock);
+        assert.equal(map.ok, true, `${JSON.stringify(src)} 载入对齐`);
+        const after = afterRaw.map((n) => normalizeNodeJson(structuredClone(n)));
+        const patches = planSourcePatch({
+            sourceText: src, blocks: map.blocks, beforeNodes: before, afterNodes: after, serializeNode,
+        });
+        const buf = new CanonicalBuffer(src);
+        const applied = patches.length > 0 ? buf.applyPatches(patches) : false;
+        const candidate = applied ? buf.text : src;
+        assert.equal(
+            jsonEqual(normalizeNodeJson(manager.parse(candidate)), {type: "doc", content: after}),
+            true,
+            `${JSON.stringify(src)} 含尾随空格必须 tier1 无损物化，candidate=${JSON.stringify(candidate)}`,
+        );
+        assert.ok(candidate.includes("abc ") || candidate.includes("正文 "),
+            "尾随空格必须保留在候选源文中");
+    }
+});
+
+realTiptapTest("real-tiptap: 删除段落文本留下空段落（唯一/末/中/首段）复核通过", async () => {
+    const {normalizeNodeJson} = await import("./md-source-patch.js");
+    const manager = await engineMod.createManager();
+    const {parseBlock, serializeNode} = makeRealAdapters(manager);
+    const {CanonicalBuffer} = await import("./canonical-buffer.js");
+
+    const emptyOut = (idx) => (nodes) => {
+        nodes[idx] = {type: "paragraph", content: []};
+        return nodes;
+    };
+    const cases = [
+        ["B", emptyOut(0)],
+        ["A\n\nB", emptyOut(1)],
+        ["A\n\nB\n\nC", emptyOut(1)],
+        ["A\n\nB", emptyOut(0)],
+        ["A\n\n\n\nB", emptyOut(2)],
+    ];
+    for (const [src, mutate] of cases) {
+        const before = manager.parse(src).content.map((n) => normalizeNodeJson(n));
+        const map = buildBlockMap(src, {type: "doc", content: before}, parseBlock);
+        assert.equal(map.ok, true, `${JSON.stringify(src)} 载入对齐`);
+        const after = mutate(before.map((n) => structuredClone(n))).map((n) => normalizeNodeJson(n));
+        const patches = planSourcePatch({
+            sourceText: src, blocks: map.blocks, beforeNodes: before, afterNodes: after, serializeNode,
+        });
+        const buf = new CanonicalBuffer(src);
+        const applied = patches.length > 0 ? buf.applyPatches(patches) : false;
+        const candidate = applied ? buf.text : src;
+        assert.equal(
+            jsonEqual(normalizeNodeJson(manager.parse(candidate)), {type: "doc", content: after}),
+            true,
+            `${JSON.stringify(src)} 删文本留空段后整篇复核必须通过，candidate=${JSON.stringify(candidate)}`,
+        );
+    }
+});
+
+realTiptapTest("real-tiptap: 随机形态压力——规划器候选必须不劣于整篇序列化的表达力", async () => {
+    // 随机文档（多种块型 + 随机空行 gap）× 随机编辑（空段落转变/删文本/
+    // 增删块/改文本）。断言：凡「整篇序列化可 round-trip」的编辑后文档，
+    // 规划器候选源文必须复核通过——即规划器不得比序列化器更弱。
+    // 已知豁免（真不可表达，安全网正确兜底）：纯空白文本段落（nbsp/空格
+    // 段序列化为空串、parse 又把 nbsp 转普通空格）、同标记列表间的空段落
+    // （CommonMark lazy continuation 语义），这两类整篇序列化自身也不
+    // round-trip，不计入断言。
+    const {normalizeNodeJson} = await import("./md-source-patch.js");
+    const manager = await engineMod.createManager();
+    const {parseBlock, serializeNode} = makeRealAdapters(manager);
+    const {CanonicalBuffer} = await import("./canonical-buffer.js");
+
+    let seed = 20261009;
+    const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+    const pick = (arr) => arr[Math.floor(rnd() * arr.length)];
+    const ri = (lo, hi) => lo + Math.floor(rnd() * (hi - lo + 1));
+
+    const blockTexts = [
+        () => `段落${ri(1, 99)}文字`,
+        () => `# 标题${ri(1, 9)}`,
+        () => "```rust\nfn main() {\n    let x = 1;\n}\n```",
+        () => "```\nplain code\n```",
+        () => `- 列表项${ri(1, 9)}\n- 另一项`,
+        () => "> 引用内容",
+        () => "---",
+    ];
+    const randomSource = () => {
+        const parts = [];
+        const lead = pick([0, 2, 4]);
+        if (lead) parts.push("\n".repeat(lead));
+        const nBlocks = ri(1, 4);
+        for (let i = 0; i < nBlocks; i += 1) {
+            parts.push(pick(blockTexts)());
+            if (i < nBlocks - 1) parts.push("\n".repeat(pick([2, 2, 4, 6])));
+        }
+        const tail = pick([0, 1, 2, 4]);
+        if (tail) parts.push("\n".repeat(tail));
+        return parts.join("");
+    };
+
+    let checked = 0;
+    for (let i = 0; i < 400; i += 1) {
+        const src = randomSource();
+        const before = manager.parse(src).content.map((n) => normalizeNodeJson(n));
+        const map = buildBlockMap(src, {type: "doc", content: before}, parseBlock);
+        if (!map.ok) continue;
+
+        let after = before.map((n) => structuredClone(n));
+        const idx = ri(0, after.length - 1);
+        const edit = ri(0, 4);
+        if (edit === 0) { // 空段落 → 内容（或内容段追加）
+            if (!after[idx].content) after[idx].content = [];
+            if (after[idx].content.length === 0) after[idx].content.push({type: "text", text: "新"});
+            else if (after[idx].content[0]?.text != null) after[idx].content[0].text += "字";
+            else continue;
+        } else if (edit === 1 && after[idx].type === "paragraph") { // 内容 → 空段落
+            after[idx] = {type: "paragraph", content: []};
+        } else if (edit === 2) { // 删节点
+            after.splice(idx, 1);
+            if (after.length === 0) continue;
+        } else if (edit === 3) { // 插入内容段
+            after.splice(idx, 0, {type: "paragraph", content: [{type: "text", text: "插入"}]});
+        } else { // 改文本
+            const s = JSON.stringify(after);
+            const hit = s.match(/"text":"([^"]+)"/);
+            if (!hit) continue;
+            after = JSON.parse(s.replace(`"${hit[1]}"`, `"${hit[1]}改"`));
+        }
+
+        // 整篇序列化可 round-trip 才是规划器必须达成的表达力基准
+        let serRound = false;
+        try {
+            serRound = jsonEqual(
+                normalizeNodeJson(manager.parse(manager.serialize({type: "doc", content: after}))),
+                {type: "doc", content: after},
+            );
+        } catch {serRound = false;}
+        if (!serRound) continue;
+        checked += 1;
+
+        const patches = planSourcePatch({
+            sourceText: src, blocks: map.blocks, beforeNodes: before, afterNodes: after, serializeNode,
+        });
+        const buf = new CanonicalBuffer(src);
+        const applied = patches.length > 0 ? buf.applyPatches(patches) : false;
+        const candidate = applied ? buf.text : src;
+        assert.equal(
+            jsonEqual(normalizeNodeJson(manager.parse(candidate)), {type: "doc", content: after}),
+            true,
+            `随机形态 ${i}（edit=${edit}）规划器候选必须复核通过`
+            + `：src=${JSON.stringify(src)} candidate=${JSON.stringify(candidate)}`,
+        );
+    }
+    assert.ok(checked > 200, `随机形态覆盖不足：仅 ${checked} 例达到序列化基准`);
 });

@@ -13,7 +13,10 @@
  *   （md-source-patch.js::buildBlockMap）；
  * - 用户编辑后由 `takeSourcePatch(baseSource)` 产出**最小块级 patch**，
  *   只改写变更窗口对应的源文区间；
- * - 对齐验证不通过（罕见结构 / 块丢失）→ `readOnly = true`：仍可预览，
+ * - 复核失败时走**序列化兜底**（0.25.18）：canonical 前进到整篇序列化
+ *   结果（内容保全、格式可能规范化、保持可编辑），**绝不回滚用户输入**；
+ *   仅当序列化器自身抛错才退回「回滚 + 只读」（最后防线）；
+ * - 载入对齐验证不通过（罕见结构 / 块丢失）→ `readOnly = true`：仍可预览，
  *   但**禁止富文本编辑**，也不会产出任何 patch。
  *
  * `getText()`（整篇序列化）保留仅用于诊断与规范化比对，
@@ -27,7 +30,12 @@ import {
     serializeMarkdown,
 } from "../../shared/tiptap-editor.js";
 import {createMdToolbar, bindMdToolbar, updateToolbarStates} from "../../shared/md-toolbar.js";
-import {buildBlockMap, jsonEqual, planSourcePatch} from "../md-source-patch.js";
+import {
+    buildBlockMap,
+    jsonEqual,
+    normalizeNodeJson,
+    planSourcePatch,
+} from "../md-source-patch.js";
 import {CanonicalBuffer} from "../canonical-buffer.js";
 
 export class MarkdownIrEngine {
@@ -145,10 +153,16 @@ export class MarkdownIrEngine {
      * 产出针对 canonical 源文的最小块级 patch（延迟物化）。
      *
      * @param {string} baseSource - 当前 canonical 源文
-     * @returns {{text: string, exact: true}|{exact: false, reason: string}|null}
+     * @returns {{text: string, exact: true}
+     *          |{text: string, exact: false, normalized: true, reason: string}
+     *          |{exact: false, reason: string}|null}
      *   - `null`：无可应用变更（未编辑 / 只读 / 源文已被外部改变）
      *   - `exact:true`：块级无损（未编辑区间逐字节保留）
-     *   - `exact:false`：块级无损无法保证；canonical source 不变，投影进入只读
+     *   - `normalized:true`：**序列化兜底**（0.25.18）——块级复核失败但内容
+     *     保全：canonical 前进到整篇序列化结果（格式可能被规范化），投影
+     *     重建为同一文本的解析形态，**保持可编辑**，绝不回滚用户输入
+     *   - 其余 `exact:false`：序列化器自身异常，无法产出任何文本——维持
+     *     回滚 + 只读（最后防线，正常不可达）
      */
     takeSourcePatch(baseSource) {
         if (this.readOnly) return null;
@@ -175,20 +189,17 @@ export class MarkdownIrEngine {
         const applied = patches.length > 0 ? buffer.applyPatches(patches) : false;
         const candidate = applied ? buffer.text : baseSource;
 
-        // 整篇复核：新源文必须解析回当前文档——否则块级无损不成立
+        // 整篇复核：新源文必须解析回当前文档——否则块级无损不成立。
+        // parse 产物过 normalizeNodeJson 与 toJSON 快照口径对齐（空 content 差异）。
         let exact = false;
         try {
-            exact = jsonEqual(this._parseDoc(candidate), {type: "doc", content: after});
+            exact = jsonEqual(normalizeNodeJson(this._parseDoc(candidate)), {type: "doc", content: after});
         } catch {
             exact = false;
         }
 
         if (!exact) {
-            // Never promote a best-effort/full-document serialization to the
-            // canonical buffer.  Close the rich-text transaction by rebuilding
-            // the projection from the unchanged source and making it read-only.
-            this._restoreCanonicalProjection(baseSource, "patch-rejected");
-            return {exact: false, reason: "patch-verification"};
+            return this._materializeByFallback(after);
         }
 
         this._baseSource = candidate;
@@ -202,7 +213,77 @@ export class MarkdownIrEngine {
         return {text: candidate, exact: true};
     }
 
-    /** 文档顶层节点 JSON 快照（WeakMap 缓存：未改动子树仅一次引用比较） */
+    /**
+     * 序列化兜底（0.25.18 安全模型第二层）：内容保全优先于字节保真。
+     *
+     * 块级 patch 复核失败有两类根因：(a) patch 规划缺陷（内容本身可无损
+     * 表达）；(b) 序列化器对当前文档自身不可往返——段落尾随空格被丢弃、
+     * 代码块内容含围栏字符、空引用段、纯空白文本段等（实测探测锚定）。
+     * 旧模型把两类一律「回滚用户输入 + 永久只读」，(b) 类用户实测一次丢
+     * 22 段正文。兜底层用整篇序列化接管：
+     *
+     * - 序列化结果若能解析回当前文档（a 类）：直接接受为新 canonical，
+     *   投影不动、零感知——未编辑区间的格式可能被规范化重写（`*`→`-`
+     *   等），由调用方提示；
+     * - 序列化结果解析不回当前文档（b 类）：仍接受文本（内容完整、格式
+     *   尽力），投影重建为该文本的解析形态（与用户所见通常逐字符相同，
+     *   差异是不可表达的空白/结构细节），保持可编辑；
+     * - 序列化自身抛错：最后防线，维持回滚 + 只读。
+     */
+    _materializeByFallback(after) {
+        let fallback = null;
+        let fallbackDoc = null;
+        try {
+            fallback = serializeMarkdown(this.editor);
+            fallbackDoc = this._parseDoc(fallback);
+        } catch (error) {
+            console.warn(
+                "[markdown-engine] patch 复核失败且序列化兜底异常 → 回滚并转只读"
+                + ` blocks=${this._sourceMap?.blocks.length} nodes=${after.length}`,
+                error,
+            );
+            this._restoreCanonicalProjection(this._baseSource, "patch-rejected");
+            return {exact: false, reason: "patch-verification"};
+        }
+
+        const reason = jsonEqual(normalizeNodeJson(fallbackDoc), {type: "doc", content: after})
+            ? "serialize-exact"           // (a) patch 规划缺陷，序列化本身无损
+            : "serialize-normalized";     // (b) 状态不可表达，格式规范化
+        console.warn(
+            "[markdown-engine] patch 整篇复核失败 → 序列化兜底（内容保全，格式可能规范化）"
+            + ` reason=${reason} blocks=${this._sourceMap?.blocks.length} nodes=${after.length}`,
+        );
+
+        if (reason === "serialize-exact") {
+            // 文档即 fallback 的解析形态：只前进 canonical 与映射，不动投影
+            this._baseSource = fallback;
+            this._nodeSnapshot = after;
+            this._sourceMap = buildBlockMap(
+                fallback,
+                {type: "doc", content: after},
+                (text) => this._parseBlockNode(text),
+            );
+            this.edited = false;
+            this.normalized = true;
+            return {text: fallback, exact: false, normalized: true, reason};
+        }
+
+        // (b)：投影重建到规范化形态（suppress：程序化载入不计用户编辑）
+        this._suppress = true;
+        try {
+            this.editor.commands.setContent(fallbackDoc, false);
+        } finally {
+            this._suppress = false;
+        }
+        this.edited = false;
+        this._rebuildDocumentState(fallback);
+        this.readOnlyReason = this.readOnly ? reason : null;
+        this.normalized = true;
+        return {text: fallback, exact: false, normalized: true, reason};
+    }
+
+    /** 文档顶层节点 JSON 快照（WeakMap 缓存：未改动子树仅一次引用比较）。
+     *  产物过 normalizeNodeJson：与 parse 产物口径对齐（空 content / 脏 key）。 */
     _topSnapshot() {
         const doc = this.editor.state.doc;
         const out = [];
@@ -210,7 +291,7 @@ export class MarkdownIrEngine {
             const node = doc.child(i);
             let json = this._jsonCache.get(node);
             if (json === undefined) {
-                json = node.toJSON();
+                json = normalizeNodeJson(node.toJSON());
                 this._jsonCache.set(node, json);
             }
             out.push(json);
@@ -231,6 +312,15 @@ export class MarkdownIrEngine {
         this._sourceMap = map;
         this.readOnly = !map.ok || !this._editable;
         this.readOnlyReason = !map.ok ? "align" : (this._editable ? null : "forced");
+        if (!map.ok) {
+            // 只读降级必须可诊断：块切分 vs 文档节点的对齐数据直接进控制台
+            const nodes = this._nodeSnapshot;
+            console.warn(
+                `[markdown-engine] 块对齐失败 → MD 只读预览 mismatchAt=${map.mismatchAt}`
+                + ` blocks=${map.blocks.length} nodes=${nodes.length}`
+                + ` blockTexts=${JSON.stringify(map.blocks.map((b) => b.text.slice(0, 60)))}`,
+            );
+        }
         return map;
     }
 
@@ -240,17 +330,21 @@ export class MarkdownIrEngine {
             const json = this._parseDoc(blockText);
             const content = json?.content;
             if (!Array.isArray(content) || content.length !== 1) return null;
-            return content[0];
+            return normalizeNodeJson(content[0]);
         } catch {
             return null;
         }
     }
 
-    /** 单节点序列化（`&nbsp;` 等内部表示由序列化器决定） */
+    /**
+     * 单节点序列化（`&nbsp;` 等内部表示由序列化器决定）。
+     * 不做空白剃除——尾随空格是用户内容（parser 逐字保留），首尾换行的
+     * 剥除由 md-source-patch.nodeText 统一负责（0.25.18）。
+     */
     _serializeNodeText(node) {
         try {
             const raw = this._serializeDoc({type: "doc", content: [node]});
-            return typeof raw === "string" ? raw.replace(/^\n+/, "").replace(/\s+$/, "") : "";
+            return typeof raw === "string" ? raw : "";
         } catch {
             return "";
         }

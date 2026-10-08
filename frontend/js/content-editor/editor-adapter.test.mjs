@@ -52,12 +52,16 @@ function makeFakeEngines(opts = {}) {
             if (!this._pending) return null;
             const result = this._pending;
             this._pending = null;
-            if (result.exact === false) {
+            if (result.exact === false && result.normalized !== true) {
                 this.readOnly = true;
                 this.readOnlyReason = "patch-rejected";
                 return {exact: false, reason: "patch-verification"};
             }
             this._text = result.text;
+            if (result.normalized === true) {
+                this.normalized = true;
+                return {text: result.text, exact: false, normalized: true, reason: "serialize-normalized"};
+            }
             return {text: result.text, exact: result.exact !== false};
         }
         /** 模拟 Source 视图用户输入（textarea 即真源） */
@@ -68,8 +72,8 @@ function makeFakeEngines(opts = {}) {
             if (edited) this._onChange?.();
         }
         /** 模拟 MD 视图用户编辑：正文以块级 patch 形式延迟物化 */
-        setPendingSource(text, {exact = true} = {}) {
-            this._pending = {text, exact};
+        setPendingSource(text, {exact = true, normalized = false} = {}) {
+            this._pending = {text, exact, normalized};
             this.edited = true;
             this._onChange?.();
         }
@@ -226,6 +230,25 @@ test("adapter: Markdown patch 复核失败时 canonical 正文逐字符不变并
     adapter.switchView("source");
     assert.equal(created.at(-1).initialText, "正文", "切回 Source 仍必须是原始文本");
     assert.equal(adapter.isDirty(), false, "被拒绝的 patch 不得制造正文 dirty");
+});
+
+test("adapter: 序列化兜底物化——内容进入 canonical、保持可编辑、明确提示（0.25.18）", () => {
+    // 复核失败但内容可保全（引擎序列化兜底）：canonical 前进到序列化结果，
+    // 绝不回滚用户输入，MD 保持可编辑。
+    const {factory, created} = makeFakeEngines();
+    const {adapter, notices} = makeAdapter(factory);
+    adapter.loadInitial({body: "正文", markdownPolicy: "preferred"});
+
+    const md = created.at(-1);
+    md.setPendingSource("正文改 \n", {exact: false, normalized: true});
+    assert.equal(adapter.getText(), "正文改 \n", "兜底文本必须进入 canonical buffer（内容保全）");
+    assert.ok(notices.includes("editor.md.normalized"), "必须提示源文被规范化重写");
+    assert.equal(adapter.isMdReadOnly(), false, "兜底不是只读降级，必须保持可编辑");
+    assert.equal(adapter.isDirty(), true, "兜底物化后正文与基线不同");
+    assert.equal(adapter.isNormalizedMd(), true, "规范化标记必须置位（提示已按编辑器规范重写）");
+
+    adapter.switchView("source");
+    assert.equal(created.at(-1).initialText, "正文改 \n", "切回 Source 是兜底后的正文");
 });
 
 test("adapter: canonical source 保留 CRLF、混合换行与 EOF newline", () => {

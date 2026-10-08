@@ -60,15 +60,11 @@ async function init() {
     // 注册窗口复用回调
     window.__stickyManagerReload = loadList;
 
-    const win = getCurrentWindow();
-    if (win) {
-        try {
-            await win.show();
-            await win.setFocus();
-        } catch (e) {
-            console.error("[sticky-manager] show window 失败:", e);
-        }
-    }
+    // 窗口显隐由 Rust 侧统一管理（show_sticky_manager_window：新窗
+    // visible(true)、复用路径显式 show + eval reload）。init 不得调 win.show()
+    // ——启动预热以 visible(false) 建窗时页面同样会跑 init，此前该调用被 ACL
+    // 拒绝而「恰好」无害，0.25.18 放行 core:window:allow-show 后会在每次
+    // 启动把预热窗口弹出来（0.25.18 修复）。
 
     console.log("[sticky-manager] init 完成");
 }

@@ -377,7 +377,36 @@ export function isEmptyParagraphNode(node) {
     return text.replace(/[\s\u00a0]+/g, "") === "";
 }
 
-/** 深比较两个 JSON 值（节点 JSON；键序无关） */
+/**
+ * 归一化节点 JSON：递归删除空数组 `content` key。
+ *
+ * ProseMirror `Node.toJSON()` 对无内容节点省略 `content`，而
+ * @tiptap/markdown 解析产物显式输出 `content: []`——「整篇复核」两侧
+ * （parse 产物 vs toJSON 快照）口径不同会使 jsonEqual 恒假：文档含
+ * 尾部空行/连续空行（空段落产物）时，任何编辑触发的复核都失败并误转
+ * 只读（0.25.18）。空数组与缺失在 ProseMirror 节点语义中等价，比较前
+ * 统一剥离为缺失（配合 jsonEqual 的 undefined 值 key 忽略）。
+ */
+export function normalizeNodeJson(node) {
+    if (Array.isArray(node)) return node.map(normalizeNodeJson);
+    if (!node || typeof node !== "object") return node;
+    const out = {};
+    for (const [k, v] of Object.entries(node)) {
+        if (k === "content" && Array.isArray(v) && v.length === 0) continue;
+        out[k] = normalizeNodeJson(v);
+    }
+    return out;
+}
+
+/**
+ * 深比较两个 JSON 值（节点 JSON；键序无关；undefined 值 key 视为不存在）。
+ *
+ * undefined 值 key 必须忽略：@tiptap/markdown 解析 codeBlock 内 text node 产出
+ * `{type, text, marks: undefined}`（脏 key），而 ProseMirror `toJSON()` 产出
+ * `{type, text}`——对齐验证两边口径不同，若按 key 数比较，任何含代码块的
+ * 文档都会误判"对齐失败"而锁定只读（0.25.18）。JSON.stringify 口径同样
+ * 跳过 undefined 值 key，本函数语义与其一致。
+ */
 export function jsonEqual(a, b) {
     if (a === b) return true;
     if (a === null || b === null || a === undefined || b === undefined) return false;
@@ -391,8 +420,8 @@ export function jsonEqual(a, b) {
         }
         return true;
     }
-    const ka = Object.keys(a);
-    const kb = Object.keys(b);
+    const ka = Object.keys(a).filter((k) => a[k] !== undefined);
+    const kb = Object.keys(b).filter((k) => b[k] !== undefined);
     if (ka.length !== kb.length) return false;
     for (const k of ka) {
         if (!Object.prototype.hasOwnProperty.call(b, k)) return false;
@@ -442,8 +471,12 @@ function countContentNodes(nodes, start, end) {
 /** 单节点的块文本（去掉序列化器可能附加的首尾换行/空白） */
 function nodeText(node, serializeNode) {
     const raw = serializeNode(node);
+    if (typeof raw === "string" && raw.length === 0) return raw;
     if (typeof raw !== "string") return "";
-    return raw.replace(/^\n+/, "").replace(/\s+$/, "");
+    // 只剥序列化器附加的首尾换行，保留行尾空白：段落尾随空格是用户内容
+    // （@tiptap/markdown 的 parser 逐字保留），此前 `\s+$` 全量剃除使
+    // 「abc 」物化成「abc」→ 整篇复核必败（0.25.18）。
+    return raw.replace(/^\n+/, "").replace(/\n+$/, "");
 }
 
 /**
@@ -494,11 +527,26 @@ export function buildBlockMap(sourceText, docJson, parseBlock) {
 /**
  * 生成针对 canonical 源文的最小块级 patch（纯函数）。
  *
- * 语义：
- * - 窗口内的**内容块**被替换为新节点序列化结果，块之间以 `\n\n` 连接；
- * - 窗口**两端**的空段落由窗口外的 gap 承载，因此不参与替换区间（gap 原样保留）；
- * - 窗口内**中间**的空段落由 `\n\n` 连接自然表达（空段落序列化为空串）；
- * - 纯空段落增删（窗口内无内容块）→ 按 gap 长度调整（1 个空段落 ↔ 2 个换行）。
+ * ## 区间统一重建模型（0.25.18 重构）
+ *
+ * 早期实现按编辑形态分 6 个特例分支手工拼 gap 换行数（纯空段增删 / 空段→
+ * 内容 / 整体删除 / 纯插入 / 块间插入 / 块替换），多分支各自推导「空段落 ↔
+ * 换行数」映射，漏掉一种形态就丢/多空段落 → 整篇复核必败 → 用户被打断并
+ * 锁只读（0.25.18 实测两轮）。本版收敛为单一模型：
+ *
+ * 1. `diffTopNodes` 求最小变更窗口（不变）；
+ * 2. 以**内容块**为锚点定替换区间：`[前一个内容块 contentEnd, 后一个内容
+ *    块 contentStart)`，文档首尾以 0 / 文末为界——被重写的只有变更窗口及
+ *    其相邻 gap，其余源文逐字节保留；
+ * 3. 区间内节点 = 窗口向两侧扩展覆盖的相邻空段落（含未变化空段——其源文
+ *    表达在被重写的 gap 里，必须一并重发）；
+ * 4. 按唯一一组映射公式重发区间文本：
+ *    - 相邻两个内容节点之间 E 个空段落 ↔ `2(E+1)` 个换行；
+ *    - 文档首部 / 尾部 E 个空段落 ↔ `2E` 个换行；
+ *    - 文档尾部保留原 gap 的换行**奇偶性**（EOF 换行约定，§3.10）。
+ *
+ * 空段落的增删 / 转变 / 块的插入删除替换全部落进同一组公式，不再有形态
+ * 特例；正确性仍由调用方的整篇复核兜底（parse(candidate) ≡ 当前文档）。
  *
  * @param {object} args
  * @param {string} args.sourceText
@@ -514,84 +562,66 @@ export function planSourcePatch({sourceText, blocks, beforeNodes, afterNodes, se
     const win = diffTopNodes(before, after);
     if (win.beforeStart === win.beforeEnd && win.afterStart === win.afterEnd) return [];
 
-    // 节点空间 → 块空间：窗口之前的内容节点数即内容块下标
+    const blockCount = blocks.length;
+    // 节点空间 → 块空间：窗口之前的内容节点数即首个被窗口覆盖的内容块下标
     const bi0 = countContentNodes(before, 0, win.beforeStart);
     const bi1 = countContentNodes(before, 0, win.beforeEnd);
-    const blockCount = blocks.length;
+    const hasPrev = bi0 > 0;
+    const hasNext = bi1 < blockCount;
 
-    const afterWindow = after.slice(win.afterStart, win.afterEnd);
-    const afterWindowText = afterWindow.map((n) => (isEmptyParagraphNode(n) ? "" : nodeText(n, serializeNode)));
+    // 区间节点序列：窗口 + 两侧相邻空段落。公共前缀/后缀保证这些外层空段
+    // 落是未变化节点，但它们的源文表达位于被重写的 gap 内，必须参与重发。
+    let from = win.afterStart;
+    while (from > 0 && isEmptyParagraphNode(after[from - 1])) from -= 1;
+    let to = win.afterEnd;
+    while (to < after.length && isEmptyParagraphNode(after[to])) to += 1;
+    const nodes = after.slice(from, to);
 
-    const beforeContent = countContentNodes(before, win.beforeStart, win.beforeEnd);
-    const afterContent = countContentNodes(afterWindow, 0, afterWindow.length);
-    const emptyDelta = (afterWindow.length - afterContent) - ((win.beforeEnd - win.beforeStart) - beforeContent);
+    const regionFrom = hasPrev ? contentPatchEnd(sourceText, blocks[bi0 - 1].contentEnd) : 0;
+    const regionTo = hasNext ? blocks[bi1].contentStart : sourceText.length;
+    const eol = preferredEol(sourceText, regionFrom, regionTo);
 
-    // 纯空段落增删（窗口内无内容块变化）→ 按 gap 长度调整：1 个空段落 ↔ 2 个换行
-    if (afterContent === 0 && beforeContent === 0) {
-        if (emptyDelta === 0) return [];
-        if (emptyDelta > 0) {
-            const insertAt = bi0 < blockCount ? blocks[bi0].contentStart : sourceText.length;
-            const eol = preferredEol(sourceText, insertAt, insertAt);
-            return [{start: insertAt, end: insertAt, text: eol.repeat(2 * emptyDelta)}];
+    // 文档尾部的 EOF 换行（奇数个换行收尾）不属于任何空段落；重写尾部 gap
+    // 时保留其奇偶位，`X\n` 编辑后仍是 `X…\n` 而非吞掉末换行（§3.10）。
+    let tailPad = 0;
+    if (!hasNext) {
+        const tailFrom = blockCount > 0
+            ? contentPatchEnd(sourceText, blocks[blockCount - 1].contentEnd)
+            : 0;
+        const counts = countEols(sourceText.slice(tailFrom, sourceText.length));
+        tailPad = (counts.crlf + counts.lf + counts.cr) % 2;
+    }
+
+    const emitted = emitRegionText(nodes, hasPrev, hasNext, serializeNode, eol)
+        + (tailPad > 0 ? eol : "");
+    const text = withEol(emitted, eol);
+    if (text === sourceText.slice(regionFrom, regionTo)) return [];
+    return [{start: regionFrom, end: regionTo, text}];
+}
+
+/**
+ * 重发区间文本：空段落只计入换行游程（不序列化），内容节点按序拼接。
+ * 映射公式见 planSourcePatch 文档；`run` 是自上一个内容节点以来的空段落数。
+ */
+function emitRegionText(nodes, hasPrev, hasNext, serializeNode, eol) {
+    const nl = (n) => eol.repeat(2 * n);
+    const parts = [];
+    let run = 0;
+    let emitted = false;
+    for (const node of nodes) {
+        if (isEmptyParagraphNode(node)) {
+            run += 1;
+            continue;
         }
-        const gapEnd = bi0 < blockCount ? blocks[bi0].contentStart : sourceText.length;
-        const eol = preferredEol(sourceText, gapEnd, gapEnd);
-        const removed = eol.repeat(2 * -emptyDelta);
-        const from = gapEnd - removed.length;
-        if (from < 0 || sourceText.slice(from, gapEnd) !== removed) return [];
-        return [{start: from, end: gapEnd, text: ""}];
+        // 首个内容节点：有前锚点（或前面已发过内容）时带分隔符，文档首部裸开头
+        parts.push(nl(hasPrev || emitted ? run + 1 : run));
+        parts.push(nodeText(node, serializeNode));
+        run = 0;
+        emitted = true;
     }
-
-    // 窗口两端的空段落由窗口外的 gap 承载，剔除后按节点顺序拼接块文本
-    let head = 0;
-    while (head < afterWindowText.length && afterWindowText[head] === "" && isEmptyParagraphNode(afterWindow[head])) {
-        head += 1;
+    if (!emitted) {
+        // 区间内无内容节点：整段就是两锚点之间的 gap（或文档首/尾 gap）
+        return nl(hasPrev && hasNext ? run + 1 : run);
     }
-    let tail = afterWindowText.length;
-    while (tail > head && afterWindowText[tail - 1] === "" && isEmptyParagraphNode(afterWindow[tail - 1])) {
-        tail -= 1;
-    }
-    const patchStart = bi0 < blockCount ? blocks[bi0].contentStart : sourceText.length;
-    const patchEnd = bi1 > bi0 && bi1 <= blockCount
-        ? contentPatchEnd(sourceText, blocks[bi1 - 1].contentEnd)
-        : patchStart;
-    const eol = preferredEol(sourceText, patchStart, patchEnd);
-    const chunk = withEol(afterWindowText.slice(head, tail).join("\n\n"), eol);
-
-    if (bi1 > bi0) {
-        if (chunk === "") {
-            // 窗口内内容块被整体删除：吸掉左侧 gap，保留右侧 gap 作为唯一分隔
-            const leftEnd = bi0 > 0
-                ? contentPatchEnd(sourceText, blocks[bi0 - 1].contentEnd)
-                : 0;
-            const sep = bi0 > 0 && bi1 < blockCount
-                ? sourceText.slice(blocks[bi0].start, blocks[bi0].contentStart)
-                : "";
-            const rightStart = bi1 < blockCount ? blocks[bi1].contentStart : sourceText.length;
-            return [{start: leftEnd, end: rightStart, text: sep}];
-        }
-        return [{
-            start: blocks[bi0].contentStart,
-            end: patchEnd,
-            text: chunk,
-        }];
-    }
-
-    // 纯插入（窗口内无内容块）：不重写任何已有块内容
-    if (bi0 >= blockCount) {
-        if (blockCount === 0) {
-            // 空文档（或全空白文档）：空白不承载任何节点，直接以块内容作为新源文
-            return [{start: 0, end: sourceText.length, text: chunk}];
-        }
-        const at = contentPatchEnd(sourceText, blocks[blockCount - 1].contentEnd);
-        const insertEol = preferredEol(sourceText, at, at);
-        return [{start: at, end: at, text: `${insertEol}${insertEol}${chunk}`}];
-    }
-    const next = blocks[bi0];
-    const insertEol = preferredEol(sourceText, next.start, next.contentStart);
-    // Insert after the existing gap.  In CRLF input `contentEnd` includes the
-    // CR while the following gap starts at LF; inserting at `next.start` would
-    // split that delimiter and create a bare LF.  Keeping the old gap wholly
-    // before the new block preserves it byte-for-byte.
-    return [{start: next.contentStart, end: next.contentStart, text: `${chunk}${insertEol.repeat(2)}`}];
+    return parts.join("") + nl(hasNext ? run + 1 : run);
 }
