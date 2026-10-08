@@ -13,6 +13,33 @@ let mediaQuery = null;
 let mediaListener = null;
 
 /**
+ * 浅色主题清单：这些 data-theme 值是浅色底，写主题时同步输出
+ * data-theme-shade="light"（其余输出 "dark"）。cherry 代码块的 Latte
+ * 色板桶等明暗二分逻辑认这个属性，不自己判别（cherry.css 注 4）。
+ * 新增浅色主题时在此追加一行。
+ */
+const LIGHT_THEMES = new Set([
+    "light",
+    "catppuccin-latte",
+    "nord-snow-storm",
+    // NvChad Light 整组（与 THEME_CATALOG / settings.html 的 NvChad Light 分组一致）
+    "nvchad-ayu_light",
+    "nvchad-blossom_light",
+    "nvchad-everforest_light",
+    "nvchad-flex-light",
+    "nvchad-flexoki-light",
+    "nvchad-github_light",
+    "nvchad-gruvbox_light",
+    "nvchad-material-lighter",
+    "nvchad-nano-light",
+    "nvchad-oceanic-light",
+    "nvchad-one_light",
+    "nvchad-onenord_light",
+    "nvchad-penumbra_light",
+    "nvchad-rosepine-dawn",
+]);
+
+/**
  * 解析 mode → 实际 data-theme 值。
  * auto 跟随系统（light 媒体查询命中 → "light"，否则 → "dark"）。
  * 其他值（light / dark / gruvbox / …）原样透传。
@@ -24,7 +51,8 @@ function resolve(mode) {
     return mode;
 }
 
-/** 把解析后的主题写到 <html>。dark 移除 data-theme（回落 :root），其余设 data-theme。 */
+/** 把解析后的主题写到 <html>。dark 移除 data-theme（回落 :root），其余设 data-theme。
+ *  同时输出规范化的 data-theme-shade="light|dark" 供明暗二分 CSS 使用。 */
 function paint(resolved) {
     const root = document.documentElement;
     if (resolved === "dark") {
@@ -32,6 +60,7 @@ function paint(resolved) {
     } else {
         root.setAttribute("data-theme", resolved);
     }
+    root.setAttribute("data-theme-shade", LIGHT_THEMES.has(resolved) ? "light" : "dark");
 }
 
 /**

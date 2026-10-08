@@ -193,8 +193,17 @@
     margin: 8px 0;
     padding: var(--space-md);
     border-radius: 8px;
-    background: var(--bg);
+    background: var(--cherry-code-bg, var(--surface)); /* 固定代码底色，见 cherry.css 注 4 */
     overflow-x: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--surface-2) transparent;
+}
+
+/* vendor cherry 把 codeBlock pre 底色钉死 #2d2d2d（cherry default 主题本身
+   是 Atom 系深色，特异性 0,2,2 压过上面的规则），导致浅色主题下代码块
+   仍是深色。对位提升恢复应用侧底色（components/cherry.css 注 4）。 */
+.chat-msg-assistant div[data-type="codeBlock"] pre[class*="language-"] {
+    background: var(--cherry-code-bg, var(--surface));
 }
 
 .chat-msg-assistant pre code {
@@ -528,6 +537,22 @@
 .chat-code-copy:hover {
     background: var(--surface-2);
     color: var(--text);
+}
+
+/* 点击成功态注入 ICONS.check 内联 SVG（无 width/height 属性），
+   无尺寸的 SVG 在自适应宽度的按钮里会塌缩成 0，按钮看起来"变空" */
+.chat-code-copy svg {
+    display: block;
+    width: 13px;
+    height: 13px;
+    margin: 0 auto;
+}
+
+/* cherry 悬浮复制按钮与本按钮重复（.chat-code-copy 常驻代码块右上角），
+   chat 窗口内禁用 cherry 的 hover 版本 */
+.chat-msg-assistant .cherry-copy-code-block,
+.chat-tool-detail .cherry-copy-code-block {
+    display: none;
 }
 
 /* ── 原地编辑态 ────────────────────────────────────────────────

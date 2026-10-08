@@ -254,7 +254,7 @@ body.voice-active #ai-query {
 }
 
 #ai-content pre {
-    background: var(--surface) !important;
+    background: var(--cherry-code-bg, var(--surface)) !important; /* 固定代码底色，见 components/cherry.css 注 4 */
     border-radius: var(--radius-sm);
     padding: var(--space-sm);
     overflow-x: auto;
@@ -618,7 +618,7 @@ body.voice-active #ai-query {
 }
 
 .ai-round-summary-body pre {
-    background: var(--surface) !important;
+    background: var(--cherry-code-bg, var(--surface)) !important; /* 固定代码底色，见 components/cherry.css 注 4 */
     border-radius: var(--radius-sm);
     padding: var(--space-sm);
     overflow-x: auto;

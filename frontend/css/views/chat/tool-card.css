@@ -21,7 +21,9 @@
 
 /* 统一滚动条样式（thinking 内容 / tool 详情 / 模型下拉 / 供应商 flyout / 思考强度下拉共用） */
 .thinking-content::-webkit-scrollbar,
+.thinking-content pre::-webkit-scrollbar,
 .chat-tool-detail pre::-webkit-scrollbar,
+.chat-msg-assistant pre::-webkit-scrollbar,
 .chat-model-dropdown::-webkit-scrollbar,
 .chat-model-flyout::-webkit-scrollbar,
 .chat-thinking-dropdown::-webkit-scrollbar {
@@ -30,7 +32,9 @@
 }
 
 .thinking-content::-webkit-scrollbar-track,
+.thinking-content pre::-webkit-scrollbar-track,
 .chat-tool-detail pre::-webkit-scrollbar-track,
+.chat-msg-assistant pre::-webkit-scrollbar-track,
 .chat-model-dropdown::-webkit-scrollbar-track,
 .chat-model-flyout::-webkit-scrollbar-track,
 .chat-thinking-dropdown::-webkit-scrollbar-track {
@@ -38,7 +42,9 @@
 }
 
 .thinking-content::-webkit-scrollbar-thumb,
+.thinking-content pre::-webkit-scrollbar-thumb,
 .chat-tool-detail pre::-webkit-scrollbar-thumb,
+.chat-msg-assistant pre::-webkit-scrollbar-thumb,
 .chat-model-dropdown::-webkit-scrollbar-thumb,
 .chat-model-flyout::-webkit-scrollbar-thumb,
 .chat-thinking-dropdown::-webkit-scrollbar-thumb {
@@ -47,7 +53,9 @@
 }
 
 .thinking-content::-webkit-scrollbar-thumb:hover,
+.thinking-content pre::-webkit-scrollbar-thumb:hover,
 .chat-tool-detail pre::-webkit-scrollbar-thumb:hover,
+.chat-msg-assistant pre::-webkit-scrollbar-thumb:hover,
 .chat-model-dropdown::-webkit-scrollbar-thumb:hover,
 .chat-model-flyout::-webkit-scrollbar-thumb:hover,
 .chat-thinking-dropdown::-webkit-scrollbar-thumb:hover {
@@ -127,6 +135,11 @@
 .thinking-content pre code {
     padding: 0;
     background: transparent;
+}
+
+/* vendor cherry 把 codeBlock pre 底色钉死 #2d2d2d（见 bubble.css 同款注释） */
+.thinking-content div[data-type="codeBlock"] pre[class*="language-"] {
+    background: var(--cherry-code-bg, var(--surface));
 }
 
 /* ── Tool 状态卡（0.12.7 §6.6 增强） ─────────── */
@@ -289,6 +302,12 @@
 
 .chat-tool-detail pre:last-child {
     margin-bottom: 0;
+}
+
+/* vendor cherry 把 codeBlock pre 底色钉死 #2d2d2d（特异性 0,2,2 压过上面的
+   var(--bg-deep)），对位提升恢复应用侧底色（见 bubble.css 同款注释） */
+.chat-tool-detail div[data-type="codeBlock"] pre[class*="language-"] {
+    background: var(--bg-deep);
 }
 
 .chat-tool-detail-error summary {

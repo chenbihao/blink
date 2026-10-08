@@ -1,7 +1,7 @@
 /**
  * Cherry Markdown vendor 暗色适配修正（跨窗口：主窗口 AI 模式 / 对话窗口 / 设置页）。
  *
- * cherry-markdown.min.css 按"白底浅色"假设设计，在暗色主题下有三处残留穿帮：
+ * cherry-markdown.min.css 按"白底浅色"假设设计，在暗色主题下有多处残留穿帮：
  *
  * 1. 叠字重影：Prism default 代码主题给 code/pre 叠了 text-shadow: 0 1px #fff
  *    （白底防字晕的反白阴影）。暗底上它就是每个字符下方 1px 的白色重影，
@@ -19,18 +19,30 @@
  *    .cherry 上定义为白底浅色，应用未覆盖，暗色主题下按钮是一块白斑。
  *    这里映射到应用语义 token，随主题联动。
  *
- * 4. 语法配色：vendor 内置的 Prism 代码主题按白底设计（黑字/深青 keyword/
- *    白底块 operator），暗底上大半不可读。对齐对话窗口的 Catppuccin
- *    Mocha/Latte 色板（见 bubble.css 0.12.5 §5.7），两窗口同源。
+ * 4. 语法配色：vendor 内置的 Prism 代码主题按白底/Atom 深底设计（黑字或
+ *    Atom 亮色 token），与主题脱钩。对齐对话窗口的 Catppuccin Mocha/Latte
+ *    色板（见 bubble.css 0.12.5 §5.7），两窗口同源、明暗随主题切换。
  *
  * 5. 行内代码：vendor 默认浅蓝底 + 蓝框，映射到应用 token 兜底。
+ *
+ * ── 双渲染模式 ──────────────────────────────────────────────────────────────
+ * Cherry 有两种挂载形态，选择器必须同时覆盖（shared/markdown.js）：
+ * - 流式：new Cherry({id}) 直接挂载，产出 .cherry > .cherry-previewer 包裹层
+ *   （主窗口 AI 模式实时回复区）；
+ * - 容器模式：getHtml(false) 回填 innerHTML，【没有】任何 .cherry 包裹层，
+ *   codeBlock div 直接落在业务容器里（对话窗口、轮次摘要、thinking 块）。
+ * 因此 token/文字规则统一用 :is(流式前缀, 裸 codeBlock) 双分支，
+ * :is 取最高特异性分支 (0,3,1)，加 token/元素后稳定压过 vendor 的
+ * theme 作用域规则 (0,3,1) 与无作用域规则 (0,2,2)，不依赖加载顺序。
+ * 代码块【底色】不在此文件设置：主窗口归 ai-mode.css（var(--surface)），
+ * 对话窗口归 bubble.css / tool-card.css（var(--bg) / var(--bg-deep)）。
  */
 
-/* 1. 清掉浅色主题的白色文字阴影。
-   vendor 规则特异性 (0,3,1) 且 vendor CSS 在 entry link 之后加载，
-   必须用更高特异性覆盖，!important 都不需要。 */
-.cherry .cherry-previewer div[data-type=codeBlock] pre[class*="language-"],
-.cherry .cherry-previewer div[data-type=codeBlock] code[class*="language-"] {
+/* 1. 文字：清白色阴影 + 钉到色板原生文字色（vendor 分别钉死 #fff 阴影与黑/Atom 色；
+       纯文本若用 var(--text) 会随主题漂移，与固定代码底不配套） */
+:is(.cherry .cherry-previewer div[data-type=codeBlock], div[data-type=codeBlock]) pre[class*="language-"],
+:is(.cherry .cherry-previewer div[data-type=codeBlock], div[data-type=codeBlock]) code[class*="language-"] {
+    color: var(--cherry-code-text);
     text-shadow: none;
 }
 
@@ -84,10 +96,11 @@
 /* 3. 按钮配色跟随应用主题。vendor 在 .cherry 上定义的按钮变量默认白底
    （--toolbar-bg: var(--oc-white)），暗色主题下按钮是一块白斑；其中
    --toolbar-bg 还是长代码块渐隐遮罩的渐变目标色，需与代码块底色一致。
+   容器模式没有 .cherry 包裹层，变量改落在 codeBlock div 上向后代传导。
    vendor CSS 在 entry link 之后加载，同特异性（.cherry，0,1,0）覆盖会被
    反超，故用双类 .cherry.cherry 提高特异性。 */
-.cherry.cherry {
-    --toolbar-bg: var(--surface);
+.cherry.cherry,
+div[data-type="codeBlock"] {
     --toolbar-btn-color: var(--text-dim);
     --toolbar-btn-hover-bg: var(--surface-2);
     --toolbar-btn-hover-color: var(--text);
@@ -121,154 +134,126 @@
 }
 
 /* 4. 语法高亮配色：对齐应用与对话窗口的 Catppuccin 色板
-   （对话窗口见 bubble.css「代码块语法高亮主题」0.12.5 §5.7）。
-   vendor Prism default 主题按白底设计：基础文字纯黑 #000、keyword 深青、
-   string 暗橄榄、operator 带半透明白底块，暗底上大半颜色不可读或发闷。
-   按对话窗口 hljs-* 的 Mocha/Latte 映射逐一同名对应 Prism token 类，
-   两个窗口同一语法同一色；亮色主题（data-theme="light"）取 Latte。 */
-.cherry .cherry-previewer div[data-type=codeBlock] pre[class*="language-"],
-.cherry .cherry-previewer div[data-type=codeBlock] code[class*="language-"] {
-    color: var(--text);
+   （对话窗口见 bubble.css「代码块语法高亮主题」0.12.5 §5.7 的 hljs 映射，
+   这里逐一同名对应 Prism token 类，两个窗口同一语法同一色）。
+   色板收敛为变量：codeBlock div 上定义 Mocha（默认），data-theme="light"
+   时覆盖为 Latte，token 规则只写一遍。 */
+:is(.cherry .cherry-previewer div[data-type=codeBlock], div[data-type=codeBlock]) {
+    /* 代码块底色与主题 surface 解耦：语法色板只有 Mocha/Latte 两套，
+       底色若随主题 surface 变化（gruvbox 棕 / genshin 紫等），辨识度会随
+       主题色调波动。固定为色板原生中性底：深色系统一 #313244（Mocha
+       surface0，默认主题观感不变），浅色统一 #e2e2e6 中性浅灰。 */
+    --cherry-code-bg: #313244;
+    --toolbar-bg: var(--cherry-code-bg); /* 渐隐遮罩目标色须与代码底一致 */
+    --cherry-code-text: #cdd6f4; /* 纯文本（非 token）钉到色板原生文字色，不随主题 --text 漂移 */
+    --cherry-code-keyword: #cba6f7;
+    --cherry-code-string: #a6e3a1;
+    --cherry-code-number: #fab387;
+    --cherry-code-function: #89b4fa;
+    --cherry-code-type: #eba0ac;
+    --cherry-code-builtin: #89dceb;
+    --cherry-code-operator: #89dceb;
+    --cherry-code-variable: #f38ba8;
+    --cherry-code-comment: #6c7086;
+    --cherry-code-punctuation: #9399b2;
+    --cherry-code-regex: #f5c2e7;
 }
 
-.cherry .cherry-previewer div[data-type=codeBlock] .token.keyword,
-.cherry .cherry-previewer div[data-type=codeBlock] .token.atrule {
-    color: #cba6f7;
+/* 浅色桶：按 theme.js 输出的规范化属性判定（SnowStorm/Latte/NvChad Light
+   整组等浅色主题都在 theme.js 的 LIGHT_THEMES 清单里），不用 [data-theme]
+   逐值枚举。 */
+[data-theme-shade="light"] :is(.cherry .cherry-previewer div[data-type=codeBlock], div[data-type=codeBlock]) {
+    --cherry-code-bg: #e2e2e6;
+    --cherry-code-text: #4c4f69;
+    --cherry-code-keyword: #8839ef;
+    --cherry-code-string: #40a02b;
+    --cherry-code-number: #fe640b;
+    --cherry-code-function: #1e66f5;
+    --cherry-code-type: #e64553;
+    --cherry-code-builtin: #04a5e5;
+    --cherry-code-operator: #04a5e5;
+    --cherry-code-variable: #d20f39;
+    --cherry-code-comment: #9ca0b0;
+    --cherry-code-punctuation: #6c7086;
+    --cherry-code-regex: #ea76cb;
 }
 
-.cherry .cherry-previewer div[data-type=codeBlock] .token.string,
-.cherry .cherry-previewer div[data-type=codeBlock] .token.char,
-.cherry .cherry-previewer div[data-type=codeBlock] .token.attr-name,
-.cherry .cherry-previewer div[data-type=codeBlock] .token.attr-value {
-    color: #a6e3a1;
+:is(.cherry .cherry-previewer div[data-type=codeBlock], div[data-type=codeBlock]) .token.keyword,
+:is(.cherry .cherry-previewer div[data-type=codeBlock], div[data-type=codeBlock]) .token.atrule {
+    color: var(--cherry-code-keyword);
 }
 
-.cherry .cherry-previewer div[data-type=codeBlock] .token.number,
-.cherry .cherry-previewer div[data-type=codeBlock] .token.boolean,
-.cherry .cherry-previewer div[data-type=codeBlock] .token.constant {
-    color: #fab387;
+:is(.cherry .cherry-previewer div[data-type=codeBlock], div[data-type=codeBlock]) .token.string,
+:is(.cherry .cherry-previewer div[data-type=codeBlock], div[data-type=codeBlock]) .token.char,
+:is(.cherry .cherry-previewer div[data-type=codeBlock], div[data-type=codeBlock]) .token.attr-name,
+:is(.cherry .cherry-previewer div[data-type=codeBlock], div[data-type=codeBlock]) .token.attr-value {
+    color: var(--cherry-code-string);
 }
 
-.cherry .cherry-previewer div[data-type=codeBlock] .token.function,
-.cherry .cherry-previewer div[data-type=codeBlock] .token.property {
-    color: #89b4fa;
+:is(.cherry .cherry-previewer div[data-type=codeBlock], div[data-type=codeBlock]) .token.number,
+:is(.cherry .cherry-previewer div[data-type=codeBlock], div[data-type=codeBlock]) .token.boolean,
+:is(.cherry .cherry-previewer div[data-type=codeBlock], div[data-type=codeBlock]) .token.constant {
+    color: var(--cherry-code-number);
 }
 
-.cherry .cherry-previewer div[data-type=codeBlock] .token.class-name {
-    color: #eba0ac;
+:is(.cherry .cherry-previewer div[data-type=codeBlock], div[data-type=codeBlock]) .token.function,
+:is(.cherry .cherry-previewer div[data-type=codeBlock], div[data-type=codeBlock]) .token.property {
+    color: var(--cherry-code-function);
 }
 
-.cherry .cherry-previewer div[data-type=codeBlock] .token.builtin {
-    color: #89dceb;
+:is(.cherry .cherry-previewer div[data-type=codeBlock], div[data-type=codeBlock]) .token.class-name {
+    color: var(--cherry-code-type);
+}
+
+:is(.cherry .cherry-previewer div[data-type=codeBlock], div[data-type=codeBlock]) .token.builtin {
+    color: var(--cherry-code-builtin);
 }
 
 /* operator：vendor default 主题给的是 #9a6e3a + 半透明白底块（暗底上像坏字框） */
-.cherry .cherry-previewer div[data-type=codeBlock] .token.operator,
-.cherry .cherry-previewer div[data-type=codeBlock] .token.entity,
-.cherry .cherry-previewer div[data-type=codeBlock] .token.url {
-    color: #89dceb;
+:is(.cherry .cherry-previewer div[data-type=codeBlock], div[data-type=codeBlock]) .token.operator,
+:is(.cherry .cherry-previewer div[data-type=codeBlock], div[data-type=codeBlock]) .token.entity,
+:is(.cherry .cherry-previewer div[data-type=codeBlock], div[data-type=codeBlock]) .token.url {
+    color: var(--cherry-code-operator);
     background: none;
 }
 
-.cherry .cherry-previewer div[data-type=codeBlock] .token.variable,
-.cherry .cherry-previewer div[data-type=codeBlock] .token.tag,
-.cherry .cherry-previewer div[data-type=codeBlock] .token.selector {
-    color: #f38ba8;
+:is(.cherry .cherry-previewer div[data-type=codeBlock], div[data-type=codeBlock]) .token.variable,
+:is(.cherry .cherry-previewer div[data-type=codeBlock], div[data-type=codeBlock]) .token.tag,
+:is(.cherry .cherry-previewer div[data-type=codeBlock], div[data-type=codeBlock]) .token.selector {
+    color: var(--cherry-code-variable);
 }
 
-.cherry .cherry-previewer div[data-type=codeBlock] .token.comment,
-.cherry .cherry-previewer div[data-type=codeBlock] .token.prolog,
-.cherry .cherry-previewer div[data-type=codeBlock] .token.doctype,
-.cherry .cherry-previewer div[data-type=codeBlock] .token.cdata {
-    color: #6c7086;
+:is(.cherry .cherry-previewer div[data-type=codeBlock], div[data-type=codeBlock]) .token.comment,
+:is(.cherry .cherry-previewer div[data-type=codeBlock], div[data-type=codeBlock]) .token.prolog,
+:is(.cherry .cherry-previewer div[data-type=codeBlock], div[data-type=codeBlock]) .token.doctype,
+:is(.cherry .cherry-previewer div[data-type=codeBlock], div[data-type=codeBlock]) .token.cdata {
+    color: var(--cherry-code-comment);
 }
 
-.cherry .cherry-previewer div[data-type=codeBlock] .token.punctuation {
-    color: #9399b2;
+:is(.cherry .cherry-previewer div[data-type=codeBlock], div[data-type=codeBlock]) .token.punctuation {
+    color: var(--cherry-code-punctuation);
 }
 
-.cherry .cherry-previewer div[data-type=codeBlock] .token.regex,
-.cherry .cherry-previewer div[data-type=codeBlock] .token.important {
-    color: #f5c2e7;
+:is(.cherry .cherry-previewer div[data-type=codeBlock], div[data-type=codeBlock]) .token.regex,
+:is(.cherry .cherry-previewer div[data-type=codeBlock], div[data-type=codeBlock]) .token.important {
+    color: var(--cherry-code-regex);
 }
 
-.cherry .cherry-previewer div[data-type=codeBlock] .token.deleted {
-    color: #f38ba8;
+:is(.cherry .cherry-previewer div[data-type=codeBlock], div[data-type=codeBlock]) .token.deleted {
+    color: var(--cherry-code-variable);
 }
 
-.cherry .cherry-previewer div[data-type=codeBlock] .token.inserted {
-    color: #a6e3a1;
+:is(.cherry .cherry-previewer div[data-type=codeBlock], div[data-type=codeBlock]) .token.inserted {
+    color: var(--cherry-code-string);
 }
 
-.cherry .cherry-previewer div[data-type=codeBlock] .line-numbers-rows > span::before {
-    color: var(--text-dim);
-}
-
-/* 亮色主题：Latte */
-[data-theme="light"] .cherry .cherry-previewer div[data-type=codeBlock] pre[class*="language-"],
-[data-theme="light"] .cherry .cherry-previewer div[data-type=codeBlock] code[class*="language-"] {
-    color: #4c4f69;
-}
-
-[data-theme="light"] .cherry .cherry-previewer div[data-type=codeBlock] .token.keyword,
-[data-theme="light"] .cherry .cherry-previewer div[data-type=codeBlock] .token.atrule {
-    color: #8839ef;
-}
-
-[data-theme="light"] .cherry .cherry-previewer div[data-type=codeBlock] .token.string,
-[data-theme="light"] .cherry .cherry-previewer div[data-type=codeBlock] .token.char,
-[data-theme="light"] .cherry .cherry-previewer div[data-type=codeBlock] .token.attr-name,
-[data-theme="light"] .cherry .cherry-previewer div[data-type=codeBlock] .token.attr-value {
-    color: #40a02b;
-}
-
-[data-theme="light"] .cherry .cherry-previewer div[data-type=codeBlock] .token.number,
-[data-theme="light"] .cherry .cherry-previewer div[data-type=codeBlock] .token.boolean,
-[data-theme="light"] .cherry .cherry-previewer div[data-type=codeBlock] .token.constant {
-    color: #fe640b;
-}
-
-[data-theme="light"] .cherry .cherry-previewer div[data-type=codeBlock] .token.function,
-[data-theme="light"] .cherry .cherry-previewer div[data-type=codeBlock] .token.property {
-    color: #1e66f5;
-}
-
-[data-theme="light"] .cherry .cherry-previewer div[data-type=codeBlock] .token.class-name {
-    color: #e64553;
-}
-
-[data-theme="light"] .cherry .cherry-previewer div[data-type=codeBlock] .token.builtin,
-[data-theme="light"] .cherry .cherry-previewer div[data-type=codeBlock] .token.operator,
-[data-theme="light"] .cherry .cherry-previewer div[data-type=codeBlock] .token.entity,
-[data-theme="light"] .cherry .cherry-previewer div[data-type=codeBlock] .token.url {
-    color: #04a5e5;
-}
-
-[data-theme="light"] .cherry .cherry-previewer div[data-type=codeBlock] .token.variable,
-[data-theme="light"] .cherry .cherry-previewer div[data-type=codeBlock] .token.tag,
-[data-theme="light"] .cherry .cherry-previewer div[data-type=codeBlock] .token.selector {
-    color: #d20f39;
-}
-
-[data-theme="light"] .cherry .cherry-previewer div[data-type=codeBlock] .token.comment,
-[data-theme="light"] .cherry .cherry-previewer div[data-type=codeBlock] .token.prolog,
-[data-theme="light"] .cherry .cherry-previewer div[data-type=codeBlock] .token.doctype,
-[data-theme="light"] .cherry .cherry-previewer div[data-type=codeBlock] .token.cdata {
-    color: #9ca0b0;
-}
-
-[data-theme="light"] .cherry .cherry-previewer div[data-type=codeBlock] .token.punctuation {
-    color: #6c7086;
-}
-
-[data-theme="light"] .cherry .cherry-previewer div[data-type=codeBlock] .token.regex,
-[data-theme="light"] .cherry .cherry-previewer div[data-type=codeBlock] .token.important {
-    color: #ea76cb;
+:is(.cherry .cherry-previewer div[data-type=codeBlock], div[data-type=codeBlock]) .line-numbers-rows > span::before {
+    color: var(--cherry-code-comment); /* 行号跟随色板注释灰，与固定底配套 */
 }
 
 /* 5. 行内代码：vendor 默认浅蓝底 + 蓝框（白底假设），映射到应用 token。
-   主窗口 AI 模式已有 --md-inline-code-* 变量覆盖，这里兜底 chat 窗口
-   等未覆盖变量的窗口。 */
+   仅流式挂载需要（容器模式的行内代码无语言类，vendor 规则不命中，
+   由各窗口自己的 code 样式负责，如 bubble.css .chat-msg-assistant code）。 */
 .cherry .cherry-markdown :not(pre) > code {
     color: var(--accent);
     background-color: var(--surface);
