@@ -28,6 +28,7 @@
 @import '../components/form-row.css';
 @import '../components/kbd.css';
 @import '../components/icon.css';
+@import '../components/cherry.css';
 @import '../components/voice-wave.css';
 
 /* views（Step 5 拆分 style.css；0.24.4 增 smart-tab 信息架构四件套） */
