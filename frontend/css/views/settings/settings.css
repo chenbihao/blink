@@ -376,6 +376,26 @@ body {
     text-decoration: underline;
 }
 
+/* 0.25.19：更新日志多版本分组（跳版升级时从新到旧逐版展示） */
+.release-notes-version + .release-notes-version {
+    margin-top: var(--space-md, 12px);
+    padding-top: var(--space-md, 12px);
+    border-top: 1px solid var(--surface);
+}
+
+.release-notes-version-head {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-sm, 8px);
+    margin-bottom: 0.3em;
+}
+
+.release-notes-version-tag {
+    font-size: var(--text-base, 14px);
+    font-weight: 600;
+    color: var(--text);
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
 settings-components.css — 通用 UI 组件：setting-row、按钮、表单控件、开关
 ═══════════════════════════════════════════════════════════════════════════ */

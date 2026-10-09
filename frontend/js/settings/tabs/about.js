@@ -6,6 +6,7 @@
  * (tauri_version/webview_version) 与后端 get_app_info 返回不匹配；0.9.5.1 还原原版。
  * 0.17.1：新增 release notes 展示（Markdown 渲染）
  * 0.25.10：新增一键更新（invoke install_update + UPDATE_INSTALL_PROGRESS 进度事件）
+ * 0.25.19：更新日志多版本分组展示（跳版升级时从新到旧列出全部待更新版本）
  */
 import {invoke, listen, normalizeError} from "../../shared/tauri.js";
 import {EVENTS} from "../../shared/event-names.js";
@@ -121,17 +122,8 @@ function initCheckUpdate() {
                 updateEl.innerHTML = `新版本 ${r.latest_version} 可用${link}`;
                 // 0.25.10：发现新版本 → 露出一键更新入口
                 if (installBtn) installBtn.hidden = false;
-                // 0.17.1：展示 release notes（Markdown 渲染）
-                if (notesEl) {
-                    const notes = r.release_notes || "";
-                    if (notes.trim()) {
-                        renderMarkdown(notes, {container: notesEl});
-                        notesEl.hidden = false;
-                    } else {
-                        notesEl.textContent = t("about.update.no_notes");
-                        notesEl.hidden = false;
-                    }
-                }
+                // 0.17.1：展示 release notes；0.25.19：多版本分组渲染
+                renderUpdateNotes(notesEl, r);
             } else {
                 updateEl.textContent = `已是最新版本（${r.current_version}）`;
             }
@@ -171,6 +163,58 @@ function initCheckUpdate() {
             }
         });
     }
+}
+
+/**
+ * 渲染更新日志区（0.25.19 多版本分组）。
+ *
+ * r.updates 是后端筛好的待更新版本（从新到旧，已滤掉 release 模板段）：
+ * - 单版本：维持 0.17.1 形态只渲染正文，版本号不重复展示（上方
+ *   「新版本 x 可用」一行已示）
+ * - 多版本（跳版升级）：每版一个分组——版本号标签 + 各自「查看」链接 + 正文
+ * updates 缺失/为空时兜底单条 release_notes，再退到 no_notes 文案。
+ */
+function renderUpdateNotes(notesEl, r) {
+    if (!notesEl) return;
+    const updates = Array.isArray(r.updates) && r.updates.length
+        ? r.updates
+        : (r.release_notes || "").trim()
+            ? [{version: r.latest_version, notes: r.release_notes, release_url: r.release_url}]
+            : [];
+    if (!updates.length) {
+        notesEl.textContent = t("about.update.no_notes");
+        notesEl.hidden = false;
+        return;
+    }
+    notesEl.innerHTML = "";
+    const multi = updates.length > 1;
+    for (const u of updates) {
+        const section = document.createElement("div");
+        section.className = "release-notes-version";
+        if (multi) {
+            const head = document.createElement("div");
+            head.className = "release-notes-version-head";
+            const tag = document.createElement("span");
+            tag.className = "release-notes-version-tag";
+            tag.textContent = `v${u.version}`;
+            head.appendChild(tag);
+            if (u.release_url) {
+                // .external-link + data-url 走统一外链委托（外部浏览器打开）
+                const link = document.createElement("a");
+                link.href = "#";
+                link.className = "external-link about-update-link";
+                link.dataset.url = u.release_url;
+                link.textContent = "查看";
+                head.appendChild(link);
+            }
+            section.appendChild(head);
+        }
+        const body = document.createElement("div");
+        section.appendChild(body);
+        renderMarkdown(u.notes || "", {container: body});
+        notesEl.appendChild(section);
+    }
+    notesEl.hidden = false;
 }
 
 /**

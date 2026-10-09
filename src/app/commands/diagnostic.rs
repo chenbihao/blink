@@ -277,13 +277,18 @@ async fn global_proxy_url(app: &tauri::AppHandle) -> Option<String> {
     })
 }
 
-/// 设置页-关于：检查 GitHub 最新 Release 版本。
+/// 设置页-关于：检查 GitHub Release 是否有新版本（0.25.19 起一次拉取最近多条）。
 ///
-/// 流程：请求 GitHub API `/repos/{owner/repo}/releases/latest` →
-/// 取 `tag_name` 去掉 `v` 前缀 → semver 比较与当前版本。
+/// 流程：请求 GitHub API `/repos/{owner/repo}/releases?per_page=10`（时间倒序）→
+/// 取第一条非 prerelease 为「最新发布版」（在客户端复现 `/latest` 端点的
+/// prerelease 排除语义）→ `version_gt` 与当前版本比较；所有大于当前版本的
+/// 已发布条目经 `extract_changelog` 过滤模板后作为 `updates` 数组返回，
+/// 供前端按版本分组展示更新日志（跳版升级可看到中间各版内容）。
 ///
 /// 返回 JSON：
-/// - 成功：`{ has_update, current_version, latest_version, release_url }`
+/// - 成功：`{ has_update, current_version, latest_version, release_url,
+///   release_notes, updates: [{version, notes, release_url}] }`
+///   （updates 从新到旧，可能为空数组）
 /// - 网络失败：`{ has_update: false, current_version, error: "..." }`
 ///
 /// **走全局代理**：如果用户配置了 `engine:_global_proxy`，检查更新请求也走代理。
@@ -298,7 +303,7 @@ pub async fn check_update(app: tauri::AppHandle) -> serde_json::Value {
         .trim_start_matches("http://github.com/")
         .trim_end_matches('/');
 
-    let api_url = format!("https://api.github.com/repos/{repo_path}/releases/latest");
+    let api_url = format!("https://api.github.com/repos/{repo_path}/releases?per_page=10");
 
     // 读取全局代理配置，与插件 HTTP 请求共用
     let proxy_url = global_proxy_url(&app).await;
@@ -336,7 +341,7 @@ pub async fn check_update(app: tauri::AppHandle) -> serde_json::Value {
             "error": format!("GitHub API 返回 {}", resp.status()),
         });
     }
-    let body = match resp.json::<serde_json::Value>().await {
+    let releases = match resp.json::<Vec<serde_json::Value>>().await {
         Ok(b) => b,
         Err(e) => {
             tracing::warn!(%e, "check_update: 解析 JSON 失败");
@@ -348,18 +353,29 @@ pub async fn check_update(app: tauri::AppHandle) -> serde_json::Value {
         }
     };
 
-    let tag = body["tag_name"].as_str().unwrap_or("");
-    let latest = tag.trim_start_matches('v');
-    let release_url = body["html_url"]
-        .as_str()
-        .unwrap_or(&format!("https://github.com/{repo_path}/releases/latest"))
-        .to_string();
-    // 0.17.1 §3.8：提取 release notes（GitHub API release body 字段）
-    let release_notes = body["body"].as_str().unwrap_or("").to_string();
+    // 「最新发布版」= 列表第一条非 prerelease（GitHub /releases 按创建时间倒序）
+    let latest_release = releases
+        .iter()
+        .find(|r| !r["prerelease"].as_bool().unwrap_or(false));
+    let latest = latest_release
+        .and_then(|r| r["tag_name"].as_str())
+        .map(|t| t.trim_start_matches('v').to_string())
+        .unwrap_or_default();
+    let release_url = latest_release
+        .and_then(|r| r["html_url"].as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("https://github.com/{repo_path}/releases/latest"));
+    // 0.17.1 §3.8：最新版的 release notes；release.yml 模板固定含「下载方式 +
+    // SmartScreen 提示」样板段，只保留更新日志正文
+    let release_notes = latest_release
+        .map(|r| extract_changelog(r["body"].as_str().unwrap_or("")))
+        .unwrap_or_default();
+    // 0.25.19：全部待更新版本（> 当前版本，从新到旧），供前端分组展示
+    let pending = collect_pending_updates(&releases, current);
 
-    let has_update = version_gt(latest, current);
+    let has_update = version_gt(&latest, current);
     if has_update {
-        tracing::info!(current, latest, "发现新版本");
+        tracing::info!(current, latest, pending = pending.len(), "发现新版本");
     } else {
         tracing::debug!(current, latest, "已是最新版本");
     }
@@ -370,7 +386,47 @@ pub async fn check_update(app: tauri::AppHandle) -> serde_json::Value {
         "latest_version": latest,
         "release_url": release_url,
         "release_notes": release_notes,
+        "updates": pending
+            .iter()
+            .map(|(version, notes, url)| serde_json::json!({
+                "version": version,
+                "notes": notes,
+                "release_url": url,
+            }))
+            .collect::<Vec<_>>(),
     })
+}
+
+/// 从 release 数组筛出待更新条目（0.25.19）：跳过 prerelease 与不大于当前
+/// 版本的条目，每条经 `extract_changelog` 过滤模板，返回
+/// (version, notes, release_url)，保持 GitHub 返回的时间倒序（新→旧）。
+fn collect_pending_updates(
+    releases: &[serde_json::Value],
+    current: &str,
+) -> Vec<(String, String, String)> {
+    releases
+        .iter()
+        .filter(|r| !r["prerelease"].as_bool().unwrap_or(false))
+        .filter_map(|r| {
+            let version = r["tag_name"].as_str()?.trim_start_matches('v');
+            if !version_gt(version, current) {
+                return None;
+            }
+            let notes = extract_changelog(r["body"].as_str().unwrap_or(""));
+            let url = r["html_url"].as_str().unwrap_or("").to_string();
+            Some((version.to_string(), notes, url))
+        })
+        .collect()
+}
+
+/// 从 release body 截取实际更新内容：release.yml 固定模板的
+/// 「下载方式 + SmartScreen 提示」样板段在「### 更新日志」标记之前，滤掉后
+/// 只保留其后的正文；无标记（手工编辑/历史 release）时原样返回，宁多勿缺。
+fn extract_changelog(notes: &str) -> String {
+    match notes.split_once("### 更新日志") {
+        Some((_, changelog)) => changelog.trim().to_string(),
+        None => notes.trim().to_string(),
+    }
 }
 
 // ── 0.25.10 应用内一键更新（tauri-plugin-updater）──────────────────────────
@@ -990,4 +1046,72 @@ pub async fn cleanup_all_data(app: tauri::AppHandle) -> serde_json::Value {
 #[tauri::command]
 pub async fn show_theme_debug_cmd(app: tauri::AppHandle) -> Result<(), String> {
     crate::infra::platform::window::show_theme_debug_window(&app)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{collect_pending_updates, extract_changelog};
+
+    /// release.yml 生成的完整模板形态（照抄 `.github/workflows/release.yml` 的 body 块）
+    const TEMPLATE_BODY: &str = "## Blink v0.25.17\n\n### 下载\n- **MSI 安装包**（`.msi`）：标准 Windows 安装程序\n- **NSIS 安装包**（`-setup.exe`）：轻量安装程序\n\n> 首次运行未签名，Windows SmartScreen 可能拦截，点击「更多信息 → 仍要运行」即可。\n\n### 更新日志\n\n新增一键自动更新功能，优化浅色主题表现。\n\n调整快捷键支持单功能键。";
+
+    #[test]
+    fn changelog_extracts_body_after_marker_and_drops_template() {
+        let out = extract_changelog(TEMPLATE_BODY);
+        assert!(out.starts_with("新增一键自动更新功能"));
+        assert!(out.ends_with("调整快捷键支持单功能键。"));
+        assert!(!out.contains("MSI 安装包"));
+        assert!(!out.contains("SmartScreen"));
+        assert!(!out.contains("### 更新日志"));
+    }
+
+    #[test]
+    fn changelog_falls_back_to_full_body_without_marker() {
+        let manual = "手工编辑的 release，没有模板段";
+        assert_eq!(extract_changelog(manual), manual);
+    }
+
+    #[test]
+    fn changelog_empty_body_stays_empty() {
+        assert_eq!(extract_changelog(""), "");
+        assert_eq!(extract_changelog("  \n "), "");
+    }
+
+    /// 构造 GitHub `/releases` 列表条目（含模板 body 的最小形态）
+    fn release_item(tag: &str, prerelease: bool, changelog: &str) -> serde_json::Value {
+        serde_json::json!({
+            "tag_name": tag,
+            "prerelease": prerelease,
+            "html_url": format!("https://github.com/chenbihao/blink/releases/tag/{tag}"),
+            "body": format!("## Blink {tag}\n\n### 下载\n- **MSI 安装包**\n\n### 更新日志\n\n{changelog}"),
+        })
+    }
+
+    #[test]
+    fn pending_updates_keeps_newer_stable_releases_in_api_order() {
+        // GitHub /releases 按创建时间倒序——fixture 顺序即真实返回顺序
+        let releases = vec![
+            release_item("v0.25.20", false, "乙功能"),
+            release_item("v0.25.21-beta", true, "预发布不进列表"),
+            release_item("v0.25.19", false, "甲功能"),
+            release_item("v0.25.18", false, "当前版本不进列表"),
+        ];
+        let out = collect_pending_updates(&releases, "0.25.18");
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].0, "0.25.20");
+        assert_eq!(out[1].0, "0.25.19");
+        assert!(out[0].1.contains("乙功能"));
+        assert!(!out[0].1.contains("MSI 安装包"));
+        assert!(out[0].2.ends_with("/tag/v0.25.20"));
+    }
+
+    #[test]
+    fn pending_updates_empty_when_nothing_newer() {
+        let releases = vec![
+            release_item("v0.25.18", false, "当前版本"),
+            release_item("v0.25.19-beta", true, "预发布"),
+        ];
+        assert!(collect_pending_updates(&releases, "0.25.18").is_empty());
+        assert!(collect_pending_updates(&[], "0.25.18").is_empty());
+    }
 }
