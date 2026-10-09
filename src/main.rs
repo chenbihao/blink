@@ -445,7 +445,19 @@ fn main() {
                     .map(|d| d.join("plugins").join("builtin"))
                     .unwrap_or_else(|_| domain::plugin::builtin_plugins_dir())
             };
-            let plugins = domain::plugin::load_builtin_plugins(&plugins_dir, proxy.clone());
+            let mut plugins = domain::plugin::load_builtin_plugins(&plugins_dir, proxy.clone());
+            // 0.25.20：dev 额外加载 examples 示例插件（echo-python / echo-node
+            // 验证托管脚本解释器链路；release 包不含 examples 资源——编译期
+            // 排除，与 examples_plugins_dir 的 cfg 对齐）。
+            #[cfg(debug_assertions)]
+            {
+                let examples = domain::plugin::load_builtin_plugins(
+                    &domain::plugin::examples_plugins_dir(),
+                    proxy.clone(),
+                );
+                tracing::debug!(count = examples.len(), "已加载 examples 示例插件");
+                plugins.extend(examples);
+            }
             // 构造意图路由 RuleRouter,从插件 manifest 注入规则(合并用户自定义 triggers)。
             let router = std::sync::Arc::new(domain::intent::RuleRouter::new(app_config.surface_takeover_enabled));
             // 0.24.2 §3.7：SuggestionCoordinator 由编排层（SearchService）持有，
@@ -924,6 +936,10 @@ fn main() {
 
             // 后台预热次级窗口（1s 延迟，不阻塞启动；WebView2 冷启动 300~400ms → 预热后 show <50ms）
             infra::platform::window::preheat_secondary_windows(app.handle().clone());
+
+            // 0.25.20：清扫脚本解释器孤儿 staging（上次安装中断的残留；
+            // 独立线程，不阻塞主链路）
+            app::commands::startup_sweep();
 
             // 0.22.3: 构造进程级 EngineManager（全进程唯一实例）
             //
@@ -1551,8 +1567,9 @@ app::commands::generate_palette_schemes,
             app::commands::hide_context_menu,
             app::commands::context_menu_action,
             app::commands::take_context_menu_payload,
-            app::commands::probe_interpreters,
-            app::commands::get_interpreter_paths,
+            app::commands::script_interpreters_status,
+            app::commands::install_script_interpreter,
+            app::commands::uninstall_script_interpreter,
             app::commands::open_file_dialog,
             app::commands::pick_directory_dialog,
 app::commands::get_clipboard_history,

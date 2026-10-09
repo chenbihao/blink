@@ -8,7 +8,7 @@
 //! - Windows:CREATE_NO_WINDOW 防控制台子进程弹窗。
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,8 +28,9 @@ use super::protocol::{
 pub enum PluginError {
     /// 进程拉起失败。
     Spawn(String),
-    /// 解释器未找到。
-    InterpreterNotFound(String),
+    /// 托管脚本运行时未安装（0.25.20：Python/Node 解释器改 Blink 托管分发，
+    /// 不再探测系统 PATH——缺失时引导用户到设置页安装）。
+    InterpreterNotInstalled { kind: &'static str },
     /// 进程已关闭(stdout EOF / 写 stdin 失败)。
     ProcessClosed,
     /// 查询超时。
@@ -44,7 +45,9 @@ impl std::fmt::Display for PluginError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PluginError::Spawn(e) => write!(f, "spawn 失败: {e}"),
-            PluginError::InterpreterNotFound(name) => write!(f, "未找到解释器: {name}"),
+            PluginError::InterpreterNotInstalled { kind } => {
+                write!(f, "脚本运行时（{kind}）未安装")
+            }
             PluginError::ProcessClosed => write!(f, "进程已关闭"),
             PluginError::Timeout => write!(f, "查询超时"),
             PluginError::PluginReturned(e) => write!(f, "插件返回错误: {e}"),
@@ -70,126 +73,21 @@ struct PluginProcess {
     next_id: std::sync::atomic::AtomicU64,
 }
 
-/// 解释器探测结果。
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct InterpreterStatus {
-    /// 是否找到
-    pub found: bool,
-    /// 可执行文件路径
-    pub path: Option<String>,
-    /// 版本号（如 "3.11.4"）
-    pub version: Option<String>,
-    /// 版本是否符合最低要求
-    pub version_ok: bool,
-    /// 错误信息（未找到/版本过低时）
-    pub error: Option<String>,
-}
-
-/// 检测路径是否应该跳过（无效/无用的系统目录）。
-fn should_skip_path(path: &std::path::Path) -> bool {
-    let path_str = path.to_string_lossy().to_lowercase();
-    // 排除 WindowsApps（里面都是假 exe，实际是 AppX 执行代理）
-    path_str.contains("microsoft\\windowsapps")
-        || path_str.contains("appdata\\local\\microsoft\\windowsapps")
-        || path_str.contains("program files\\windowsapps")
-}
-
-/// 在 PATH 中查找解释器，返回第一个找到的路径。
+/// 解析托管脚本解释器 exe 路径（0.25.20 取代 PATH 探测）。
 ///
-/// 如果提供了 `manual_path`，优先验证该路径是否存在：
-/// - 有效则直接返回（用户手动配置优先）
-/// - 无效则记录警告并回退到 PATH 扫描
-pub fn find_interpreter(
-    candidates: &[&str],
-    manual_path: Option<&str>,
+/// 版本由 Blink 锁文件锁定、安装在 `runtimes/script_interpreters/` 下，与用户
+/// 系统隔离；**未安装不回退到系统 PATH**——版本不可控会破坏托管语义，
+/// 缺失时返回 `InterpreterNotInstalled`，由四层兜底转为引导安装的错误项。
+fn managed_interpreter(
+    kind: blink_infra::script_interpreter::ScriptInterpreterKind,
 ) -> Result<PathBuf, PluginError> {
-    // 1. 优先使用用户手动配置的路径
-    if let Some(path) = manual_path {
-        let p = PathBuf::from(path);
-        if p.is_file() {
-            // 直接指向 exe 文件
-            tracing::debug!(path = %path, "使用手动配置的解释器路径");
-            return Ok(p);
-        }
-        if p.is_dir() {
-            // 选了文件夹 → 在内部查找候选 exe
-            for candidate in candidates {
-                let exe = p.join(format!("{candidate}.exe"));
-                if exe.exists() {
-                    tracing::debug!(path = %exe.display(), "在手动配置的目录中找到解释器");
-                    return Ok(exe);
-                }
-            }
-            tracing::warn!(dir = %path, "手动配置的目录中未找到解释器，回退到 PATH 扫描");
-        } else {
-            tracing::warn!(path = %path, "手动配置的解释器路径不存在，回退到 PATH 扫描");
-        }
-    }
-
-    // 2. 扫描 PATH 环境变量的所有目录
-    let path_env = std::env::var("PATH").unwrap_or_default();
-    for dir in std::env::split_paths(&path_env) {
-        // 跳过无效系统目录
-        if should_skip_path(&dir) {
-            continue;
-        }
-        for candidate in candidates {
-            let exe = dir.join(format!("{candidate}.exe"));
-            if exe.exists() {
-                return Ok(exe);
-            }
-        }
-    }
-    Err(PluginError::InterpreterNotFound(
-        candidates.join(" / ").to_string(),
-    ))
-}
-
-/// 探测解释器版本，返回 (version_string, version_ok)。
-fn probe_version(exe_path: &Path, version_arg: &str, min_version: &str) -> (Option<String>, bool) {
-    let output = match blink_infra::platform::no_window(std::process::Command::new(exe_path))
-        .arg(version_arg)
-        .output()
-    {
-        Ok(o) => o,
-        Err(_) => return (None, false),
+    let kind_name = match kind {
+        blink_infra::script_interpreter::ScriptInterpreterKind::Python => "Python",
+        blink_infra::script_interpreter::ScriptInterpreterKind::Node => "Node.js",
     };
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let version_output = if stdout.is_empty() { &stderr } else { &stdout };
-
-    // 简单的版本提取：找第一个数字.数字.数字模式
-    let version_re = regex::Regex::new(r"(\d+\.\d+\.\d+)").unwrap();
-    let version = version_re
-        .find(version_output)
-        .map(|m| m.as_str().to_string());
-
-    let version_ok = version
-        .as_ref()
-        .map(|v| version_is_gte(v, min_version))
-        .unwrap_or(false);
-
-    (version, version_ok)
-}
-
-/// 简单的版本比较：a >= b？只支持 x.y.z 格式。
-fn version_is_gte(a: &str, b: &str) -> bool {
-    let parse = |s: &str| -> Option<(u32, u32, u32)> {
-        let parts: Vec<&str> = s.split('.').collect();
-        if parts.len() < 2 {
-            return None;
-        }
-        let major = parts[0].parse().ok()?;
-        let minor = parts[1].parse().ok()?;
-        let patch = parts.get(2).and_then(|p| p.parse().ok()).unwrap_or(0);
-        Some((major, minor, patch))
-    };
-
-    match (parse(a), parse(b)) {
-        (Some(a), Some(b)) => a >= b,
-        _ => false,
-    }
+    blink_infra::script_interpreter::resolve(kind).ok_or(PluginError::InterpreterNotInstalled {
+        kind: kind_name,
+    })
 }
 
 impl PluginProcess {
@@ -209,13 +107,16 @@ impl PluginProcess {
                 c
             }
             RuntimeType::Python => {
-                let interpreter = find_interpreter(&["python", "python3", "py"], None)?;
+                let interpreter = managed_interpreter(
+                    blink_infra::script_interpreter::ScriptInterpreterKind::Python,
+                )?;
                 let mut c = tokio::process::Command::new(interpreter);
                 c.current_dir(work_dir).arg(exec_path);
                 c
             }
             RuntimeType::Node => {
-                let interpreter = find_interpreter(&["node", "nodejs"], None)?;
+                let interpreter =
+                    managed_interpreter(blink_infra::script_interpreter::ScriptInterpreterKind::Node)?;
                 let mut c = tokio::process::Command::new(interpreter);
                 c.current_dir(work_dir).arg(exec_path);
                 c
@@ -633,8 +534,8 @@ impl PluginHandle {
                     Err(e) => {
                         // 进程拉起失败 → 返回友好错误项,用户知道发生了什么
                         let msg = match e {
-                            PluginError::InterpreterNotFound(name) => {
-                                format!("未找到解释器：{name}，请在设置页配置")
+                            PluginError::InterpreterNotInstalled { kind } => {
+                                format!("脚本运行时（{kind}）未安装，请在 设置 → 引擎 → 脚本运行时 安装")
                             }
                             PluginError::Spawn(e) => format!("进程启动失败：{e}"),
                             _ => e.to_string(),
@@ -701,8 +602,8 @@ impl PluginHandle {
                     Ok(proc) => *guard = Some(Arc::new(proc)),
                     Err(e) => {
                         let msg = match e {
-                            PluginError::InterpreterNotFound(name) => {
-                                format!("未找到解释器：{name}，请在设置页配置")
+                            PluginError::InterpreterNotInstalled { kind } => {
+                                format!("脚本运行时（{kind}）未安装，请在 设置 → 引擎 → 脚本运行时 安装")
                             }
                             PluginError::Spawn(e) => format!("进程启动失败：{e}"),
                             _ => e.to_string(),
@@ -733,74 +634,6 @@ impl PluginHandle {
 
         result
     }
-}
-
-/// 所有解释器的探测结果。
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct InterpretersStatus {
-    pub python: InterpreterStatus,
-    pub node: InterpreterStatus,
-}
-
-/// 探测系统中所有支持的脚本解释器状态。
-///
-/// 如果提供了 `manual_python` 或 `manual_node`，优先验证该路径（用户手动配置），
-/// 无效时才回退到 PATH 扫描。
-pub fn probe_interpreters(
-    manual_python: Option<&str>,
-    manual_node: Option<&str>,
-) -> InterpretersStatus {
-    // Python: 最低 3.8
-    let python = match find_interpreter(&["python", "python3", "py"], manual_python) {
-        Ok(path) => {
-            let (version, version_ok) = probe_version(&path, "--version", "3.8.0");
-            InterpreterStatus {
-                found: true,
-                path: Some(path.to_string_lossy().to_string()),
-                version,
-                version_ok,
-                error: if !version_ok {
-                    Some("Python 版本需 >= 3.8".to_string())
-                } else {
-                    None
-                },
-            }
-        }
-        Err(e) => InterpreterStatus {
-            found: false,
-            path: None,
-            version: None,
-            version_ok: false,
-            error: Some(e.to_string()),
-        },
-    };
-
-    // Node.js: 最低 16.0
-    let node = match find_interpreter(&["node", "nodejs"], manual_node) {
-        Ok(path) => {
-            let (version, version_ok) = probe_version(&path, "--version", "16.0.0");
-            InterpreterStatus {
-                found: true,
-                path: Some(path.to_string_lossy().to_string()),
-                version,
-                version_ok,
-                error: if !version_ok {
-                    Some("Node.js 版本需 >= 16.0".to_string())
-                } else {
-                    None
-                },
-            }
-        }
-        Err(e) => InterpreterStatus {
-            found: false,
-            path: None,
-            version: None,
-            version_ok: false,
-            error: Some(e.to_string()),
-        },
-    };
-
-    InterpretersStatus { python, node }
 }
 
 /// 执行 HTTP 请求（插件代理请求用）。使用 reqwest 并遵循全局代理配置。

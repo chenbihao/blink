@@ -143,7 +143,6 @@ export const en = {
     "engine.builtin_actions.save_failed": "Save failed",
     "engine.everything.hint": "(optional, requires installation)",
     "engine.everything.status.label": "Everything status",
-    "engine.probe": "Re-probe",
     "engine.everything.port.label": "HTTP port",
     "engine.everything.port.hint": "Everything options → HTTP server",
     "engine.everything.max_results.label": "Max results",
@@ -157,25 +156,28 @@ export const en = {
     "engine.status.available": "Available ✓",
     "engine.status.unavailable": "Unavailable ✗",
     "engine.status.failed": "Probe failed",
-    "engine.status.version_low": "Version too low",
-    "engine.status.version_unknown": "Version unknown",
-    "engine.status.not_found": "Not found",
 
     // ── Engines tab: interpreters (Phase 0.6) ──
-    "engine.interpreter.title": "Script Interpreters",
-    "engine.interpreter.desc": "Python / Node.js runtime for script plugins",
+    "plugin.script_runtime.guide": "This plugin needs the {runtime} script runtime (downloaded and installed by Blink, tens of MB; your system interpreters are untouched). Go to Settings to install it now?",
     "engine.python.title": "Python",
-    "engine.python.status": "Status",
-    "engine.python.path": "Python path",
-    "engine.python.path.ph": "Auto-detect or enter manually...",
-    "engine.python.hint": "For .py script plugins, requires Python 3.8+",
+    // ── Script runtime (Blink-managed, 0.25.20) ──
+    "engines.section.script_runtime": "Script Runtime (Blink-managed)",
+    "engines.section.script_runtime.desc": "Python / Node.js distributions are downloaded by Blink into an isolated directory with locked versions, for running script plugins. Your system interpreters are never read or modified.",
+    "engine.script_runtime.title": "Script Runtime",
+    "engine.script_runtime.desc": "Python / Node.js runtime for script plugins (managed)",
+    "engine.script_runtime.status": "Status",
+    "engine.script_runtime.installed": "{version} installed",
+    "engine.script_runtime.not_installed": "Not installed",
+    "engine.script_runtime.install": "Install",
+    "engine.script_runtime.uninstall": "Uninstall",
+    "engine.script_runtime.installing": "Installing…",
+    "engine.script_runtime.uninstall_confirm": "Script plugins depending on this runtime will stop working after uninstall (uninstall fails while the interpreter is held by a plugin process — retry after restarting Blink). Uninstall anyway?",
+    "engine.script_runtime.install_failed": "Install failed: {message}",
+    "engine.script_runtime.stage.downloading": "Downloading…",
+    "engine.script_runtime.stage.extracting": "Extracting…",
+    "engine.script_runtime.stage.verifying": "Verifying…",
+    "engine.script_runtime.stage.promoting": "Finalizing…",
     "engine.node.title": "Node.js",
-    "engine.node.status": "Status",
-    "engine.node.path": "Node path",
-    "engine.node.path.ph": "Auto-detect or enter manually...",
-    "engine.node.hint": "For .js script plugins, requires Node.js 16+",
-    "engine.browse": "Browse",
-    "engine.probe_all": "Re-probe all",
     // Spinner buttons
     "spinner.increase": "Increase",
     "spinner.decrease": "Decrease",
@@ -185,9 +187,6 @@ export const en = {
     // Error messages
     "error.port_range": "Port must be between 1-65535",
     // File dialog
-    "file_dialog.python_title": "Select Python executable",
-    "file_dialog.node_title": "Select Node.js executable",
-    "file_dialog.exe_filter": "Executable files",
 
     // ── Debug tab: logging ──
     "debug.section.log": "Logging · Troubleshooting",
@@ -1449,9 +1448,6 @@ export const en = {
     // ── Engines section headings (0.22.5) ──
     "engines.section.search_sources": "Search Sources",
     "engines.section.search_sources.desc": "Apps / files / calculator — feed search results in the main window.",
-    "engines.section.script_interpreters": "Script Interpreters",
-    "engines.section.script_interpreters.desc": "Python / Node.js interpreters for running script plugins. These are your system interpreters; Blink does not modify them.",
-    "engines.section.script_interpreters.note": "Different from the Blink-managed runtime below: script interpreters read your PATH or manual config, not the isolated environment.",
     "engines.section.local_runtime": "Local Model Engines",
 
     // ── Local engine runtime (0.22.5; compact density redesign) ──

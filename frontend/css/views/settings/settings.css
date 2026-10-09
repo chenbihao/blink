@@ -1477,6 +1477,28 @@ details.plugin-config-section .plugin-config-body {
     padding: 10px 0 4px;
 }
 
+/* 0.25.20：引导深链后安装按钮的注意力闪烁（3 次脉冲，accent 色光环） */
+.btn-small.attention-flash {
+    animation: btn-attention-pulse 0.9s ease-in-out 3;
+}
+
+@keyframes btn-attention-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 transparent; }
+    50% { box-shadow: 0 0 0 3px var(--accent); }
+}
+
+/* 0.25.20：脚本运行时区块小节标题——排版同 plugin-section-title，
+   但无分隔线版式（区块仅两小节且间隔着进度行，扁平分隔线在此形成
+   双线 + 过大间隔；语义也不是 schema 分组） */
+.runtime-section-title {
+    font-size: var(--text-sm);
+    color: var(--text-faint);
+    font-weight: var(--weight-semibold);
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    padding: 10px 0 4px;
+}
+
 /* 扁平模式：.extension-body 内直接使用的 .plugin-section-title，
    需要更明显的分隔（上边框 + margin），替代嵌套的深色背景 */
 .extension-body > .plugin-section-title {

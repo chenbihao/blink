@@ -648,29 +648,6 @@ pub fn get_log_info() -> serde_json::Value {
     })
 }
 
-/// 探测系统中可用的脚本解释器状态。
-///
-/// 如果提供了 `python_path` 或 `node_path`，优先验证该路径（用户手动配置），
-/// 无效时才回退到 PATH 扫描。
-#[tauri::command]
-pub async fn probe_interpreters(
-    python_path: Option<String>,
-    node_path: Option<String>,
-) -> crate::domain::plugin::InterpretersStatus {
-    tracing::debug!(?python_path, ?node_path, "探测脚本解释器状态");
-    crate::domain::plugin::probe_interpreters(python_path.as_deref(), node_path.as_deref())
-}
-
-/// 获取已保存的解释器路径配置。
-#[tauri::command]
-pub async fn get_interpreter_paths(app: tauri::AppHandle) -> serde_json::Value {
-    let pool = &app.state::<crate::infra::data::DbPools>().config;
-    crate::infra::data::history::get_config(pool, "interpreter_paths")
-        .await
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or(serde_json::json!({}))
-}
-
 /// 获取性能统计概览（设置页 → 调试 Tab）。
 #[tauri::command]
 pub async fn get_perf_overview(app: tauri::AppHandle) -> serde_json::Value {

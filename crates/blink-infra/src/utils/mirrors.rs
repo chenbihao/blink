@@ -14,7 +14,12 @@
 //! gguf 锁定值）。换源只改 host/改写路径，镜像内容与锁定 hash 不一致时会被
 //! 校验层拒绝，降级线路不放宽供应链约束。
 //!
-//! 非 GitHub/HF 主站 URL 只含原链自身，不加镜像候选。
+//! - **Python 官方发行版**（`www.python.org/ftp/python/...`）：主站 → 华为云镜像
+//!   （路径同构：`mirrors.huaweicloud.com/python/...`；2026-10 实测字节一致）。
+//! - **Node.js 官方发行版**（`nodejs.org/dist/...`）：主站 → 华为云镜像
+//!   （路径同构：`mirrors.huaweicloud.com/nodejs/...`；2026-10 实测字节一致）。
+//!
+//! 非 GitHub/HF/Python/Node 主站 URL 只含原链自身，不加镜像候选。
 
 /// HuggingFace 主站 host 前缀。
 pub const HF_HOST: &str = "https://huggingface.co/";
@@ -36,6 +41,16 @@ const GH_PROXY_HOSTS: &[&str] = &[
 
 /// raw.githubusercontent 文件 URL 前缀。
 const RAW_GH_HOST: &str = "https://raw.githubusercontent.com/";
+
+/// Python 官方发行版 URL 前缀（0.25.20 脚本解释器托管分发）。
+const PYTHON_FTPOP_HOST: &str = "https://www.python.org/ftp/python/";
+/// Python 发行版华为云镜像（路径同构）。
+const PYTHON_MIRROR_HOST: &str = "https://mirrors.huaweicloud.com/python/";
+
+/// Node.js 官方发行版 URL 前缀（0.25.20 脚本解释器托管分发）。
+const NODE_DIST_HOST: &str = "https://nodejs.org/dist/";
+/// Node.js 发行版华为云镜像（路径同构）。
+const NODE_MIRROR_HOST: &str = "https://mirrors.huaweicloud.com/nodejs/";
 /// raw 文件镜像（jsDelivr，路径改写为 `/gh/{owner}/{repo}@{branch}/{path}`）。
 const JSDELIVR_HOSTS: &[&str] = &["https://cdn.jsdelivr.net", "https://fastly.jsdelivr.net"];
 
@@ -52,7 +67,24 @@ pub fn download_candidates(primary_url: &str) -> Vec<String> {
     if primary_url.starts_with(RAW_GH_HOST) {
         return raw_github_candidates(primary_url);
     }
+    if primary_url.starts_with(PYTHON_FTPOP_HOST) {
+        return mirror_host_candidates(primary_url, PYTHON_FTPOP_HOST, PYTHON_MIRROR_HOST);
+    }
+    if primary_url.starts_with(NODE_DIST_HOST) {
+        return mirror_host_candidates(primary_url, NODE_DIST_HOST, NODE_MIRROR_HOST);
+    }
     vec![primary_url.to_string()]
+}
+
+/// 整站路径同构镜像候选：主站原链 → 镜像 host（0.25.20 Python/Node 发行版）。
+///
+/// 与 HF 镜像同型：只换 host 不改路径，内容完整性由调用方 SHA-256 锁定兜底。
+fn mirror_host_candidates(primary_url: &str, primary_host: &str, mirror_host: &str) -> Vec<String> {
+    let mut candidates = vec![primary_url.to_string()];
+    if let Some(path) = primary_url.strip_prefix(primary_host) {
+        candidates.push(format!("{mirror_host}{path}"));
+    }
+    candidates
 }
 
 /// HF 候选：`BLINK_HF_ENDPOINT` 覆盖 → 主站 → hf-mirror 镜像。
@@ -152,6 +184,22 @@ mod tests {
         "https://huggingface.co/PaddlePaddle/PP-OCRv6_tiny_det_onnx/resolve/main/inference.onnx";
     const ORT_ZIP: &str = "https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-win-x64-1.19.2.zip";
     const DICT: &str = "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/main/ppocr/utils/dict/ppocrv6_tiny_dict.txt";
+    /// 0.25.20：Python/Node 发行版主站 → 华为云同构镜像，主站在前。
+    #[test]
+    fn python_and_node_dist_have_huaweicloud_mirror() {
+        let py = download_candidates(
+            "https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip",
+        );
+        assert_eq!(py[0], "https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip");
+        assert_eq!(py[1], "https://mirrors.huaweicloud.com/python/3.12.10/python-3.12.10-embed-amd64.zip");
+        assert_eq!(py.len(), 2);
+
+        let node = download_candidates("https://nodejs.org/dist/v22.11.0/node-v22.11.0-win-x64.zip");
+        assert_eq!(node[0], "https://nodejs.org/dist/v22.11.0/node-v22.11.0-win-x64.zip");
+        assert_eq!(node[1], "https://mirrors.huaweicloud.com/nodejs/v22.11.0/node-v22.11.0-win-x64.zip");
+        assert_eq!(node.len(), 2);
+    }
+
 
     #[test]
     fn hf_url_gets_mirror_candidate() {

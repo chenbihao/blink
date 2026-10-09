@@ -194,12 +194,24 @@ pub enum RuntimeType {
     /// 原生可执行文件（直接 spawn）
     #[default]
     Process,
-    /// Python 脚本（python xxx.py）
+    /// Python 脚本（python xxx.py；0.25.20 起跑 Blink 托管解释器）
     Python,
-    /// Node.js 脚本（node xxx.js）
+    /// Node.js 脚本（node xxx.js；0.25.20 起跑 Blink 托管解释器）
     Node,
-    /// PowerShell 脚本（powershell -File xxx.ps1）
+    /// PowerShell 脚本（powershell -File xxx.ps1，系统自带）
     Powershell,
+}
+
+impl RuntimeType {
+    /// 前端 wire 名（list_plugins 透传，启用引导按此判定是否需要托管运行时）。
+    pub fn wire_name(&self) -> &'static str {
+        match self {
+            Self::Process => "process",
+            Self::Python => "python",
+            Self::Node => "node",
+            Self::Powershell => "powershell",
+        }
+    }
 }
 
 /// 进程拉起参数。

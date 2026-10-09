@@ -578,7 +578,7 @@ dependencies = [
 
 [[package]]
 name = "blink"
-version = "0.25.19"
+version = "0.25.20"
 dependencies = [
  "async-trait",
  "base64 0.22.1",

@@ -133,6 +133,14 @@ function appendNew(items, didReset) {
     const realItems = (items || []).filter(x => x.source !== "empty_result");
 
     for (const item of realItems) {
+        // 0.25.20：迟到占位丢弃——Tauri 的 invoke 返回与事件推送到达顺序
+        // 不保证，插件查询极快时（进程已热，毫秒级）结果事件先于本 sync 批
+        // 到达：结果已立为该 seq 基底，后到的占位若照常 append 将永远无人
+        // 清理（清理块只看本批 items，占位自己被排除）——结果与转圈同屏。
+        if (item.is_placeholder && item.score !== -2
+            && allItems.some((x) => x.source === item.source && !x.is_placeholder)) {
+            continue;
+        }
         const key = itemKey(item);
         if (!seen.has(key)) {
             allItems.push(item);

@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "id": "example.echo-python",
+  "name": { "zh": "Echo (Python)", "en": "Echo (Python)" },
+  "version": "0.1.0",
+  "description": {
+    "zh": "回显输入文本——验证 Blink 托管 Python 解释器链路（0.25.20）",
+    "en": "Echo input text — validates the Blink-managed Python interpreter path (0.25.20)"
+  },
+  "builtin": true,
+  "default_enabled": false,
+  "runtime": {
+    "type": "python",
+    "protocol": "jsonl",
+    "exec": "./main.py",
+    "timeout_ms": 8000,
+    "concurrency": 1
+  },
+  "triggers": [
+    { "type": "keyword", "keyword": "echo", "exclusive": true }
+  ],
+  "capabilities": ["query"]
+}

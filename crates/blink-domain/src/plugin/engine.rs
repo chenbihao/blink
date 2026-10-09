@@ -138,6 +138,9 @@ impl PluginEngine {
                     "custom_triggers": custom_triggers,
                     "disabled_default_triggers": config.disabled_default_triggers,
                     "enabled": self.is_enabled(&manifest.id),
+                    // 0.25.20：runtime 类型透传——python/node 脚本插件启用时
+                    // 前端引导安装托管解释器（powershell 系统自带、process 无需）。
+                    "runtime_type": manifest.runtime.r#type.wire_name(),
                     "settings": self.get_settings(&manifest.id),
                     "settings_schema": schema,
                 })

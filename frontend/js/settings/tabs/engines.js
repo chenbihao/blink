@@ -6,9 +6,11 @@
  * 与其它自动保存卡片（context / general / chord）一致。
  */
 
-import {invoke, messageDialog} from "../../shared/tauri.js";
+import {confirmDialog, invoke, listen, messageDialog} from "../../shared/tauri.js";
 import {onLangChange, t} from "../../i18n/index.js";
 import {saveConfig} from "../../shared/config-keys.js";
+import {EVENTS} from "../../shared/event-names.js";
+import {formatBytes, progressPercent} from "../../shared/download-progress.js";
 import {initApplicationSearch} from "./application-search.js";
 
 /**
@@ -21,13 +23,13 @@ export function initEnginesTab(cfg) {
     initApplicationSearch();
     initCalcConfig();
     initFileSearchConfig();
-    initInterpreterProbing();
-    // 状态徽章文本是 JS 动态生成（探测结果 → i18n key），applyI18n 扫不到，
+    initScriptRuntime();
+    // 状态徽章文本是 JS 动态生成（状态结果 → i18n key），applyI18n 扫不到，
     // 语言切换时通过 i18n 订阅自行刷新
     onLangChange(() => {
         refreshEverythingBadgeText();
-        refreshInterpreterBadgeText("python");
-        refreshInterpreterBadgeText("node");
+        refreshScriptRuntimeBadgeText("python");
+        refreshScriptRuntimeBadgeText("node");
     });
 }
 
@@ -181,203 +183,200 @@ export function refreshEverythingBadgeText() {
     statusEl.textContent = t(key);
 }
 
-/**
- * 刷新脚本解释器徽章文本（语言切换时）
- * @param {string} type - 解释器类型（python/node）
- */
-export function refreshInterpreterBadgeText(type) {
-    const statusEl = document.getElementById(`${type}-status`);
-    if (!statusEl) return;
-    const key =
-        statusEl.dataset.badgeState === "available" ? "engine.status.available" :
-            statusEl.dataset.badgeState === "version_low" ? "engine.status.version_low" :
-                statusEl.dataset.badgeState === "version_unknown" ? "engine.status.version_unknown" :
-                    statusEl.dataset.badgeState === "not_found" ? "engine.status.not_found" :
-                        statusEl.dataset.badgeState === "failed" ? "engine.status.failed" :
-                            "engine.status.probing";
-    statusEl.textContent = t(key);
-}
+// ── 脚本运行时（Blink 托管，0.25.20 取代系统解释器探测）──────────────────
+//
+// Python / Node 发行版由 Blink 下载到独立目录并锁定版本，与用户系统 PATH
+// 隔离；本区块只做状态展示与安装/卸载操作，进度经
+// EVENTS.SCRIPT_INTERPRETER_INSTALL 事件实时更新。
 
-// ── 脚本解释器探测（搬自原 settings.js，0.9.5 拆分时遗漏，0.9.5.1 补回）─────────
+/** 解释器种类列表（DOM id 与后端 kind 一致）。 */
+const RUNTIME_KINDS = ["python", "node"];
 
 /**
- * 更新单个解释器的状态 UI
- * @param {"python"|"node"} type - 解释器类型
- * @param {Object} status - 后端探测结果 { found, version_ok, version, path, error }
+ * 渲染单个运行时行的状态徽章与操作按钮
+ * @param {"python"|"node"} kind
+ * @param {Object} st - 后端状态 { kind, version, installed, exe_path }
  */
-function updateInterpreterUI(type, status) {
-    const statusEl = document.getElementById(`${type}-status`);
-    const pathEl = document.getElementById(`${type}-path`);
+function renderRuntimeRow(kind, st) {
+    const statusEl = document.getElementById(`script-${kind}-status`);
+    const actionEl = document.getElementById(`script-${kind}-action`);
     if (!statusEl) return;
 
-    if (status.found) {
-        if (status.version_ok) {
-            const versionText = status.version ? `${status.version} ` : "";
-            statusEl.textContent = `${versionText}${t("engine.status.available")}`;
-            statusEl.className = "status-badge status-available";
-            statusEl.dataset.badgeState = "available";
-        } else if (status.version) {
-            // 找到了 exe 且获取到版本号，但版本过低
-            statusEl.textContent = `${status.version} ${t("engine.status.version_low")}`;
-            statusEl.className = "status-badge status-warning";
-            statusEl.dataset.badgeState = "version_low";
-        } else {
-            // 找到了 exe 但无法获取版本（执行失败/输出异常）
-            statusEl.textContent = t("engine.status.version_unknown");
-            statusEl.className = "status-badge status-warning";
-            statusEl.dataset.badgeState = "version_unknown";
-        }
-        if (pathEl) pathEl.value = status.path || "";
+    if (st?.installed) {
+        statusEl.dataset.badgeState = "installed";
+        statusEl.dataset.version = st.version || "";
+        statusEl.title = st.exe_path || "";
     } else {
-        statusEl.textContent = t("engine.status.not_found");
-        statusEl.className = "status-badge status-unavailable";
-        statusEl.dataset.badgeState = "not_found";
-        if (pathEl) pathEl.value = status.error || t("engine.status.not_found");
+        statusEl.dataset.badgeState = "not_installed";
+        delete statusEl.dataset.version;
+        statusEl.title = "";
     }
-}
-
-/**
- * 保存解释器路径配置到后端（持久化到 SQLite config 表）
- */
-async function saveInterpreterPaths() {
-    const pythonPath = document.getElementById("python-path")?.value || "";
-    const nodePath = document.getElementById("node-path")?.value || "";
-    try {
-        await invoke("set_config", {
-            key: "interpreter_paths",
-            value: {python_path: pythonPath, node_path: nodePath},
-        });
-    } catch (e) {
-        console.error("saveInterpreterPaths failed:", e);
-    }
-}
-
-/**
- * 打开文件选择器选择解释器路径
- * @param {"python"|"node"} kind - 解释器类型
- */
-async function browseInterpreter(kind) {
-    try {
-        const selected = await invoke("open_file_dialog", {
-            title: t(`file_dialog.${kind}_title`),
-            filters: [{name: t("file_dialog.exe_filter"), extensions: ["exe"]}],
-        });
-        if (selected) {
-            const pathEl = document.getElementById(`${kind}-path`);
-            if (pathEl) pathEl.value = selected;
-            saveInterpreterPaths();
+    refreshScriptRuntimeBadgeText(kind);
+    if (actionEl) {
+        actionEl.dataset.installed = st?.installed ? "1" : "0";
+        if (!actionEl.dataset.busy) {
+            actionEl.textContent = st?.installed
+                ? t("engine.script_runtime.uninstall")
+                : t("engine.script_runtime.install");
         }
-    } catch (e) {
-        console.error("browseInterpreter failed:", e);
     }
 }
 
 /**
- * 探测单个解释器（一次只探测一种，跟文件搜索对齐）
- *
- * 如果用户有手动配置的路径，优先探测该路径（验证有效性），
- * 无效时才回退到 PATH 扫描。
- * @param {"python"|"node"} type - 解释器类型
+ * 刷新运行时徽章文本（语言切换 / 状态更新共用）
+ * @param {"python"|"node"} kind
  */
-async function probeSingleInterpreter(type) {
-    const statusEl = document.getElementById(`${type}-status`);
+export function refreshScriptRuntimeBadgeText(kind) {
+    const statusEl = document.getElementById(`script-${kind}-status`);
     if (!statusEl) return;
-
-    statusEl.textContent = t("engine.status.probing");
-    statusEl.className = "status-badge status-unknown";
-    statusEl.dataset.badgeState = "probing";
-
-    try {
-        // 传入手动配置的路径，让后端优先验证
-        const manualPath = document.getElementById(`${type}-path`)?.value || null;
-        const status = await invoke("probe_interpreters", {
-            pythonPath: type === "python" ? manualPath : null,
-            nodePath: type === "node" ? manualPath : null,
-        });
-        updateInterpreterUI(type, status[type]);
-        // 探测成功后保存路径
-        saveInterpreterPaths();
-    } catch (e) {
-        console.error(`probeInterpreter ${type} failed:`, e);
-        statusEl.textContent = t("engine.status.failed");
+    if (statusEl.dataset.badgeState === "installed") {
+        statusEl.textContent = t("engine.script_runtime.installed", {version: statusEl.dataset.version || ""});
+        statusEl.className = "status-badge status-available";
+    } else {
+        statusEl.textContent = t("engine.script_runtime.not_installed");
         statusEl.className = "status-badge status-unavailable";
-        statusEl.dataset.badgeState = "failed";
     }
 }
 
 /**
- * 探测全部解释器（页面初始化时验证已保存路径，未配置时扫描 PATH）
- *
- * 传入当前 input 中的路径（可能为空），后端逻辑：
- * - 有手动路径 → 验证该路径
- * - 无手动路径 → 扫描 PATH
+ * 拉取并渲染全部运行时状态（只读 command，无副作用）
  */
-async function probeAllInterpreters() {
-    const pythonPath = document.getElementById("python-path")?.value || null;
-    const nodePath = document.getElementById("node-path")?.value || null;
-
-    ["python", "node"].forEach((type) => {
-        const statusEl = document.getElementById(`${type}-status`);
-        if (statusEl) {
-            statusEl.textContent = t("engine.status.probing");
-            statusEl.className = "status-badge status-unknown";
-            statusEl.dataset.badgeState = "probing";
-        }
-    });
-
+async function refreshScriptRuntimeStatus() {
     try {
-        const status = await invoke("probe_interpreters", {pythonPath, nodePath});
-        updateInterpreterUI("python", status.python);
-        updateInterpreterUI("node", status.node);
-        // 探测成功后保存路径
-        saveInterpreterPaths();
+        const list = await invoke("script_interpreters_status");
+        for (const kind of RUNTIME_KINDS) {
+            renderRuntimeRow(kind, (list || []).find((x) => x.kind === kind));
+        }
     } catch (e) {
-        console.error("probeInterpreters failed:", e);
-        ["python", "node"].forEach((type) => {
-            const statusEl = document.getElementById(`${type}-status`);
+        console.error("script_interpreters_status failed:", e);
+    }
+}
+
+/**
+ * 更新某 kind 的下载进度条（downloaded 为 null 时隐藏）
+ * @param {"python"|"node"} kind
+ * @param {number|null} downloaded 已下载字节
+ * @param {number|null} total 总字节
+ */
+function renderRuntimeProgress(kind, downloaded, total) {
+    const wrap = document.getElementById(`script-${kind}-progress`);
+    if (!wrap) return;
+    const fill = wrap.querySelector(".download-progress__fill");
+    const text = wrap.querySelector(".download-progress__text");
+    if (downloaded === null || downloaded === undefined) {
+        wrap.hidden = true;
+        return;
+    }
+    wrap.hidden = false;
+    const percent = progressPercent(downloaded, total);
+    fill.classList.toggle("download-progress__fill--indeterminate", percent === null);
+    fill.style.width = percent === null ? "" : `${percent}%`;
+    if (text) {
+        text.textContent = total
+            ? `${formatBytes(downloaded)} / ${formatBytes(total)} · ${percent ?? "--"}%`
+            : formatBytes(downloaded);
+    }
+}
+
+/**
+ * 安装/卸载按钮态（busy 时禁用并显示进行中文案）
+ */
+function setRuntimeBusy(kind, busy, stage) {
+    const actionEl = document.getElementById(`script-${kind}-action`);
+    if (!actionEl) return;
+    if (busy) {
+        actionEl.dataset.busy = "1";
+        actionEl.disabled = true;
+        actionEl.textContent = t("engine.script_runtime.installing");
+        if (stage) {
+            const statusEl = document.getElementById(`script-${kind}-status`);
             if (statusEl) {
-                statusEl.textContent = t("engine.status.failed");
-                statusEl.className = "status-badge status-unavailable";
-                statusEl.dataset.badgeState = "failed";
+                statusEl.dataset.badgeState = "installing";
+                statusEl.className = "status-badge status-unknown";
+                statusEl.textContent = t(`engine.script_runtime.stage.${stage}`);
+            }
+        }
+    } else {
+        delete actionEl.dataset.busy;
+        actionEl.disabled = false;
+    }
+}
+
+/**
+ * 安装进度事件 → 单 kind 路由（stage 机：downloading/extracting/verifying/
+ * promoting/done/failed）
+ */
+function handleInstallEvent(payload) {
+    const {kind, stage, downloaded, total, message} = payload || {};
+    if (!RUNTIME_KINDS.includes(kind)) return;
+
+    if (stage === "downloading" && downloaded !== undefined) {
+        setRuntimeBusy(kind, true, "downloading");
+        renderRuntimeProgress(kind, downloaded, total ?? null);
+        return;
+    }
+    if (["extracting", "verifying", "promoting"].includes(stage)) {
+        renderRuntimeProgress(kind, null);
+        setRuntimeBusy(kind, true, stage);
+        return;
+    }
+    if (stage === "done") {
+        renderRuntimeProgress(kind, null);
+        setRuntimeBusy(kind, false);
+        refreshScriptRuntimeStatus();
+        return;
+    }
+    if (stage === "failed") {
+        renderRuntimeProgress(kind, null);
+        setRuntimeBusy(kind, false);
+        const statusEl = document.getElementById(`script-${kind}-status`);
+        if (statusEl) {
+            statusEl.dataset.badgeState = "failed";
+            statusEl.className = "status-badge status-unavailable";
+            statusEl.textContent = t("engine.script_runtime.install_failed", {
+                message: message || "unknown",
+            });
+            statusEl.title = message || "";
+        }
+    }
+}
+
+/**
+ * 初始化脚本运行时区块：状态拉取 + 按钮绑定 + 进度事件监听
+ */
+function initScriptRuntime() {
+    for (const kind of RUNTIME_KINDS) {
+        document.getElementById(`script-${kind}-action`)?.addEventListener("click", async (e) => {
+            const btn = e.currentTarget;
+            const installed = btn.dataset.installed === "1";
+            try {
+                if (installed) {
+                    // 卸载确认：依赖该运行时的脚本插件会失效
+                    const ok = await confirmDialog(
+                        t("engine.script_runtime.uninstall_confirm"),
+                        {title: t("engine.script_runtime.uninstall"), kind: "warning"},
+                    );
+                    if (!ok) return;
+                    await invoke("uninstall_script_interpreter", {kind});
+                } else {
+                    setRuntimeBusy(kind, true, "downloading");
+                    await invoke("install_script_interpreter", {kind});
+                }
+                refreshScriptRuntimeStatus();
+            } catch (err) {
+                console.error(`script runtime action (${kind}) failed:`, err);
+                setRuntimeBusy(kind, false);
+                messageDialog(String(err?.message || err), {
+                    title: t("common.error"), kind: "error",
+                });
+                refreshScriptRuntimeStatus();
             }
         });
     }
-}
 
-/**
- * 初始化脚本解释器探测：加载已保存路径 + 绑定按钮事件 + 首次自动探测
- */
-async function initInterpreterProbing() {
-    // 加载已保存的解释器路径
-    try {
-        const saved = await invoke("get_interpreter_paths");
-        if (saved.python_path) {
-            const el = document.getElementById("python-path");
-            if (el) el.value = saved.python_path;
-        }
-        if (saved.node_path) {
-            const el = document.getElementById("node-path");
-            if (el) el.value = saved.node_path;
-        }
-    } catch (e) {
-        console.error("get_interpreter_paths failed:", e);
-    }
-
-    document.getElementById("python-probe")?.addEventListener("click", () => probeSingleInterpreter("python"));
-    document.getElementById("node-probe")?.addEventListener("click", () => probeSingleInterpreter("node"));
-    document.getElementById("python-browse")?.addEventListener("click", () => browseInterpreter("python"));
-    document.getElementById("node-browse")?.addEventListener("click", () => browseInterpreter("node"));
-
-    // 手动编辑路径时自动保存
-    ["python", "node"].forEach((kind) => {
-        const pathEl = document.getElementById(`${kind}-path`);
-        if (pathEl) {
-            pathEl.addEventListener("change", saveInterpreterPaths);
-        }
+    listen(EVENTS.SCRIPT_INTERPRETER_INSTALL, (event) => {
+        handleInstallEvent(event.payload);
     });
 
-    // 每次设置页初始化都验证当前路径；否则已有配置时徽章会一直停在「探测中」
-    setTimeout(() => {
-        probeAllInterpreters();
-    }, 100);
+    refreshScriptRuntimeStatus();
 }

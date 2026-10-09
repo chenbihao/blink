@@ -1000,12 +1000,18 @@ impl SearchService {
             }
             let snapshot = snapshot.read().unwrap().clone();
             let ctx = crate::plugin::PluginQueryContext::from_snapshot(&snapshot);
+            // takeover 查询链路诊断（debug 级，与相邻防抖/async lane 日志同级；
+            // 排查"查询中"占位与结果同屏类问题时按此判断查询是否执行/emit
+            // 是否被 seq 过期吞掉——根因已由前端迟到占位丢弃修复）
+            tracing::debug!(plugin = %plugin_id, seq, arg_len = arg.chars().count(), "takeover 查询开始");
             let items = plugin_engine
                 .query_subset(&[(plugin_id.clone(), arg)], &ctx)
                 .await;
             if seq != latest_seq.load(Ordering::SeqCst) {
+                tracing::debug!(plugin = %plugin_id, seq, "takeover 查询返回但 seq 已过期，不 emit");
                 return;
             }
+            tracing::debug!(plugin = %plugin_id, seq, count = items.len(), "takeover 查询返回，即将 emit");
             // Takeover:即使空结果也要 emit,让前端清除占位符
             let limit = max_results.load(Ordering::SeqCst);
             emit_results(app.as_ref(), seq, items, limit, Some(&plugin_id));

@@ -159,6 +159,14 @@ export const EVENTS = Object.freeze({
      */
     LOCAL_ENGINE_INSTALL_PROGRESS: 'blink://local-engine-install-progress',
 
+    // ── 脚本解释器（0.25.20）──
+    /**
+     * 托管脚本解释器安装进度。payload:
+     * { kind: "python"|"node", stage: "downloading"|"extracting"|"verifying"|
+     *   "promoting"|"done"|"failed", downloaded?, total?, message? }
+     */
+    SCRIPT_INTERPRETER_INSTALL: 'blink://script-interpreter-install',
+
     // ── 便签（0.16.7）──
     STICKY_CREATED: 'blink://sticky-created',
     STICKY_DELETED: 'blink://sticky-deleted',

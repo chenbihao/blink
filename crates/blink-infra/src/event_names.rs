@@ -207,6 +207,15 @@ impl EventNames {
     /// 且 asset-lock 未锁大小），前端退化为已下载字节数展示。
     pub const LOCAL_ENGINE_INSTALL_PROGRESS: &str = "blink://local-engine-install-progress";
 
+    // ── 脚本解释器（0.25.20）──
+    /// 托管脚本解释器安装进度。payload:
+    /// `{ kind: "python"|"node", stage: "downloading"|"extracting"|"verifying"
+    ///    |"promoting"|"done"|"failed", downloaded?, total?, message? }`
+    ///
+    /// `downloaded/total` 仅 `downloading` 阶段携带（单 zip 文件内计数，
+    /// 后端按 chunk 节流上报）；`failed` 携带 `message`（错误摘要）。
+    pub const SCRIPT_INTERPRETER_INSTALL: &str = "blink://script-interpreter-install";
+
     // ── 便签（0.16.7-0.16.10）──
     /// 便签被创建。payload: `{ stickyId }`
     pub const STICKY_CREATED: &str = "blink://sticky-created";

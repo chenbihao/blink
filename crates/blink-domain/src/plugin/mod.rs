@@ -17,7 +17,7 @@ pub use engine::PluginEngine;
 pub use manifest::{
     LocalizableText, ManifestContextWhen, ManifestSurfaceHint, PluginManifest, PluginTrigger,
 };
-pub use process::{InterpretersStatus, PluginHandle, probe_interpreters};
+pub use process::PluginHandle;
 #[allow(unused_imports)]
 pub use protocol::{PluginQueryContext, PluginRawResult, RawToolResult};
 
@@ -74,6 +74,21 @@ pub fn builtin_plugins_dir() -> PathBuf {
     } else {
         PathBuf::from("plugins").join("builtin")
     }
+}
+
+/// 示例插件目录（仓库内 `plugins/examples`，**仅 dev 加载**）。
+///
+/// 0.25.20：echo-python / echo-node 脚本示例插件在此验证托管解释器链路；
+/// release 包的 bundle resources 只含 `plugins/builtin/**/*`，examples
+/// 不随包分发——它们是插件作者的参考模板与开发期链路验证，不是产品功能。
+#[cfg(debug_assertions)]
+pub fn examples_plugins_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("blink-domain 应位于 workspace 的 crates/ 下")
+        .join("plugins")
+        .join("examples")
 }
 
 /// 加载所有 builtin 插件:扫描 `<dir>/*/manifest.json` → 解析 → 过滤 query 能力。
@@ -145,5 +160,16 @@ mod tests {
                 "翻译插件应声明 {tool_name} 能力"
             );
         }
+    }
+
+    /// 0.25.20：examples 目录的脚本示例插件（echo-python / echo-node）必须
+    /// 可被发现且 manifest 可解析——这是托管解释器链路的 dev 验证载体，
+    /// 示例腐烂（manifest 改名/字段变更）在此处早期暴露。
+    #[test]
+    fn dev_discovers_example_script_plugins() {
+        let plugins = load_builtin_plugins(&examples_plugins_dir(), None);
+        let mut ids: Vec<_> = plugins.iter().map(|plugin| plugin.id()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["example.echo-node", "example.echo-python"]);
     }
 }

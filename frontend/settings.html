@@ -427,18 +427,12 @@
                 </div>
             </div>
 
-            <!-- 用户脚本解释器 -->
-            <h3 class="section-heading" data-i18n="engines.section.script_interpreters">用户脚本解释器</h3>
-            <p class="section-desc" data-i18n="engines.section.script_interpreters.desc">Python / Node.js
-                解释器用于运行脚本插件。这是你系统上的解释器，Blink 不会修改它。</p>
-            <div class="section-note">
-                <svg aria-hidden="true" class="icon section-note-icon">
-                    <use href="#icon-lightbulb"/>
-                </svg>
-                <span data-i18n="engines.section.script_interpreters.note">与下方 Blink 托管运行时不同：脚本解释器读取你的 PATH 或手动配置路径，不共享隔离环境。</span>
-            </div>
+            <!-- 脚本运行时（Blink 托管，0.25.20） -->
+            <h3 class="section-heading" data-i18n="engines.section.script_runtime">脚本运行时（Blink 托管）</h3>
+            <p class="section-desc" data-i18n="engines.section.script_runtime.desc">Python / Node.js
+                发行版由 Blink 下载到独立目录并锁定版本，用于运行脚本插件；不读取、不修改系统解释器。</p>
 
-            <div class="extension-card">
+            <div class="extension-card" id="script-runtime-card">
                 <div class="extension-header">
                     <div class="extension-icon">
                         <svg aria-hidden="true" class="icon">
@@ -446,43 +440,39 @@
                         </svg>
                     </div>
                     <div class="extension-info">
-                        <h3 data-i18n="engine.interpreter.title">脚本解释器</h3>
-                        <p class="extension-desc" data-i18n="engine.interpreter.desc">Python / Node.js
-                            脚本插件运行环境</p>
+                        <h3 data-i18n="engine.script_runtime.title">脚本运行时</h3>
+                        <p class="extension-desc" data-i18n="engine.script_runtime.desc">Python / Node.js
+                            脚本插件运行环境（托管分发）</p>
                     </div>
                 </div>
 
                 <div class="extension-body">
-                    <!-- Python 解释器 -->
-                    <div class="plugin-section-title" data-i18n="engine.python.title">Python</div>
+                    <!-- Python 运行时 -->
+                    <div class="runtime-section-title" data-i18n="engine.python.title">Python</div>
                     <div class="setting-row">
-                        <label class="setting-label" data-i18n="engine.python.status">当前状态</label>
-                        <span class="status-badge status-unknown" data-i18n="engine.status.probing" id="python-status">探测中…</span>
-                        <button class="btn-small" data-i18n="engine.probe" id="python-probe">重新探测</button>
+                        <label class="setting-label" data-i18n="engine.script_runtime.status">当前状态</label>
+                        <span class="status-badge status-unknown" id="script-python-status">…</span>
+                        <button class="btn-small" id="script-python-action">安装</button>
                     </div>
-                    <div class="setting-row">
-                        <label class="setting-label" data-i18n="engine.python.path">Python 路径<span
-                                class="field-hint-icon" data-i18n-title="engine.python.hint">ⓘ</span></label>
-                        <input class="input-wide" data-i18n-ph="engine.python.path.ph" id="python-path"
-                               placeholder="自动探测或手动输入..."
-                               type="text"/>
-                        <button class="btn-small" data-i18n="engine.browse" id="python-browse">浏览</button>
+                    <div class="download-progress" hidden id="script-python-progress">
+                        <div class="download-progress__bar">
+                            <div class="download-progress__fill"></div>
+                        </div>
+                        <span class="download-progress__text"></span>
                     </div>
 
-                    <!-- Node.js 解释器 -->
-                    <div class="plugin-section-title" data-i18n="engine.node.title">Node.js</div>
+                    <!-- Node.js 运行时 -->
+                    <div class="runtime-section-title" data-i18n="engine.node.title">Node.js</div>
                     <div class="setting-row">
-                        <label class="setting-label" data-i18n="engine.node.status">当前状态</label>
-                        <span class="status-badge status-unknown" data-i18n="engine.status.probing" id="node-status">探测中…</span>
-                        <button class="btn-small" data-i18n="engine.probe" id="node-probe">重新探测</button>
+                        <label class="setting-label" data-i18n="engine.script_runtime.status">当前状态</label>
+                        <span class="status-badge status-unknown" id="script-node-status">…</span>
+                        <button class="btn-small" id="script-node-action">安装</button>
                     </div>
-                    <div class="setting-row">
-                        <label class="setting-label" data-i18n="engine.node.path">Node 路径<span class="field-hint-icon"
-                                                                                                 data-i18n-title="engine.node.hint">ⓘ</span></label>
-                        <input class="input-wide" data-i18n-ph="engine.node.path.ph" id="node-path"
-                               placeholder="自动探测或手动输入..."
-                               type="text"/>
-                        <button class="btn-small" data-i18n="engine.browse" id="node-browse">浏览</button>
+                    <div class="download-progress" hidden id="script-node-progress">
+                        <div class="download-progress__bar">
+                            <div class="download-progress__fill"></div>
+                        </div>
+                        <span class="download-progress__text"></span>
                     </div>
                 </div>
             </div>

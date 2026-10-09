@@ -144,7 +144,6 @@ export const zh = {
     "engine.builtin_actions.save_failed": "保存失败",
     "engine.everything.hint": "（可选，需安装）",
     "engine.everything.status.label": "Everything 状态",
-    "engine.probe": "重新探测",
     "engine.everything.port.label": "HTTP 端口",
     "engine.everything.port.hint": "Everything 选项 → HTTP 服务器",
     "engine.everything.max_results.label": "最大结果数",
@@ -158,25 +157,28 @@ export const zh = {
     "engine.status.available": "可用 ✓",
     "engine.status.unavailable": "不可用 ✗",
     "engine.status.failed": "探测失败",
-    "engine.status.version_low": "版本过低",
-    "engine.status.version_unknown": "版本未知",
-    "engine.status.not_found": "未找到",
 
     // ── 引擎 Tab：脚本解释器（Phase 0.6） ──
-    "engine.interpreter.title": "脚本解释器",
-    "engine.interpreter.desc": "Python / Node.js 脚本插件运行环境",
+    "plugin.script_runtime.guide": "该插件需要 {runtime} 脚本运行时（由 Blink 下载安装，约几十 MB，不影响系统解释器）。是否前往设置页安装？",
     "engine.python.title": "Python",
-    "engine.python.status": "当前状态",
-    "engine.python.path": "Python 路径",
-    "engine.python.path.ph": "自动探测或手动输入...",
-    "engine.python.hint": "用于运行 .py 脚本插件，需要 Python 3.8+",
+    // ── 脚本运行时（Blink 托管，0.25.20）──
+    "engines.section.script_runtime": "脚本运行时（Blink 托管）",
+    "engines.section.script_runtime.desc": "Python / Node.js 发行版由 Blink 下载到独立目录并锁定版本，用于运行脚本插件；不读取、不修改系统解释器。",
+    "engine.script_runtime.title": "脚本运行时",
+    "engine.script_runtime.desc": "Python / Node.js 脚本插件运行环境（托管分发）",
+    "engine.script_runtime.status": "当前状态",
+    "engine.script_runtime.installed": "{version} 已安装",
+    "engine.script_runtime.not_installed": "未安装",
+    "engine.script_runtime.install": "安装",
+    "engine.script_runtime.uninstall": "卸载",
+    "engine.script_runtime.installing": "安装中…",
+    "engine.script_runtime.uninstall_confirm": "卸载后依赖该运行时的脚本插件将无法运行（解释器被插件进程占用时会卸载失败，重启应用后再试）。确定卸载？",
+    "engine.script_runtime.install_failed": "安装失败：{message}",
+    "engine.script_runtime.stage.downloading": "下载中…",
+    "engine.script_runtime.stage.extracting": "解压中…",
+    "engine.script_runtime.stage.verifying": "验证中…",
+    "engine.script_runtime.stage.promoting": "完成安装中…",
     "engine.node.title": "Node.js",
-    "engine.node.status": "当前状态",
-    "engine.node.path": "Node 路径",
-    "engine.node.path.ph": "自动探测或手动输入...",
-    "engine.node.hint": "用于运行 .js 脚本插件，需要 Node.js 16+",
-    "engine.browse": "浏览",
-    "engine.probe_all": "重新探测全部",
     // spinner 按钮
     "spinner.increase": "增加",
     "spinner.decrease": "减少",
@@ -186,9 +188,6 @@ export const zh = {
     // 错误消息
     "error.port_range": "端口号必须在 1-65535 之间",
     // 文件对话框
-    "file_dialog.python_title": "选择 Python 可执行文件",
-    "file_dialog.node_title": "选择 Node.js 可执行文件",
-    "file_dialog.exe_filter": "可执行文件",
 
     // ── 调试 Tab：日志 ──
     "debug.section.log": "日志 · 排查现场",
@@ -1445,9 +1444,6 @@ export const zh = {
     // ── 引擎页分区标题（0.22.5）──
     "engines.section.search_sources": "搜索候选来源",
     "engines.section.search_sources.desc": "应用 / 文件 / 计算器 —— 构成主窗口搜索结果。",
-    "engines.section.script_interpreters": "用户脚本解释器",
-    "engines.section.script_interpreters.desc": "Python / Node.js 解释器用于运行脚本插件。这是你系统上的解释器，Blink 不会修改它。",
-    "engines.section.script_interpreters.note": "与下方 Blink 托管运行时不同：脚本解释器读取你的 PATH 或手动配置路径，不共享隔离环境。",
     "engines.section.local_runtime": "本地模型引擎",
 
     // ── 本地引擎运行时（0.22.5；中密度重设计）──

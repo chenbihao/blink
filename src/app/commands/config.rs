@@ -37,7 +37,7 @@ pub async fn get_config(app: tauri::AppHandle) -> Result<serde_json::Value, Stri
 /// `chord_toggles` / `clipboard_enabled` / `disabled_builtin_actions` /
 /// `disabled_context_bindings` / `disabled_chord_actions` / `window_opacity`
 ///
-/// **引擎配置**：`file_search` / `start_menu_config` / `calc_config` / `global_proxy` / `interpreter_paths`
+/// **引擎配置**：`file_search` / `start_menu_config` / `calc_config` / `global_proxy`
 ///
 /// **插件配置**：`plugin_config`
 ///
@@ -403,15 +403,6 @@ async fn set_config_value(
             };
             engine.update_global_proxy(proxy).await;
             tracing::info!(has_http, has_https, "全局代理配置已更新");
-        }
-
-        // ── 解释器路径配置 ────────────────────────────────────────────────
-        "interpreter_paths" => {
-            let json_str = serde_json::to_string(&value).map_err(|e| e.to_string())?;
-            crate::infra::data::history::set_config(pool, "interpreter_paths", &json_str)
-                .await
-                .map_err(|e| e.to_string())?;
-            tracing::info!("解释器路径配置已更新");
         }
 
         // ── 插件配置 ──────────────────────────────────────────────────────

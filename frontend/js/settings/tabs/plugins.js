@@ -6,10 +6,11 @@
  * 命令名 list_plugins 与容器 plugins-list 均不存在导致页面空白；0.9.5.1 还原原版
  * get_plugins + plugins-container + 整套 schema/触发词/拖拽）。
  */
-import {invoke} from "../../shared/tauri.js";
+import {confirmDialog, invoke} from "../../shared/tauri.js";
 import {onLangChange, t} from "../../i18n/index.js";
 import {iconHTML} from "../../shared/icon.js";
 import {saveConfig} from "../../shared/config-keys.js";
+import {navigateSettings} from "../navigation.js";
 
 /** 插件图标映射（0.10.8：emoji → Lucide 图标名） */
 const PLUGIN_ICONS = {
@@ -17,6 +18,9 @@ const PLUGIN_ICONS = {
     "builtin.ai": "sparkles",
     "builtin.translate": "languages",
     "builtin.weather": "cloud-sun",
+    // 0.25.20 示例脚本插件（终端语义）
+    "example.echo-python": "terminal",
+    "example.echo-node": "terminal",
 };
 
 /** 防止重复注册 onLangChange */
@@ -485,6 +489,39 @@ function renderExtensionCard({icon, title, desc, headerRight = "", attrs = "", c
 }
 
 /**
+ * 启用脚本插件时的托管运行时安装引导（0.25.20）。
+ *
+ * python / node 脚本插件跑 Blink 托管解释器——启用时若未安装，弹确认
+ * （大小与用途），确认后深链到 引擎 Tab 的脚本运行时区块手动安装；
+ * 取消则插件保持启用，查询时由四层兜底返回引导文案。
+ * @param {"python"|"node"|undefined} runtimeType - manifest runtime 类型
+ */
+async function guideScriptRuntimeInstall(runtimeType) {
+    if (runtimeType !== "python" && runtimeType !== "node") return;
+    try {
+        const list = await invoke("script_interpreters_status");
+        const st = (list || []).find((x) => x.kind === runtimeType);
+        if (st?.installed) return;
+        const label = t(`engine.${runtimeType === "python" ? "python" : "node"}.title`);
+        const go = await confirmDialog(
+            t("plugin.script_runtime.guide", {runtime: label}),
+            {title: t("engine.script_runtime.title"), kind: "info"},
+        );
+        if (!go) return;
+        await navigateSettings({tabId: "engines", target: "#script-runtime-card", block: "start"});
+        // 深链定位已等待目标就绪（waitForSettingsTarget）——按钮直接可用；
+        // 注意力闪烁 3 次脉冲让用户知道要点哪个（animationend 自动移除）
+        const btn = document.getElementById(`script-${runtimeType}-action`);
+        if (btn && !btn.disabled) {
+            btn.classList.add("attention-flash");
+            btn.addEventListener("animationend", () => btn.classList.remove("attention-flash"), {once: true});
+        }
+    } catch (e) {
+        console.error("guideScriptRuntimeInstall failed:", e);
+    }
+}
+
+/**
  * 绑定单个插件卡片事件（enabled 开关 + 保存 settings + 触发词增删禁用）
  */
 function bindPluginCardEvents(plugin) {
@@ -517,6 +554,14 @@ function bindPluginCardEvents(plugin) {
     card.querySelector(".plugin-enabled")?.addEventListener("change", async (e) => {
         const ok = await save(e.target.checked);
         if (!ok) e.target.checked = !e.target.checked;
+        // 0.25.20：启用态即时反映到卡片视觉（is-disabled 原本只在渲染时
+        // 决定，默认禁用的插件启用后卡片一直灰显）
+        if (ok) card.classList.toggle("is-disabled", !e.target.checked);
+        // 0.25.20：启用脚本插件且托管运行时未安装 → 显式确认后引导安装
+        // （不做静默后台下载——失败不可见、流量不可控）
+        if (ok && e.target.checked) {
+            guideScriptRuntimeInstall(plugin.runtime_type);
+        }
     });
 
     // 字段变更 → 自动保存 + 重算条件显隐
