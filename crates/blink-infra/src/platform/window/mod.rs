@@ -15,6 +15,12 @@ mod list;
 mod control;
 
 #[cfg(target_os = "windows")]
+mod paste;
+
+#[cfg(target_os = "windows")]
+pub use paste::PasteTarget;
+
+#[cfg(target_os = "windows")]
 pub use windows::{
     ChatCloseCallback, PinImage, StickySpareCloseCallback, VOICE_W, WelcomeCloseCallback,
     ack_chat_prefill, apply_cloak, center_of_active_monitor, clamp_context_menu,

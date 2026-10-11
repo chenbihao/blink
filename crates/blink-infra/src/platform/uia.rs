@@ -85,6 +85,57 @@ pub fn set_focused_element(elem: &IUIAutomationElement) -> bool {
     unsafe { elem.SetFocus() }.is_ok()
 }
 
+/// 在目标窗口的 UIA 树内查找文本输入控件并把焦点设过去（0.25.22-fix 第 2 层回写）。
+///
+/// Electron 编辑器失焦后 `GetFocusedElement` 只剩窗体根（Typora 实测 50026 Group，
+/// 捕获通道也拿不到编辑器引用），但编辑器元素仍在窗口树里——按控件类型找到它
+/// SetFocus，paste 门控即可通过、光标落回上次编辑位置。依次找 Edit(50004) 与
+/// Document(50030)。找不到（如 IDEA 未启 Java Access Bridge 时是裸树）返回
+/// false。调用线程需已在 MTA。
+pub fn refocus_text_input_in_window(hwnd_raw: isize) -> bool {
+    use windows::Win32::System::Variant::VARIANT;
+    use windows::Win32::UI::Accessibility::{
+        PropertyConditionFlags_None, TreeScope_Descendants, UIA_ControlTypePropertyId,
+    };
+
+    let hwnd = HWND(hwnd_raw as *mut _);
+    if hwnd.is_invalid() {
+        return false;
+    }
+    let start = Instant::now();
+    let _com = ComGuard::init_mta();
+    let Some(automation) = create_automation() else {
+        return false;
+    };
+    let Ok(window_elem) = (unsafe { automation.ElementFromHandle(hwnd) }) else {
+        return false;
+    };
+    for type_id in [UIA_EDIT_CONTROL_TYPE_ID, UIA_DOCUMENT_CONTROL_TYPE_ID] {
+        let Ok(cond) = (unsafe {
+            automation.CreatePropertyConditionEx(
+                UIA_ControlTypePropertyId,
+                &VARIANT::from(type_id),
+                PropertyConditionFlags_None,
+            )
+        }) else {
+            continue;
+        };
+        let Ok(elem) = (unsafe { window_elem.FindFirst(TreeScope_Descendants, &cond) }) else {
+            continue;
+        };
+        if set_focused_element(&elem) {
+            let elapsed_ms = start.elapsed().as_millis() as u64;
+            // 大 Chromium 树的整树搜索可能慢（selection 域实测过秒级），留观测依据
+            if elapsed_ms > 500 {
+                tracing::warn!(elapsed_ms, "refocus_text_input_in_window: 窗口树搜索偏慢");
+            }
+            std::thread::sleep(Duration::from_millis(30));
+            return true;
+        }
+    }
+    false
+}
+
 /// 获取前台焦点元素的控件类型 ID。
 ///
 /// 用于判断焦点是否在文本输入控件上（如 `UIA_EditControlTypeId`、

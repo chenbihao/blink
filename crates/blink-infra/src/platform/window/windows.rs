@@ -981,8 +981,15 @@ pub fn start_watchdog(app: AppHandle) {
                         // fg == NULL:焦点真空(系统正在切换前台窗口的瞬态,如刚拉起子进程时)。
                         // 这不代表用户切到了别的窗口,据此隐藏会误伤——跳过本轮,等下次轮询。
                         if !fg.0.is_null() && !is_self_foreground(&app, fg) {
+                            // 0.25.22-fix：带上前台进程名——定位"谁在抢焦点"
+                            //（Typora/IDEA 等焦点强势应用与看门狗竞速的诊断依据）
+                            let mut fg_pid: u32 = 0;
+                            unsafe { GetWindowThreadProcessId(fg, Some(&mut fg_pid)) };
+                            let fg_process = crate::platform::context::process_name_of_pid(fg_pid)
+                                .unwrap_or_default();
                             tracing::info!(
                                 since_invoke,
+                                fg_process = %fg_process,
                                 "watchdog: hide! fg=0x{:x}",
                                 fg.0 as isize
                             );
@@ -1141,7 +1148,25 @@ fn is_self_foreground(_app: &AppHandle, fg: windows::Win32::Foundation::HWND) ->
         return true; // 拿不到 PID:保守不隐藏
     }
     let self_pid = unsafe { GetCurrentProcessId() };
-    fg_pid == self_pid
+    if fg_pid == self_pid {
+        return true;
+    }
+    // 0.25.22-fix：前台可能是 WebView2 内容子 HWND（msedgewebview2 进程持有）——
+    // 用户点击 blink 网页内容时实测发生，此前被判"非自家"导致看门狗 ~1s 内误收
+    // 主窗（实测 since_invoke=696 即隐藏）。沿 GA_ROOT 找根窗口再比进程：WebView2
+    // 子 HWND 的根是 blink 主窗；别家应用的 WebView 根仍是别家进程，不受影响。
+    let root = unsafe {
+        windows::Win32::UI::WindowsAndMessaging::GetAncestor(
+            fg,
+            windows::Win32::UI::WindowsAndMessaging::GA_ROOT,
+        )
+    };
+    if root.is_invalid() {
+        return false;
+    }
+    let mut root_pid: u32 = 0;
+    unsafe { GetWindowThreadProcessId(root, Some(&mut root_pid)) };
+    root_pid == self_pid
 }
 
 /// 计算窗口在鼠标所在显示器上的位置：工作区中心居中（物理像素）。

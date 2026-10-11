@@ -53,6 +53,22 @@ pub fn capture_focused_element() -> Option<()> {
     None
 }
 
+/// 门控被拒时尝试把焦点回写到最近捕获的文本输入元素（0.25.22-fix）。
+///
+/// Electron 系应用窗口重新激活后不回写控件焦点（Typora 实测 paste 时点焦点落到
+/// 50026 Group）——用唤起时捕获的编辑器元素做 UIA SetFocus 回写。三重守卫见
+/// `windows.rs`。返回 true 表示已回写、调用方可重跑门控。
+#[cfg(target_os = "windows")]
+pub fn try_refocus_last_text_capture(target_pid: u32) -> bool {
+    self::windows::try_refocus_last_text_capture(target_pid)
+}
+
+#[cfg(not(target_os = "windows"))]
+#[allow(dead_code)]
+pub fn try_refocus_last_text_capture(_target_pid: u32) -> bool {
+    false
+}
+
 /// 从已捕获的焦点元素中提取选区文本（慢速，可后台执行）。
 ///
 /// 三段式策略与 `get_selected_text` 完全一致。可在 `show()` 之后从任意线程调用。

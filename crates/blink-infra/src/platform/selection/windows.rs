@@ -47,6 +47,54 @@ use crate::platform::uia;
 /// （由 `uia::ComGuard::init_mta()` 保证）。
 pub struct SendableElement(pub(crate) IUIAutomationElement); // 0.25.1 crate 化：经 pub API 跨 crate 暴露，字段保持 crate 内
 unsafe impl Send for SendableElement {}
+impl Clone for SendableElement {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+/// 最近一次捕获的焦点元素（0.25.22-fix：paste 门控被拒时的焦点回写源）。
+///
+/// Electron 系应用窗口重新激活后不回写控件焦点（Typora 实测：paste 时点焦点落到
+/// 50026 Group），用唤起瞬间（show 前焦点未失）捕获的编辑器 COM 引用做 UIA
+/// SetFocus 回写。元素随每次捕获覆盖；失效元素（目标窗口已关）COM 调用报错，
+/// 由使用方自然放弃。
+static LAST_ELEM: std::sync::OnceLock<std::sync::Mutex<Option<SendableElement>>> =
+    std::sync::OnceLock::new();
+
+fn last_elem_slot() -> &'static std::sync::Mutex<Option<SendableElement>> {
+    LAST_ELEM.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// 门控被拒时尝试把焦点回写到最近捕获的文本输入元素（0.25.22-fix）。
+///
+/// 三重守卫：元素仍是文本输入控件（COM 读失败=失效元素即放弃）、元素进程
+/// 与目标窗口一致（防止回写进 blink 自家 webview）、SetFocus 成功。调用线程
+/// 需已在 MTA。返回 true 表示已回写、调用方可重跑门控。
+pub(crate) fn try_refocus_last_text_capture(target_pid: u32) -> bool {
+    let Some(elem) = last_elem_slot().lock().unwrap().clone() else {
+        return false;
+    };
+    let _com = uia::ComGuard::init_mta();
+    let Ok(control_type) = (unsafe { elem.0.CurrentControlType() }) else {
+        return false; // 元素已失效（目标窗口关闭等）
+    };
+    if !uia::is_text_input_control(control_type.0) {
+        return false;
+    }
+    let Ok(elem_pid) = (unsafe { elem.0.CurrentProcessId() }) else {
+        return false;
+    };
+    if elem_pid as u32 != target_pid {
+        return false;
+    }
+    let ok = uia::set_focused_element(&elem.0);
+    if ok {
+        // SetFocus 是异步生效的，给目标应用的消息循环一点时间
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    ok
+}
 
 // 用于 hwnd → 进程名 的 Win32 调用（隐私门控：见 listener.rs on_selection）
 use std::ffi::OsString;
@@ -88,7 +136,7 @@ pub(crate) fn capture_focused_element() -> Option<SendableElement> {
     let automation: IUIAutomation = create_automation()?;
     let elem = unsafe { automation.GetFocusedElement().ok() }.map(SendableElement)?;
     // 0.25.21 诊断：捕获时点（show 前焦点未失）记录焦点控件类型——外部跨进程
-    // UIA 探测不可靠（实机验证树枚举属性读取全败），这是拿目标应用真实
+    // UIA 探测不可靠（实机验证树枚举跨进程属性读取全败），这是拿目标应用真实
     // ControlType 的唯一稳定通道，供 debug_uia_focus 与日志双路消费
     let info = uia::read_focus_info(&elem.0);
     tracing::info!(
@@ -99,6 +147,8 @@ pub(crate) fn capture_focused_element() -> Option<SendableElement> {
         "uia: 捕获焦点元素"
     );
     uia::set_last_capture_info(info);
+    // 0.25.22-fix：留存元素供 paste 门控被拒时回写焦点（见 LAST_ELEM 注释）
+    *last_elem_slot().lock().unwrap() = Some(elem.clone());
     Some(elem)
 }
 

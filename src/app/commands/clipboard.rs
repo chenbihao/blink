@@ -6,6 +6,9 @@ use crate::domain::clipboard::ClipboardWriteSource;
 use crate::domain::event::CapabilityEnv;
 use crate::domain::search::SearchResponse;
 
+// 同一时刻只允许一次上屏，避免后一次请求覆盖前一次尚未粘贴的剪贴板。
+static PASTE_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// 剪贴板模式直接搜索（bypass SearchService pipeline）。
 ///
 /// Alt+C 进入剪贴板模式后，前端输入直接调此命令，
@@ -52,47 +55,55 @@ pub async fn copy_to_clipboard(text: String) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// 剪贴板「上屏」：把文本直接注入唤起前的前台应用输入框。
+/// 剪贴板「上屏」：按用户明确的粘贴意图，把文本贴回唤起前的应用。
 ///
-/// 流程（复用语音 G2 的注入链路）：
-/// 1. 先把文本写入系统剪贴板——兜底：注入失败或目标非输入框时，用户仍可手动 Ctrl+V；
-///    同时与现有「复制」语义一致（该条历史顺位置顶）。
-/// 2. 隐藏主窗口（同 hide_window 语义，emit HIDDEN 供前端复位）。
-/// 3. 恢复唤起前记录的外部前台窗口焦点（关 Alt 系统菜单 + UIA SetFocus）。
-/// 4. UIA 判断焦点是否在文本输入控件：
-///    - 是 → **一律真实粘贴**（0.25.22，取消 0.23.20 的长度分流）：对步骤 1 已写入
-///      的剪贴板内容发 Ctrl+V；终端类窗口（conhost/WT/mintty/PuTTY，按窗口类名家族
-///      识别）改发 Shift+Insert。实测依据：SendInput Unicode 逐字注入在 Typora
-///      （Chromium+IME）会把文本搅碎成乱码（`EastWest\Installation` → `EastWest\rrr…`），
-///      且 `\n`→VK_RETURN 在地址栏/终端是"命令"而非数据；真实粘贴的换行是惰性
-///      数据且受 bracketed paste 保护
-///    - 否 → 保留剪贴板复制语义（文本已在系统剪贴板，用户自行粘贴）
+/// 固定原目标窗口身份 → 写系统剪贴板 → 隐藏主窗口 → 等修饰键松开 →
+/// 恢复并核对原窗口 → Ctrl+V（终端 Shift+Insert）。失败时保留已复制的文本。
 ///
-/// **时序约束**：「是否输入框」判断必须在隐藏并恢复焦点之后——blink 自身聚焦时，
-/// `GetFocusedElement` 拿到的是 blink 的输入框，测不出目标窗口的状态。
+/// UIA 不参与粘贴门控或 SetFocus：Typora 的可编辑区可暴露为 Group，Java IDE
+/// 可只暴露 SunAwtFrame；两者都能正常接收粘贴。应用自行决定当前控件如何处理
+/// 粘贴，保留原光标/选区。该策略仅用于用户显式「上屏」，不改变语音注入链路。
 #[tauri::command]
 pub async fn paste_to_input(app: tauri::AppHandle, text: String) -> Result<(), String> {
     if text.is_empty() {
         return Ok(());
     }
 
+    let paste_guard = PASTE_GATE
+        .try_lock()
+        .map_err(|_| "正在粘贴，请稍后重试".to_string())?;
+    // 在首次 await 前读取原 HWND，复制/隐藏之前快照身份，不在后台重新选目标。
+    let prev_hwnd = crate::infra::platform::window::last_external_foreground_hwnd();
+    let (target, text, units) = tokio::task::spawn_blocking(move || {
+        let target = prev_hwnd.and_then(crate::infra::platform::window::PasteTarget::capture);
+        let units = text.encode_utf16().count();
+        (target, text, units)
+    })
+    .await
+    .map_err(|e| format!("读取粘贴目标失败: {e}"))?;
+
     // 1. 兜底复制（同步等待：保证后续注入/降级路径能读到文本）
-    crate::domain::clipboard::write_text(text.clone(), ClipboardWriteSource::User)
+    crate::domain::clipboard::write_text(text, ClipboardWriteSource::User)
         .await
         .map_err(|e| e.to_string())?;
 
     // 2. 隐藏主窗口
     crate::infra::platform::window::hide(&app, "paste_to_input");
 
-    // 3. 恢复焦点 + 判断输入框 + 注入（spawn_blocking：SendInput/UIA 需同线程）
+    // 3. 恢复原窗口并发粘贴键（阻塞 Win32 调用隔离于 async 工作线程）
     //
     // **Alt+数字 激活时用户仍按着 Alt**。Alt 按住期间 Windows 处于系统菜单态，
-    // `restore_foreground`（SetForegroundWindow/UIA 焦点）与 `inject_text`（SendInput）
+    // 窗口恢复（SetForegroundWindow）与粘贴键（SendInput）
     // 都会被干扰——语音 G2 从无此问题，正因它是 hold 松开后才注入（Alt 已弹起）。
     // 这里先等修饰键全部物理松开（限时 500ms），超时仍未松开则跳过注入、
     // 保留剪贴板复制语义（文本已在系统剪贴板），不做失败注入。
-    let prev_hwnd = crate::infra::platform::window::last_external_foreground_hwnd();
     tokio::task::spawn_blocking(move || {
+        // 即使等待 IPC 的任务被取消，也保持互斥到后台粘贴结束。
+        let _paste_guard = paste_guard;
+        let Some(target) = target else {
+            tracing::info!("paste_to_input: 原目标窗口不可用，仅复制");
+            return Ok(());
+        };
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
         while !crate::infra::platform::hotkey::read_physical_modifiers().all_up()
             && std::time::Instant::now() < deadline
@@ -103,39 +114,42 @@ pub async fn paste_to_input(app: tauri::AppHandle, text: String) -> Result<(), S
             tracing::debug!(
                 "paste_to_input: 修饰键 500ms 内未松开，跳过注入（保留剪贴板复制语义）"
             );
-            return;
+            return Ok(());
         }
-        if let Some(hwnd) = prev_hwnd {
-            crate::infra::platform::window::restore_foreground(hwnd);
-            std::thread::sleep(std::time::Duration::from_millis(50));
+        if !target.restore() {
+            tracing::info!(?target, "paste_to_input: 原目标窗口未恢复，仅复制");
+            return Ok(());
         }
-        if crate::infra::platform::uia::is_focused_on_text_input() {
-            // 0.25.22：一律真实粘贴。Ctrl+V 打进非输入窗口有副作用，门控仍然保留；
-            // 终端窗口类改发 Shift+Insert（Ctrl+V 在旧 conhost 不可用）。
-            let terminal = crate::infra::platform::window::get_foreground_hwnd()
-                .is_some_and(crate::infra::platform::window::is_terminal_window);
-            let (result, method) = if terminal {
-                (
-                    crate::infra::platform::inject::paste_via_shift_insert(),
-                    "shift_insert",
-                )
-            } else {
-                (
-                    crate::infra::platform::inject::paste_clipboard_text(),
-                    "ctrl_v",
-                )
-            };
-            let units = text.encode_utf16().count();
-            match result {
-                Ok(()) => tracing::info!(units, method, "paste_to_input: 文本已上屏"),
-                Err(e) => tracing::error!(%e, units, method, "paste_to_input: 文本注入失败"),
-            }
+        let terminal = crate::infra::platform::window::is_terminal_window(target.hwnd());
+        // 不按 PID 放宽到同应用的另一个窗口，也不搜索任意输入框强行 SetFocus。
+        if !target.is_foreground()
+            || !crate::infra::platform::hotkey::read_physical_modifiers().all_up()
+        {
+            tracing::info!(?target, "paste_to_input: 发键前焦点或修饰键已变化，仅复制");
+            return Ok(());
+        }
+        let (result, method) = if terminal {
+            (
+                crate::infra::platform::inject::paste_via_shift_insert(),
+                "shift_insert",
+            )
         } else {
-            tracing::debug!("paste_to_input: 目标焦点不在文本输入控件，保留剪贴板复制语义");
+            (
+                crate::infra::platform::inject::paste_clipboard_text(),
+                "ctrl_v",
+            )
+        };
+        match result {
+            Ok(()) => tracing::info!(units, method, ?target, "paste_to_input: 已发送粘贴键"),
+            Err(e) => {
+                tracing::error!(%e, units, method, ?target, "paste_to_input: 发送粘贴键失败");
+                return Err(e.to_string());
+            }
         }
-    });
-
-    Ok(())
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("粘贴任务失败: {e}"))?
 }
 
 /// 获取最近的剪贴板历史。
