@@ -1421,6 +1421,63 @@ pub fn get_foreground_hwnd() -> Option<isize> {
     }
 }
 
+/// 判断指定窗口是否终端类宿主（按窗口类名家族识别，0.25.22）。
+///
+/// 上屏注入前用：终端对 Ctrl+V 支持参差（旧 conhost 只认 Ctrl+Shift+V），统一改发
+/// Shift+Insert（终端界通用粘贴键）。类名是**家族级**识别，不依赖 exe 名单——
+/// `ConsoleWindowClass` 覆盖全部经典控制台宿主（conhost，无论里面跑 cmd/pwsh/
+/// python/ssh），`CASCADIA_HOSTING_WINDOW_CLASS` 覆盖 Windows Terminal 全家。
+/// 未识别的现代终端（VSCode 内嵌终端等）落回 Ctrl+V 优雅降级（默认支持）。
+pub fn is_terminal_window(hwnd_raw: isize) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::GetClassNameW;
+
+    let hwnd = HWND(hwnd_raw as *mut _);
+    if hwnd.is_invalid() {
+        return false;
+    }
+    let mut buf = [0u16; 64];
+    let len = unsafe { GetClassNameW(hwnd, &mut buf) };
+    if len <= 0 {
+        return false;
+    }
+    is_terminal_window_class(&String::from_utf16_lossy(&buf[..len as usize]))
+}
+
+/// 终端窗口类名家族（纯函数，单测锁死；新增终端往这里加一行即可）。
+fn is_terminal_window_class(class: &str) -> bool {
+    matches!(
+        class,
+        "ConsoleWindowClass" // conhost：全部经典控制台宿主
+            | "CASCADIA_HOSTING_WINDOW_CLASS" // Windows Terminal
+            | "PuTTY" // PuTTY
+            | "mintty" // Git Bash / MSYS2
+            | "VirtualConsoleClass" // ConEmu
+    )
+}
+
+#[cfg(test)]
+mod tests_terminal_class {
+    use super::is_terminal_window_class;
+
+    #[test]
+    fn console_families_match() {
+        assert!(is_terminal_window_class("ConsoleWindowClass"));
+        assert!(is_terminal_window_class("CASCADIA_HOSTING_WINDOW_CLASS"));
+        assert!(is_terminal_window_class("PuTTY"));
+        assert!(is_terminal_window_class("mintty"));
+        assert!(is_terminal_window_class("VirtualConsoleClass"));
+    }
+
+    #[test]
+    fn non_terminal_classes_rejected() {
+        // 编辑器/浏览器窗口不能误判——误发 Shift+Insert 会插入字符而非粘贴
+        assert!(!is_terminal_window_class("Chrome_WidgetWin_1"));
+        assert!(!is_terminal_window_class("Notepad"));
+        assert!(!is_terminal_window_class("Scintilla"));
+        assert!(!is_terminal_window_class(""));
+    }
+}
+
 /// 返回 Blink 最近一次唤起、尚未抢焦点时记录的外部前台窗口。
 pub fn last_external_foreground_hwnd() -> Option<isize> {
     let hwnd = LAST_EXTERNAL_HWND.load(Ordering::SeqCst);

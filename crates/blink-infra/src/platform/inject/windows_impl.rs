@@ -235,6 +235,34 @@ pub fn paste_clipboard_text() -> Result<(), InjectError> {
     send_paste().map_err(InjectError::SendInput)
 }
 
+/// 对剪贴板现有内容发送 Shift+Insert（0.25.22，终端粘贴键）。
+///
+/// 终端对 Ctrl+V 支持参差（旧 conhost 只认 Ctrl+Shift+V），Shift+Insert 是终端界
+/// 最通用的粘贴键。**Insert 是扩展键，必须带 `KEYEVENTF_EXTENDEDKEY`**（见文件头
+/// 注意事项），否则被系统解释为 Numpad Ins 不生效。左 Shift 同左 Ctrl 理由不带
+/// 扩展 flag。
+pub fn send_shift_insert_paste() -> Result<(), InjectError> {
+    let mut inputs: Vec<INPUT> = Vec::with_capacity(6);
+    neutralize_pressed_alt(&mut inputs);
+    inputs.push(make_virtual_key(VK_LSHIFT, KEYBD_EVENT_FLAGS(0)));
+    inputs.push(make_virtual_key(VK_INSERT, KEYEVENTF_EXTENDEDKEY));
+    inputs.push(make_virtual_key(
+        VK_INSERT,
+        KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP,
+    ));
+    inputs.push(make_virtual_key(VK_LSHIFT, KEYEVENTF_KEYUP));
+
+    let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+    if sent != inputs.len() as u32 {
+        let err = format!("SendInput Shift+Insert 只发送了 {sent}/{}", inputs.len());
+        tracing::error!(%err, "send_shift_insert_paste 失败");
+        return Err(InjectError::SendInput(err));
+    }
+    // 与 inject_text_clipboard 的粘贴等待对齐，给目标应用处理消息的时间
+    std::thread::sleep(Duration::from_millis(100));
+    Ok(())
+}
+
 /// 发送 Ctrl+V 按键序列。
 ///
 /// **关键**: `KEYEVENTF_EXTENDEDKEY` 只用于扩展键(右Ctrl/右Alt/Insert/Delete等),

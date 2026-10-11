@@ -22,6 +22,16 @@
 //! 无需用户配置——自动分流覆盖了所有场景。已预写剪贴板的调用方（`paste_to_input`
 //! 的复制兜底）可用 [`paste_clipboard_text()`] 免去备份→写→恢复三连。
 //!
+//! ## 0.25.22 行为变更：上屏一律真实粘贴
+//!
+//! `paste_to_input` 不再走 [`choose_inject_strategy`] 分流——一律剪贴板+Ctrl+V
+//! （终端窗口类改发 [`paste_via_shift_insert`]）。实测依据：SendInput Unicode
+//! 逐字注入在 Typora（Chromium+IME）会把文本搅碎成乱码（`EastWest\Installation`
+//! → `EastWest\rrrr…`），且 `\n`→VK_RETURN 在地址栏/终端是"命令"而非数据；
+//! 真实粘贴的换行是惰性数据且受 bracketed paste 保护。`inject_text` 与
+//! `choose_inject_strategy` 保留：语音渐进路径仍用 strict Unicode（0.23.20
+//! 不变量），通用注入库不变。
+//!
 //! > **0.10.5 TSF 方案已废弃**：曾引入 imekit 做 TSF Composition 注入，实测发现
 //! > `ITfThreadMgr::GetFocus()` 是进程本地的——Blink 拿不到前台应用的编辑上下文，跨进程时 TSF 路径静默失败退化成 SendInput，无额外价值。imekit 依赖与 TSF 实现已移除。
 //! >
@@ -131,6 +141,17 @@ pub fn inject_text(text: &str) -> Result<(), InjectError> {
 #[cfg(target_os = "windows")]
 pub fn paste_clipboard_text() -> Result<(), InjectError> {
     windows_impl::paste_clipboard_text()
+}
+
+/// 对系统剪贴板中的**现有内容**发送 Shift+Insert（0.25.22）。
+///
+/// 终端类窗口的粘贴键：Ctrl+V 在旧 conhost 不可用（只认 Ctrl+Shift+V），Shift+Insert
+/// 是终端界最通用的粘贴键（conhost/WT/mintty/PuTTY 全认）；且 bracketed paste 只对
+/// 真实粘贴生效——粘贴文本中的换行不会被 shell 当命令执行。与
+/// [`paste_clipboard_text`] 同语义：调用方自行保证剪贴板内容已就位。
+#[cfg(target_os = "windows")]
+pub fn paste_via_shift_insert() -> Result<(), InjectError> {
+    windows_impl::send_shift_insert_paste()
 }
 
 /// 仅 SendInput Unicode 注入，失败不降级剪贴板（0.23.13 G2 渐进上屏）。

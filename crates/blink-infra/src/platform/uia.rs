@@ -110,20 +110,25 @@ pub fn focused_class_name() -> Option<String> {
 ///
 /// 见 https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-controltype-ids
 const UIA_EDIT_CONTROL_TYPE_ID: i32 = 50004;
+// 0.25.21 修复：白名单缺真值 Document=50030（原写 50036），WinUI TextBox（Win11
+// 记事本，class=RichEditD2DPT）与 Chromium 整页编辑器（Typora，class=
+// Chrome_RenderWidgetHostHWND）被注入门控拒绝——实测日志已证两者均返回 50030。
 const UIA_DOCUMENT_CONTROL_TYPE_ID: i32 = 50030;
-// 0.25.21 修复：此处原写 50036（实为 Table）——真值 Document=50030 不在白名单，
-// WinUI TextBox（Win11 记事本）与 Chromium 整页编辑器（Typora）的焦点元素被
-// 注入门控拒绝，静默降级为仅复制。50036 移除；50089（注释称 Chromium "Edit"
-// 变体，标准表无此 ID）保留待 debug_uia_focus 诊断数据定去留。
+// 经验值保留（0.25.22 恢复）：50036 标准名是 Table，但 0.25.21 曾将其移除后用户
+// 实测 IDEA 注入回归——经验值只增不删，来源待 IDEA 上 debug_uia_focus 实测确认。
+// 50089 同为经验值（注释称 Chromium "Edit" 变体，标准表无此 ID），继续保留。
+const UIA_TABLE_CONTROL_TYPE_ID: i32 = 50036;
 const UIA_EDIT2_CONTROL_TYPE_ID: i32 = 50089;
 
 /// 判断指定控件类型 ID 是否属于文本输入控件。
 ///
 /// 覆盖原生 Win32 Edit、UWP/WinUI TextBox 与 Chromium 整页编辑器（Document）、
-/// Chromium 输入框（contenteditable → Edit 50004，20261011 实机验证）。
+/// Chromium 输入框（contenteditable → Edit 50004，20261011 实机验证），
+/// 外加 50036/50089 两个经验值（见上方常量注释）。
 pub fn is_text_input_control(control_type_id: i32) -> bool {
     control_type_id == UIA_EDIT_CONTROL_TYPE_ID
         || control_type_id == UIA_DOCUMENT_CONTROL_TYPE_ID
+        || control_type_id == UIA_TABLE_CONTROL_TYPE_ID
         || control_type_id == UIA_EDIT2_CONTROL_TYPE_ID
 }
 
@@ -131,10 +136,23 @@ pub fn is_text_input_control(control_type_id: i32) -> bool {
 ///
 /// 在后台线程调用。返回 false 表示获取失败或焦点不在文本输入框。
 /// 0.21.x 起供剪贴板上屏（paste_to_input）判断目标是否为可注入输入框。
+///
+/// 0.25.22：控件类型不可辨时按**类名**兜底放行——Scintilla（Notepad3/Notepad++）
+/// 的编辑区暴露为 Pane(50033)，任何控件类型白名单都覆盖不到，但类名 "Scintilla"
+/// 恒为代码编辑控件，类名级放行安全。
 pub fn is_focused_on_text_input() -> bool {
-    focused_control_type()
-        .map(is_text_input_control)
-        .unwrap_or(false)
+    let Some(elem) = get_focused_element() else {
+        return false;
+    };
+    if let Ok(control_type) = unsafe { elem.CurrentControlType() }
+        && is_text_input_control(control_type.0)
+    {
+        return true;
+    }
+    // 0.25.22：Scintilla 类名级放行（见函数 doc 注释）
+    unsafe { elem.CurrentClassName() }
+        .map(|s| s.to_string())
+        .is_ok_and(|class| class == "Scintilla")
 }
 
 // ── 焦点元素诊断（0.25.21）───────────────────────────────────────────────
@@ -1135,5 +1153,40 @@ mod tests {
         let partial = hints.iter().find(|h| h.x == 900).unwrap();
         assert_eq!(partial.w, 100);
         assert_eq!(partial.h, 100);
+    }
+}
+
+#[cfg(test)]
+mod tests_text_input_gate {
+    use super::is_text_input_control;
+
+    /// 0.25.21/0.25.22：白名单覆盖实测真值与经验值——真值 Document=50030（Win11
+    /// 记事本 RichEditD2DPT / Typora Chrome_RenderWidgetHostHWND，20261011 日志实证），
+    /// Edit=50004（Chromium contenteditable），经验值 50036/50089 只增不删。
+    #[test]
+    fn whitelist_covers_measured_and_empirical_ids() {
+        assert!(is_text_input_control(50004), "Edit：Win32/Chromium 输入框");
+        assert!(
+            is_text_input_control(50030),
+            "Document：WinUI TextBox/Chromium 整页编辑器"
+        );
+        assert!(
+            is_text_input_control(50036),
+            "经验值保留：移除后 IDEA 回归（0.25.21 教训）"
+        );
+        assert!(is_text_input_control(50089), "经验值保留：来源待实测");
+    }
+
+    /// Scintilla（Notepad3/Notepad++）暴露为 Pane(50033)，控件类型不可辨——
+    /// 门控在类型不过时按类名放行（见 is_focused_on_text_input），50033 本身
+    /// 不能进白名单：Pane 是万能容器， Electron 页面/资源管理器都是 Pane。
+    #[test]
+    fn pane_is_not_whitelisted_by_type() {
+        assert!(
+            !is_text_input_control(50033),
+            "Pane 走类名级放行而非类型白名单"
+        );
+        assert!(!is_text_input_control(50020), "Text：静态文本");
+        assert!(!is_text_input_control(0), "读取失败占位");
     }
 }

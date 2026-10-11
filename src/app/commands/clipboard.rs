@@ -60,11 +60,12 @@ pub async fn copy_to_clipboard(text: String) -> Result<(), String> {
 /// 2. 隐藏主窗口（同 hide_window 语义，emit HIDDEN 供前端复位）。
 /// 3. 恢复唤起前记录的外部前台窗口焦点（关 Alt 系统菜单 + UIA SetFocus）。
 /// 4. UIA 判断焦点是否在文本输入控件：
-///    - 是 → 按长度分流上屏（0.23.20）：
-///      - 短文本 `inject_text` SendInput Unicode 逐字符（不污染剪贴板）
-///      - 长文本 `paste_clipboard_text` 直接对步骤 1 已写入的剪贴板发 Ctrl+V
-///        一次上屏——目标文本已在剪贴板，免去注入层的备份→写→恢复三连，
-///        也规避恢复抢先覆盖的竞态；粘贴后剪贴板保持目标文本正是复制语义
+///    - 是 → **一律真实粘贴**（0.25.22，取消 0.23.20 的长度分流）：对步骤 1 已写入
+///      的剪贴板内容发 Ctrl+V；终端类窗口（conhost/WT/mintty/PuTTY，按窗口类名家族
+///      识别）改发 Shift+Insert。实测依据：SendInput Unicode 逐字注入在 Typora
+///      （Chromium+IME）会把文本搅碎成乱码（`EastWest\Installation` → `EastWest\rrr…`），
+///      且 `\n`→VK_RETURN 在地址栏/终端是"命令"而非数据；真实粘贴的换行是惰性
+///      数据且受 bracketed paste 保护
 ///    - 否 → 保留剪贴板复制语义（文本已在系统剪贴板，用户自行粘贴）
 ///
 /// **时序约束**：「是否输入框」判断必须在隐藏并恢复焦点之后——blink 自身聚焦时，
@@ -109,29 +110,25 @@ pub async fn paste_to_input(app: tauri::AppHandle, text: String) -> Result<(), S
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         if crate::infra::platform::uia::is_focused_on_text_input() {
-            let units = text.encode_utf16().count();
-            let strategy = crate::infra::platform::inject::choose_inject_strategy(units);
-            let result = match strategy {
-                crate::infra::platform::inject::InjectStrategy::ClipboardPaste => {
-                    // 长文本：步骤 1 已把目标文本写入剪贴板，直接粘贴
-                    crate::infra::platform::inject::paste_clipboard_text()
-                }
-                crate::infra::platform::inject::InjectStrategy::Unicode => {
-                    crate::infra::platform::inject::inject_text(&text)
-                }
+            // 0.25.22：一律真实粘贴。Ctrl+V 打进非输入窗口有副作用，门控仍然保留；
+            // 终端窗口类改发 Shift+Insert（Ctrl+V 在旧 conhost 不可用）。
+            let terminal = crate::infra::platform::window::get_foreground_hwnd()
+                .is_some_and(crate::infra::platform::window::is_terminal_window);
+            let (result, method) = if terminal {
+                (
+                    crate::infra::platform::inject::paste_via_shift_insert(),
+                    "shift_insert",
+                )
+            } else {
+                (
+                    crate::infra::platform::inject::paste_clipboard_text(),
+                    "ctrl_v",
+                )
             };
-            // method 为分流决策的实际执行方式；Unicode 路径若 SendInput 失败，
-            // inject_text 内部自动降级剪贴板并打 warn 日志（含降级后结果）。
+            let units = text.encode_utf16().count();
             match result {
-                Ok(()) => {
-                    tracing::info!(units, method = strategy.as_label(), "paste_to_input: 文本已上屏")
-                }
-                Err(e) => tracing::error!(
-                    %e,
-                    units,
-                    method = strategy.as_label(),
-                    "paste_to_input: 文本注入失败"
-                ),
+                Ok(()) => tracing::info!(units, method, "paste_to_input: 文本已上屏"),
+                Err(e) => tracing::error!(%e, units, method, "paste_to_input: 文本注入失败"),
             }
         } else {
             tracing::debug!("paste_to_input: 目标焦点不在文本输入控件，保留剪贴板复制语义");
