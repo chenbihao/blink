@@ -187,6 +187,11 @@ pub(super) fn list_window_processes() -> Vec<super::RunningProcess> {
     }
 }
 
+/// [`process_name_of`] 的安全包装（uia 焦点诊断复用，0.25.21）。
+pub(crate) fn process_name_of_pid(pid: u32) -> Option<String> {
+    unsafe { process_name_of(pid) }
+}
+
 /// 由 PID 取进程名（OpenProcess + QueryFullProcessImageNameW + 取文件名）。None 表示拿不到。
 unsafe fn process_name_of(pid: u32) -> Option<String> {
     unsafe {

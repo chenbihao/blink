@@ -648,6 +648,25 @@ pub fn get_log_info() -> serde_json::Value {
     })
 }
 
+/// 焦点元素 UIA 诊断（0.25.21）：返回最近一次焦点捕获（热键唤起 show 前捕获的
+/// 目标应用焦点元素）与当前系统焦点的 ControlType/ClassName/进程信息。
+///
+/// 用途：实测各编辑器（Typora/记事本/Obsidian/终端）暴露的控件类型真值，
+/// 定稿 `is_text_input_control` 白名单与 caret 兜底策略。诊断流程：
+/// 目标应用输入框聚焦 → Alt+C/Alt+Space 唤起 → devtools 调用本命令看 `captured`。
+#[tauri::command]
+pub async fn debug_uia_focus() -> Result<serde_json::Value, String> {
+    // COM 属性读是跨进程阻塞调用（spec-backend：阻塞走 spawn_blocking）
+    let current =
+        tauri::async_runtime::spawn_blocking(crate::infra::platform::uia::current_focus_info)
+            .await
+            .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "captured": crate::infra::platform::uia::last_capture_info(),
+        "current": current,
+    }))
+}
+
 /// 获取性能统计概览（设置页 → 调试 Tab）。
 #[tauri::command]
 pub async fn get_perf_overview(app: tauri::AppHandle) -> serde_json::Value {

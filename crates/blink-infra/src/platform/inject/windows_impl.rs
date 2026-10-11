@@ -6,7 +6,7 @@
 //!
 //! 1. 将文本编码为 UTF-16
 //! 2. 每个 UTF-16 码元构造一个 `INPUT { wScan: code_unit, dwFlags: KEYEVENTF_UNICODE }`
-//! 3. 换行符 `\n` / `\r\n` 用 `VK_RETURN` 代替
+//! 3. 换行符 `\n` / `\r` / `\r\n` 用 `VK_RETURN` 代替（`\r\n` 合并为单次，0.25.21）
 //! 4. 批量 `SendInput`（Windows 限制单次最多 ~544 个 INPUT 结构体，分批发送）
 //!
 //! - ✅ 完全不碰剪贴板
@@ -44,9 +44,24 @@ use super::InjectError;
 /// Windows 内部缓冲区上限约 544 个，留余量取 500。
 const SENDINPUT_BATCH_LIMIT: usize = 500;
 
+/// UTF-16 换行码元：`\n`（LF）与 `\r`（CR）。
+const LF_CODE_UNIT: u16 = 0x0A;
+const CR_CODE_UNIT: u16 = 0x0D;
+
+/// 该 UTF-16 码元是否应产生一次回车按键：`\n`/`\r` 都换行，但 `\r\n` 序列只发一次
+/// （前一码元是 `\r` 且当前是 `\n` 时跳过）——逐码元各发一对 VK_RETURN 会双回车，
+/// Windows 复制的多行文本在编辑器中会出现隔行空行（0.25.21 修复）。
+fn emits_return_key(code_unit: u16, prev_code_unit: u16) -> bool {
+    if code_unit == LF_CODE_UNIT {
+        prev_code_unit != CR_CODE_UNIT
+    } else {
+        code_unit == CR_CODE_UNIT
+    }
+}
+
 /// 通过 `SendInput` + `KEYEVENTF_UNICODE` 逐字符注入文本。
 ///
-/// 完全不碰剪贴板。换行符用 `VK_RETURN` 代替。
+/// 完全不碰剪贴板。换行符用 `VK_RETURN` 代替（`\r\n` 合并为单次）。
 /// 超出 BMP 的字符（如 emoji）通过 UTF-16 代理对发送。
 pub fn inject_text_unicode(text: &str) -> Result<(), InjectError> {
     if text.is_empty() {
@@ -61,12 +76,13 @@ pub fn inject_text_unicode(text: &str) -> Result<(), InjectError> {
     let mut inputs: Vec<INPUT> = Vec::with_capacity(utf16.len() * 2 + 2);
     neutralize_pressed_alt(&mut inputs);
 
+    let mut prev_code_unit: u16 = 0;
     for &code_unit in &utf16 {
-        if code_unit == b'\n' as u16 || code_unit == b'\r' as u16 {
+        if emits_return_key(code_unit, prev_code_unit) {
             // 换行符用 VK_RETURN 代替（KEYEVENTF_UNICODE 发 \n 很多应用不认）
             inputs.push(make_virtual_key(VK_RETURN, KEYBD_EVENT_FLAGS(0)));
             inputs.push(make_virtual_key(VK_RETURN, KEYEVENTF_KEYUP));
-        } else {
+        } else if code_unit != LF_CODE_UNIT && code_unit != CR_CODE_UNIT {
             // 普通字符：KEYEVENTF_UNICODE 逐码元发送
             inputs.push(make_unicode_key(code_unit, KEYEVENTF_UNICODE));
             inputs.push(make_unicode_key(
@@ -74,6 +90,8 @@ pub fn inject_text_unicode(text: &str) -> Result<(), InjectError> {
                 KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
             ));
         }
+        // else：`\r\n` 的 `\n` 半段——回车已由 `\r` 发出，跳过
+        prev_code_unit = code_unit;
     }
 
     // 分批发送（Windows 限制单次 SendInput 数量）
@@ -313,5 +331,33 @@ mod tests {
         assert_eq!(keyboard.wVk, VIRTUAL_KEY(0));
         assert_eq!(keyboard.wScan, '测' as u16);
         assert_eq!(keyboard.dwFlags, KEYEVENTF_UNICODE);
+    }
+
+    /// 0.25.21：`\r\n` 必须合并为单次回车，其余换行形态各发一次。
+    #[test]
+    fn crlf_sequence_emits_single_return() {
+        // \r\n：\r 发回车、\n 跳过（逐码元各发会让 Windows 多行文本打出隔行空行）
+        assert!(emits_return_key(CR_CODE_UNIT, 0));
+        assert!(!emits_return_key(LF_CODE_UNIT, CR_CODE_UNIT));
+    }
+
+    #[test]
+    fn lone_newlines_each_emit_return() {
+        assert!(emits_return_key(LF_CODE_UNIT, 0), "孤立 \\n 换行");
+        assert!(
+            emits_return_key(CR_CODE_UNIT, 0),
+            "孤立 \\r（老 Mac 文本）换行"
+        );
+        assert!(emits_return_key(LF_CODE_UNIT, LF_CODE_UNIT), "\\n\\n 两行");
+        assert!(emits_return_key(CR_CODE_UNIT, CR_CODE_UNIT), "\\r\\r 两行");
+        // \r\n\n：CRLF 后再一个空行 = 共两次回车
+        assert!(emits_return_key(LF_CODE_UNIT, LF_CODE_UNIT));
+    }
+
+    #[test]
+    fn non_newline_code_units_emit_nothing() {
+        assert!(!emits_return_key('a' as u16, 0));
+        assert!(!emits_return_key('a' as u16, CR_CODE_UNIT));
+        assert!(!emits_return_key(0xD83D, 0), "emoji 代理对高位不是换行");
     }
 }

@@ -86,7 +86,20 @@ pub(crate) fn get_selected_text(hwnd_raw: isize) -> Option<String> {
 pub(crate) fn capture_focused_element() -> Option<SendableElement> {
     let _com = uia::ComGuard::init_mta();
     let automation: IUIAutomation = create_automation()?;
-    unsafe { automation.GetFocusedElement().ok() }.map(SendableElement)
+    let elem = unsafe { automation.GetFocusedElement().ok() }.map(SendableElement)?;
+    // 0.25.21 诊断：捕获时点（show 前焦点未失）记录焦点控件类型——外部跨进程
+    // UIA 探测不可靠（实机验证树枚举属性读取全败），这是拿目标应用真实
+    // ControlType 的唯一稳定通道，供 debug_uia_focus 与日志双路消费
+    let info = uia::read_focus_info(&elem.0);
+    tracing::info!(
+        control_type = info.control_type_id,
+        type_name = info.control_type_name,
+        class = %info.class_name,
+        process = %info.process_name,
+        "uia: 捕获焦点元素"
+    );
+    uia::set_last_capture_info(info);
+    Some(elem)
 }
 
 /// 从已捕获的焦点元素中提取选区文本（慢速，可后台执行）。

@@ -313,6 +313,19 @@ pub fn list_running_processes() -> Vec<RunningProcess> {
     }
 }
 
+/// 由 PID 查进程名（uia 焦点诊断复用，0.25.21）。None 表示拿不到。
+pub fn process_name_of_pid(pid: u32) -> Option<String> {
+    #[cfg(target_os = "windows")]
+    {
+        self::windows::process_name_of_pid(pid)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
 /// 采集当前前台应用信息（对外暴露 · 0.9.2.1）。
 ///
 /// 供 clipboard listener 的 change hook 判断「前台是否为敏感应用」用——不能重复

@@ -110,12 +110,17 @@ pub fn focused_class_name() -> Option<String> {
 ///
 /// 见 https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-controltype-ids
 const UIA_EDIT_CONTROL_TYPE_ID: i32 = 50004;
-const UIA_DOCUMENT_CONTROL_TYPE_ID: i32 = 50036;
-const UIA_EDIT2_CONTROL_TYPE_ID: i32 = 50089; // Chromium 内部 "Edit" 变体
+const UIA_DOCUMENT_CONTROL_TYPE_ID: i32 = 50030;
+// 0.25.21 修复：此处原写 50036（实为 Table）——真值 Document=50030 不在白名单，
+// WinUI TextBox（Win11 记事本）与 Chromium 整页编辑器（Typora）的焦点元素被
+// 注入门控拒绝，静默降级为仅复制。50036 移除；50089（注释称 Chromium "Edit"
+// 变体，标准表无此 ID）保留待 debug_uia_focus 诊断数据定去留。
+const UIA_EDIT2_CONTROL_TYPE_ID: i32 = 50089;
 
 /// 判断指定控件类型 ID 是否属于文本输入控件。
 ///
-/// 覆盖原生 Win32 Edit、UWP/WinUI TextBox（Document）、Chromium 输入框（Edit2）。
+/// 覆盖原生 Win32 Edit、UWP/WinUI TextBox 与 Chromium 整页编辑器（Document）、
+/// Chromium 输入框（contenteditable → Edit 50004，20261011 实机验证）。
 pub fn is_text_input_control(control_type_id: i32) -> bool {
     control_type_id == UIA_EDIT_CONTROL_TYPE_ID
         || control_type_id == UIA_DOCUMENT_CONTROL_TYPE_ID
@@ -130,6 +135,85 @@ pub fn is_focused_on_text_input() -> bool {
     focused_control_type()
         .map(is_text_input_control)
         .unwrap_or(false)
+}
+
+// ── 焦点元素诊断（0.25.21）───────────────────────────────────────────────
+
+/// 焦点元素诊断快照（`debug_uia_focus` command 直接序列化返回）。
+///
+/// **不含 Name/Value 等内容字段**——可能携带用户文本，隐私铁则不记录。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FocusElementInfo {
+    pub control_type_id: i32,
+    /// 标准控件类型名（静态映射；未知 ID 为 "unknown"）。
+    pub control_type_name: &'static str,
+    /// 元素自述的本地化控件类型（如 "文档"/"edit"）；与标准名矛盾时即为可疑暴露。
+    pub localized_control_type: String,
+    pub class_name: String,
+    pub process_id: u32,
+    pub process_name: String,
+}
+
+/// 常见 UIA ControlTypeId → 标准名（只列诊断相关，完整表见 uiauto-controltype-ids）。
+fn control_type_name(id: i32) -> &'static str {
+    match id {
+        50004 => "Edit",
+        50005 => "Hyperlink",
+        50020 => "Text",
+        50025 => "Custom",
+        50030 => "Document",
+        50032 => "Window",
+        50033 => "Pane",
+        50036 => "Table",
+        _ => "unknown",
+    }
+}
+
+/// 最近一次 `capture_focused_element` 的焦点元素快照（跨线程读，0.25.21 诊断用）。
+static LAST_CAPTURE: std::sync::OnceLock<std::sync::Mutex<Option<FocusElementInfo>>> =
+    std::sync::OnceLock::new();
+
+fn last_capture_slot() -> &'static std::sync::Mutex<Option<FocusElementInfo>> {
+    LAST_CAPTURE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// 读取焦点元素诊断信息（跨进程 COM 属性读，O(1)；失败字段留空）。调用线程需已在 MTA。
+pub(crate) fn read_focus_info(elem: &IUIAutomationElement) -> FocusElementInfo {
+    let control_type_id = unsafe { elem.CurrentControlType() }
+        .map(|t| t.0)
+        .unwrap_or(0);
+    let process_id = unsafe { elem.CurrentProcessId() }
+        .map(|p| p as u32)
+        .unwrap_or(0);
+    FocusElementInfo {
+        control_type_id,
+        control_type_name: control_type_name(control_type_id),
+        localized_control_type: unsafe { elem.CurrentLocalizedControlType() }
+            .map(|s| s.to_string())
+            .unwrap_or_default(),
+        class_name: unsafe { elem.CurrentClassName() }
+            .map(|s| s.to_string())
+            .unwrap_or_default(),
+        process_id,
+        process_name: crate::platform::context::process_name_of_pid(process_id).unwrap_or_default(),
+    }
+}
+
+/// 记录最近一次焦点捕获的诊断快照（`capture_focused_element` 调用点同步写入）。
+pub fn set_last_capture_info(info: FocusElementInfo) {
+    *last_capture_slot().lock().unwrap() = Some(info);
+}
+
+/// 读取最近一次焦点捕获的诊断快照（尚无捕获返回 None）。
+pub fn last_capture_info() -> Option<FocusElementInfo> {
+    last_capture_slot().lock().unwrap().clone()
+}
+
+/// 读取**当前**系统焦点元素诊断信息（`debug_uia_focus` 对照用；主窗可见时是其自身输入框）。
+pub fn current_focus_info() -> Option<FocusElementInfo> {
+    let _com = ComGuard::init_mta();
+    let elem = get_focused_element()?;
+    Some(read_focus_info(&elem))
 }
 
 // ── 0.18.2 控件级智能吸附 ──────────────────────────────────────────────────
