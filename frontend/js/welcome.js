@@ -910,6 +910,17 @@ function initNavigation() {
     });
     document.getElementById("skip-btn")?.addEventListener("click", finish);
 
+    // 丝滑小妙招入口（0.25.28）：等同「开始使用」——先发 open_settings_tab（await 确保指令
+    // 在关窗前送达后端），再 finish() 完成引导并关闭引导页
+    document.getElementById("guide-btn")?.addEventListener("click", async () => {
+        try {
+            await invoke("open_settings_tab", {tab: "guide"});
+        } catch (e) {
+            console.error("welcome: open guide failed:", e);
+        }
+        finish();
+    });
+
     // 第 3 步按钮
     document.getElementById("ocr-install-btn")?.addEventListener("click", installOcr);
     document.getElementById("voice-engines-btn")?.addEventListener("click", async () => {

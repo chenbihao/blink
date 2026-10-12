@@ -1442,6 +1442,7 @@ fn main() {
             app::commands::get_chat_messages,
             app::commands::get_conversation_system_prompt, // 0.12.7 §6.5
             app::commands::open_settings_tab,
+            app::commands::get_guide_markdown, // 0.25.28 丝滑小妙招
             app::commands::save_text_file,
             app::commands::generate_conversation_title,
             app::commands::truncate_messages,

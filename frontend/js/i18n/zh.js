@@ -13,6 +13,7 @@ export const zh = {
     "tab.plugins": "插件",
     "tab.network": "网络",
     "tab.context": "上下文感知",
+    "tab.guide": "丝滑小妙招",
     "tab.chord": "Chord 交互",
     "tab.storage": "存储",
     "tab.debug": "调试",
@@ -34,6 +35,17 @@ export const zh = {
     "panel.storage": "存储",
     "panel.debug": "调试",
     "panel.about": "关于",
+    "panel.guide": "丝滑小妙招",
+
+    // ── 丝滑小妙招（0.25.28）──
+    "guide.lede": "主操作之外的使用技巧：搜索、剪贴板、截图、贴图、便签、AI 与语音里那些不写出来就发现不了的交互。",
+    "guide.loading": "加载中…",
+    "guide.error": "指南加载失败：{message}",
+    "guide.version": "对应版本 v{version}（随安装包内嵌，与当前安装版本行为一致）",
+    "guide.online": "在线查看最新版",
+    "guide.toc": "指南目录",
+    "about.guide.label": "使用指南",
+    "about.guide.open": "打开丝滑小妙招",
 
     // ── 面板 lede（每个 tab h2 下的一句导览）──
     "general.lede": "全局偏好：主题、语言、历史与结果条数上限。",
@@ -1316,6 +1328,7 @@ export const zh = {
     "welcome.step3.voice.action": "去引擎页下载",
     "welcome.step4.title": "一切就绪！",
     "welcome.step4.desc": "按 Alt+Space 唤出 Blink 开始使用；所有选项都可在设置中调整。",
+    "welcome.step4.guide": "查看丝滑小妙招",
 
     // ── 快捷键速查表（0.17.3）──
     "hotkey.cheatsheet.title": "当前快捷键",

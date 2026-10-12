@@ -1,0 +1,191 @@
+/**
+ * 丝滑小妙招 tab 样式（0.25.28）
+ *
+ * 内容由 tabs/guide.js 用 Cherry 容器模式渲染进 #guide-body（innerHTML
+ * 回填，挂 .cherry-markdown 取 vendor 排版；代码块/行内代码的明暗主题
+ * 适配在 components/cherry.css，全局已导入）。这里只做布局与主题变量
+ * 桥接：可读宽度、meta 行、中文防斜体。
+ *
+ * 变量桥接（关键）：Cherry vendor 把全部 --md-* 变量定义在 .cherry 包裹层
+ * 选择器上，而容器模式渲染【没有】.cherry 包裹层——变量未定义时
+ * `border:1px solid var(--md-table-border)` 整条声明按"计算值时刻无效"
+ * 处理，表格退化为无边框。这里在 .guide-body 上补齐所需变量并映射到
+ * 应用 token，与主窗 AI 模式（ai-mode.css §Cherry 渲染容器内样式微调）
+ * 同一套模式。
+ */
+
+/* meta 行：内嵌版本说明 + 在线版外链 */
+.guide-meta {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px 16px;
+    margin: -8px 0 16px 0;
+    font-size: 12.5px;
+    color: var(--text-dim);
+}
+
+.guide-online {
+    color: var(--accent);
+}
+
+/* 加载占位（渲染成功后被整体替换） */
+.guide-loading {
+    color: var(--text-dim);
+    padding: 32px 0;
+    text-align: center;
+}
+
+/* 正文：限制可读宽度，长表格横向滚动不出面板 */
+.guide-body {
+    max-width: 760px;
+    line-height: var(--leading-relaxed);
+    overflow-x: auto;
+
+    /* Cherry --md-* 变量桥接到应用 token（vendor 表头背景复用 --md-inline-code-bg） */
+    --md-heading-color: var(--text);
+    --md-paragraph-color: var(--text);
+    --md-link-color: var(--accent);
+    --md-table-border: var(--surface-2);
+    --md-hr-border: var(--surface-2);
+    --md-inline-code-bg: var(--surface-2);
+    --md-blockquote-color: var(--text-dim);
+    --md-blockquote-border: var(--surface-2);
+    --md-blockquote-bg: transparent;
+}
+
+/* 表头增强：vendor 的 th 随 reset 失去加粗，与数据行区分偏弱（视觉验证反馈） */
+.guide-body table th {
+    font-weight: 600;
+    color: var(--text);
+}
+
+/* 表格统一等宽：19 张表宽度随内容 386~760px 参差，滚动时块节奏不齐 */
+.guide-body table {
+    width: 100%;
+}
+
+/* 键名/代码在窄触发列内不拆行：CJK 换行规则会把 `Tab` 断成 "Ta b"、
+   `Delete` 断成 "Del ete"；面板级 overflow-x 兜底最宽表 */
+.guide-body td :is(code, kbd) {
+    white-space: nowrap;
+}
+
+/* vendor 在 .cherry-markdown 根上全局 word-break:break-all——对中文无感
+   （CJK 本就逐字可断），对英文正文/表格是单词任意断行（"depending" 断成
+   "depe nding"）。双语指南恢复常规断行：CJK 在 normal 下照常逐字换行，
+   英文按词换行，超长 token 由 break-word 兜底。双类名压过 vendor 同名
+   规则（载入顺序无关）。 */
+.cherry-markdown.guide-body {
+    word-break: normal;
+    overflow-wrap: break-word;
+}
+
+/* 目录锚点定位留呼吸空间（点击目录 scrollIntoView 后标题贴容器顶） */
+.guide-body :is(h2, h3) {
+    scroll-margin-top: 12px;
+}
+
+/* 小节标题弱强调：h3 承载「丝滑技巧」等文档灵魂小节，左侧 accent 竖线
+   与设置页 section-label 的视觉语言一致，扫视时可与数据行区分 */
+.guide-body h3 {
+    padding-left: 8px;
+    border-left: 3px solid var(--accent);
+}
+
+/* ── 右侧悬浮目录（0.25.28）─────────────────────────────────────────────
+   内容区宽度预算约 716px（窗 960 − 侧栏 180 − 内边距 64），常驻侧栏列会
+   挤压正文表格，故目录做成 overlay：容器绝对定位贴 panel 右缘、不占布局
+   宽度，内层 sticky 随 .content 滚动。≥900px 时正文收窄让出右缘，目录
+   常驻；窄窗正文恢复全宽，目录收成贴右缘的悬浮小签，悬停/聚焦展开。 */
+
+#guide {
+    position: relative;
+}
+
+@media (min-width: 900px) {
+    #guide .guide-body {
+        max-width: 552px;
+    }
+}
+
+/* 容器只做 sticky 的行程轨道：贯穿 panel 全高，不接收点击 */
+.guide-toc {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 148px;
+    pointer-events: none;
+}
+
+.guide-toc-inner {
+    position: sticky;
+    top: 32px;
+    /* 自然位置压在 h2 + lede + meta 行下方，起浮后随滚动钉在 32px */
+    margin-top: 176px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.guide-toc-inner a {
+    display: block;
+    padding: 3px 0 3px 10px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-dim);
+    border-left: 2px solid var(--surface-2);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    pointer-events: auto;
+    transition: color var(--transition-fast), border-color var(--transition-fast);
+}
+
+.guide-toc-inner a:hover {
+    color: var(--text);
+}
+
+.guide-toc-inner a.active {
+    color: var(--accent);
+    border-left-color: var(--accent);
+}
+
+/* 窄窗：目录收成贴右缘的悬浮小签（peek），悬停/聚焦展开成完整卡片浮于
+   内容之上；离开延迟 0.2s 再收起（纯 CSS 过渡实现 spec-frontend §5.3
+   hover 缓冲）。收起态只滑出卡片左缘 36px——关键约束：收起区必须是
+   展开区的子集（展开态覆盖光标所在的小签），否则悬停后卡片滑离光标、
+   hover 断开又滑回，形成抖振循环。pointer-events 只开在卡片上——轨道
+   全高透明列不得拦截正文点击。
+   置于文件末尾：media 内的 transform 必须排在基础 .guide-toc 规则之后，
+   同优先级下靠源顺序覆盖。 */
+@media (max-width: 899.5px) {
+    .guide-toc {
+        /* 展开态停靠到窗口右缘（panel 右缘 + 留白 42px）：确保展开卡片
+           完整覆盖收起小签的可见区，光标停在签上不会滑出 hover 区 */
+        right: -42px;
+        transform: translateX(calc(100% - 36px));
+        transition: transform var(--transition-base) 0.2s;
+    }
+
+    .guide-toc:hover,
+    .guide-toc:focus-within {
+        transform: translateX(0);
+        transition-delay: 0s;
+    }
+
+    .guide-toc-inner {
+        pointer-events: auto;
+        background: var(--surface);
+        border: 1px solid var(--surface-2);
+        border-radius: var(--radius-md);
+        padding: 8px 12px 8px 8px;
+    }
+}
+
+/* 中文不斜体（spec-frontend §3.1/§3.4 防御）：Cherry em 输出统一转直体加粗 */
+.guide-body em {
+    font-style: normal;
+    font-weight: 600;
+}

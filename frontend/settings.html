@@ -41,6 +41,7 @@
             <span class="group-title" data-i18n="sidebar.group.interaction">感知与交互</span>
             <button class="tab" data-i18n="tab.voice" data-tab="voice">语音输入</button>
             <button class="tab" data-i18n="tab.context" data-tab="context">上下文感知</button>
+            <button class="tab" data-i18n="tab.guide" data-tab="guide">丝滑小妙招</button>
         </div>
         <div class="sidebar-group">
             <span class="group-title" data-i18n="sidebar.group.other">其他</span>
@@ -2280,6 +2281,19 @@
             </div>
         </div>
 
+        <!-- 丝滑小妙招（0.25.28）：docs/guide.md 编译期内嵌 + Cherry 渲染（vendor 脚本在页底统一加载）─── -->
+        <div class="panel" id="guide">
+            <h2 data-i18n="panel.guide">丝滑小妙招</h2>
+            <p class="panel-lede" data-i18n="guide.lede">主操作之外的使用技巧：那些不写出来就发现不了的交互，都在这里。</p>
+            <div class="guide-meta">
+                <span class="guide-version" id="guide-version"></span>
+                <a class="external-link guide-online" data-i18n="guide.online" hidden href="#" id="guide-online">在线查看最新版</a>
+            </div>
+            <div class="cherry-markdown guide-body" id="guide-body">
+                <div class="guide-loading" data-i18n="guide.loading" id="guide-loading">加载中…</div>
+            </div>
+        </div>
+
         <!-- Chord 交互（0.8.5 §6.6 · 0.8.7 UX 重排：Hero 主开关 + 紧凑动作行）─── -->
         <div class="panel" id="chord">
             <h2 data-i18n="panel.chord">Chord 交互</h2>
@@ -2651,6 +2665,10 @@
             <div class="setting-row">
                 <label class="setting-label" data-i18n="about.repository.label">仓库</label>
                 <span class="value"><a class="external-link" href="#" id="about-repository">—</a></span>
+            </div>
+            <div class="setting-row">
+                <label class="setting-label" data-i18n="about.guide.label">使用指南</label>
+                <button class="about-check-btn" data-i18n="about.guide.open" id="about-guide-open" type="button">打开丝滑小妙招</button>
             </div>
         </div>
     </main>

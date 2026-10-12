@@ -204,6 +204,10 @@ Blink 中可复用的业务能力可以被 AI 调用，也可以通过开放协�
 | `Alt + Space`（按住） | 语音输入 |
 | `Esc` | 隐藏 |
 
+完整功能清单与隐藏技巧见[《丝滑小妙招》使用指南](docs/guide.md)（应用内：设置 → 感知与交互 → 丝滑小妙招）。
+
+English edition: [Tips & Tricks](docs/guide.en.md)（英文版可能滞后于中文版）。
+
 ---
 
 ## 开发

@@ -12,6 +12,7 @@ import {invoke, listen, normalizeError} from "../../shared/tauri.js";
 import {EVENTS} from "../../shared/event-names.js";
 import {initMarkdown, renderMarkdown} from "../../shared/markdown.js";
 import {t} from "../../i18n/index.js";
+import {navigateSettings} from "../navigation.js";
 
 /**
  * 初始化关于 Tab
@@ -21,6 +22,11 @@ export function initAboutTab() {
     initMarkdown();
     loadAboutInfo();
     initCheckUpdate();
+
+    // 丝滑小妙招入口（0.25.28）：跨 tab 跳转统一走 navigation（spec-frontend §5.7）
+    document.getElementById("about-guide-open")?.addEventListener("click", () => {
+        navigateSettings({tabId: "guide"}).catch((e) => console.error("navigate to guide failed:", e));
+    });
 }
 
 /**

@@ -13,6 +13,7 @@ export const en = {
     "tab.plugins": "Plugins",
     "tab.network": "Network",
     "tab.context": "Context",
+    "tab.guide": "Tips & Tricks",
     "tab.chord": "Chord",
     "tab.storage": "Storage",
     "tab.debug": "Debug",
@@ -34,6 +35,17 @@ export const en = {
     "panel.storage": "Storage",
     "panel.debug": "Debug",
     "panel.about": "About",
+    "panel.guide": "Tips & Tricks",
+
+    // ── Tips & Tricks guide (0.25.28) ──
+    "guide.lede": "Power tips and hidden interactions across search, clipboard, screenshot, pin, sticky notes, AI and voice — the ones you would never find on your own.",
+    "guide.loading": "Loading…",
+    "guide.error": "Failed to load guide: {message}",
+    "guide.version": "Bundled with v{version} — matches the installed build",
+    "guide.online": "View latest online",
+    "guide.toc": "Guide contents",
+    "about.guide.label": "User Guide",
+    "about.guide.open": "Open Tips & Tricks",
 
     // ── Panel lede (one-line intro under each tab h2) ──
     "general.lede": "Global preferences: theme, language, history, and result limits.",
@@ -1320,6 +1332,7 @@ export const en = {
     "welcome.step3.voice.action": "Open engines page",
     "welcome.step4.title": "You're all set!",
     "welcome.step4.desc": "Press Alt+Space to summon Blink and get started; every option is adjustable in Settings.",
+    "welcome.step4.guide": "Open tips & tricks",
 
     // ── Hotkey cheatsheet (0.17.3) ──
     "hotkey.cheatsheet.title": "Current shortcuts",

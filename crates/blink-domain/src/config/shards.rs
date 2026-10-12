@@ -54,7 +54,8 @@ fn default_grace_period() -> u64 {
 /// welcome 引导页随二进制发布、始终渲染最新内容；发布新引导时本值 +1，
 /// 启动时 `onboarding_version < ONBOARDING_VERSION` 即弹出引导，完成/跳过后写回本值。
 /// 存量老用户（0.22.13 前的记录）一次性迁移为 0（未完成当前版），升级后补看一次新版向导。
-pub const ONBOARDING_VERSION: u32 = 1;
+/// 0.25.28：v2——第 4 步新增「丝滑小妙招」入口（等同完成引导并直达设置页指南 tab）。
+pub const ONBOARDING_VERSION: u32 = 2;
 
 /// 外观配置分片。theme / language / auto_start + log_level + ai_http_body_log + window_opacity + onboarding_version。
 #[derive(Debug, Clone, Serialize, Deserialize)]

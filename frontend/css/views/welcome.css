@@ -92,6 +92,23 @@
     max-width: 480px;
     min-height: 0;
     overflow-y: auto;
+    /* 0.25.28：快捷键步骤内容超高滚动时随主题渲染滚动条（修复 WebView2 原生样式，
+       与 chat-messages / voice-overlay 同一套写法） */
+    scrollbar-width: thin;
+    scrollbar-color: var(--surface-2) transparent;
+}
+
+.welcome-body::-webkit-scrollbar {
+    width: 6px;
+}
+
+.welcome-body::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.welcome-body::-webkit-scrollbar-thumb {
+    background: var(--surface-2);
+    border-radius: 3px;
 }
 
 .welcome-step-title {
@@ -537,4 +554,9 @@
 
 .welcome-btn--ghost:hover:not(:disabled) {
     background: var(--surface);
+}
+
+/* 丝滑小妙招入口（0.25.28）：完成步骤 desc 下的标准按钮（带边框可辨识可点击） */
+.welcome-guide-btn {
+    margin-top: 16px;
 }

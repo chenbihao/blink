@@ -266,16 +266,32 @@ fn fetch_models() {
 /// 所有通过 `include_str!` 嵌入 Rust 二进制的资源文件清单。
 /// 新增嵌入资源时必须在此登记，否则 release-check 不会覆盖它。
 /// 0.22.10：Python OCR server/锁文件条目已随 Python/uv 栈退役删除。
-const EMBEDDED_RESOURCES: &[(&str, &str, EmbeddedKind)] = &[(
-    "resources/model_context_windows.json",
-    "AI model context windows catalog",
-    EmbeddedKind::JsonData,
-)];
+/// 0.25.28：docs/guide.md（丝滑小妙招）从 docs/ 直引嵌入，不复制进
+/// resources/（避免生成文件 + dev 模式编译依赖 xtask 拷贝）。
+const EMBEDDED_RESOURCES: &[(&str, &str, EmbeddedKind)] = &[
+    (
+        "resources/model_context_windows.json",
+        "AI model context windows catalog",
+        EmbeddedKind::JsonData,
+    ),
+    (
+        "docs/guide.md",
+        "丝滑小妙招使用指南（内嵌文档，中文真源）",
+        EmbeddedKind::MarkdownDoc,
+    ),
+    (
+        "docs/guide.en.md",
+        "Tips & Tricks guide (embedded doc, EN translation)",
+        EmbeddedKind::MarkdownDoc,
+    ),
+];
 
 /// 嵌入资源类型——决定校验策略。
 #[derive(Clone, Copy)]
 enum EmbeddedKind {
     JsonData,
+    /// Markdown 文档：校验一级/章节标题结构锚点（结构见 guide.rs tests）。
+    MarkdownDoc,
 }
 
 /// 必须存在的许可文件清单。
@@ -752,8 +768,21 @@ fn check_embedded_resources(failures: &mut Vec<String>) {
             EmbeddedKind::JsonData => {
                 check_json_valid(&content, desc, failures);
             }
+            EmbeddedKind::MarkdownDoc => {
+                check_markdown_doc(&content, desc, failures);
+            }
         }
     }
+}
+
+/// Markdown 文档结构校验：一级标题开头 + 含章节标题。
+/// 非空已由公共路径保证；这里防的是「文件还在但被清成无结构残片」。
+fn check_markdown_doc(content: &str, desc: &str, failures: &mut Vec<String>) {
+    if !content.starts_with("# ") || !content.contains("\n## ") {
+        failures.push(format!("{desc}: 缺少一级标题或章节标题（# / ##）结构"));
+        return;
+    }
+    println!("  ✓ {desc}: Markdown 结构有效");
 }
 
 /// 普通 JSON 数据校验。
