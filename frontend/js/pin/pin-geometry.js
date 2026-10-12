@@ -171,6 +171,78 @@ export function expandRectForMenu(rect, expand, targetDpr) {
     };
 }
 
+// ── mini 落位可见性钳制 ────────────────────────────────────────────────────
+
+/**
+ * 把窗口矩形原点钳制进工作区（物理像素），返回钳制后的原点（尺寸不变）。
+ *
+ * 背景：超高长图 pin 允许 JS 拖动把窗口顶边推到屏幕外（0.24.10 设计行为，
+ * 否则长图下方内容不可达），此时以图片左上角锚定的 mini 小窗会整体落在
+ * 工作区外——表现为"双击后 pin 消失"。
+ *
+ * 规则（逐轴独立）：
+ * - 窗口边长 ≤ 工作区边长：四向 clamp（左/上越界右/下拉回，右/下越界左/上拉回）
+ * - 窗口边长 > 工作区边长：该轴居中（极端小工作区，最大化可见面积）
+ * - 工作区边长 ≤ 0：该轴不钳制（防御异常输入）
+ *
+ * 调用方在钳制发生后必须同步改写锚点状态（imageScreen = winOrigin + pad），
+ * 否则 reconcile 安全网会用旧锚点把窗口拉回屏外。
+ *
+ * @param {{ winX: number, winY: number, winW: number, winH: number }} rect - 窗口物理矩形
+ * @param {{ x: number, y: number, w: number, h: number }} work - 工作区物理矩形
+ *   （rcWork，虚拟屏幕坐标系，副屏在左/上时 x/y 为负）
+ * @returns {{ winX: number, winY: number }}
+ */
+export function clampWinOriginToWorkArea(rect, work) {
+    const clampAxis = (origin, side, waStart, waLen) => {
+        if (!(waLen > 0)) return origin;
+        if (side > waLen) return Math.round(waStart + (waLen - side) / 2);
+        return Math.min(Math.max(origin, waStart), waStart + waLen - side);
+    };
+    return {
+        winX: clampAxis(rect.winX, rect.winW, work.x, work.w),
+        winY: clampAxis(rect.winY, rect.winH, work.y, work.h),
+    };
+}
+
+// ── JS 拖动 DPI 换算 ──────────────────────────────────────────────────────
+
+/**
+ * 长图 JS 拖动的屏幕位移换算：WebView2 的 `MouseEvent.screenX/Y` 是 CSS 像素
+ * （高 DPI 屏当物理像素用会偏 1/dpr，main-window/contextmenu.js 同一实测
+ * 结论），按当前屏 DPR 换算为物理位移后累加到图片锚点。
+ *
+ * 跨 DPI 屏时 WebView 坐标空间随所在屏整体重标：DPR 翻转瞬间先把已积累
+ * 位移按**旧尺度**落账（`startImage += (lastScreen - startScreen) × 旧 dpr`）、
+ * 重定基准，再以新尺度继续——分段换算，避免用新尺度重算全程产生假跳变；
+ * 翻转事件本身的跨界微差由拖动结束的 reconcileFromBackend 收敛。
+ *
+ * 本函数原地推进会话状态（reducer 风格）。
+ *
+ * @param {{ startScreenX: number, startScreenY: number, startImageX: number,
+ *           startImageY: number, lastScreenX: number, lastScreenY: number,
+ *           dpr: number }} state - 拖动会话状态（原地修改）
+ * @param {number} screenX - 当前事件 screenX（CSS px）
+ * @param {number} screenY - 当前事件 screenY（CSS px）
+ * @param {number} dpr - 当前窗口屏 DPR（拖动期取 window.devicePixelRatio）
+ * @returns {{ imageScreenX: number, imageScreenY: number }} 本次事件的图片左上角物理坐标
+ */
+export function applyJsDragMove(state, screenX, screenY, dpr) {
+    if (dpr !== state.dpr) {
+        state.startImageX += Math.round((state.lastScreenX - state.startScreenX) * state.dpr);
+        state.startImageY += Math.round((state.lastScreenY - state.startScreenY) * state.dpr);
+        state.startScreenX = state.lastScreenX;
+        state.startScreenY = state.lastScreenY;
+        state.dpr = dpr;
+    }
+    state.lastScreenX = screenX;
+    state.lastScreenY = screenY;
+    return {
+        imageScreenX: state.startImageX + Math.round((screenX - state.startScreenX) * state.dpr),
+        imageScreenY: state.startImageY + Math.round((screenY - state.startScreenY) * state.dpr),
+    };
+}
+
 // ── 缩放锚点 ──────────────────────────────────────────────────────────────
 
 /**
@@ -215,7 +287,8 @@ export function zoomAroundPointer(
 /**
  * 图片中心锚点缩放：保持中心位置不变。
  *
- * 用于双击 mini mode / restore，中心保持在原位。
+ * 锚点工具函数。注：mini mode 自 0.25.26 起为左上角锚定 + 工作区钳制
+ * （见 clampWinOriginToWorkArea），本函数当前无调用方，保留作锚点数学参考。
  *
  * @param {number} imageCenterX - 图片中心屏幕物理 X
  * @param {number} imageCenterY - 图片中心屏幕物理 Y

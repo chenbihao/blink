@@ -75,6 +75,8 @@
         expandRectForMenu,
         reconcileDpi,
         clampZoom,
+        clampWinOriginToWorkArea,
+        applyJsDragMove,
     } from "./js/pin/pin-geometry.js";
     // 0.23.12：图上文字图层（识别文字/翻译覆盖后划词），纯函数共用
     // shared/text-selection.js——与截图阅读模式同一套"空白放行"语义
@@ -372,7 +374,36 @@
         return Math.min(1, MINI_MAX_SIDE / longestCss);
     }
 
-    function enterMiniMode() {
+    /** 0.25.26：mini 落位可见性钳制。
+     *  超高长图 pin 的左上角可被 JS 拖动推到屏幕外（0.24.10 设计行为，否则
+     *  长图下方内容不可达），左上角锚定的 mini 小窗会整体落在屏外——表现为
+     *  "双击后 pin 消失"。这里把 mini 窗口矩形钳制进所在屏工作区；钳制发生
+     *  时同步改写 imageScreenX/Y（= 钳制后窗口原点 + pad），否则 onMoved →
+     *  reconcile 安全网会用旧锚点把窗口拉回屏外。
+     *  工作区查询失败或动画代际已过期返回 false（退化为原左上角锚定）。
+     *  @param {number} miniZoom mini 态 zoom
+     *  @param {number} gen 调用方动画代际
+     *  @returns {Promise<boolean>} true = 锚点已挪进可见区 */
+    async function clampMiniAnchor(miniZoom, gen) {
+        let wa = null;
+        try {
+            wa = await pinWorkArea(myLabel);
+        } catch (e) {
+            const err = normalizeError(e);
+            console.warn(`pin_work_area 失败 [${err.code}] ${err.message}，mini 落位不做可见性钳制`);
+        }
+        if (!wa || gen !== miniAnimGen) return false;
+        const rect = computeWindowRect(
+            {baseCssW, baseCssH, zoom: miniZoom, imageScreenX, imageScreenY}, monitorDpr,
+        );
+        const clamped = clampWinOriginToWorkArea(rect, wa);
+        if (clamped.winX === rect.winX && clamped.winY === rect.winY) return false;
+        imageScreenX = clamped.winX + rect.padPhys;
+        imageScreenY = clamped.winY + rect.padPhys;
+        return true;
+    }
+
+    async function enterMiniMode() {
         if (miniState !== 'normal') return;
         if (isCtxOpen) hideCtxMenu();
         const gen = ++miniAnimGen;
@@ -383,10 +414,14 @@
         // 0.23.12：层不跟随 mini 缩放动画，进入即隐藏（退出时恢复）
         setPinTextLayerHidden(true);
 
-        // 左上角固定：imageScreenX/Y 不变，只改 zoom 和窗口尺寸
+        // 0.25.26：落位前先做可见性钳制（长图锚点可能在屏外）。await 期间
+        // 窗口保持大窗旧态，miniState='entering' 挡住 dblclick / 滚轮 /
+        // reconcile 的重入。
+        const relocated = await clampMiniAnchor(miniZoom, gen);
+        if (gen !== miniAnimGen) return; // 查询期间被新动画 / 会话重置取代
 
-        // reduced-motion：直接到最终状态
-        if (window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches) {
+        /** 落定 mini 终态（动画收尾 / reduced-motion / 钳制后直接落位共用）。 */
+        const settleMini = () => {
             zoom = miniZoom;
             isMinimized = true;
             miniState = 'mini';
@@ -394,6 +429,18 @@
             applyTransformOnly();
             commitWindowRect();
             zoomLabel.style.opacity = '0';
+            if (pendingReconcileDpr !== null) {
+                const dpr = pendingReconcileDpr;
+                pendingReconcileDpr = null;
+                reconcileFromBackend(dpr);
+            }
+        };
+
+        // 锚点被挪进可见区时跳过动画直接落位：Phase 1 的 CSS 动画发生在大窗
+        // 内的旧（屏外）锚点位置，用户本来看不见，动画无意义。
+        // reduced-motion 同样直接到最终状态。
+        if (relocated || window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches) {
+            settleMini();
             return;
         }
 
@@ -407,18 +454,7 @@
             img.removeEventListener('transitionend', onTransEnd);
             clearTimeout(fallback);
             img.style.transition = '';
-            zoom = miniZoom;
-            isMinimized = true;
-            miniState = 'mini';
-            document.body.classList.add('mini-mode');
-            applyTransformOnly();
-            commitWindowRect();
-            zoomLabel.style.opacity = '0';
-            if (pendingReconcileDpr !== null) {
-                const dpr = pendingReconcileDpr;
-                pendingReconcileDpr = null;
-                reconcileFromBackend(dpr);
-            }
+            settleMini();
         };
         const onTransEnd = (e) => {
             if (e.target !== img || e.propertyName !== 'transform') return;
@@ -648,8 +684,9 @@
     // 点击（表现为"拖完 pin 后第一次左键没反应"）。改为限时窗口，过期自动失效。
     let suppressClickUntil = 0;
 
-    // JS 拖动状态（超高长图专用）
-    let jsDrag = null;          // {pointerId, startScreenX, startScreenY, startImageX, startImageY}
+    // JS 拖动状态（超高长图专用；applyJsDragMove 的会话状态，含
+    // lastScreen/dpr 供跨 DPI 屏翻转时按段落账）
+    let jsDrag = null;
     let jsDragRaf = 0;
     let jsDragIpcInFlight = false;
 
@@ -665,6 +702,13 @@
         if (availH <= 0) return false;
         const dpr = monitorDpr || 1;
         return rect.winH > Math.round(availH * dpr);
+    }
+
+    /** 0.25.26：拖动 DPI 基准。window.devicePixelRatio 是 WebView 实时渲染
+     *  尺度（跨屏随所在屏更新）——初始化不信任它是因为加载期未稳定，拖动期
+     *  恰是它的可靠区间；异常回退状态值 monitorDpr。 */
+    function currentDragDpr() {
+        return window.devicePixelRatio || monitorDpr || 1;
     }
 
     /** rAF 合流 + 单在途 IPC：一次只挂一个 screenshotPinMove，完成补尾随。 */
@@ -732,8 +776,10 @@
     });
 
     document.addEventListener('pointermove', (e) => {
-        // JS 拖动进行中：按屏幕坐标增量移动窗口（e.screenX/Y 增量为物理像素，
-        // 与 0.19.13 旧实现同语义）
+        // JS 拖动进行中：按屏幕坐标增量移动窗口。0.25.26：e.screenX/Y 在
+        // WebView2 是 CSS 像素（main-window/contextmenu.js 同一实测结论，高
+        // DPI 屏当物理像素用会偏 1/dpr），经 applyJsDragMove 按当前屏 DPR
+        // 换算成物理位移；跨 DPI 屏坐标系随所在屏重标，由函数按段落账重定基准
         if (jsDrag) {
             if (e.pointerId !== jsDrag.pointerId) return;
             if (!(e.buttons & 1)) {
@@ -743,8 +789,9 @@
                 nativeDragActive = false;
                 return;
             }
-            imageScreenX = jsDrag.startImageX + (e.screenX - jsDrag.startScreenX);
-            imageScreenY = jsDrag.startImageY + (e.screenY - jsDrag.startScreenY);
+            const moved = applyJsDragMove(jsDrag, e.screenX, e.screenY, currentDragDpr());
+            imageScreenX = moved.imageScreenX;
+            imageScreenY = moved.imageScreenY;
             scheduleJsDragMove();
             return;
         }
@@ -768,6 +815,9 @@
                 startScreenY: e.screenY,
                 startImageX: imageScreenX,
                 startImageY: imageScreenY,
+                lastScreenX: e.screenX,
+                lastScreenY: e.screenY,
+                dpr: currentDragDpr(),
             };
             try {
                 e.target.setPointerCapture?.(e.pointerId);
@@ -820,6 +870,11 @@
             const newScaleFactor = payload?.scaleFactor ?? payload;
             if (typeof newScaleFactor === 'number' && newScaleFactor > 0) {
                 tracing_debug('onScaleChanged', {newScaleFactor, oldDpr: monitorDpr});
+                // 0.25.26：拖动进行中（JS/原生）不做中途回读回设——跨 DPI 边界时
+                // 窗口关联屏翻转恰在此刻触发 scale 变化，中途 SetWindowPos 会与
+                // 拖动移动流打架（resize 还会重建合成表面）；拖动结束的
+                // pointerup / watchdog reconcile 已覆盖收敛
+                if (jsDrag || nativeDragActive) return;
                 // 扩窗平移量按旧 DPR 算的物理值，DPI 翻转后语义失效——先还原再 reconcile
                 if (isCtxOpen) hideCtxMenu();
                 reconcileFromBackend(newScaleFactor);
@@ -908,7 +963,10 @@
         if (isMinimized) {
             exitMiniMode();
         } else {
-            enterMiniMode();
+            // 0.25.26：enterMiniMode 异步钳制后落位；失败已在源头记日志，此处兜住
+            // 避免 unhandled rejection
+            enterMiniMode().catch(() => {
+            });
         }
     });
 

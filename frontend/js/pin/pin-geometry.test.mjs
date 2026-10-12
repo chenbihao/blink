@@ -6,8 +6,10 @@
 //! 运行：node frontend/js/pin/pin-geometry.test.mjs
 
 import {
+    applyJsDragMove,
     baseCssSize,
     clampZoom,
+    clampWinOriginToWorkArea,
     computeWindowRect,
     displayPhysicalSize,
     expandRectForMenu,
@@ -580,6 +582,130 @@ test('expandRectForMenu：扩窗后图片相对窗口左上的物理偏移 = pad
     const imgGlobalX = expanded.winX + imgPhysOffsetInWindow;
     const originalImgX = rect.winX + padPhys;
     assertEqual(imgGlobalX, originalImgX, '补偿后图片物理位置不变');
+});
+
+// ── 16. mini 落位可见性钳制（0.25.26）─────────────────────────────────────
+
+test('clampWinOriginToWorkArea：窗口在工作区内原样返回', () => {
+    const clamped = clampWinOriginToWorkArea(
+        {winX: 100, winY: 200, winW: 240, winH: 280},
+        {x: 0, y: 0, w: 2560, h: 1400},
+    );
+    assertEqual(clamped, {winX: 100, winY: 200}, '窗口在屏内不钳制');
+});
+
+test('clampWinOriginToWorkArea：长图锚点在屏上方外（负 Y）拉回工作区顶边', () => {
+    // 0.25.26 修复场景：长图 JS 拖动后 imageScreenY 深负，mini 小窗整体在屏外
+    const clamped = clampWinOriginToWorkArea(
+        {winX: 400, winY: -5200, winW: 240, winH: 280},
+        {x: 0, y: 0, w: 2560, h: 1400},
+    );
+    assertEqual(clamped, {winX: 400, winY: 0}, 'winY 拉回工作区顶边，winX 不动');
+});
+
+test('clampWinOriginToWorkArea：右/下越界左/上拉回', () => {
+    const clamped = clampWinOriginToWorkArea(
+        {winX: 2500, winY: 1300, winW: 240, winH: 280},
+        {x: 0, y: 0, w: 2560, h: 1400},
+    );
+    assertEqual(clamped, {winX: 2320, winY: 1120}, '右缘 2560-240 / 下缘 1400-280');
+});
+
+test('clampWinOriginToWorkArea：负坐标副屏（左/上方）同样四向钳制', () => {
+    const clamped = clampWinOriginToWorkArea(
+        {winX: -4000, winY: -300, winW: 240, winH: 280},
+        {x: -1920, y: -1080, w: 1920, h: 1040},
+    );
+    // winX 深负拉回副屏左缘；winY=-300 底边(-20)超出工作区底(-40)上移 20px
+    assertEqual(clamped, {winX: -1920, winY: -320}, 'winX 拉回副屏左缘，winY 上移回底缘内');
+});
+
+test('clampWinOriginToWorkArea：窗口边长超过工作区时该轴居中', () => {
+    const clamped = clampWinOriginToWorkArea(
+        {winX: 99999, winY: 100, winW: 5000, winH: 280},
+        {x: 0, y: 0, w: 2560, h: 1400},
+    );
+    assertEqual(clamped, {winX: -1220, winY: 100}, '超宽轴居中 0+(2560-5000)/2，屏内 Y 不动');
+});
+
+test('clampWinOriginToWorkArea：工作区边长非正时该轴不钳制', () => {
+    const clamped = clampWinOriginToWorkArea(
+        {winX: -5200, winY: -5200, winW: 240, winH: 280},
+        {x: 0, y: 0, w: 0, h: -1},
+    );
+    assertEqual(clamped, {winX: -5200, winY: -5200}, '异常工作区输入退化为原样');
+});
+
+test('clampWinOriginToWorkArea：与 computeWindowRect 组合——锚点状态同步后稳定', () => {
+    // 模拟 pin.html clampMiniAnchor：钳制后 imageScreen = winOrigin + padPhys，
+    // 重算窗口矩形须与钳制原点一致且落在工作区内（reconcile 安全网不回拉）
+    const {baseCssW, baseCssH} = baseCssSize(900, 12000, 1.5);
+    const miniZoom = 160 / Math.max(baseCssW, baseCssH);
+    const rect = computeWindowRect(
+        {baseCssW, baseCssH, zoom: miniZoom, imageScreenX: 300, imageScreenY: -8600},
+        1.5,
+    );
+    const wa = {x: 0, y: 0, w: 2560, h: 1400};
+    const clamped = clampWinOriginToWorkArea(rect, wa);
+    const resynced = computeWindowRect(
+        {
+            baseCssW, baseCssH, zoom: miniZoom,
+            imageScreenX: clamped.winX + rect.padPhys,
+            imageScreenY: clamped.winY + rect.padPhys,
+        },
+        1.5,
+    );
+    assertEqual(resynced.winX, clamped.winX, '状态同步后 winX 稳定');
+    assertEqual(resynced.winY, clamped.winY, '状态同步后 winY 稳定');
+    assertInRange(resynced.winX, wa.x, wa.x + wa.w - resynced.winW, '窗口在工作区 X 范围内');
+    assertInRange(resynced.winY, wa.y, wa.y + wa.h - resynced.winH, '窗口在工作区 Y 范围内');
+});
+
+// ── 17. JS 拖动 DPI 换算（0.25.26）─────────────────────────────────────────
+
+function newDragState(startScreenX, startScreenY, startImageX, startImageY, dpr) {
+    return {
+        startScreenX, startScreenY, startImageX, startImageY,
+        lastScreenX: startScreenX, lastScreenY: startScreenY, dpr,
+    };
+}
+
+test('applyJsDragMove：100% 屏 CSS 增量即物理位移（原行为回归）', () => {
+    const st = newDragState(100, 100, 500, 400, 1);
+    const r = applyJsDragMove(st, 160, 130, 1);
+    assertEqual(r, {imageScreenX: 560, imageScreenY: 430}, '100% 屏 1:1');
+});
+
+test('applyJsDragMove：150% 屏 CSS 增量按 DPR 放大为物理位移', () => {
+    const st = newDragState(100, 100, 500, 400, 1.5);
+    const r = applyJsDragMove(st, 200, 160, 1.5);
+    assertEqual(r, {imageScreenX: 650, imageScreenY: 490}, '100 CSS → 150 物理');
+});
+
+test('applyJsDragMove：跨 DPI 屏翻转按段落账，不用新尺度重算全程', () => {
+    const st = newDragState(100, 100, 500, 400, 1);
+    applyJsDragMove(st, 200, 100, 1);            // 累计 +100 物理
+    applyJsDragMove(st, 300, 100, 1);            // 累计 +200 物理
+    const r = applyJsDragMove(st, 350, 100, 1.5); // 翻转：落账 +200，再算 round(50×1.5)
+    assertEqual(r, {imageScreenX: 775, imageScreenY: 400}, '总位移 200 + 75');
+    const r2 = applyJsDragMove(st, 450, 100, 1.5);
+    assertEqual(r2, {imageScreenX: 925, imageScreenY: 400}, '翻转后继续按 1.5 累计');
+});
+
+test('applyJsDragMove：静止事件不产生位移', () => {
+    const st = newDragState(100, 100, 500, 400, 1.5);
+    const r = applyJsDragMove(st, 100, 100, 1.5);
+    assertEqual(r, {imageScreenX: 500, imageScreenY: 400}, '原地不动');
+});
+
+test('applyJsDragMove：多次翻转往返累计正确', () => {
+    const st = newDragState(0, 0, 1000, 1000, 1);
+    applyJsDragMove(st, 100, 0, 1);       // +100
+    applyJsDragMove(st, 200, 0, 1);       // +200
+    applyJsDragMove(st, 250, 0, 2);       // 翻转 2x：落账 +200，再 +100 → 1300
+    applyJsDragMove(st, 300, 0, 2);       // +200 → 1400
+    const r = applyJsDragMove(st, 250, 0, 1); // 翻回 1x：落账 +200，再 -50 → 1350
+    assertEqual(r, {imageScreenX: 1350, imageScreenY: 1000}, '往返累计 1000+350');
 });
 
 // ── 结果 ─────────────────────────────────────────────────────────────────
