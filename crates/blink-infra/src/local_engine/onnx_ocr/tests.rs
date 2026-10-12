@@ -789,7 +789,8 @@ async fn worker_build_timeout_drops_sender_and_retires() {
     let config = OcrExecutorConfig::default();
     let build_fn = make_forever_blocking_build_fn();
     let executor = OnnxOcrExecutor::with_build_fn(config, build_fn)
-        .with_build_timeout(Duration::from_millis(100));
+        .with_build_timeout(Duration::from_millis(100))
+        .with_shutdown_join_timeout(Duration::from_millis(50));
 
     // 触发构建——会超时
     let cancellation = CancellationToken::new();
@@ -828,7 +829,8 @@ async fn worker_inflight_limit_blocks_new_build() {
     let config = OcrExecutorConfig::default();
     let build_fn = make_forever_blocking_build_fn();
     let executor = OnnxOcrExecutor::with_build_fn(config, build_fn)
-        .with_build_timeout(Duration::from_millis(100));
+        .with_build_timeout(Duration::from_millis(100))
+        .with_shutdown_join_timeout(Duration::from_millis(50));
 
     let cancellation = CancellationToken::new();
 
@@ -909,7 +911,8 @@ async fn worker_shutdown_does_not_hang_on_stuck_build() {
     let config = OcrExecutorConfig::default();
     let build_fn = make_forever_blocking_build_fn();
     let executor = OnnxOcrExecutor::with_build_fn(config, build_fn)
-        .with_build_timeout(Duration::from_millis(100));
+        .with_build_timeout(Duration::from_millis(100))
+        .with_shutdown_join_timeout(Duration::from_millis(50));
 
     let cancellation = CancellationToken::new();
 
@@ -918,18 +921,21 @@ async fn worker_shutdown_does_not_hang_on_stuck_build() {
     assert_eq!(executor.in_flight_count(), 1, "超时后 in_flight=1");
 
     // shutdown——barrier 永远不会被释放，但 shutdown 应在有限时间内完成
-    // SHUTDOWN_JOIN_TIMEOUT_SECS = 10s，但我们不需要等那么久——
-    // 退休 worker 的 build 仍在阻塞，shutdown 会对它做有界 join
+    // 注入 50ms join 超时，验证同一条有界回收路径，生产仍为 10s。
     let shutdown_start = std::time::Instant::now();
     executor.shutdown().await;
     let shutdown_elapsed = shutdown_start.elapsed();
 
     // shutdown 应在合理时间内完成（有界 join 超时 + 一些开销）
-    // SHUTDOWN_JOIN_TIMEOUT_SECS = 10s，给 15s 余量
     assert!(
-        shutdown_elapsed < Duration::from_secs(15),
+        shutdown_elapsed < Duration::from_secs(1),
         "shutdown 不应无限挂起，实际耗时 {:?}",
         shutdown_elapsed
+    );
+    assert_eq!(
+        executor.in_flight_count(),
+        1,
+        "detach 不释放仍存活 worker 的额度"
     );
 
     // 注意：卡住的线程会 detached，但测试进程退出时会被清理

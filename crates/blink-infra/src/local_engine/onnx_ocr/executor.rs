@@ -231,6 +231,8 @@ pub struct OnnxOcrExecutor {
     build_fn: BuildFn,
     /// Session 构建超时（测试可注入短超时）。
     build_timeout: Duration,
+    /// 有界 join 超时（生产 10s，测试可注入）。
+    shutdown_join_timeout: Duration,
 }
 
 impl OnnxOcrExecutor {
@@ -251,6 +253,7 @@ impl OnnxOcrExecutor {
             in_flight_count: Arc::new(AtomicU32::new(0)),
             build_fn,
             build_timeout: Duration::from_secs(SESSION_BUILD_TIMEOUT_SECS),
+            shutdown_join_timeout: Duration::from_secs(SHUTDOWN_JOIN_TIMEOUT_SECS),
         }
     }
 
@@ -258,6 +261,12 @@ impl OnnxOcrExecutor {
     #[cfg(test)]
     pub(super) fn with_build_timeout(mut self, timeout: Duration) -> Self {
         self.build_timeout = timeout;
+        self
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_shutdown_join_timeout(mut self, timeout: Duration) -> Self {
+        self.shutdown_join_timeout = timeout;
         self
     }
 
@@ -758,7 +767,7 @@ impl OnnxOcrExecutor {
         };
         if let Some(handle) = handle_opt {
             // 有界 join：在辅助线程上等待，主线程设 timeout
-            let join_result = bounded_join(handle, Duration::from_secs(SHUTDOWN_JOIN_TIMEOUT_SECS));
+            let join_result = bounded_join(handle, self.shutdown_join_timeout);
             match join_result {
                 JoinResult::Ok => {
                     tracing::debug!("OnnxOcrExecutor: 工作线程已退出");
@@ -770,7 +779,7 @@ impl OnnxOcrExecutor {
                 }
                 JoinResult::Timeout => {
                     tracing::warn!(
-                        timeout_secs = SHUTDOWN_JOIN_TIMEOUT_SECS,
+                        timeout_ms = self.shutdown_join_timeout.as_millis() as u64,
                         "OnnxOcrExecutor: 工作线程 join 超时，线程 detached（native build 完成后自然退出）"
                     );
                     // 线程 detached——in_flight_count 不递减
@@ -788,7 +797,7 @@ impl OnnxOcrExecutor {
         for rw in retired.drain(..) {
             if let Some(handle) = rw.handle {
                 let join_result =
-                    bounded_join(handle, Duration::from_secs(SHUTDOWN_JOIN_TIMEOUT_SECS));
+                    bounded_join(handle, self.shutdown_join_timeout);
                 match join_result {
                     JoinResult::Ok | JoinResult::Panic => {
                         self.in_flight_count.fetch_sub(1, Ordering::SeqCst);
@@ -888,6 +897,7 @@ impl OcrExecutor for OnnxOcrExecutor {
         let worker_handle = self.worker_handle.clone();
         let retired_workers = self.retired_workers.clone();
         let in_flight_count = self.in_flight_count.clone();
+        let join_timeout = self.shutdown_join_timeout;
 
         tokio::task::spawn_blocking(move || {
             // drop sender
@@ -902,7 +912,7 @@ impl OcrExecutor for OnnxOcrExecutor {
             };
             if let Some(handle) = handle_opt {
                 let join_result =
-                    bounded_join(handle, Duration::from_secs(SHUTDOWN_JOIN_TIMEOUT_SECS));
+                    bounded_join(handle, join_timeout);
                 match join_result {
                     JoinResult::Ok => {
                         tracing::debug!("OnnxOcrExecutor: 工作线程已退出");
@@ -922,7 +932,7 @@ impl OcrExecutor for OnnxOcrExecutor {
             for rw in retired.drain(..) {
                 if let Some(handle) = rw.handle {
                     let join_result =
-                        bounded_join(handle, Duration::from_secs(SHUTDOWN_JOIN_TIMEOUT_SECS));
+                        bounded_join(handle, join_timeout);
                     match join_result {
                         JoinResult::Ok | JoinResult::Panic => {
                             in_flight_count.fetch_sub(1, Ordering::SeqCst);

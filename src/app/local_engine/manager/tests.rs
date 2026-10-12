@@ -7,6 +7,33 @@ use std::sync::Arc;
 
 // ── 基础辅助 ──────────────────────────────────────────────────────────────
 
+#[test]
+fn dependency_runtime_storage_is_isolated() {
+    // 在 bin 测试中 infra 是普通依赖；只在 infra 内部用 cfg(test) 无法隔离这里。
+    let root = crate::infra::local_engine::runtime::runtimes_root();
+    assert!(
+        root.starts_with(std::env::temp_dir()),
+        "运行时必须写入临时目录: {root:?}"
+    );
+    assert_ne!(
+        root,
+        crate::infra::utils::paths::app_data_dir().join("runtimes")
+    );
+}
+
+async fn wait_for_install_start<T: std::fmt::Debug>(
+    started: impl std::future::Future<Output = ()>,
+    task: &mut tokio::task::JoinHandle<T>,
+) {
+    tokio::select! {
+        () = started => {},
+        result = task => panic!("安装在进入下载前退出: {result:?}"),
+        () = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+            panic!("等待下载开始超时");
+        }
+    }
+}
+
 fn make_fake_adapter(id: &str, self_test_passes: bool) -> Arc<dyn LocalEngineAdapter> {
     make_fake_adapter_with_options(id, self_test_passes, true)
 }
@@ -499,13 +526,13 @@ async fn manager_cancel_gates_next_operation_until_worker_finishes() {
     let svc_c = svc.clone();
     let eid_c = eid.clone();
     let tag_c = tag.clone();
-    let install_task = tokio::spawn(async move {
+    let mut install_task = tokio::spawn(async move {
         svc_c
             .install_model(&eid_c, &tag_c, Some("op-gated".to_string()))
             .await
     });
 
-    started.await;
+    wait_for_install_start(started, &mut install_task).await;
     // 0.22.9 双槽协调：模型安装占 model_storage 槽——用 any 探测（mutating 槽为空）
     let op = svc
         .coordinator()
@@ -558,9 +585,9 @@ async fn model_install_does_not_block_stop_and_env_repair() {
     let svc_c = svc.clone();
     let eid_c = eid.clone();
     let tag_c = tag.clone();
-    let install_task = tokio::spawn(async move { svc_c.install_model(&eid_c, &tag_c, None).await });
+    let mut install_task = tokio::spawn(async move { svc_c.install_model(&eid_c, &tag_c, None).await });
 
-    started.await;
+    wait_for_install_start(started, &mut install_task).await;
 
     // 同槽（另一个模型安装）→ 仍互斥
     let err = svc
@@ -606,9 +633,9 @@ async fn two_model_installs_same_engine_second_rejected() {
 
     let svc1 = svc.clone();
     let (e1, t1) = (eid.clone(), tag_a.clone());
-    let first = tokio::spawn(async move { svc1.install_model(&e1, &t1, None).await });
+    let mut first = tokio::spawn(async move { svc1.install_model(&e1, &t1, None).await });
 
-    started.await;
+    wait_for_install_start(started, &mut first).await;
 
     // 第二个模型安装 → AlreadyRunning（key = engine_id，与 model_id 无关）
     let err = svc.install_model(&eid, &tag_b, None).await.unwrap_err();

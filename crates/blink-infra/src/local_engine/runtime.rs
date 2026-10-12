@@ -340,14 +340,20 @@ impl RuntimeError {
 
 /// 运行时根目录：`%APPDATA%\blink\runtimes`
 pub fn runtimes_root() -> PathBuf {
-    #[cfg(test)]
-    {
-        // 单测不得触碰真实 `%APPDATA%\blink`。进程级唯一根目录同时避免不同
-        // cargo test 进程互相清理指针/引用测试数据。
-        std::env::temp_dir().join(format!("blink-runtime-tests-{}", std::process::id()))
+    if crate::runtime_mode::is_production() {
+        return crate::utils::paths::app_data_dir().join("runtimes");
     }
-    #[cfg(not(test))]
-    crate::utils::paths::app_data_dir().join("runtimes")
+    // 依赖 crate 在单测中不带 cfg(test)，必须与其它存储路径共用运行模式开关。
+    static TEST_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    TEST_ROOT
+        .get_or_init(|| {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            std::env::temp_dir().join(format!("blink-runtime-tests-{}-{nonce}", std::process::id()))
+        })
+        .clone()
 }
 
 /// 共享 artifact 目录：`runtimes/shared/{provider}/{artifact_id}`

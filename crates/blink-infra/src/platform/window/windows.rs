@@ -769,6 +769,14 @@ fn transition_visibility(visible: bool) {
 /// 返回 `Ok(())` 表示窗口已成功显示（调用方可继续后续编排），
 /// `Err` 表示窗口获取或 show 失败。
 pub fn show_main_window(app: &AppHandle) -> Result<(), String> {
+    show_main_window_with_cursor(app, None)
+}
+
+/// 剪贴板全局唤起可传入 show 前捕获的鼠标位置；普通 launcher 继续居中。
+pub fn show_main_window_with_cursor(
+    app: &AppHandle,
+    cursor: Option<(i32, i32)>,
+) -> Result<(), String> {
     let t0 = std::time::Instant::now();
 
     let Some(win) = app.get_webview_window("main") else {
@@ -778,7 +786,17 @@ pub fn show_main_window(app: &AppHandle) -> Result<(), String> {
     let t_show = std::time::Instant::now();
     let _ = win.set_size(tauri::LogicalSize::new(BASE_W_LOGICAL, BASE_H_LOGICAL));
 
-    if let Some(pos) = launcher_position(&win) {
+    let cursor_position = cursor.and_then(|(x, y)| {
+        let anchor = crate::platform::caret::ClipboardAnchor::Mouse(POINT { x, y });
+        let (work, dpi) = clipboard_anchor_monitor(&anchor)?;
+        let width = crate::platform::dpi::logical_to_physical(BASE_W_LOGICAL, dpi);
+        let height = crate::platform::dpi::logical_to_physical(BASE_H_LOGICAL, dpi);
+        let (x, y) = crate::platform::caret::compute_clipboard_popup_placement(
+            &anchor, width, height, &work, None,
+        );
+        Some(PhysicalPosition::new(x, y))
+    });
+    if let Some(pos) = cursor_position.or_else(|| launcher_position(&win)) {
         let _ = win.set_position(pos);
     }
     let now = elapsed_ms();
@@ -1181,7 +1199,7 @@ fn is_self_foreground(_app: &AppHandle, fg: windows::Win32::Foundation::HWND) ->
 ///
 /// 取当前光标的虚拟屏幕物理像素坐标（0.25.14-fix：注入截图 overlay 会话，
 /// 供前端窗口列表就绪后的主动补预选定位；副屏在左侧时坐标为负）。
-fn cursor_pos_virtual() -> Option<(i32, i32)> {
+pub fn cursor_pos_virtual() -> Option<(i32, i32)> {
     unsafe {
         let mut pt = POINT { x: 0, y: 0 };
         if GetCursorPos(&mut pt).is_ok() {
@@ -2721,12 +2739,12 @@ fn spawn_voice_overlay_caret_refine(hwnd: HWND, owner_hwnd: isize) {
 /// show 后查系统焦点被自家 WebView 抢占必败，教训见 caret.rs）：
 /// 调用方在 invoke 之前 `selection::capture_focused_element()` 同步捕获焦点
 /// 元素（O(1) <5ms，此刻焦点还在目标应用），本函数在 invoke 之后拿引用
-/// 慢查 caret——COM 引用不依赖系统焦点。拿到后轮询等主窗可见再挪位
-/// （几何复用 voice-overlay 锚定算法）；捕获失败或目标无 TextPattern
-/// 保持 `launcher_position` 居中，零退化。
+/// 慢查 caret——COM 引用不依赖系统焦点。窗口已先在鼠标附近显示；
+/// 仅当前会话的及时结果可校准到可信光标/紧凑输入框，失败继续保持鼠标落点。
 pub fn spawn_main_window_caret_refine(
     app: &AppHandle,
     elem: crate::platform::selection::SendableElement,
+    owner_hwnd: Option<isize>,
 ) {
     let Some(win) = app.get_webview_window("main") else {
         return;
@@ -2735,32 +2753,91 @@ pub fn spawn_main_window_caret_refine(
         return;
     };
     let hwnd_raw = hwnd.0 as isize;
+    let revision = WINDOW_REVISION.load(Ordering::SeqCst);
+    let started = Instant::now();
+    let owner = owner_hwnd
+        .and_then(|raw| {
+            let root = unsafe {
+                windows::Win32::UI::WindowsAndMessaging::GetAncestor(
+                    HWND(raw as *mut _), windows::Win32::UI::WindowsAndMessaging::GA_ROOT,
+                )
+            };
+            (!root.is_invalid()).then_some(root.0 as isize)
+        })
+        .and_then(super::get_window_dwm_rect)
+        .map(|(x, y, w, h)| RECT {
+            left: x,
+            top: y,
+            right: x + w as i32,
+            bottom: y + h as i32,
+        });
+    let app = app.clone();
     let spawned = std::thread::Builder::new()
         .name("main-caret".into())
         .spawn(move || {
-            let Some(caret) = crate::platform::caret::caret_rect_from_captured(&elem)
-            else {
-                tracing::debug!("clipboard-mode: 捕获的焦点元素无文本光标，保持居中定位");
+            let Some(anchor) = crate::platform::caret::clipboard_anchor_from_captured(&elem) else {
+                tracing::debug!("clipboard-mode: 无可信定位信息，保持鼠标定位");
                 return;
             };
-            // 等 invoke 链路把主窗 show 出来（上限 600ms；超时说明本次唤起
-            // 中途失败，直接放弃——窗口不可见时 refine 也会自检跳过）
-            for _ in 0..60 {
-                if unsafe { IsWindowVisible(HWND(hwnd_raw as *mut _)) }.as_bool() {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
+            // UIA 跨进程调用不阻塞 show；慢返回不再移动已开始操作的弹窗。
+            if started.elapsed() > Duration::from_millis(250) {
+                tracing::debug!("clipboard-mode: 定位结果过晚，保持鼠标定位");
+                return;
             }
-            refine_main_window_to_caret(HWND(hwnd_raw as *mut _), &caret);
+            let queued = app.run_on_main_thread(move || {
+                // 与 hide/show 串行，避免旧请求移动后来唤起的普通 launcher。
+                if WINDOW_REVISION.load(Ordering::SeqCst) != revision
+                    || started.elapsed() > Duration::from_millis(250)
+                {
+                    return;
+                }
+                let hwnd = HWND(hwnd_raw as *mut _);
+                let fg = unsafe { GetForegroundWindow() };
+                let root = unsafe {
+                    windows::Win32::UI::WindowsAndMessaging::GetAncestor(
+                        fg,
+                        windows::Win32::UI::WindowsAndMessaging::GA_ROOT,
+                    )
+                };
+                if fg != hwnd && root != hwnd {
+                    return;
+                }
+                refine_main_window_to_caret(hwnd, &anchor, owner.as_ref());
+            });
+            if let Err(error) = queued {
+                tracing::debug!(%error, "clipboard-mode: 定位调度失败，保持鼠标定位");
+            }
         });
     if let Err(error) = spawned {
-        tracing::debug!(%error, "main-caret 线程启动失败，保持居中定位");
+        tracing::debug!(%error, "main-caret 线程启动失败，保持鼠标定位");
     }
 }
 
-/// 主窗 caret 锚定：与 voice-overlay 同算法（行下方优先 / 底部翻上方 / 工作区
-/// clamp），差异是不带 SWP_NOACTIVATE——主窗本就是被唤起的目标焦点窗口。
-fn refine_main_window_to_caret(hwnd: HWND, caret: &RECT) {
+fn clipboard_anchor_monitor(
+    anchor: &crate::platform::caret::ClipboardAnchor,
+) -> Option<(RECT, u32)> {
+    unsafe {
+        let hmon = MonitorFromPoint(anchor.point(), MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(hmon, &mut info).as_bool() {
+            return None;
+        }
+        Some((
+            info.rcWork,
+            crate::platform::dpi::get_dpi_for_hmonitor(hmon),
+        ))
+    }
+}
+
+/// 仅可信文本定位可覆盖唤起时的鼠标落点；整页或滚出视口的矩形直接丢弃。
+fn refine_main_window_to_caret(
+    hwnd: HWND,
+    anchor: &crate::platform::caret::ClipboardAnchor,
+    owner: Option<&RECT>,
+) {
     unsafe {
         if !IsWindowVisible(hwnd).as_bool() {
             return;
@@ -2772,27 +2849,25 @@ fn refine_main_window_to_caret(hwnd: HWND, caret: &RECT) {
         let width = window_rect.right - window_rect.left;
         let height = window_rect.bottom - window_rect.top;
 
-        let anchor = POINT {
-            x: caret.left,
-            y: caret.bottom,
+        let Some((work, dpi)) = clipboard_anchor_monitor(anchor) else {
+            return;
         };
-        let hmon = MonitorFromPoint(anchor, MONITOR_DEFAULTTONEAREST);
-        let mut monitor_info: MONITORINFO = std::mem::zeroed();
-        monitor_info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
-        if !GetMonitorInfoW(hmon, &mut monitor_info).as_bool() {
+        if !anchor.is_usable(&work, owner, dpi) {
+            tracing::debug!(
+                ?anchor,
+                "clipboard-mode: 非光标行/紧凑输入框或超出可见区，保持鼠标定位"
+            );
             return;
         }
-        let work = monitor_info.rcWork;
+        // 鼠标与文本可位于不同 DPI 的屏幕；挪屏后 tao 会按目标 DPI 缩放，
+        // 钳制也按目标尺寸计算，避免用来源屏尺寸造成右/下边缘溢出。
+        let current_dpi = crate::platform::dpi::get_dpi_for_hwnd(hwnd).max(1);
+        let width = (i64::from(width) * i64::from(dpi) / i64::from(current_dpi)) as i32;
+        let height = (i64::from(height) * i64::from(dpi) / i64::from(current_dpi)) as i32;
 
-        const GAP: i32 = 8;
-        let below_y = caret.bottom + GAP;
-        let y = if below_y + height <= work.bottom {
-            below_y
-        } else {
-            (caret.top - GAP - height).max(work.top)
-        };
-        let new_x = caret.left.clamp(work.left, (work.right - width).max(work.left));
-        let new_y = y.clamp(work.top, (work.bottom - height).max(work.top));
+        let (new_x, new_y) = crate::platform::caret::compute_clipboard_popup_placement(
+            anchor, width, height, &work, owner,
+        );
 
         let _ = SetWindowPos(
             hwnd,
@@ -2801,13 +2876,13 @@ fn refine_main_window_to_caret(hwnd: HWND, caret: &RECT) {
             new_y,
             0,
             0,
-            SET_WINDOW_POS_FLAGS(SWP_NOSIZE.0 | SWP_NOZORDER.0),
+            SET_WINDOW_POS_FLAGS(SWP_NOSIZE.0 | SWP_NOZORDER.0 | SWP_NOACTIVATE.0),
         );
         tracing::debug!(
             new_x,
             new_y,
-            caret_left = caret.left,
-            caret_top = caret.top,
+            ?anchor,
+            has_owner = owner.is_some(),
             "clipboard-mode: 主窗已定位到目标光标附近"
         );
     }

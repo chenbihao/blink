@@ -532,13 +532,20 @@ impl SurfacePort for TauriDomainEnv {
         // 焦点元素（O(1) <5ms，同 orchestrator 的划词捕获模式），invoke 之后再
         // 拿元素引用慢查 caret 定位（时序详见 windows.rs 函数注释）。
         // 主窗可见（chord 场景）时跳过——窗口已在屏幕，无需重定位。
-        let caret_elem = if self
+        let was_hidden = self
             .app
             .get_webview_window("main")
             .and_then(|w| w.is_visible().ok())
             .map(|v| !v)
-            .unwrap_or(true)
-        {
+            .unwrap_or(true);
+        // 在 UIA 慢查之前固定鼠标与宿主窗口，后续鼠标移动不改变本次落点。
+        let cursor = was_hidden
+            .then(crate::infra::platform::window::cursor_pos_virtual)
+            .flatten();
+        let owner = was_hidden
+            .then(crate::infra::platform::window::get_foreground_hwnd)
+            .flatten();
+        let caret_elem = if was_hidden {
             crate::infra::platform::selection::capture_focused_element()
         } else {
             None
@@ -551,9 +558,9 @@ impl SurfacePort for TauriDomainEnv {
             crate::domain::event_names::EventNames::CHORD_ENTER_MODE,
             serde_json::json!({ "mode": "clipboard" }),
         );
-        crate::app::window_orchestrator::invoke(&self.app);
+        crate::app::window_orchestrator::invoke_with_cursor(&self.app, cursor);
         if let Some(elem) = caret_elem {
-            crate::infra::platform::window::spawn_main_window_caret_refine(&self.app, elem);
+            crate::infra::platform::window::spawn_main_window_caret_refine(&self.app, elem, owner);
         }
         // 幂等补发：前置 emit 若因隐藏态丢失，此处到达时前端照常 enter
         let _ = self.app.emit(

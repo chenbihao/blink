@@ -61,6 +61,29 @@ const CANDIDATE_LIMIT_MAX: usize = 5000;
 /// 副行预览截断字符数（避免长文本挤爆 UI；前端本身也会截）。
 const PREVIEW_MAX_CHARS: usize = 60;
 
+/// 剪贴板模式类型筛选（0.25.23）。
+///
+/// 文本与图片分表存储（`clipboard_history` / `clipboard_images`），筛选天然
+/// 下推为「跳过另一张表的查询」，无需按行过滤。文件/音频待采集支持后再加
+/// 变体（当前监听只收 CF_UNICODETEXT / CF_DIB）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipKind {
+    All,
+    Text,
+    Image,
+}
+
+impl ClipKind {
+    /// 解析前端传入的 kind 参数；未知/缺失回落 All（不因脏参数丢结果）。
+    pub fn parse(raw: Option<&str>) -> Self {
+        match raw {
+            Some("text") => Self::Text,
+            Some("image") => Self::Image,
+            _ => Self::All,
+        }
+    }
+}
+
 pub struct ClipboardEngine {
     pool: SqlitePool,
     /// cache 库——clipboard_images 表所在（0.16.4 图片历史）。
@@ -143,40 +166,12 @@ impl ClipboardEngine {
     pub fn update_retention_days(&self, days: u32) {
         *self.retention_days.write().unwrap() = days;
     }
-}
 
-#[async_trait::async_trait]
-impl SearchEngine for ClipboardEngine {
-    fn id(&self) -> &'static str {
-        ENGINE_ID
-    }
-
-    fn lane(&self) -> Lane {
-        Lane::Sync
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    /// 只在 EngineTakeover 分派下工作——Mixed 分支跳过（0.8.5 §6.4 修正）。
-    /// 否则任意非 keyword 输入都会 fuzzy 搜整个剪贴板历史，污染常规查询结果。
-    fn takeover_only(&self) -> bool {
-        true
-    }
-
-    /// query 是**已剥离触发词后的参数**（由 intent 层负责剥离）。
-    /// - 空串 → 拉最近 top-N（元数据，不含 text）
-    /// - 非空 → fuzzy search（元数据，不含 text）
+    /// 剪贴板模式搜索（0.25.23 起带类型筛选）。
     ///
-    /// **不预载完整 text**：搜索路径只携带 `id` + `preview`（80 字符截断），
-    /// 完整 text 在用户激活时通过 `get_clipboard_text` command 按需拉取。
-    /// 这将搜索路径 JSON 从 MB 级降到 KB 级。
-    ///
-    /// **不再检测 keyword**：0.8.5 §6.4 后此 engine 只在 EngineTakeover 路径被调用；
-    /// route 层保证 Mixed 分支不会调到本 engine。
-    async fn search(&self, query: &str, _ctx: &QueryContext<'_>) -> Vec<SearchItem> {
-        let arg = query.trim();
+    /// kind 只决定查哪张表：Text 跳过图片查询、Image 跳过文本查询（分表存储，
+    /// 筛选即下推），All 与历史行为一致（两表并行合并按时间倒序）。
+    pub async fn search_with_kind(&self, arg: &str, kind: ClipKind) -> Vec<SearchItem> {
         let limit = self.effective_limit() as i64;
         let candidate_limit = *self.candidate_limit.read().unwrap() as i64;
         let retention_days = *self.retention_days.read().unwrap();
@@ -190,8 +185,20 @@ impl SearchEngine for ClipboardEngine {
             let t_text = std::time::Instant::now();
             let t_img = std::time::Instant::now();
             let (text, images) = tokio::join!(
-                query_recent_meta(&self.pool, limit),
-                query_recent_image_list(&self.cache_pool, limit)
+                async {
+                    if kind == ClipKind::Image {
+                        Vec::new()
+                    } else {
+                        query_recent_meta(&self.pool, limit).await
+                    }
+                },
+                async {
+                    if kind == ClipKind::Text {
+                        Vec::new()
+                    } else {
+                        query_recent_image_list(&self.cache_pool, limit).await
+                    }
+                }
             );
             tracing::trace!(
                 text_count = text.len(),
@@ -213,8 +220,22 @@ impl SearchEngine for ClipboardEngine {
                     query_recent_days_meta(&self.pool, retention_days, candidate_limit).await
                 }
             };
-            let (text_metas, image_items) =
-                tokio::join!(text_query, search_image_list(&self.cache_pool, arg, limit));
+            let (text_metas, image_items) = tokio::join!(
+                async {
+                    if kind == ClipKind::Image {
+                        Vec::new()
+                    } else {
+                        text_query.await
+                    }
+                },
+                async {
+                    if kind == ClipKind::Text {
+                        Vec::new()
+                    } else {
+                        search_image_list(&self.cache_pool, arg, limit).await
+                    }
+                }
+            );
             // nucleo fuzzy match on preview（不含 text）
             let text_matched = fuzzy_match_metas(&text_metas, arg, limit as usize);
             (text_matched, image_items)
@@ -252,6 +273,44 @@ impl SearchEngine for ClipboardEngine {
             "ClipboardEngine: search 完成"
         );
         result
+    }
+}
+
+#[async_trait::async_trait]
+impl SearchEngine for ClipboardEngine {
+    fn id(&self) -> &'static str {
+        ENGINE_ID
+    }
+
+    fn lane(&self) -> Lane {
+        Lane::Sync
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    /// 只在 EngineTakeover 分派下工作——Mixed 分支跳过（0.8.5 §6.4 修正）。
+    /// 否则任意非 keyword 输入都会 fuzzy 搜整个剪贴板历史，污染常规查询结果。
+    fn takeover_only(&self) -> bool {
+        true
+    }
+
+    /// query 是**已剥离触发词后的参数**（由 intent 层负责剥离）。
+    /// - 空串 → 拉最近 top-N（元数据，不含 text）
+    /// - 非空 → fuzzy search（元数据，不含 text）
+    ///
+    /// **不预载完整 text**：搜索路径只携带 `id` + `preview`（80 字符截断），
+    /// 完整 text 在用户激活时通过 `get_clipboard_text` command 按需拉取。
+    /// 这将搜索路径 JSON 从 MB 级降到 KB 级。
+    ///
+    /// **不再检测 keyword**：0.8.5 §6.4 后此 engine 只在 EngineTakeover 路径被调用；
+    /// route 层保证 Mixed 分支不会调到本 engine。
+    ///
+    /// 0.25.23：实现主体移入 `search_with_kind`（供剪贴板模式带类型筛选复用），
+    /// keyword 路径恒为 All。
+    async fn search(&self, query: &str, _ctx: &QueryContext<'_>) -> Vec<SearchItem> {
+        self.search_with_kind(query.trim(), ClipKind::All).await
     }
 }
 
@@ -897,5 +956,130 @@ mod tests {
             "blink:screenshot 应解析为「截图」: {}",
             si.title
         );
+    }
+
+    // ── 0.25.23 ClipKind 类型筛选 ────────────────────────────────────────
+
+    #[test]
+    fn clip_kind_parse_known_values() {
+        assert_eq!(ClipKind::parse(None), ClipKind::All);
+        assert_eq!(ClipKind::parse(Some("text")), ClipKind::Text);
+        assert_eq!(ClipKind::parse(Some("image")), ClipKind::Image);
+    }
+
+    #[test]
+    fn clip_kind_parse_unknown_falls_back_to_all() {
+        // 脏参数不丢结果：未知值/空串/大小写不一律回落 All
+        assert_eq!(ClipKind::parse(Some("")), ClipKind::All);
+        assert_eq!(ClipKind::parse(Some("file")), ClipKind::All);
+        assert_eq!(ClipKind::parse(Some("TEXT")), ClipKind::All);
+    }
+
+    /// 建带数据的内存 engine：2 条文本（needle 命中一条）+ 2 张图片
+    /// （source_app 含 needle 命中一张）。max_connections(1) 保证同一内存库
+    /// 不被第二条连接孤立（sqlite::memory: 按连接隔离）。
+    async fn engine_with_mixed_data() -> ClipboardEngine {
+        let text_pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        blink_infra::data::clipboard::init_db(&text_pool).await.unwrap();
+        let now = chrono::Utc::now().timestamp();
+        for (id, text, at) in [
+            ("clip_100", "needle in haystack", now),
+            ("clip_101", "plain text", now - 10),
+        ] {
+            blink_infra::data::clipboard::save_item(
+                &text_pool,
+                &blink_infra::data::clipboard::ClipboardItem {
+                    id: id.into(),
+                    text: text.into(),
+                    preview: text.into(),
+                    created_at: at,
+                    source_app: None,
+                    hit_count: 0,
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        let cache_pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        blink_infra::data::clipboard_images::init_db(&cache_pool).await.unwrap();
+        for (id, app, at) in [
+            ("clipimg_200", "needleapp.exe", now),
+            ("clipimg_201", "otherapp.exe", now - 10),
+        ] {
+            blink_infra::data::clipboard_images::save_image(
+                &cache_pool,
+                &blink_infra::data::clipboard_images::ClipboardImage {
+                    id: id.into(),
+                    png_blob: vec![1],
+                    thumb_blob: vec![2],
+                    width: 10,
+                    height: 10,
+                    sha256: format!("sha_{id}"),
+                    created_at: at,
+                    source_app: Some(app.into()),
+                    source_path: None,
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        ClipboardEngine::new(text_pool, cache_pool)
+    }
+
+    fn is_image_item(item: &SearchItem) -> bool {
+        matches!(
+            item.action,
+            SearchAction::RunAction {
+                id: ref run_id,
+                ..
+            } if run_id == "copy_clipboard_image"
+        )
+    }
+
+    #[tokio::test]
+    async fn kind_all_returns_text_and_images() {
+        let engine = engine_with_mixed_data().await;
+        let items = engine.search_with_kind("", ClipKind::All).await;
+        assert_eq!(items.len(), 2 + 2, "全量应合并文本与图片");
+        assert_eq!(items.iter().filter(|x| is_image_item(x)).count(), 2);
+    }
+
+    #[tokio::test]
+    async fn kind_text_skips_image_table() {
+        let engine = engine_with_mixed_data().await;
+        let items = engine.search_with_kind("", ClipKind::Text).await;
+        assert_eq!(items.len(), 2, "文本筛选只返回文本项");
+        assert!(items.iter().all(|x| !is_image_item(x)));
+    }
+
+    #[tokio::test]
+    async fn kind_image_skips_text_table() {
+        let engine = engine_with_mixed_data().await;
+        let items = engine.search_with_kind("", ClipKind::Image).await;
+        assert_eq!(items.len(), 2, "图片筛选只返回图片项");
+        assert!(items.iter().all(is_image_item));
+    }
+
+    #[tokio::test]
+    async fn kind_filter_applies_to_fuzzy_search() {
+        let engine = engine_with_mixed_data().await;
+        // "needle" 同时命中文本 preview 与图片 source_app
+        let text_hits = engine.search_with_kind("needle", ClipKind::Text).await;
+        assert_eq!(text_hits.len(), 1);
+        assert!(!is_image_item(&text_hits[0]));
+
+        let image_hits = engine.search_with_kind("needle", ClipKind::Image).await;
+        assert_eq!(image_hits.len(), 1);
+        assert!(is_image_item(&image_hits[0]));
     }
 }

@@ -33,9 +33,10 @@ export function resetSuggestionSession() {
  *  不经过 SearchService::search / IntentRouter / get_weights / Route 分派。
  *  @param {string} query 搜索词（用户原始输入，无需"剪贴板"前缀）
  *  @param {number} seq 请求序号
+ *  @param {string} [kind] 0.25.23 类型筛选："text"/"image"，缺省 = 全部
  *  @returns {Promise<{entries: Array, suggestion: *}>} */
-export function searchClipboard(query, seq) {
-    return invoke("search_clipboard", {query, seq});
+export function searchClipboard(query, seq, kind) {
+    return invoke("search_clipboard", {query, seq, kind});
 }
 
 /** 启动应用（打开 lnk）。 */

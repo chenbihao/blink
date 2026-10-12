@@ -1345,12 +1345,16 @@ export const zh = {
     "action.error.missing_arg": "缺少参数：{message}",
     "action.error.unknown": "操作失败：{message}",
 // ── 0.20.2 剪贴板多选 ──
+    "clipboard.kind_all": "全部",
+    "clipboard.kind_text": "文本",
+    "clipboard.kind_image": "图片",
     "clipboard.selected_count": "已选择 {count} 段文本",
     "clipboard.loading_count": "正在加载 {count} 项…",
     "clipboard.copied_count": "已复制 {count} 段文本",
     "clipboard.copy_failed": "批量复制失败：{message}",
+    "clipboard.paste_failed": "批量上屏失败：{message}",
     "clipboard.hint_select": "单击选择 · Ctrl+A 全选 · Ctrl+C 批量复制",
-    "clipboard.hint_selected": "Ctrl+C 复制 {count} 段 · 右键菜单可复制选中项 · Esc 取消选择",
+    "clipboard.hint_selected": "Enter 上屏 {count} 段 · Ctrl+C 复制 · Esc 取消选择",
     "clipboard.item_unavailable": "部分内容已不可用",
 
 // ── 0.21.6 能力管理页面 ──

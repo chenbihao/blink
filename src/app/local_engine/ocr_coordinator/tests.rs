@@ -414,29 +414,24 @@ async fn concurrent_waiters_handle_individual_cancellation() {
             tokio::select! {
                 _ = rx.changed() => "state_changed",
                 _ = token.cancelled() => "cancelled",
-                _ = tokio::time::sleep(Duration::from_secs(10)) => "timeout",
             }
         });
         handles.push(handle);
     }
 
-    // 等待所有 waiter 完成
-    let results = futures::future::join_all(handles).await;
-
-    // leader（第 0 个）应该因 cancel 返回 "cancelled"
-    let leader_result = results[0].as_ref().unwrap();
-    assert_eq!(*leader_result, "cancelled", "leader 应因 cancel 返回");
-
-    // 其他 waiter 应该等待 state change——我们发送 Ready
-    // 注意：它们可能已经超时了，所以我们只检查它们完成了
-    for (i, r) in results.iter().skip(1).enumerate() {
-        let val: &str = r.as_ref().unwrap();
-        assert!(
-            val == "state_changed" || val == "timeout" || val == "cancelled",
-            "waiter {} 应有有效结果，实际 {}",
-            i + 1,
-            val
-        );
+    // 先确认单独取消，再广播共享状态，避免两个分支同时 ready 的随机选择。
+    let leader = tokio::time::timeout(Duration::from_secs(5), handles.remove(0))
+        .await
+        .expect("取消的 waiter 未退出")
+        .unwrap();
+    assert_eq!(leader, "cancelled");
+    tx.send(LifecycleState::Starting { generation: 1 })
+        .unwrap();
+    let results = tokio::time::timeout(Duration::from_secs(5), futures::future::join_all(handles))
+        .await
+        .expect("其余 waiter 未收到状态广播");
+    for result in results {
+        assert_eq!(result.unwrap(), "state_changed");
     }
 }
 

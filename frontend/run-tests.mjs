@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 // 0.21.12: 统一前端测试 runner
 //
-// 递归发现 frontend/js/**/*.test.mjs，路径排序保证执行顺序稳定。
+// 递归发现 frontend/js/**/*.test.mjs，路径排序保证汇总顺序稳定，默认 4 个子进程并行。
 // 每个测试文件独立执行，单个失败不中止后续文件。
 // 任意测试失败、超时、被 signal 终止或 runner 自身异常时，最终退出码非零。
 // 未发现任何测试文件时失败，避免空测试集假绿。
 
-import {execFileSync} from 'node:child_process';
+import {mapLimit, runCaptured, testJobs} from '../xtask/scripts/test-support.mjs';
 import {readdirSync, statSync} from 'node:fs';
 import {join, relative, sep} from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -56,67 +56,14 @@ function discoverTestFiles(dir) {
     return results;
 }
 
-/**
- * 独立执行单个测试文件，返回结果对象。
- * 用 execFileSync 在子进程中执行，隔离 failure/crash。
- */
-function runTestFile(filePath, timeoutMs) {
-    const relativePath = relative(ROOT, filePath).split(sep).join('/');
-    const start = performance.now();
-    try {
-        execFileSync(process.execPath, [filePath], {
-            cwd: ROOT,
-            timeout: timeoutMs,
-            stdio: ['ignore', 'pipe', 'pipe'],
-            encoding: 'utf8',
-            maxBuffer: 10 * 1024 * 1024,
-        });
-        const elapsed = Math.round(performance.now() - start);
-        return {file: relativePath, passed: true, elapsed};
-    } catch (error) {
-        const elapsed = Math.round(performance.now() - start);
-        let stdout = '';
-        let stderr = '';
-        if (error.stdout) stdout = error.stdout.toString();
-        if (error.stderr) stderr = error.stderr.toString();
-
-        // 超时
-        if (error.signal === 'SIGTERM' || error.code === 'ETIMEDOUT') {
-            return {
-                file: relativePath,
-                passed: false,
-                elapsed,
-                timedOut: true,
-                stdout,
-                stderr,
-            };
-        }
-
-        // 被其他 signal 终止
-        if (error.signal) {
-            return {
-                file: relativePath,
-                passed: false,
-                elapsed,
-                signal: error.signal,
-                stdout,
-                stderr,
-            };
-        }
-
-        // 非零退出码
-        return {
-            file: relativePath,
-            passed: false,
-            elapsed,
-            exitCode: error.status ?? 'unknown',
-            stdout,
-            stderr,
-        };
-    }
+/** 每个文件独立子进程执行，保留超时和失败输出。 */
+async function runTestFile(filePath, timeoutMs) {
+    const file = relative(ROOT, filePath).split(sep).join('/');
+    const result = await runCaptured(process.execPath, [filePath], {cwd: ROOT, timeoutMs});
+    return {file, ...result};
 }
 
-function main() {
+async function main() {
     const files = discoverTestFiles(TEST_DIR);
 
     if (files.length === 0) {
@@ -124,13 +71,14 @@ function main() {
         process.exit(1);
     }
 
-    console.log(`🧪 发现 ${files.length} 个测试文件\n`);
+    const start = performance.now();
+    const jobs = testJobs(4);
+    console.log(`🧪 发现 ${files.length} 个测试文件，${jobs} 并行\n`);
 
-    const results = [];
-    for (const file of files) {
+    const results = await mapLimit(files, jobs, async file => {
         const relativePath = relative(ROOT, file).split(sep).join('/');
+        const result = await runTestFile(file, DEFAULT_TIMEOUT_MS);
         process.stdout.write(`▶ ${relativePath} ... `);
-        const result = runTestFile(file, DEFAULT_TIMEOUT_MS);
         if (result.passed) {
             console.log(`✓ (${result.elapsed}ms)`);
         } else if (result.timedOut) {
@@ -140,8 +88,9 @@ function main() {
         } else {
             console.log(`✗ exit=${result.exitCode} (${result.elapsed}ms)`);
         }
-        results.push(result);
-    }
+        return result;
+    });
+    console.log(`总耗时 ${((performance.now() - start) / 1000).toFixed(2)}s`);
 
     const failures = results.filter((r) => !r.passed);
 
@@ -171,4 +120,4 @@ function main() {
     process.exit(1);
 }
 
-main();
+main().catch(error => { console.error(error); process.exitCode = 1; });

@@ -13,17 +13,16 @@
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::ClientToScreen;
 use windows::Win32::System::Ole::{
-    SafeArrayAccessData, SafeArrayGetDim, SafeArrayGetLBound, SafeArrayGetUBound,
+    SafeArrayAccessData, SafeArrayDestroy, SafeArrayGetDim, SafeArrayGetLBound, SafeArrayGetUBound,
     SafeArrayUnaccessData,
 };
 use windows::Win32::UI::Accessibility::{
     IUIAutomationTextPattern, IUIAutomationTextPattern2, IUIAutomationTextRange,
-    TextUnit_Character,
+    TextUnit_Character, UIA_TextPattern2Id, UIA_TextPatternId,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, GUITHREADINFO,
+    GUITHREADINFO, GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId,
 };
-use windows::core::Interface;
 
 /// 查询指定窗口内当前文本光标的屏幕矩形（物理像素）。
 ///
@@ -93,7 +92,10 @@ fn caret_via_guithreadinfo(owner_hwnd: Option<isize>) -> Option<RECT> {
     }
     // 无经典 caret 时 hwndCaret 为空 / rcCaret 退化——现代应用普遍如此，走 UIA。
     if gti.hwndCaret.is_invalid() || gti.rcCaret.bottom <= gti.rcCaret.top {
-        tracing::trace!(caret_valid = !gti.hwndCaret.is_invalid(), "caret: 前台线程无经典 caret");
+        tracing::trace!(
+            caret_valid = !gti.hwndCaret.is_invalid(),
+            "caret: 前台线程无经典 caret"
+        );
         return None;
     }
 
@@ -136,7 +138,11 @@ fn caret_via_uia(owner_hwnd: Option<isize>) -> Option<RECT> {
     match unsafe { elem.CurrentProcessId() } {
         Ok(elem_pid) if elem_pid as u32 == owner_pid => try_caret_patterns(&elem, "owned"),
         Ok(elem_pid) => {
-            tracing::debug!(elem_pid, owner_pid, "caret: 焦点元素不属于目标进程（焦点已被抢占）");
+            tracing::debug!(
+                elem_pid,
+                owner_pid,
+                "caret: 焦点元素不属于目标进程（焦点已被抢占）"
+            );
             None
         }
         Err(error) => {
@@ -152,26 +158,39 @@ fn caret_via_uia(owner_hwnd: Option<isize>) -> Option<RECT> {
 /// 必然取到自家 WebView 被归属校验拒绝）；本函数基于 show **之前**经
 /// `selection::capture_focused_element()` 捕获的 COM 元素引用慢查——引用
 /// 不依赖系统焦点（MTA 公寓跨线程安全），show 之后仍指向目标输入框。
-pub fn caret_rect_from_captured(
+///
+/// 保留光标行与控件矩形的来源，供调用方判断可信度；只影响弹窗定位，不作为粘贴门控。
+pub fn clipboard_anchor_from_captured(
     elem: &crate::platform::selection::SendableElement,
-) -> Option<RECT> {
+) -> Option<ClipboardAnchor> {
     // 签名收 &SendableElement（而非裸元素）：闭包精确捕获下，调用方
     // spawn 线程必须捕获整个 Send 包装类型才满足 Send（裸字段非 Send）。
+    let _com = crate::platform::uia::ComGuard::init_mta();
+    if unsafe { elem.0.CurrentIsOffscreen() }.ok()?.as_bool() {
+        return None;
+    }
     if let Some(rect) = try_caret_patterns(&elem.0, "captured") {
-        return Some(rect);
+        return Some(ClipboardAnchor::Caret(rect));
     }
     // TextPattern 不支持时退化为控件包围矩形——0.24.7 实测 Chrome 地址栏
     // （OmniboxViewViews）等自绘 Edit 控件不实现 TextPattern，caret 无解；
     // 而"定位到输入框附近"的语义本就是控件级近似，Edit/Document 控件的
     // 包围矩形比 caret 更稳（任何输入控件都有）。非输入控件不兜底——
     // 避免把主窗定位到整窗/整页矩形。
-    control_rect_fallback(&elem.0)
+    control_rect_fallback(&elem.0).map(ClipboardAnchor::Control)
 }
 
-/// 输入控件包围矩形兜底：仅 Edit（50004）/ Document（50005）类控件。 */
-fn control_rect_fallback(elem: &windows::Win32::UI::Accessibility::IUIAutomationElement) -> Option<RECT> {
+/// 输入控件包围矩形兜底：仅 Edit（50004）/ Document（50030）类控件。
+///
+/// 0.25.25：Document 常量 50005 → 50030 修正（50005 是 Hyperlink，与 0.25.21
+/// `uia.rs` 门控白名单同源的笔误——Typora/Win11 记事本的 Document 焦点元素
+/// 之前根本进不了兜底）。Group/SunAwtFrame 不因「支持粘贴」而纳入——粘贴
+/// 走 0.25.22 的原窗口身份校验，与定位无关。 */
+fn control_rect_fallback(
+    elem: &windows::Win32::UI::Accessibility::IUIAutomationElement,
+) -> Option<RECT> {
     const UIA_EDIT_CONTROL_TYPE: i32 = 50004;
-    const UIA_DOCUMENT_CONTROL_TYPE: i32 = 50005;
+    const UIA_DOCUMENT_CONTROL_TYPE: i32 = 50030;
     let control_type = unsafe { elem.CurrentControlType() }.ok()?.0;
     if control_type != UIA_EDIT_CONTROL_TYPE && control_type != UIA_DOCUMENT_CONTROL_TYPE {
         tracing::debug!(control_type, "caret: 非输入控件，不做控件矩形兜底");
@@ -185,8 +204,102 @@ fn control_rect_fallback(elem: &windows::Win32::UI::Accessibility::IUIAutomation
     Some(rect)
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum ClipboardAnchor {
+    Caret(RECT),
+    Control(RECT),
+    Mouse(POINT),
+}
+
+impl ClipboardAnchor {
+    pub fn point(&self) -> POINT {
+        match self {
+            Self::Caret(rect) | Self::Control(rect) => POINT {
+                x: rect.left,
+                y: rect.top,
+            },
+            Self::Mouse(point) => *point,
+        }
+    }
+
+    /// 光标应为一行，控件只接受紧凑输入框；整页/滚出可见区的矩形不猜位置。
+    /// 阈值按目标屏 DPI 缩放，避免高 DPI 下正常输入框被误判。
+    pub fn is_usable(&self, work: &RECT, owner: Option<&RECT>, dpi: u32) -> bool {
+        let (rect, max_height) = match self {
+            Self::Caret(rect) => (rect, 64),
+            Self::Control(rect) => (rect, 96),
+            Self::Mouse(_) => return true,
+        };
+        let allowed = clipboard_allowed_rect(work, owner);
+        let height = i64::from(rect.bottom) - i64::from(rect.top);
+        let width = i64::from(rect.right) - i64::from(rect.left);
+        height > 0
+            && height <= max_height * i64::from(dpi) / 96
+            && width >= 0
+            && (matches!(self, Self::Control(_))
+                || width <= i64::from(work.right - work.left) * 9 / 10)
+            && rect.left >= allowed.left
+            && rect.right <= allowed.right
+            && rect.top >= allowed.top
+            && rect.bottom <= allowed.bottom
+    }
+}
+
+fn clipboard_allowed_rect(work: &RECT, owner: Option<&RECT>) -> RECT {
+    if let Some(o) = owner {
+        let rect = RECT {
+            left: o.left.max(work.left),
+            top: o.top.max(work.top),
+            right: o.right.min(work.right),
+            bottom: o.bottom.min(work.bottom),
+        };
+        if rect.right > rect.left && rect.bottom > rect.top {
+            return rect;
+        }
+    }
+    *work
+}
+
+/// 可信光标/紧凑控件在下方展开，底部空间不足时翻到上方。
+/// 鼠标回退只钳制工作区，避免被原应用边界拉回左上角或另一块屏。
+pub fn compute_clipboard_popup_placement(
+    anchor: &ClipboardAnchor,
+    win_w: i32,
+    win_h: i32,
+    work: &RECT,
+    owner: Option<&RECT>,
+) -> (i32, i32) {
+    let (x, top, bottom, gap, allowed) = match anchor {
+        ClipboardAnchor::Caret(rect) | ClipboardAnchor::Control(rect) => (
+            rect.left,
+            rect.top,
+            rect.bottom,
+            8,
+            clipboard_allowed_rect(work, owner),
+        ),
+        ClipboardAnchor::Mouse(point) => (point.x + 12, point.y, point.y, 12, *work),
+    };
+    let below_y = bottom + gap;
+    let y = if below_y + win_h <= allowed.bottom {
+        below_y
+    } else {
+        top - gap - win_h
+    };
+    let new_x = x.clamp(allowed.left, (allowed.right - win_w).max(allowed.left));
+    let new_y = y.clamp(allowed.top, (allowed.bottom - win_h).max(allowed.top));
+    // owner 比弹窗更窄/更矮时仍须保证不越出屏幕。
+    (
+        new_x.clamp(work.left, (work.right - win_w).max(work.left)),
+        new_y.clamp(work.top, (work.bottom - win_h).max(work.top)),
+    )
+}
+
 /// 在焦点元素上依次尝试 TextPattern2.GetCaretRange / TextPattern.GetSelection。
-fn try_caret_patterns(elem: &windows::Win32::UI::Accessibility::IUIAutomationElement, tag: &str) -> Option<RECT> {
+fn try_caret_patterns(
+    elem: &windows::Win32::UI::Accessibility::IUIAutomationElement,
+    tag: &str,
+) -> Option<RECT> {
+    let _com = crate::platform::uia::ComGuard::init_mta();
     if tracing::enabled!(tracing::Level::TRACE) {
         let class = unsafe { elem.CurrentClassName() }
             .ok()
@@ -198,7 +311,9 @@ fn try_caret_patterns(elem: &windows::Win32::UI::Accessibility::IUIAutomationEle
         tracing::trace!(tag, control_type, class = %class, "caret: 焦点元素信息");
     }
 
-    if let Ok(pattern) = elem.cast::<IUIAutomationTextPattern2>() {
+    if let Ok(pattern) =
+        unsafe { elem.GetCurrentPatternAs::<IUIAutomationTextPattern2>(UIA_TextPattern2Id) }
+    {
         match unsafe { pattern.GetCaretRange(&mut Default::default()) } {
             Ok(range) => {
                 if let Some(rect) = text_range_caret_rect(&range, "GetCaretRange") {
@@ -211,7 +326,9 @@ fn try_caret_patterns(elem: &windows::Win32::UI::Accessibility::IUIAutomationEle
         tracing::trace!(tag, "caret: 焦点元素不支持 TextPattern2");
     }
 
-    let Ok(pattern) = elem.cast::<IUIAutomationTextPattern>() else {
+    let Ok(pattern) =
+        (unsafe { elem.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId) })
+    else {
         tracing::debug!(tag, "caret: 焦点元素不支持 TextPattern，无法取光标");
         return None;
     };
@@ -252,42 +369,193 @@ fn text_range_caret_rect(range: &IUIAutomationTextRange, source: &str) -> Option
 
 fn read_bounding_rects(range: &IUIAutomationTextRange) -> Option<RECT> {
     let psa = unsafe { range.GetBoundingRectangles() }.ok()?;
-    if unsafe { SafeArrayGetDim(psa) } != 1 {
+    if psa.is_null() {
         return None;
     }
-    let lower = unsafe { SafeArrayGetLBound(psa, 1) }.ok()?;
-    let upper = unsafe { SafeArrayGetUBound(psa, 1) }.ok()?;
-    // 空数组（UBound = -1）或异常负下界：无矩形可用
-    if upper < lower || lower < 0 {
-        return None;
-    }
+    // GetBoundingRectangles 转移 SAFEARRAY 所有权；所有提前返回也必须释放。
+    let rect = (|| {
+        if unsafe { SafeArrayGetDim(psa) } != 1 {
+            return None;
+        }
+        let lower = unsafe { SafeArrayGetLBound(psa, 1) }.ok()?;
+        let upper = unsafe { SafeArrayGetUBound(psa, 1) }.ok()?;
+        // 空数组（UBound = -1）或异常负下界：无矩形可用
+        if upper < lower || lower < 0 {
+            return None;
+        }
 
-    let mut data: *mut core::ffi::c_void = std::ptr::null_mut();
-    (unsafe { SafeArrayAccessData(psa, &mut data) }).ok()?;
-    let count = (upper - lower + 1) as usize;
-    let rect = unsafe {
-        let values = std::slice::from_raw_parts(data as *const f64, count);
-        values.rchunks_exact(4).find_map(|group| {
-            let (left, top, width, height) = (group[0], group[1], group[2], group[3]);
-            if height <= 0.0 {
-                return None;
-            }
-            Some(RECT {
-                left: left as i32,
-                top: top as i32,
-                right: left as i32 + width.max(1.0) as i32,
-                bottom: top as i32 + height as i32,
+        let mut data: *mut core::ffi::c_void = std::ptr::null_mut();
+        (unsafe { SafeArrayAccessData(psa, &mut data) }).ok()?;
+        if data.is_null() {
+            let _ = unsafe { SafeArrayUnaccessData(psa) };
+            return None;
+        }
+        let count = (upper - lower + 1) as usize;
+        let rect = unsafe {
+            let values = std::slice::from_raw_parts(data as *const f64, count);
+            values.rchunks_exact(4).find_map(|group| {
+                let (left, top, width, height) = (group[0], group[1], group[2], group[3]);
+                if !group.iter().all(|v| v.is_finite()) || height <= 0.0 || width < 0.0 {
+                    return None;
+                }
+                Some(RECT {
+                    left: left as i32,
+                    top: top as i32,
+                    right: left as i32 + width.max(1.0) as i32,
+                    bottom: top as i32 + height as i32,
+                })
             })
-        })
-    };
-    let _ = unsafe { SafeArrayUnaccessData(psa) };
+        };
+        let _ = unsafe { SafeArrayUnaccessData(psa) };
+        rect
+    })();
+    let _ = unsafe { SafeArrayDestroy(psa) };
     rect
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::core::Interface;
 
+    fn rect(l: i32, t: i32, r: i32, b: i32) -> RECT {
+        RECT {
+            left: l,
+            top: t,
+            right: r,
+            bottom: b,
+        }
+    }
+
+    fn work() -> RECT {
+        rect(0, 0, 1920, 1040)
+    }
+
+    #[test]
+    fn document_and_medium_editor_rects_do_not_override_mouse_position() {
+        // Obsidian 滚动后仍返回容器矩形；即便未达到旧的半屏阈值也不应锚顶部。
+        for r in [rect(100, 100, 1800, 1000), rect(100, 100, 900, 450)] {
+            assert!(!ClipboardAnchor::Control(r).is_usable(&work(), None, 96));
+            assert!(!ClipboardAnchor::Caret(r).is_usable(&work(), None, 96));
+        }
+        let mouse = ClipboardAnchor::Mouse(POINT { x: 650, y: 700 });
+        assert_eq!(
+            compute_clipboard_popup_placement(&mouse, 600, 98, &work(), None),
+            (662, 712)
+        );
+    }
+
+    #[test]
+    fn ordinary_caret_and_compact_input_are_usable() {
+        assert!(ClipboardAnchor::Caret(rect(300, 500, 300, 520)).is_usable(&work(), None, 96));
+        assert!(ClipboardAnchor::Control(rect(100, 100, 1900, 140)).is_usable(&work(), None, 96));
+        assert!(!ClipboardAnchor::Caret(rect(0, 500, 1900, 530)).is_usable(&work(), None, 96));
+    }
+
+    #[test]
+    fn input_height_threshold_scales_with_monitor_dpi() {
+        let input = ClipboardAnchor::Control(rect(300, 400, 900, 550));
+        assert!(!input.is_usable(&work(), None, 96));
+        assert!(input.is_usable(&work(), None, 192));
+        let caret = ClipboardAnchor::Caret(rect(300, 400, 305, 500));
+        assert!(!caret.is_usable(&work(), None, 96));
+        assert!(caret.is_usable(&work(), None, 192));
+    }
+
+    #[test]
+    fn scrolled_offscreen_and_invalid_rects_are_rejected() {
+        let owner = rect(100, 200, 1000, 800);
+        for r in [
+            rect(300, 850, 302, 870),
+            rect(50, 400, 70, 420),
+            rect(300, 180, 302, 210),
+            rect(300, 500, 290, 520),
+            rect(300, 500, 302, 500),
+        ] {
+            assert!(!ClipboardAnchor::Caret(r).is_usable(&work(), Some(&owner), 96));
+        }
+        assert!(!ClipboardAnchor::Caret(rect(300, 1050, 302, 1070)).is_usable(&work(), None, 96));
+    }
+
+    #[test]
+    fn normal_caret_line_places_below() {
+        let caret = ClipboardAnchor::Caret(rect(300, 500, 320, 520));
+        assert_eq!(
+            compute_clipboard_popup_placement(&caret, 600, 98, &work(), None),
+            (300, 528)
+        );
+    }
+
+    #[test]
+    fn normal_caret_flips_above_when_no_room_below() {
+        let caret = ClipboardAnchor::Caret(rect(300, 1000, 320, 1020));
+        assert_eq!(
+            compute_clipboard_popup_placement(&caret, 600, 98, &work(), None),
+            (300, 894)
+        );
+    }
+
+    #[test]
+    fn caret_flips_above_at_owner_bottom_before_screen_bottom() {
+        let owner = rect(100, 200, 1000, 800);
+        let caret = ClipboardAnchor::Caret(rect(300, 740, 302, 760));
+        assert!(caret.is_usable(&work(), Some(&owner), 96));
+        assert_eq!(
+            compute_clipboard_popup_placement(&caret, 600, 98, &work(), Some(&owner)),
+            (300, 634)
+        );
+    }
+
+    #[test]
+    fn mouse_is_not_pulled_back_into_owner_window() {
+        // zcode 无输入焦点：鼠标落点不被原应用矩形拉回左上角。
+        let owner = rect(100, 100, 800, 700);
+        let mouse = ClipboardAnchor::Mouse(POINT { x: 1200, y: 800 });
+        assert_eq!(
+            compute_clipboard_popup_placement(&mouse, 600, 98, &work(), Some(&owner)),
+            (1212, 812)
+        );
+    }
+
+    #[test]
+    fn mouse_at_bottom_right_stays_in_work_area() {
+        let mouse = ClipboardAnchor::Mouse(POINT { x: 1900, y: 1020 });
+        assert_eq!(
+            compute_clipboard_popup_placement(&mouse, 600, 98, &work(), None),
+            (1320, 910)
+        );
+    }
+
+    #[test]
+    fn mouse_on_negative_coordinate_monitor_stays_on_that_monitor() {
+        let left_screen = rect(-1920, -200, 0, 840);
+        let mouse = ClipboardAnchor::Mouse(POINT { x: -1800, y: 500 });
+        assert_eq!(
+            compute_clipboard_popup_placement(&mouse, 600, 98, &left_screen, None),
+            (-1788, 512)
+        );
+    }
+
+    #[test]
+    fn narrow_owner_cannot_push_popup_outside_screen() {
+        let caret = ClipboardAnchor::Caret(rect(1800, 400, 1802, 420));
+        let owner = rect(1700, 200, 1900, 800);
+        assert_eq!(
+            compute_clipboard_popup_placement(&caret, 600, 98, &work(), Some(&owner)),
+            (1320, 428)
+        );
+    }
+
+    #[test]
+    fn missing_or_degenerate_owner_uses_work_area() {
+        let caret = ClipboardAnchor::Caret(rect(300, 400, 302, 420));
+        let owner = rect(2000, 0, 3000, 500);
+        assert!(caret.is_usable(&work(), Some(&owner), 96));
+        assert_eq!(
+            compute_clipboard_popup_placement(&caret, 600, 98, &work(), Some(&owner)),
+            (300, 428)
+        );
+    }
     /// 手动探针（依赖当前前台应用，CI 跳过）：焦点一个文本编辑器后运行
     /// `cargo test --bin blink probe_foreground_caret -- --ignored --nocapture`，
     /// 输出各阶段结果，用于定位"未取到前台光标"发生在哪一环。
@@ -312,7 +580,7 @@ mod tests {
         let control_type = unsafe { elem.CurrentControlType() }.map(|t| t.0).unwrap_or(0);
         println!("[2] 焦点元素: control_type={control_type} class={class}");
 
-        match elem.cast::<IUIAutomationTextPattern2>() {
+        match unsafe { elem.GetCurrentPatternAs::<IUIAutomationTextPattern2>(UIA_TextPattern2Id) } {
             Ok(pattern) => match unsafe { pattern.GetCaretRange(&mut Default::default()) } {
                 Ok(range) => {
                     let rects = read_bounding_rects(&range);
@@ -327,7 +595,7 @@ mod tests {
             Err(_) => println!("[3] TextPattern2: 不支持"),
         }
 
-        match elem.cast::<IUIAutomationTextPattern>() {
+        match unsafe { elem.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId) } {
             Ok(pattern) => match unsafe { pattern.GetSelection() } {
                 Ok(sels) => {
                     let count = unsafe { sels.Length() }.unwrap_or(0);

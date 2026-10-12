@@ -18,6 +18,8 @@
 //! **UX**：
 //! - 进入：输入框清空 + placeholder 变为 "搜索剪贴板历史…" + 模式徽章
 //! - 输入：每个字符直接调 searchClipboard（40ms 防抖）
+//! - 筛选：0.25.23 顶部类型 chips（全部/文本/图片），Tab/Shift+Tab 循环切换，
+//!   kind 参数下推后端（文本/图片分表，筛选即跳过另一张表）
 //! - ESC：有多选时先清空选择；无多选直接隐藏窗口（模式由 HIDDEN reset 兜底复位）
 //! - 选中外壳隐藏 / SHOWN / HIDDEN：自动复位
 
@@ -26,7 +28,7 @@ import * as results from "./results.js";
 import * as ghost from "./ghost.js";
 import * as suggestionBar from "./suggestion-bar.js";
 import * as statusbar from "./statusbar.js";
-import {show as showFeedback} from "./transient-feedback.js";
+import {dismiss as dismissFeedback, show as showFeedback} from "./transient-feedback.js";
 import {syncWindowSize, resyncWindowSize} from "./window-size.js";
 import {
     copyToClipboard,
@@ -44,11 +46,16 @@ import {parse as parseColor} from "../shared/color.js";
 import {activateItem} from "./actions.js";
 import {showActionError} from "./action-error.js";
 import {findDeleteTarget, findEditAction, resolveShortcutAction} from "./clipboard-shortcuts.js";
+import {KIND_ORDER, nextKind} from "./clipboard-kind.js";
+import * as inputState from "./input-state.js";
 
 // 0.20.1: 从 results.js 导入 setClipboardMode，进入/退出模式时设置标志。
 
 /** 当前是否处于剪贴板模式。 */
 let active = false;
+
+/** 0.25.23: 当前类型筛选（"all" | "text" | "image"，Tab/Shift+Tab 循环）。 */
+let kind = "all";
 
 /** 原始 placeholder（退出时恢复）。 */
 let savedPlaceholder = "";
@@ -61,6 +68,18 @@ let seq = 0;
 
 /** 模式徽章 DOM（搜索栏右上角浅提示）。 */
 let badgeEl = null;
+
+/** 0.25.23: 类型 chips 容器（#clipboard-type-chips）。 */
+let chipsEl = null;
+/** 0.25.23: chips 按钮列表（顺序同 KIND_ORDER）。 */
+let chipBtns = [];
+
+/** 0.25.23: kind → i18n key（chips 文案）。 */
+const KIND_LABEL_KEYS = {
+    all: "clipboard.kind_all",
+    text: "clipboard.kind_text",
+    image: "clipboard.kind_image",
+};
 
 /** 0.20.2: 上次搜索的 trim 后 query——避免相同 query 重复搜索导致光标重置。 */
 let lastQuery = "";
@@ -114,6 +133,25 @@ export function reloadList() {
     doSearch(lastQuery, true);
 }
 
+/** 0.25.23: 切换类型筛选（chips 点击 / Tab 循环共用）。
+ *  结果集随筛选变化——与 query 变化同语义：清空选择 + 递增 generation，
+ *  绕过「相同 query 不重搜」早退直接重查当前 query。 */
+export function setKind(next) {
+    if (!active || next === kind) return;
+    kind = next;
+    refreshChips();
+    handleInput(queryEl.value, {force: true, immediate: true});
+}
+
+/** 0.25.23: 投影 chips 文案与 active 态。 */
+function refreshChips() {
+    for (const btn of chipBtns) {
+        const key = KIND_LABEL_KEYS[btn.dataset.kind];
+        if (key) btn.textContent = t(key);
+        btn.classList.toggle("active", btn.dataset.kind === kind);
+    }
+}
+
 // ── 生命周期 ──────────────────────────────────────────────────────────────
 
 /** 初始化：创建搜索栏右上角模式徽章（0.24.7 回退恢复 0.19.15 形态——
@@ -127,6 +165,24 @@ export function init() {
     badgeEl.innerHTML =
         '<svg class="icon"><use href="#icon-copy"/></svg><span></span>';
     document.getElementById("search-mode").appendChild(badgeEl);
+
+    // 0.25.23: 类型 chips（index.html 静态容器，按钮按 KIND_ORDER 生成）
+    chipsEl = document.getElementById("clipboard-type-chips");
+    if (chipsEl) {
+        chipBtns = KIND_ORDER.map((k) => {
+            const btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "clip-kind-chip";
+            btn.dataset.kind = k;
+            btn.addEventListener("click", () => {
+                setKind(k);
+                // 点击抢走的焦点还给输入框——chips 是筛选器，不是输入终点
+                queryEl.focus({preventScroll: true});
+            });
+            chipsEl.appendChild(btn);
+            return btn;
+        });
+    }
 }
 
 /** 复位：退出剪贴板模式（lifecycle shown/hidden 调用）。 */
@@ -170,6 +226,13 @@ export function enter({preserveQuery = false} = {}) {
         badgeEl.classList.remove("hidden");
     }
 
+    // 0.25.23: 显示类型 chips，筛选重置为「全部」（每次进入都从全量起步）
+    kind = "all";
+    if (chipsEl) {
+        refreshChips();
+        chipsEl.classList.remove("hidden");
+    }
+
     // 清空 ghost + 建议 + 结果
     ghost.clear();
     suggestionBar.clear();
@@ -193,6 +256,8 @@ export function exit() {
     active = false;
     // 0.20.2: 退出模式时递增 epoch+generation，清空选择
     selection.onExitMode();
+    // 生命周期负责清理本次模式的持久 loading，迟到的 IPC 不得清理新会话反馈。
+    dismissFeedback();
     // 0.20.1: 恢复 results.js 的 maxResults 截断
     results.setClipboardMode(false);
 
@@ -201,6 +266,8 @@ export function exit() {
 
     // 0.24.7: 隐藏右上角模式徽章
     if (badgeEl) badgeEl.classList.add("hidden");
+    // 0.25.23: 隐藏类型 chips（kind 已在 enter 时重置，这里只管显隐）
+    if (chipsEl) chipsEl.classList.add("hidden");
 
     // 取消防抖
     clearTimeout(timer);
@@ -232,22 +299,27 @@ export function exit() {
  * @param {string} value 当前输入框值
  * @returns {boolean} true = 剪贴板模式已处理（search.js 应跳过搜索）；false = 非剪贴板模式（继续搜索）
  */
-export function handleInput(value) {
+export function handleInput(value, {force = false, immediate = false} = {}) {
     if (!active) return false;
 
     const q = value.trim();
 
     // 0.20.2: 相同 query（trim 后）不重新搜索——避免空格等无效输入触发重渲染
     // 导致光标重置到第一项（图片项 active 跳动的根因）
-    if (q === lastQuery) {
+    if (!force && q === lastQuery) {
         return true;
     }
 
     // 0.20.2: query 真正变化时清空选择状态（递增 generation 使旧请求失效）
     selection.onQueryChanged();
+    // 防抖只延迟发请求；输入变化时立即使旧响应失效并记住当前 query。
+    clearTimeout(timer);
+    lastQuery = q;
+    seq++;
 
-    // 0.20.3：颜色字面量优先——在剪贴板模式中输入颜色也立即返回颜色结果
-    const colorResult = parseColor(q);
+    // 0.20.3：颜色字面量优先——在剪贴板模式中输入颜色也立即返回颜色结果。
+    // 0.25.23：图片筛选下颜色项无意义（不是剪贴板历史），跳过降级走常规过滤。
+    const colorResult = kind === "image" ? null : parseColor(q);
     if (colorResult) {
         // 构造与 ColorEngine 一致的颜色 AppEntry
         const entry = {
@@ -257,19 +329,17 @@ export function handleInput(value) {
             score: 1.0,
             actions: [{kind: "copy", payload: colorResult.hex}],
         };
-        clearTimeout(timer);
-        lastQuery = q;
-        seq++;
         results.render([entry], seq);
         refreshSelectionCss();
         return true;
     }
 
     // 40ms 防抖（与正常搜索一致，合并极快连打）
-    clearTimeout(timer);
-    timer = setTimeout(() => {
+    if (immediate) {
         doSearch(q);
-    }, 40);
+    } else {
+        timer = setTimeout(() => doSearch(q), 40);
+    }
 
     return true;
 }
@@ -293,7 +363,7 @@ async function doSearch(query, keepPage = false) {
     const savedPage = keepPage ? results.getPage() : 0;
     const savedSelected = keepPage ? results.getSelectedIndex() : 0;
     try {
-        const resp = await searchClipboard(query, mySeq);
+        const resp = await searchClipboard(query, mySeq, kind);
         // 竞态防护：用户已输入新 query 或已退出模式
         if (mySeq !== seq) return;
         if (!active) return;
@@ -324,11 +394,12 @@ async function doSearch(query, keepPage = false) {
  *
  * 键盘规则：
  * 1. IME composition 优先，期间不接管快捷键。
- * 2. query 为空时 Ctrl+A 全选当前返回的全部文本项；
+ * 2. Tab/Shift+Tab 循环类型筛选（0.25.23；Alt 按下放行——Alt+Tab 归系统）。
+ * 3. query 为空时 Ctrl+A 全选当前返回的全部文本项；
  *    query 非空时保留输入框全选。
- * 3. 存在多选时 Ctrl+C 批量复制；不存在多选时保留输入框原生复制。
- * 4. Esc 顺序：清空多选 → 退出 clipboard mode（由 keyboard.js onEscape 处理）。
- * 5. Enter / Alt+数字：走 activateByData——文本项上屏（目标输入框）或复制兜底，
+ * 4. 存在多选时 Ctrl+C 批量复制；不存在多选时保留输入框原生复制。
+ * 5. Esc 顺序：清空多选 → 退出 clipboard mode（由 keyboard.js onEscape 处理）。
+ * 6. Enter / Alt+数字：走 activateByData——文本项上屏（目标输入框）或复制兜底，
  *    图片项复制。见 dispatchActivate 注释。
  *
  * 鼠标规则（在 results.js mousedown 中由 handleMousedown 处理）：
@@ -346,6 +417,16 @@ export function handleKeydown(e) {
     if (e.isComposing || e.keyCode === 229) return false;
 
     const ctrl = e.ctrlKey || e.metaKey;
+
+    // 0.25.23: Tab/Shift+Tab 循环类型筛选。
+    // Alt 按下放行（Alt+Tab 归系统，铁则）；Ctrl/Meta 组合不劫持（浏览器焦点语义）。
+    // 用后端 Alt 快照 || e.altKey 防御式消费（spec-frontend §5.5）。
+    if (e.key === "Tab" && !ctrl) {
+        if (inputState.isAltDown() || e.altKey) return false;
+        e.preventDefault();
+        setKind(nextKind(kind, e.shiftKey));
+        return true;
+    }
 
     // Ctrl+A：query 为空时全选文本项
     if (ctrl && e.key === "a") {
@@ -388,6 +469,33 @@ export function handleKeydown(e) {
 // ── 0.20.2 批量原子复制 ────────────────────────────────────────────────────
 
 /**
+ * 批量取数拼接共用路径（0.25.24，batchCopy / batchPaste 共用）：
+ * 按 `getSelectedKeys()` 的点击顺序批量拉取选中项完整文本（一次 IPC 往返）。
+ *
+ * @param {number} gen beginCopy 返回的 generation
+ * @param {string[]} keys 选中项 hitId 列表（点击顺序）
+ * @returns {Promise<{texts: string[]} | {missing: true} | null>}
+ *   `{texts}` — 全部命中；`{missing: true}` — 有项已不可用（整体放弃）；
+ *   `null` — generation/epoch 已失效（调用方静默放弃，不动剪贴板/不上屏）。
+ */
+async function composeSelectedTexts(gen, keys) {
+    // 后端单次批量查询（逐 id 查询但一次 IPC 往返，SQLite 连接池排队）
+    const batchResults = await getClipboardTextBatch(keys);
+
+    // generation / epoch 失效检查
+    if (!selection.isCopyStillValid(gen)) return null;
+
+    const texts = [];
+    for (const item of batchResults) {
+        if (item.text === null || item.text === undefined) {
+            return {missing: true};
+        }
+        texts.push(item.text);
+    }
+    return {texts};
+}
+
+/**
  * 批量原子复制：所有请求成功且 generation/epoch 仍有效后，使用 `\n` 拼接并单次写剪贴板。
  * 任一失败、取消或 epoch 失效均不修改原剪贴板。
  */
@@ -400,25 +508,15 @@ export async function batchCopy() {
     showStatusLoading(keys.length);
 
     try {
-        // 后端单次批量查询（逐 id 查询但一次 IPC 往返，SQLite 连接池排队）
-        const batchResults = await getClipboardTextBatch(keys);
-
-        // generation / epoch 失效检查
-        if (!selection.isCopyStillValid(gen)) return;
-
-        // 检查是否有未找到的项
-        const texts = [];
-        for (const item of batchResults) {
-            if (item.text === null || item.text === undefined) {
-                // 有项未找到，整体放弃
-                showStatusError(t("clipboard.copy_failed", {message: t("clipboard.item_unavailable")}));
-                return;
-            }
-            texts.push(item.text);
+        const composed = await composeSelectedTexts(gen, keys);
+        if (!composed) return; // epoch/generation 失效，静默放弃
+        if (composed.missing) {
+            showStatusError(t("clipboard.copy_failed", {message: t("clipboard.item_unavailable")}));
+            return;
         }
 
         // 所有成功，拼接写剪贴板
-        const combined = texts.join("\n");
+        const combined = composed.texts.join("\n");
         await copyToClipboard(combined);
 
         // 再次检查 generation（写剪贴板是异步的）
@@ -430,7 +528,7 @@ export async function batchCopy() {
             });
         }
 
-        showStatusCopied(texts.length);
+        showStatusCopied(composed.texts.length);
         // 复制成功后清空选择
         selection.clearSelection();
         refreshSelectionCss();
@@ -438,6 +536,53 @@ export async function batchCopy() {
         if (!selection.isCopyStillValid(gen)) return;
         console.error("[clipboard-mode] batchCopy failed:", e);
         showStatusError(e?.message || "unknown");
+    }
+}
+
+// ── 0.25.24 批量上屏 ────────────────────────────────────────────────────────
+
+/**
+ * 批量上屏：选择非空时 Enter = 按点击顺序拼接选中内容上屏（`\n` 连接）。
+ *
+ * 与 batchCopy 共用 `composeSelectedTexts` 取数路径，仅终点不同：
+ * `pasteToInput`（真实粘贴，成功后后端隐藏主窗）vs `copyToClipboard`。
+ * 成功后清空选择（HIDDEN reset 兜底再清一次）；上屏请求在窗口隐藏前的失败
+ * （粘贴互斥占用等）保留窗口与选择并显示错误——隐藏后的发送失败仅后端日志。
+ * Alt+数字 / 双击不经此路径——保持单条上屏语义。
+ */
+export async function batchPaste() {
+    const keys = selection.getSelectedKeys();
+    if (keys.length === 0) return;
+
+    console.log("[clipboard-mode] batchPaste: starting with", keys.length, "items:", keys);
+    const gen = selection.beginCopy();
+    showStatusLoading(keys.length);
+
+    try {
+        const composed = await composeSelectedTexts(gen, keys);
+        if (!composed) return; // epoch/generation 失效，静默放弃
+        if (composed.missing) {
+            showStatusError(t("clipboard.paste_failed", {message: t("clipboard.item_unavailable")}));
+            return;
+        }
+
+        // 拼接顺序 = 点击顺序（getSelectedKeys 语义）；换行在真实粘贴下是惰性数据
+        const combined = composed.texts.join("\n");
+        await pasteToInput(combined);
+        // fire-and-forget 记录命中
+        for (const key of keys) {
+            recordClipboardHit(key).catch(() => {
+            });
+        }
+        // HIDDEN 已负责清理旧会话；迟到的成功仅记录命中，不修改后来唤起的 UI。
+        if (!selection.isCopyStillValid(gen)) return;
+        dismissFeedback();
+        selection.clearSelection();
+        refreshSelectionCss();
+    } catch (e) {
+        if (!selection.isCopyStillValid(gen)) return;
+        console.error("[clipboard-mode] batchPaste failed:", e);
+        showActionError("paste_to_input", e);
     }
 }
 

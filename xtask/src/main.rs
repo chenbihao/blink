@@ -10,6 +10,7 @@
 //!   cargo xtask icons          拉取 Lucide 图标并生成 SVG sprite（调用 Python 脚本）
 //!   cargo xtask models         从 LiteLLM 精选主流模型目录生成 resources/model_context_windows.json
 //!   cargo xtask lint           前端防新增检查（CSS 禁止新增带 hex fallback 的 var()）
+//!   cargo xtask test           全量单测 + doctest + 前端测试（有界并行）
 //!   cargo xtask funasr-worker  从锁定 FunASR 源码构建常驻 GGUF STT worker（0.22.7）
 //!
 //! 设计动机：原方案把插件编译挂在 Tauri 的 beforeBuildCommand 钩子（其 cwd
@@ -1287,7 +1288,7 @@ fn which_node() -> String {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let task = args.get(1).unwrap_or_else(|| {
-        panic!("用法: cargo xtask <prebuild|plugins|copy|release|release-check|funasr-worker|icons|tiptap|models|lint> [--debug]")
+        panic!("用法: cargo xtask <prebuild|plugins|copy|release|release-check|funasr-worker|icons|tiptap|models|lint|test> [--debug]")
     });
 
     match task.as_str() {
@@ -1326,10 +1327,15 @@ fn main() {
         "tiptap" => bundle_tiptap(),                  // 打包 Tiptap IIFE 产物
         "models" => fetch_models(),                   // 从 LiteLLM 精选主流模型目录
         "lint" => lint_frontend(),                    // 前端防新增检查（var hex fallback 冻结基线）
+        "test" => run(
+            "node",
+            &["xtask/scripts/test-workspace.mjs"],
+            workspace_root(),
+        ),
         "funasr-worker" => funasr_worker::build_workers(), // 构建 GGUF STT worker（0.22.7）
         other => {
             panic!(
-                "未知子命令: {other}\n用法: cargo xtask <prebuild|plugins|copy|release|release-check|funasr-worker|icons|tiptap|models|lint> [--debug]"
+                "未知子命令: {other}\n用法: cargo xtask <prebuild|plugins|copy|release|release-check|funasr-worker|icons|tiptap|models|lint|test> [--debug]"
             )
         }
     }

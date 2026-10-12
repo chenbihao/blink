@@ -25,6 +25,11 @@ use crate::infra::platform::window;
 /// infra 层 `show_main_window` 只负责定位 + show + focus + emit SHOWN，
 /// 本函数负责 domain state 定位 + context 采集 + SearchService 更新 + 异步选区回填。
 pub fn invoke(app: &AppHandle) {
+    invoke_with_cursor(app, None);
+}
+
+/// 剪贴板入口固定唤起瞬间鼠标位置；其余编排与普通 launcher 共用。
+pub fn invoke_with_cursor(app: &AppHandle, cursor: Option<(i32, i32)>) {
     // 1. 先采集上下文快照（show 之前！）
     //    读内存 ContextConfig（零 IO，热键回调不能 await），按配置过滤采集
     let context_cfg = app
@@ -82,7 +87,7 @@ pub fn invoke(app: &AppHandle) {
     }
 
     // 3. 调 infra primitive：定位 → show → set_focus → emit SHOWN
-    if let Err(e) = window::show_main_window(app) {
+    if let Err(e) = window::show_main_window_with_cursor(app, cursor) {
         // show 失败已在 infra 层记 warn，这里不重复
         tracing::debug!(error = %e, "invoke: show_main_window 失败");
         return;

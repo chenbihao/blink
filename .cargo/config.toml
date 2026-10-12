@@ -11,3 +11,18 @@ xtask = "run --package xtask --"
 # 回退：删除本段（会触发一次全量重建）。
 [target.x86_64-pc-windows-msvc]
 linker = "rust-lld"
+# tauri-build 2.7 的静态 VC / 动态 UCRT 配置生成空 msvcrt.lib；workspace
+# doctest 会继承该搜索路径，须同步 CRT 选择。仅作用于 MSVC rustdoc 链接。
+rustdocflags = [
+    "-C", "link-arg=/NODEFAULTLIB:libvcruntimed.lib",
+    "-C", "link-arg=/NODEFAULTLIB:vcruntime.lib",
+    "-C", "link-arg=/NODEFAULTLIB:vcruntimed.lib",
+    "-C", "link-arg=/NODEFAULTLIB:libcmtd.lib",
+    "-C", "link-arg=/NODEFAULTLIB:msvcrt.lib",
+    "-C", "link-arg=/NODEFAULTLIB:msvcrtd.lib",
+    "-C", "link-arg=/NODEFAULTLIB:libucrt.lib",
+    "-C", "link-arg=/NODEFAULTLIB:libucrtd.lib",
+    "-C", "link-arg=/DEFAULTLIB:libcmt.lib",
+    "-C", "link-arg=/DEFAULTLIB:libvcruntime.lib",
+    "-C", "link-arg=/DEFAULTLIB:ucrt.lib",
+]

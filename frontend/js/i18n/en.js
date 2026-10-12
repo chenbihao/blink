@@ -1349,12 +1349,16 @@ export const en = {
     "action.error.missing_arg": "Missing argument: {message}",
     "action.error.unknown": "Operation failed: {message}",
 // ── 0.20.2 Clipboard multi-select ──
+    "clipboard.kind_all": "All",
+    "clipboard.kind_text": "Text",
+    "clipboard.kind_image": "Images",
     "clipboard.selected_count": "Selected {count} items",
     "clipboard.loading_count": "Loading {count} items…",
     "clipboard.copied_count": "Copied {count} items",
     "clipboard.copy_failed": "Batch copy failed: {message}",
+    "clipboard.paste_failed": "Batch paste failed: {message}",
     "clipboard.hint_select": "Click to select · Ctrl+A select all · Ctrl+C batch copy",
-    "clipboard.hint_selected": "Ctrl+C copy {count} items · Right-click for batch copy · Esc to deselect",
+    "clipboard.hint_selected": "Enter paste {count} items · Ctrl+C copy · Esc to deselect",
     "clipboard.item_unavailable": "Some items are no longer available",
 
 // ── 0.21.6 Capabilities ──

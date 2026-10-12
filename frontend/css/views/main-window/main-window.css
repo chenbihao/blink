@@ -288,3 +288,42 @@ body.voice-active #ghost-overlay {
     height: 12px;
     opacity: 0.7;
 }
+
+/* ── 0.25.23 剪贴板模式类型筛选 chips ──────────────────────────────────── */
+/* 搜索栏下方的紧凑筛选段：全部/文本/图片。Tab/Shift+Tab 循环 + 点击切换，
+   active 态走 accent 主题变量（浅底 + 描边），未激活仅弱化文本。 */
+#clipboard-type-chips {
+    display: flex;
+    gap: 4px;
+    padding: var(--space-xs) var(--space-sm) 0;
+}
+
+#clipboard-type-chips.hidden {
+    display: none;
+}
+
+.clip-kind-chip {
+    padding: 1px var(--space-sm);
+    font: inherit; /* button 不继承字体，先复位再收字号 */
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition:
+        color var(--transition-fast) ease,
+        background-color var(--transition-fast) ease,
+        border-color var(--transition-fast) ease;
+    -webkit-app-region: no-drag;
+}
+
+.clip-kind-chip:hover {
+    color: var(--text);
+}
+
+.clip-kind-chip.active {
+    color: var(--accent);
+    background: var(--accent-bg);
+    border-color: color-mix(in srgb, var(--accent) 25%, transparent);
+}

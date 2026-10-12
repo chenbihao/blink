@@ -14,12 +14,20 @@ static PASTE_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// Alt+C 进入剪贴板模式后，前端输入直接调此命令，
 /// 不经过 SearchService::search / IntentRouter / get_weights / Route 分派，
 /// 只走 ClipboardEngine。性能最优。
+///
+/// 0.25.23: `kind` 类型筛选（"text"/"image"，缺省或未知 = 全部）——文本与图片
+/// 分表存储，筛选下推为跳过另一张表的查询。
 #[tauri::command]
-pub async fn search_clipboard(app: tauri::AppHandle, query: String, seq: u64) -> SearchResponse {
-    tracing::debug!(%query, seq, "search_clipboard: 收到请求");
+pub async fn search_clipboard(
+    app: tauri::AppHandle,
+    query: String,
+    seq: u64,
+    kind: Option<String>,
+) -> SearchResponse {
+    tracing::debug!(%query, seq, kind = kind.as_deref(), "search_clipboard: 收到请求");
     let service = app.state::<std::sync::Arc<crate::domain::search::SearchService>>();
     // 复用 SearchService 持有的 ClipboardEngine 实例（不重复建池）
-    let entries = service.search_clipboard_mode(&query).await;
+    let entries = service.search_clipboard_mode(&query, kind.as_deref()).await;
     tracing::debug!(
         count = entries.len(),
         %query,

@@ -161,8 +161,14 @@ function onNavigation(e) {
     } else if (e.key === "Enter") {
         e.preventDefault();
         // 0.21.x: 剪贴板模式 Enter = 上屏（文本）或复制（图片），与双击/Alt+数字同语义
+        // 0.25.24: 有多选时 Enter = 批量上屏选中内容（点击顺序拼接）；
+        //   Alt+数字 / 双击不经此分支，保持单条语义
         if (clipboardMode.isActive()) {
-            clipboardMode.activateByData(results.getActive());
+            if (clipboardMode.hasSelection()) {
+                clipboardMode.batchPaste();
+            } else {
+                clipboardMode.activateByData(results.getActive());
+            }
             return;
         }
         activateItem(results.getActive());
