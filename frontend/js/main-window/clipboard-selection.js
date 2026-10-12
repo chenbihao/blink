@@ -108,6 +108,16 @@ export function clearSelection() {
     selectedKeys = new Set();
 }
 
+/**
+ * 0.25.27：从选中集合移除指定 key（批量删除成功后调用）。
+ * 只清本次删除的 key——删除期间用户新增的选择不受迟到结果影响。
+ */
+export function removeKeys(keys) {
+    for (const key of keys) {
+        selectedKeys.delete(key);
+    }
+}
+
 // ── 选择操作 ─────────────────────────────────────────────────────────────────
 
 /**

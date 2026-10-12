@@ -4,8 +4,10 @@
 //! 文本/图片、无 active、已有多选等组合。
 //!
 //! **快捷键契约**（§3.7）：
-//! - `Alt+E` 编辑 active 文本项（复用 `edit_text_item` action）
-//! - `Alt+D` 删除 active 文本或图片历史
+//! - `Alt+E` 编辑 active 文本项（复用 `edit_text_item` action）；
+//!   0.25.27 起多选时改为合并编辑选中（菜单即契约，与右键标注一致）
+//! - `Alt+D` 删除 active 文本或图片历史（多选时保持单条，破坏面小）
+//! - `Alt+S` 0.25.27：active 文本项贴为便签；多选时合并选中为一张便签
 //! - 裸 `Delete` 仅在 query 为空时等价 `Alt+D`；query 非空时保留输入框前删字符语义
 //! - IME composition 期间全部放行
 //! - 图片项不响应 `Alt+E`（不误开文本编辑器）
@@ -14,7 +16,7 @@
 
 // ── 快捷键类型 ─────────────────────────────────────────────────────────────────
 
-/** @typedef {"edit" | "delete" | "none"} ShortcutAction */
+/** @typedef {"edit" | "delete" | "sticky" | "none"} ShortcutAction */
 
 // ── 事件门禁 ─────────────────────────────────────────────────────────────────
 
@@ -44,12 +46,13 @@ export function isPureAlt(e) {
  *
  * @param {KeyboardEvent} e
  * @param {boolean} queryIsEmpty — 输入框 trim 后是否为空
- * @returns {ShortcutAction} "edit" | "delete" | "none"
+ * @returns {ShortcutAction} "edit" | "delete" | "sticky" | "none"
  *
  * 规则：
  * - IME composition → "none"（放行）
  * - 纯 Alt + E（大小写不敏感）→ "edit"
  * - 纯 Alt + D（大小写不敏感）→ "delete"
+ * - 纯 Alt + S（大小写不敏感）→ "sticky"（0.25.27）
  * - 裸 Delete（无 Ctrl/Meta/Alt）→ query 为空时 "delete"，非空时 "none"
  * - 其它 → "none"
  */
@@ -64,6 +67,10 @@ export function resolveShortcutAction(e, queryIsEmpty) {
 
     if (pureAlt && (e.key === "d" || e.key === "D")) {
         return "delete";
+    }
+
+    if (pureAlt && (e.key === "s" || e.key === "S")) {
+        return "sticky";
     }
 
     // 裸 Delete：仅 query 为空时等价 Alt+D

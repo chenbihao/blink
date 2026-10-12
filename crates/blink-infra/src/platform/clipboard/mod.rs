@@ -149,6 +149,57 @@ fn cancel_self_write(id: u64) {
     }
 }
 
+// ── 0.25.27 自写入内容指纹兜底 ─────────────────────────────────────────
+//
+// 标记机制的单点脆弱：一次 Open→Empty→Set→Close 若产生两次
+// WM_CLIPBOARDUPDATE，第一个事件（空剪贴板）会消费掉唯一标记，第二个事件
+// （真实内容）落为"外部写入"；或监听线程繁忙导致事件晚于 TTL(500ms) 到达，
+// 标记已过期。两种错位的共同后果：自写入被当前台应用处理（前台=Blink 时
+// 记成 blink.exe 野标签，且 skip_persist 失效导致意外入库）。
+//
+// 兜底：写入外壳成功后同时记录**内容指纹**（fx_hash）；监听器标记 miss 时
+// 按读到的内容比对指纹，命中则沿用该写入的标签与 skip 语义。指纹窗口 2s
+// （> 标记 TTL，覆盖系统调度延迟）。外部应用恰好写入相同内容会误命中——
+// 后果只是该条重复内容跳过入库（save_item 删旧留新本就等价），可接受。
+
+/// 自写入文本指纹窗口。图片不做指纹（sha256 删旧留新天然防自繁殖）。
+static SELF_TEXT_FINGERPRINTS: Mutex<VecDeque<(u64, String, bool, Instant)>> =
+    Mutex::new(VecDeque::new());
+const SELF_FINGERPRINT_TTL: Duration = Duration::from_millis(2000);
+const MAX_SELF_FINGERPRINTS: usize = 16;
+
+/// 写入成功后记录内容指纹（文本外壳调用）。
+fn record_self_text_fingerprint(hash: u64, label: &str, skip_persist: bool) {
+    if let Ok(mut guard) = SELF_TEXT_FINGERPRINTS.lock() {
+        while guard
+            .front()
+            .is_some_and(|(_, _, _, ts)| ts.elapsed() > SELF_FINGERPRINT_TTL)
+        {
+            guard.pop_front();
+        }
+        if guard.len() >= MAX_SELF_FINGERPRINTS {
+            guard.pop_front();
+        }
+        guard.push_back((hash, label.to_string(), skip_persist, Instant::now()));
+    }
+}
+
+/// 监听器标记 miss 时按内容指纹识别自写入。命中即消费（移除）。
+pub(super) fn take_self_text_fingerprint(hash: u64) -> Option<(String, bool)> {
+    let Ok(mut guard) = SELF_TEXT_FINGERPRINTS.lock() else {
+        return None;
+    };
+    while guard
+        .front()
+        .is_some_and(|(_, _, _, ts)| ts.elapsed() > SELF_FINGERPRINT_TTL)
+    {
+        guard.pop_front();
+    }
+    let index = guard.iter().position(|(h, _, _, _)| *h == hash)?;
+    let ( _, label, skip, _) = guard.remove(index)?;
+    Some((label, skip))
+}
+
 fn with_self_write_mark<T>(
     label: &str,
     skip_persist: bool,
@@ -392,11 +443,16 @@ pub fn read_current_image() -> Option<Vec<u8>> {
 /// 把文本写入系统剪贴板（CF_UNICODETEXT 格式）—— 打标外壳。
 ///
 /// 内部先 `mark_self_write(label, skip_persist)`，再调 `write_text_to_clipboard_raw`。
+/// 0.25.27：成功后追加记录内容指纹（标记错位时的兜底识别，见模块注释）。
 #[cfg(target_os = "windows")]
 pub fn write_text_to_clipboard(text: &str, label: &str, skip_persist: bool) -> Result<(), String> {
-    with_self_write_mark(label, skip_persist, || {
+    let result = with_self_write_mark(label, skip_persist, || {
         windows::write_text_to_clipboard_raw(text)
-    })
+    });
+    if result.is_ok() {
+        record_self_text_fingerprint(windows::fx_hash(text), label, skip_persist);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -455,5 +511,44 @@ mod tests {
         assert_eq!(SELF_LABEL_BLINK, "blink:ai");
         assert_eq!(SELF_LABEL_EDITOR, "blink:editor");
         assert_eq!(SELF_LABEL_INJECT, "blink:inject");
+    }
+
+    // ── 0.25.27 内容指纹兜底 ────────────────────────────────────────────
+    // 指纹队列是进程级 static，并行测试会互相污染——用锁串行化本组用例
+
+    static FP_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn fingerprint_take_matches_and_consumes() {
+        let _guard = FP_TEST_LOCK.lock().unwrap();
+        record_self_text_fingerprint(100, "blink:app", true);
+        record_self_text_fingerprint(200, "blink:inject", true);
+        // 命中返回标签与 skip 语义，并消费（第二次同 hash 不再命中）
+        assert_eq!(
+            take_self_text_fingerprint(100),
+            Some(("blink:app".into(), true))
+        );
+        assert_eq!(take_self_text_fingerprint(100), None, "命中即消费");
+        assert_eq!(
+            take_self_text_fingerprint(200),
+            Some(("blink:inject".into(), true))
+        );
+    }
+
+    #[test]
+    fn fingerprint_ignores_unknown_hash() {
+        let _guard = FP_TEST_LOCK.lock().unwrap();
+        record_self_text_fingerprint(101, "blink:app", true);
+        assert_eq!(take_self_text_fingerprint(999), None, "外部内容不误命中");
+        // 清理本用例指纹，避免影响其他用例
+        assert!(take_self_text_fingerprint(101).is_some());
+    }
+
+    #[test]
+    fn fingerprint_ttl_and_capacity_contract() {
+        // 契约断言不触碰共享队列：过期清理由 take 时按 TTL 触发，
+        // 容量覆盖监听事件突发
+        assert_eq!(SELF_FINGERPRINT_TTL, Duration::from_millis(2000));
+        assert!(MAX_SELF_FINGERPRINTS >= 8);
     }
 }

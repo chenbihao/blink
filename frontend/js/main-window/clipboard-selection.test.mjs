@@ -18,6 +18,7 @@ import {
     onQueryChanged,
     onWindowHidden,
     reconcileAfterReorder,
+    removeKeys,
     selectAll,
     selectedCount,
     toggleSelection,
@@ -173,5 +174,33 @@ describe("clearSelection — 基础清空", () => {
         assert.equal(selectedCount(), 0);
         assert.equal(getSelectionEpoch(), epoch); // epoch 不变
         assert.equal(getCopyGeneration(), gen); // gen 不变
+    });
+});
+
+describe("removeKeys — 批量删除后定向移除（0.25.27）", () => {
+    test("只移除指定 key，其余保留", () => {
+        toggleSelection("clip_1");
+        toggleSelection("clip_2");
+        toggleSelection("clip_3");
+        removeKeys(["clip_1", "clip_3"]);
+        assert.ok(!isSelected("clip_1"));
+        assert.ok(!isSelected("clip_3"));
+        assert.ok(isSelected("clip_2"));
+        assert.equal(selectedCount(), 1);
+    });
+
+    test("不存在的 key 静默忽略（删除幂等）", () => {
+        toggleSelection("clip_1");
+        removeKeys(["clip_missing"]);
+        assert.equal(selectedCount(), 1);
+    });
+
+    test("不清 epoch/generation", () => {
+        toggleSelection("clip_1");
+        const epoch = getSelectionEpoch();
+        const gen = getCopyGeneration();
+        removeKeys(["clip_1"]);
+        assert.equal(getSelectionEpoch(), epoch);
+        assert.equal(getCopyGeneration(), gen);
     });
 });

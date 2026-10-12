@@ -575,6 +575,24 @@ pub async fn delete_item(pool: &SqlitePool, id: &str) {
         .await;
 }
 
+/// 0.25.27：按 id 批量删除条目（剪贴板模式多选右键删除用）。
+///
+/// 单事务内逐条删除：任一条目失败整体回滚，调用方可安全整体重试；
+/// 不存在的 id 静默跳过（幂等，与单删语义一致）。
+pub async fn delete_items_by_ids(pool: &SqlitePool, ids: &[&str]) -> Result<(), sqlx::Error> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let mut tx = pool.begin().await?;
+    for id in ids {
+        sqlx::query("DELETE FROM clipboard_history WHERE id = ?1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await
+}
+
 /// 清空所有剪贴板历史。
 pub async fn clear_all(pool: &SqlitePool) {
     let _ = sqlx::query("DELETE FROM clipboard_history")
@@ -694,6 +712,22 @@ mod tests {
             source_app: None,
             hit_count,
         }
+    }
+
+    #[tokio::test]
+    async fn delete_items_batch_removes_all_and_ignores_missing() {
+        let pool = test_pool().await;
+        save_item(&pool, &item("clip_1", "a", 1, 0))
+            .await
+            .unwrap();
+        save_item(&pool, &item("clip_2", "b", 2, 0))
+            .await
+            .unwrap();
+        // 含不存在的 id（clip_missing）：幂等跳过，不报错
+        delete_items_by_ids(&pool, &["clip_1", "clip_missing", "clip_2"])
+            .await
+            .unwrap();
+        assert_eq!(query_recent(&pool, 10).await.len(), 0);
     }
 
     #[tokio::test]

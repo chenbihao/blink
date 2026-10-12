@@ -139,7 +139,7 @@ pub(crate) fn capture_focused_element() -> Option<SendableElement> {
     // UIA 探测不可靠（实机验证树枚举跨进程属性读取全败），这是拿目标应用真实
     // ControlType 的唯一稳定通道，供 debug_uia_focus 与日志双路消费
     let info = uia::read_focus_info(&elem.0);
-    tracing::info!(
+    tracing::trace!(
         control_type = info.control_type_id,
         type_name = info.control_type_name,
         class = %info.class_name,

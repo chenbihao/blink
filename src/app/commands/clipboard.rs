@@ -56,6 +56,10 @@ pub async fn search_clipboard(
 
 /// 将文本写入系统剪贴板（Windows API）。
 /// 右键菜单独立 Popup 窗口中 navigator.clipboard 不可靠，改走后端。
+///
+/// 0.25.27 定案（日志实证回滚）：多选组合同样走 User 入库（删旧留新去重，
+/// 同组合只留一条顶置）——组合对用户是可复用内容，必须出现在历史里；
+/// 曾改 skip 不入库防"自繁殖"，实测是用户诉求相反。
 #[tauri::command]
 pub async fn copy_to_clipboard(text: String) -> Result<(), String> {
     crate::domain::clipboard::write_text(text, ClipboardWriteSource::User)
@@ -239,6 +243,24 @@ pub async fn get_clipboard_text_batch(
 pub async fn delete_clipboard_item(app: tauri::AppHandle, id: String) -> Result<(), String> {
     let pool = &app.state::<crate::infra::data::DbPools>().history;
     crate::infra::data::clipboard::delete_item(pool, &id).await;
+    Ok(())
+}
+
+/// 0.25.27：按 id 批量删除剪贴板文本条目（多选右键「删除选中的 N 条」）。
+///
+/// 单事务：任一条目失败整体回滚，前端整体重试无重复删除副作用。
+#[tauri::command]
+pub async fn delete_clipboard_items_batch(
+    app: tauri::AppHandle,
+    ids: Vec<String>,
+) -> Result<(), String> {
+    let pool = &app.state::<crate::infra::data::DbPools>().history;
+    let count = ids.len();
+    let id_refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
+    crate::infra::data::clipboard::delete_items_by_ids(pool, &id_refs)
+        .await
+        .map_err(|e| e.to_string())?;
+    tracing::info!(count, "剪贴板条目已批量删除");
     Ok(())
 }
 

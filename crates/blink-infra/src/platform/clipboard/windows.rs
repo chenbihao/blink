@@ -110,7 +110,9 @@ fn on_clipboard_change() {
     let self_write = take_self_write();
 
     // 确定来源：自写入标签优先，否则用前台进程名
-    let (source_app, title_for_blacklist) = if let Some((ref label, _)) = self_write {
+    // 0.25.27：前台就是 blink 自身（标记与指纹都错位的自写入）统一标
+    // blink:app——展示层认识该标签，避免历史出现 "blink.exe" 野标签
+    let (mut source_app, title_for_blacklist) = if let Some((ref label, _)) = self_write {
         (Some(label.clone()), None) // 自写入跳过黑名单
     } else {
         let app_info = crate::platform::context::foreground_app();
@@ -119,7 +121,15 @@ fn on_clipboard_change() {
             .as_ref()
             .map(|a| a.process_name.clone())
             .filter(|n| !n.is_empty());
-        (proc_name, title)
+        let resolved = match proc_name.as_deref() {
+            Some(p)
+                if p.eq_ignore_ascii_case("blink") || p.eq_ignore_ascii_case("blink.exe") =>
+            {
+                Some(super::SELF_LABEL_APP.to_string())
+            }
+            other => other.map(str::to_string),
+        };
+        (resolved, title)
     };
 
     // 黑名单：前台窗口标题命中则不记（密码管理器等）—— 自写入跳过
@@ -151,6 +161,16 @@ fn on_clipboard_change() {
         if text.trim().is_empty() {
             tracing::trace!("剪贴板：文本仅空白,跳过");
             return;
+        }
+        // 0.25.27 兜底：标记 miss（一次写入双事件错位消费 / TTL 过期）时按内容
+        // 指纹识别自写入，命中则沿用该写入的标签与 skip 语义（见 mod.rs 模块注释）
+        let mut skip_persist = skip_persist;
+        if self_write.is_none()
+            && let Some((label, skip)) = super::take_self_text_fingerprint(fx_hash(text))
+        {
+            tracing::debug!(%label, skip, "剪贴板：标记 miss，内容指纹兜底命中自写入");
+            source_app = Some(label);
+            skip_persist = skip;
         }
         // 短窗口去重（0.8.7）：10 秒内同文本不重复记录。
         // Ctrl+C 在部分应用（浏览器/编辑器）会连发多次 WM_CLIPBOARDUPDATE,不去重会看到
@@ -567,14 +587,13 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 /// 快哈希（FxHash 简化版）:去重仅用于短窗口冲突判断,不追求密码学强度。
-fn fx_hash(s: &str) -> u64 {
+pub(super) fn fx_hash(s: &str) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     for b in s.as_bytes() {
         h = h.wrapping_mul(0x100000001b3).wrapping_add(*b as u64);
     }
     h
 }
-
 fn now_ts() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

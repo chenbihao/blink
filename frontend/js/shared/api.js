@@ -143,7 +143,8 @@ export function resetItemHistory(lnkPath) {
     return invoke("reset_item_history", {lnkPath});
 }
 
-/** 将文本写入系统剪贴板（后端 Windows API，独立窗口中也可靠）。 */
+/** 将文本写入系统剪贴板（后端 Windows API，独立窗口中也可靠）。
+ *  多选组合同走此路径入库（删旧留新去重，同组合只留一条顶置，0.25.27 定案）。 */
 export function copyToClipboard(text) {
     return invoke("copy_to_clipboard", {text});
 }
@@ -157,6 +158,12 @@ export function pasteToInput(text) {
 /** 删除指定剪贴板历史记录（右键菜单用）。id 为 clipboard_history 表主键。 */
 export function deleteClipboardItem(id) {
     return invoke("delete_clipboard_item", {id});
+}
+
+/** 0.25.27：批量删除剪贴板文本历史记录（多选右键「删除选中的 N 条」）。
+ *  ids 为 clipboard_history 表主键列表；后端单事务执行，任一失败整体回滚。 */
+export function deleteClipboardItemsBatch(ids) {
+    return invoke("delete_clipboard_items_batch", {ids});
 }
 
 /** 0.17.0：删除指定剪贴板图片条目。imageId 为 clipboard_images 表 id。 */

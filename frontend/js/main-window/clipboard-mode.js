@@ -32,13 +32,18 @@ import {dismiss as dismissFeedback, show as showFeedback} from "./transient-feed
 import {syncWindowSize, resyncWindowSize} from "./window-size.js";
 import {
     copyToClipboard,
+    createStickyNote,
     deleteClipboardImage,
     deleteClipboardItem,
+    deleteClipboardItemsBatch,
     getClipboardText,
     getClipboardTextBatch,
+    hideWindow,
+    openContentEditor,
     pasteToInput,
     recordClipboardHit,
-    searchClipboard
+    searchClipboard,
+    showStickyWindow
 } from "../shared/api.js";
 import {t} from "../i18n/index.js";
 import * as selection from "./clipboard-selection.js";
@@ -450,11 +455,27 @@ export function handleKeydown(e) {
     }
 
     // 0.20.8：Alt+E / Alt+D / Delete 快捷操作
+    // 0.25.27：多选时 Alt+E = 合并编辑选中（菜单即契约）；Alt+D 保持删 active
+    // 单条（破坏面小，批量删除走菜单/右键）；新增 Alt+S 贴便签（多选=合并，
+    // 无多选=active 单条，对齐右键「钉为便签」标注）
     const queryIsEmpty = !queryEl.value.trim();
     const shortcutAction = resolveShortcutAction(e, queryIsEmpty);
     if (shortcutAction === "edit") {
         e.preventDefault();
-        handleEditActive();
+        if (selection.hasSelection()) {
+            batchEdit();
+        } else {
+            handleEditActive();
+        }
+        return true;
+    }
+    if (shortcutAction === "sticky") {
+        e.preventDefault();
+        if (selection.hasSelection()) {
+            batchSticky();
+        } else {
+            handleStickyActive();
+        }
         return true;
     }
     if (shortcutAction === "delete") {
@@ -515,7 +536,8 @@ export async function batchCopy() {
             return;
         }
 
-        // 所有成功，拼接写剪贴板
+        // 所有成功，拼接写剪贴板（组合同样入库：删旧留新去重，同组合只留一条
+        // 顶置——0.25.27 曾改中转不入库，用户实测要求组合在历史中可见可复用）
         const combined = composed.texts.join("\n");
         await copyToClipboard(combined);
 
@@ -532,6 +554,10 @@ export async function batchCopy() {
         // 复制成功后清空选择
         selection.clearSelection();
         refreshSelectionCss();
+        // 组合已入库（监听器采集，同组合删旧留新顶置）——刷新列表使其立即可见。
+        // 入库是监听线程的异步任务，若本刷新赶在入库前，入库完成的
+        // awareness-updated → retrigger 链（主窗可见时）会在 250ms 短窗外补刷。
+        reloadList();
     } catch (e) {
         if (!selection.isCopyStillValid(gen)) return;
         console.error("[clipboard-mode] batchCopy failed:", e);
@@ -566,7 +592,9 @@ export async function batchPaste() {
             return;
         }
 
-        // 拼接顺序 = 点击顺序（getSelectedKeys 语义）；换行在真实粘贴下是惰性数据
+        // 拼接顺序 = 点击顺序（getSelectedKeys 语义）；换行在真实粘贴下是惰性数据。
+        // 组合同样入库（去重顶置，与 batchCopy 同语义）；上屏后主窗隐藏，
+        // 下次唤起重查自然可见
         const combined = composed.texts.join("\n");
         await pasteToInput(combined);
         // fire-and-forget 记录命中
@@ -583,6 +611,128 @@ export async function batchPaste() {
         if (!selection.isCopyStillValid(gen)) return;
         console.error("[clipboard-mode] batchPaste failed:", e);
         showActionError("paste_to_input", e);
+    }
+}
+
+// ── 0.25.27 批量删除 ────────────────────────────────────────────────────────
+
+/**
+ * 0.25.27：右键「删除选中的 N 条」——单事务批量删除多选文本项。
+ * 成功后定向清理本次选择的 key 并刷新列表（维持页号）；失败保留选择与结果，显示错误。
+ *
+ * 与批量复制不同，删除是幂等 DB 副作用——不使用 copy generation 拒绝执行，
+ * 只需防迟到反馈污染退出模式后的新会话（reloadList 内部有 active 守卫）。
+ */
+export async function batchDelete() {
+    const keys = selection.getSelectedKeys();
+    if (keys.length === 0) return;
+
+    console.log("[clipboard-mode] batchDelete: starting with", keys.length, "items:", keys);
+    showFeedback(t("clipboard.deleting_count", {count: keys.length}), {type: "info", durationMs: 0});
+
+    try {
+        await deleteClipboardItemsBatch(keys);
+        // 只清本次删除的 key：删除期间用户新增的选择不受迟到结果影响
+        selection.removeKeys(keys);
+        reloadList();
+        if (!active) return; // 模式已退出：清态照做，但不污染新会话反馈
+        refreshSelectionCss();
+        showFeedback(t("clipboard.deleted_count", {count: keys.length}), {type: "success", durationMs: 2000});
+    } catch (e) {
+        console.error("[clipboard-mode] batchDelete failed:", e);
+        if (!active) return;
+        showFeedback(t("clipboard.delete_failed", {message: e?.message || "unknown"}), {type: "error"});
+    }
+}
+
+/**
+ * 0.25.27：右键/Alt+E「编辑选中的 N 条」——合并为一条新历史条目编辑。
+ *
+ * 取数共用批量原子路径（缺项整体放弃）；编辑器以 `itemRef: null` 的
+ * clipboard_item 来源打开——保存即新建历史条目（顶置），原条目保留，
+ * 与「删除选中的 N 条」形成合并 → 检查 → 删旧的工作流。
+ * 编辑器是独立窗口任务，打开成功后主窗隐藏（多选态由 HIDDEN 复位兜底清理）。
+ */
+export async function batchEdit() {
+    const keys = selection.getSelectedKeys();
+    if (keys.length === 0) return;
+
+    console.log("[clipboard-mode] batchEdit: starting with", keys.length, "items:", keys);
+    const gen = selection.beginCopy();
+    showStatusLoading(keys.length);
+
+    try {
+        const composed = await composeSelectedTexts(gen, keys);
+        if (!composed) return; // epoch/generation 失效，静默放弃
+        if (composed.missing) {
+            showStatusError(t("clipboard.copy_failed", {message: t("clipboard.item_unavailable")}));
+            return;
+        }
+
+        await openContentEditor({
+            body: composed.texts.join("\n"),
+            title: "合并编辑选中的内容",
+            source: {kind: "clipboard_item", itemRef: null},
+        });
+        hideWindow();
+    } catch (e) {
+        if (!selection.isCopyStillValid(gen)) return;
+        console.error("[clipboard-mode] batchEdit failed:", e);
+        showActionError("open_content_editor", e);
+    }
+}
+
+/**
+ * 0.25.27：右键/Alt+S「合并 N 条为便签」——按点击顺序拼接选中内容贴一张便签。
+ * 打开成功后主窗隐藏（与单条 pin_text_item 一致）。
+ */
+export async function batchSticky() {
+    const keys = selection.getSelectedKeys();
+    if (keys.length === 0) return;
+
+    console.log("[clipboard-mode] batchSticky: starting with", keys.length, "items:", keys);
+    const gen = selection.beginCopy();
+    showStatusLoading(keys.length);
+
+    try {
+        const composed = await composeSelectedTexts(gen, keys);
+        if (!composed) return; // epoch/generation 失效，静默放弃
+        if (composed.missing) {
+            showStatusError(t("clipboard.copy_failed", {message: t("clipboard.item_unavailable")}));
+            return;
+        }
+
+        const note = await createStickyNote(composed.texts.join("\n"));
+        await showStickyWindow(note.id, true);
+        hideWindow();
+    } catch (e) {
+        if (!selection.isCopyStillValid(gen)) return;
+        console.error("[clipboard-mode] batchSticky failed:", e);
+        showActionError("pin_text_item", e);
+    }
+}
+
+/**
+ * 0.25.27：Alt+S（无多选）——active 剪贴板文本项贴为便签（LazyCopy 按需拉全文）。
+ * 图片项与非剪贴板来源不响应（与 Alt+E 的门禁一致）。
+ */
+async function handleStickyActive() {
+    const activeItem = results.getActive();
+    const hitId = activeItem?.actions?.[0]?.hitId;
+    if (!activeItem || activeItem.isImage || activeItem.source !== "clipboard" || !hitId) {
+        console.log("[clipboard-mode] Alt+S: no sticky-able active item");
+        return;
+    }
+
+    try {
+        const text = await getClipboardText(hitId);
+        if (!text) return; // 条目已被清理，静默放弃
+        const note = await createStickyNote(text);
+        await showStickyWindow(note.id, true);
+        hideWindow();
+    } catch (e) {
+        console.error(`[clipboard-mode] sticky active failed for ${hitId}:`, e);
+        showActionError("pin_text_item", e);
     }
 }
 

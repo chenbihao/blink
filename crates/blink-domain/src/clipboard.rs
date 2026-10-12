@@ -15,7 +15,9 @@ pub enum ClipboardContent {
 /// 写入来源决定监听器记录的来源标签及是否跳过历史持久化。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClipboardWriteSource {
-    /// 用户在 Blink 界面显式复制。
+    /// 用户在 Blink 界面显式复制（含多选组合：组合入库后同内容由 save_item
+    /// 删旧留新去重，不会重复堆积——0.25.27 曾试过组合 skip 不入库，用户实测
+    /// 要求组合可见可复用，已回滚）。
     User,
     /// AI Capability 写入。
     Capability,

@@ -38,6 +38,37 @@ function isColorShortcut(s) {
 }
 
 /**
+ * 0.25.27：按内容估算菜单宽度（CSS 像素）。
+ *
+ * 文本宽度近似：中文全角 ≈ 字号（--text-base 13px），半角字母/数字 ≈ 7.5px；
+ * 行宽 = label + gap + shortcut（--space-md 16），再加 item 水平 padding
+ * （--space-md 16 × 2）与容器 padding（--space-sm 8 × 2）。宁可略宽留白，
+ * 不可裁切（label nowrap，宽度不足时被 shortcut 挤出可视区）。
+ * @param {object[]} items 菜单项数组
+ * @returns {number} 估算宽度（不含 H_BUFFER，调用方另行叠加）
+ */
+function estimateMenuWidth(items) {
+    let maxRow = 0;
+    for (const it of items) {
+        if (it.separator) continue;
+        const labelW = estimateTextWidth(it.label);
+        const shortcutW = it.shortcut ? estimateTextWidth(it.shortcut) : 0;
+        const row = labelW + (it.shortcut ? 16 + shortcutW : 0);
+        if (row > maxRow) maxRow = row;
+    }
+    return maxRow + 32 + 16;
+}
+
+/** 0.25.27：单段文本宽度近似（全角 13px / 半角 7.5px）。 */
+function estimateTextWidth(text) {
+    let w = 0;
+    for (const ch of String(text ?? "")) {
+        w += ch.codePointAt(0) > 0xff ? 13 : 7.5;
+    }
+    return w;
+}
+
+/**
  * 0.20.3：为颜色项构建 HEX/RGB/HSL 复制 + 贴便签菜单项。
  * @param {string} colorHex — canonical HEX
  * @returns {object[]} 菜单项数组（不含前导 separator，由调用方追加）
@@ -106,14 +137,14 @@ export function init() {
             items = unifiedMenu();
         }
 
-        // 0.20.2: 剪贴板模式下有多选时，在菜单顶部插入「复制选中的 N 条」
+        // 0.25.27: 多选时批量组完整接管——右键列表项只显示批量操作（单项操作
+        // 与批量指向混杂会产生「复制的是哪条」歧义）；右键空白处保留通用菜单
+        // （粘贴/设置等与选择集无指向冲突），批量组置顶插入。
         if (clipboardMode.isActive() && clipboardMode.hasSelection()) {
-            const count = clipboardMode.getSelectionCount();
-            items = [
-                {label: t("menu.copySelected", {count}), shortcut: "Ctrl+C", run: () => clipboardMode.batchCopy()},
-                {separator: true},
-                ...items,
-            ];
+            const selectionItems = buildSelectionMenu();
+            items = li
+                ? selectionItems
+                : [...selectionItems, {separator: true}, ...items];
         }
 
         if (!items.length) return;
@@ -133,8 +164,11 @@ export function init() {
         const rows = items.reduce((h, it) => h + (it.separator ? 9 : 36), 0);
         const estimatedHeight = rows + 16 + V_BUFFER;
         // 0.20.3：颜色项 shortcut 同行显示，但格式预览较长，需要更宽的菜单
+        // 0.25.27：宽度按最宽项内容估算，下限 180（既有短菜单不缩窄）。
+        // 固定 180px 在「复制选中的 N 条 Ctrl+C」这类长文案下会裁切 label
+        //（.context-menu-item nowrap + shortcut flex-shrink:0 挤压 label）。
         const hasColorShortcut = items.some((it) => isColorShortcut(it.shortcut));
-        const estimatedWidth = (hasColorShortcut ? 260 : 180) + H_BUFFER;
+        const estimatedWidth = Math.max(hasColorShortcut ? 260 : 180, estimateMenuWidth(items)) + H_BUFFER;
 
         // 光标物理坐标由后端 GetCursorPos 直接读取——MouseEvent.screenX/Y 在 WebView2
         // 里是 CSS 像素，高 DPI 屏当物理像素用会偏 1/3；索性不传，避免 dpr 猜谜。
@@ -207,6 +241,26 @@ function close() {
 }
 
 // ── 各区域菜单构建 ──────────────────────────────────────────────────────────
+
+/**
+ * 0.25.27：剪贴板多选批量菜单组——非破坏操作（复制/上屏/编辑/便签）一组，
+ * 删除独立一组（danger），取消选择收尾（escape hatch）。
+ * 标注的快捷键与键盘实际行为一致（菜单即契约）：
+ * Ctrl+C / Enter / Alt+E / Alt+S 多选时均为批量语义，Esc 清空多选。
+ */
+function buildSelectionMenu() {
+    const count = clipboardMode.getSelectionCount();
+    return [
+        {label: t("menu.copySelected", {count}), shortcut: "Ctrl+C", run: () => clipboardMode.batchCopy()},
+        {label: t("menu.pasteSelected", {count}), shortcut: "Enter", run: () => clipboardMode.batchPaste()},
+        {label: t("menu.editSelected", {count}), shortcut: "Alt+E", run: () => clipboardMode.batchEdit()},
+        {label: t("menu.stickySelected", {count}), shortcut: "Alt+S", run: () => clipboardMode.batchSticky()},
+        {separator: true},
+        {label: t("menu.deleteSelected", {count}), run: () => clipboardMode.batchDelete(), danger: true},
+        {separator: true},
+        {label: t("menu.deselect"), shortcut: "Esc", run: () => clipboardMode.clearSelection()},
+    ];
+}
 
 function unifiedMenu() {
     const exec = (cmd) => async () => {
@@ -346,12 +400,15 @@ function itemMenu(li) {
 
     // (a) 展开 actions 全部动作（hint 存 i18n key，用 t() 渲染）
     // 0.20.3：颜色项不再跳过 (a) 段——当做文本处理，默认 Copy 动作正常显示。
+    // 0.25.27：编辑/钉便签标注快捷键（与剪贴板模式键盘行为一致，菜单即契约）
     for (const action of actions) {
         const label = action.hint ? t(action.hint) : (KIND_LABELS[action.kind]?.() ?? null);
         if (!label) continue; // 无标签的动作（如无 hint 的 run）跳过
+        const shortcut = action.runId === "edit_text_item" ? "Alt+E"
+            : action.runId === "pin_text_item" ? "Alt+S" : undefined;
         items.push({
             label,
-            shortcut: action.runId === "edit_text_item" ? "Alt+E" : undefined,
+            shortcut,
             run: () => activateItem({...readData(li), actions: [action]}),
         });
     }

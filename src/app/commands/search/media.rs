@@ -888,12 +888,16 @@ pub fn pin_work_area(app: tauri::AppHandle, label: String) -> Option<serde_json:
 }
 
 /// 将 pin 窗口图片复制到剪贴板。
+///
+/// 0.25.27：改 `HistoryRepost`（回贴语义）——pin 的图多来自历史/截图（已在库），
+/// 同图 sha256 删旧留新顶置即可；用 User 会把原条目的来源标签覆盖成 Blink，
+/// 丢失"从哪个应用截的图"信息（HistoryRepost 的设计初衷，见枚举注释）。
 #[tauri::command]
 pub async fn pin_save_clipboard(request: tauri::ipc::Request<'_>) -> Result<(), String> {
     let png_data = extract_png_from_request(&request)?;
     crate::domain::clipboard::write_png(
         png_data,
-        crate::domain::clipboard::ClipboardWriteSource::User,
+        crate::domain::clipboard::ClipboardWriteSource::HistoryRepost,
     )
     .await
     .map_err(|e| e.to_string())?;
@@ -911,11 +915,11 @@ pub async fn pin_save_as(
 ) -> Result<String, String> {
     let png_data = extract_png_from_request(&request)?;
     let path = header_opt_string(request.headers(), "path");
-    // 先写剪贴板（方便流转）
+    // 先写剪贴板（方便流转）；0.25.27：HistoryRepost 回贴语义（同 pin_save_clipboard）
     let png_clone = png_data.clone();
     crate::domain::clipboard::write_png(
         png_clone,
-        crate::domain::clipboard::ClipboardWriteSource::User,
+        crate::domain::clipboard::ClipboardWriteSource::HistoryRepost,
     )
     .await
     .map_err(|e| e.to_string())?;

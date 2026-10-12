@@ -141,6 +141,28 @@ describe("resolveShortcutAction — 快捷键类型解析", () => {
         assert.equal(resolveShortcutAction(mockKey({key: "d", ctrlKey: true}), true), "none");
     });
 
+    // ── Alt+S → sticky（0.25.27）─────────────────────────────────────────────
+
+    test("Alt+S → sticky", () => {
+        assert.equal(resolveShortcutAction(mockKey({key: "s", altKey: true}), true), "sticky");
+    });
+
+    test("Alt+S 大写也能匹配", () => {
+        assert.equal(resolveShortcutAction(mockKey({key: "S", altKey: true}), true), "sticky");
+    });
+
+    test("Alt+Shift+S → none（Shift 干扰纯 Alt）", () => {
+        assert.equal(resolveShortcutAction(mockKey({key: "s", altKey: true, shiftKey: true}), true), "none");
+    });
+
+    test("Ctrl+Alt+S（AltGr）→ none", () => {
+        assert.equal(resolveShortcutAction(mockKey({key: "s", altKey: true, ctrlKey: true}), true), "none");
+    });
+
+    test("IME 组字时 Alt+S → none", () => {
+        assert.equal(resolveShortcutAction(mockKey({key: "s", altKey: true, isComposing: true}), true), "none");
+    });
+
     // ── 裸 Delete ──────────────────────────────────────────────────────────────
 
     test("裸 Delete query 为空 → delete", () => {
