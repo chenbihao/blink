@@ -9,7 +9,7 @@
 //! - 闲置一行提示（statusbar.js）：空 query 不按 Alt 时常驻（0.24.4 增量保留）
 //!
 //! **开关**（0.8.5.1 §6.6）：
-//! - `chord_enabled=false` → refresh 清空 actions，keyboard.js 的触发门禁通过
+//! - `chord_enabled=false` → 配置刷新清空 actions，keyboard.js 的触发门禁通过
 //!   `isEnabled()` 读同一 flag，保触发链一致
 //! - `chord_hint_visible=false` → getActions() 返回空（提示方据此不显示），
 //!   但触发键集合仍含全部 tap 键（用户仍可 Alt+字母 触发，只是不显示提示）
@@ -19,7 +19,6 @@
 //! 0.11: Alt+Q 划词翻译 chord 已移除，chord-ball 悬浮球已删除。Alt+Space 语音输入
 //! 作为 display-only chord 条目加入提示（触发仍走 native hotkey hold，不走 trigger_chord）。
 
-import {invoke} from "../shared/tauri.js";
 import {listChordActions} from "../shared/api.js";
 import {queryEl} from "./dom.js";
 import {findTapActionById, findTapActionByKey, isAvailableWithQuery,} from "./chord-availability.js";
@@ -31,19 +30,14 @@ let ghostChordEl = null;
 // 初值 false：config 还没到时保守禁用,避免"用户没开却弹提示"的一瞬闪现
 let chordEnabled = false;
 let hintVisible = true;
+let configRevision = 0;
 
-/** 初始化：绑定 overlay DOM + 预热 chord 配置。main.js 启动时调一次。 */
+/** 初始化只绑定 DOM；配置预热与热刷新统一由 lifecycle 驱动。 */
 export function init() {
     ghostChordEl = document.querySelector("#ghost-overlay .ghost-chord");
     // 0.16.1：输入框文本变化时重新 render overlay——有文本时清空 chord 提示（让位
     // keyword 影子并转由 statusbar 副行承接），无文本时恢复。
     queryEl.addEventListener("input", render);
-    // 0.21.x：启动预热 chord 配置（chordEnabled/chordActions）。
-    // 若等首个 SHOWN 的异步 get_config 才刷新，首次唤起时 chordEnabled 仍是初值
-    // false——readOnly 禁 IME 兜底（input-state.js）与 onChordTrigger 兜底
-    // （keyboard.js）全部失效，字母落入输入法。预热后首次唤起与后续行为一致。
-    // 窗口此时隐藏，render 无可见副作用；SHOWN 会再次刷新。
-    refresh();
 }
 
 /** 是否启用 Chord（keyboard.js chordEligible 读此值,统一门禁）。 */
@@ -121,21 +115,10 @@ export function notifyVisibilityChange() {
     for (const cb of onVisibilityChangeCallbacks) cb();
 }
 
-/** 拉取 Chord 动作列表（shown / config-changed 时调）。 */
-export async function refresh() {
-    // 配置快照 + 动作列表的刷新逻辑统一在 refreshFromConfigData（避免两份实现漂移）
-    let cfg = null;
-    try {
-        cfg = await invoke("get_config");
-    } catch (e) {
-        /* 保持默认 false */
-    }
-    await refreshFromConfigData(cfg);
-}
-
 /** 从已读好的 config 对象刷新 chord 配置并拉取动作列表（避免重复 invoke get_config）。
  * @param {object} cfg - get_config 返回的 AppConfig 对象 */
 export async function refreshFromConfigData(cfg) {
+    const revision = ++configRevision;
     // 先刷新配置快照
     if (cfg) {
         chordEnabled = cfg.chord_enabled === true;
@@ -149,8 +132,11 @@ export async function refreshFromConfigData(cfg) {
     }
 
     try {
-        chordActions = await listChordActions();
+        const actions = await listChordActions();
+        if (revision !== configRevision) return;
+        chordActions = actions;
     } catch (e) {
+        if (revision !== configRevision) return;
         console.warn("[chord] list_chord_actions 失败", e);
         chordActions = [];
     }

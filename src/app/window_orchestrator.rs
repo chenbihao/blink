@@ -25,11 +25,11 @@ use crate::infra::platform::window;
 /// infra 层 `show_main_window` 只负责定位 + show + focus + emit SHOWN，
 /// 本函数负责 domain state 定位 + context 采集 + SearchService 更新 + 异步选区回填。
 pub fn invoke(app: &AppHandle) {
-    invoke_with_cursor(app, None);
+    invoke_with_placement(app, window::MainWindowPlacement::Launcher);
 }
 
-/// 剪贴板入口固定唤起瞬间鼠标位置；其余编排与普通 launcher 共用。
-pub fn invoke_with_cursor(app: &AppHandle, cursor: Option<(i32, i32)>) {
+/// 显式指定唤起用途，避免把定位信息缺失误判为普通 launcher。
+pub fn invoke_with_placement(app: &AppHandle, placement: window::MainWindowPlacement) {
     // 1. 先采集上下文快照（show 之前！）
     //    读内存 ContextConfig（零 IO，热键回调不能 await），按配置过滤采集
     let context_cfg = app
@@ -64,7 +64,9 @@ pub fn invoke_with_cursor(app: &AppHandle, cursor: Option<(i32, i32)>) {
     // 这样窗口显示不被 UIA 阻塞——慢应用上用户不再感到"卡一下才出来"。
     //
     // 提取完成后通过 update_selected_text 回填 + emit awareness-updated 触发前端 retrigger。
-    let focused_element = if context_cfg.selection_enabled {
+    let focused_element = if context_cfg.selection_enabled
+        && matches!(placement, window::MainWindowPlacement::Launcher)
+    {
         let t_capture = std::time::Instant::now();
         let focused = snapshot
             .foreground_app
@@ -87,7 +89,7 @@ pub fn invoke_with_cursor(app: &AppHandle, cursor: Option<(i32, i32)>) {
     }
 
     // 3. 调 infra primitive：定位 → show → set_focus → emit SHOWN
-    if let Err(e) = window::show_main_window_with_cursor(app, cursor) {
+    if let Err(e) = window::show_main_window_with_placement(app, placement) {
         // show 失败已在 infra 层记 warn，这里不重复
         tracing::debug!(error = %e, "invoke: show_main_window 失败");
         return;

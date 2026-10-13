@@ -18,8 +18,8 @@ static PASTE_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 /// 分表存储，筛选下推为跳过另一张表的查询。
 ///
 /// 0.25.29: keyset 流式分页——`cursor`（上一批末条的 `{created_at, id}`，缺省 = 首批）
-/// 与 `batch`（本批条数，缺省 = 一页 page_size）；响应携带 `next_cursor` / `has_more`，
-/// 前端滚到底继续追加。batch=0 由 engine 兜底为一页。
+/// 与 `batch`（本批条数）；响应携带 `next_cursor` / `has_more`，滚到底继续追加。
+/// batch 缺省/0 由 engine 按游标区分：首批两页、追加一页 page_size。
 #[derive(serde::Serialize)]
 pub struct SearchClipboardResponse {
     pub entries: Vec<crate::domain::search::AppEntry>,

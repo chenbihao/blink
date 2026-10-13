@@ -6,7 +6,7 @@
 //! 「激活某项」交给 actions.js；选中/翻页后通知 statusbar 刷新提示。
 //!
 //! 0.25.29：页对齐起点 `page` 泛化为任意条对齐的 `viewStart`——
-//! - page 模式（搜索/剪贴板默认）：viewStart 恒页对齐（= page × PAGE_SIZE），行为不变；
+//! - page 模式（搜索/剪贴板可选）：viewStart 每次按 PAGE_SIZE 移动；
 //! - step 模式（剪贴板滚轮逐条滚动）：滚轮平移 viewStart ±N，表现形式（一屏条数、
 //!   窗口贴合高度、Alt+1~9 指向当前显示条目）完全不变，只是数据窗口滑动。
 //! 另新增流式加载配套：appendItems（追加专用路径）、removeItems（删除局部移除）。
@@ -15,7 +15,6 @@ import {resultsEl} from "./dom.js";
 import {resetMaxHeight, syncWindowSize} from "./window-size.js";
 import {activateItem} from "./actions.js";
 import * as statusbar from "./statusbar.js";
-import {invoke} from "../shared/tauri.js";
 import {renderIcon} from "../shared/icon.js";
 import {createSwatch, getColorPayload, isColorEntry, parse as parseColor} from "../shared/color.js";
 import * as clipboardMode from "./clipboard-mode.js";
@@ -28,9 +27,9 @@ let PAGE_SIZE = 9;
 
 /** 融合后最大显示条数（AppConfig.max_results）。
  *  后端单次 emit 已截断，但前端 merge 多次增量会累积，故此处对 allItems 再做最终上限。
- *  启动读一次 + lifecycle shown 时 refreshMaxResults 刷新（设置页改动下次唤起生效）。
+ *  lifecycle 统一在启动、shown、配置广播时刷新。
  *
- *  0.20.1: 剪贴板模式使用独立上限（display_pages × page_size），不受 maxResults 截断。 */
+ *  剪贴板流式加载使用会话总量保护，不受 maxResults 截断。 */
 let maxResults = 50;
 
 /** 0.20.1: 是否处于剪贴板模式（clipboard-mode.js 进入时设 true，退出时 false）。
@@ -41,37 +40,14 @@ let clipboardModeActive = false;
  *  取代后端已退役的 EFFECTIVE_LIMIT_MAX=400 一次性上限。到底后 statusbar 显示总数。 */
 const MAX_LOADED_ITEMS = 2000;
 
-(async function loadConfig() {
-    try {
-        const cfg = await invoke("get_config");
-        if (cfg) {
-            if (cfg.max_results) maxResults = cfg.max_results;
-            if (cfg.page_size) PAGE_SIZE = cfg.page_size;
-        }
-    } catch (e) {
-        /* 读失败保持默认 */
-    }
-})();
-
-/** 重新读取配置（lifecycle shown 时调用）。 */
-export async function refreshMaxResults() {
-    try {
-        const cfg = await invoke("get_config");
-        if (cfg) {
-            if (cfg.max_results) maxResults = cfg.max_results;
-            if (cfg.page_size) PAGE_SIZE = cfg.page_size;
-        }
-    } catch (e) {
-        /* 保持原值 */
-    }
-}
-
 /** 从已读好的 config 对象刷新最大结果数（避免重复 invoke get_config）。
  * @param {object} cfg - get_config 返回的 AppConfig 对象 */
 export function refreshMaxResultsFromConfigData(cfg) {
     if (cfg) {
+        const previousPageSize = PAGE_SIZE;
         if (cfg.max_results) maxResults = cfg.max_results;
         if (cfg.page_size) PAGE_SIZE = cfg.page_size;
+        if (PAGE_SIZE !== previousPageSize && allItems.length) renderViewport();
     }
 }
 

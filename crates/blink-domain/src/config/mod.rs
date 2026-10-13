@@ -15,6 +15,7 @@
 pub mod ai_capability_access;
 pub mod ai_config;
 pub mod app_config;
+pub mod clipboard_config;
 pub mod managed_settings;
 pub mod ocr_config; // 0.22.4：OCR 配置分片（第 9 KV）
 pub mod plugin_config;

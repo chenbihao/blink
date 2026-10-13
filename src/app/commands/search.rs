@@ -638,16 +638,21 @@ pub async fn clear_history(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// 调整主窗口大小（前端调用，用于弹性窗口）。
-/// 设置大小后若窗口底部超出显示器工作区，自动上移使其完整可见。
+/// 主窗口布局只读快照，覆盖首次显示早于前端监听器就绪的场景。
 #[tauri::command]
-pub async fn resize_window(app: tauri::AppHandle, width: f64, height: f64) -> Result<(), String> {
-    if let Some(win) = app.get_webview_window("main") {
-        let size = tauri::LogicalSize::new(width, height);
-        win.set_size(size).map_err(|e| e.to_string())?;
-        crate::infra::platform::window::clamp_to_work_area(&win);
-    }
-    Ok(())
+pub fn get_main_window_layout_state() -> crate::infra::platform::window::MainWindowLayoutState {
+    crate::infra::platform::window::main_window_layout_state()
+}
+
+/// 版本校验、定位和尺寸变更由 infra 在主线程统一提交。
+#[tauri::command]
+pub async fn resize_window(
+    app: tauri::AppHandle,
+    width: f64,
+    height: f64,
+    layout: crate::infra::platform::window::MainWindowLayoutRequest,
+) -> Result<(), String> {
+    crate::infra::platform::window::resize_main_window(&app, width, height, layout).await
 }
 
 /// 获取默认快捷键配置（设置页「恢复默认」按钮调用）。

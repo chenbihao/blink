@@ -29,7 +29,7 @@ import * as ghost from "./ghost.js";
 import * as suggestionBar from "./suggestion-bar.js";
 import * as statusbar from "./statusbar.js";
 import {dismiss as dismissFeedback, show as showFeedback} from "./transient-feedback.js";
-import {syncWindowSize, resyncWindowSize} from "./window-size.js";
+import {syncWindowSize, resyncWindowSize, setClipboardLayout, markClipboardLayoutReady} from "./window-size.js";
 import {
     copyToClipboard,
     createStickyNote,
@@ -97,13 +97,14 @@ let lastSearchAt = 0;
 let pageCursor = null;
 /** 后端是否还有下一批（has_more）。 */
 let hasMore = false;
-/** 追加请求进行中（防重入）。 */
+/** 在途追加持有的游标对象，false 表示空闲；旧请求不能释放新请求的标记。 */
 let loadingMore = false;
 
 // ── 0.25.29 滚轮模式（clipboard.wheel_mode）─────────────────────────────────
 
-/** "page"（默认，整页翻）| "step"（数据窗口逐条平移）。lifecycle SHOWN 时刷新。 */
-let wheelMode = "page";
+/** 默认逐条；配置启动读取、SHOWN 和广播均由 lifecycle 同步。 */
+let wheelMode = "step";
+let wheelRevision = 0;
 
 // ── 状态查询 ──────────────────────────────────────────────────────────────
 
@@ -226,6 +227,7 @@ export function enter({preserveQuery = false} = {}) {
     if (active) return;
     const initialQuery = preserveQuery ? queryEl.value : "";
     active = true;
+    setClipboardLayout(true);
     // 0.20.2: 进入剪贴板模式时递增 epoch，清空旧选择
     selection.onEnterMode();
     // 0.20.2: 重置 lastQuery，确保首次空 query 搜索能执行
@@ -275,6 +277,7 @@ export function enter({preserveQuery = false} = {}) {
 export function exit() {
     if (!active) return;
     active = false;
+    setClipboardLayout(false);
     // 0.20.2: 退出模式时递增 epoch+generation，清空选择
     selection.onExitMode();
     // 生命周期负责清理本次模式的持久 loading，迟到的 IPC 不得清理新会话反馈。
@@ -297,6 +300,7 @@ export function exit() {
     pageCursor = null;
     hasMore = false;
     loadingMore = false;
+    wheelRevision++;
 
     // 移除 body 标记——恢复 chord 提示可见性
     document.body.classList.remove("clipboard-mode-active");
@@ -355,6 +359,7 @@ export function handleInput(value, {force = false, immediate = false} = {}) {
             actions: [{kind: "copy", payload: colorResult.hex}],
         };
         results.render([entry], seq);
+        markClipboardLayoutReady();
         refreshSelectionCss();
         return true;
     }
@@ -378,12 +383,14 @@ export function handleInput(value, {force = false, immediate = false} = {}) {
  */
 async function doSearch(query, keepPage = false) {
     const mySeq = ++seq;
+    wheelRevision++;
     lastQuery = query;
     lastSearchAt = Date.now();
     // 首批重置流式状态（query/kind 变化 = 新数据集；旧游标立即失效）
     pageCursor = null;
     hasMore = false;
     // 刷新（keepPage）时记住当前页号和光标位置
+    loadingMore = false;
     const savedPage = keepPage ? results.getPage() : 0;
     const savedSelected = keepPage ? results.getSelectedIndex() : 0;
     try {
@@ -393,6 +400,7 @@ async function doSearch(query, keepPage = false) {
         if (!active) return;
         const entries = resp.entries || [];
         results.render(entries, mySeq);
+        markClipboardLayoutReady();
         // 0.20.2: keepPage 时恢复页号和光标位置（render 会重置 page/selected）
         if (keepPage) {
             results.restorePosition(savedPage, savedSelected);
@@ -412,6 +420,8 @@ async function doSearch(query, keepPage = false) {
         // 游标就绪后再补一次预取判定（首批不满一屏自动续拉满）
         maybeLoadMore();
     } catch (e) {
+        if (mySeq !== seq || !active) return;
+        markClipboardLayoutReady();
         console.error("[clipboard-mode] searchClipboard failed:", e);
     }
 }
@@ -444,9 +454,9 @@ function maybeLoadMore() {
  */
 async function loadMore() {
     if (loadingMore || !pageCursor) return;
-    loadingMore = true;
     const mySeq = seq;
     const cursorAtStart = pageCursor;
+    loadingMore = cursorAtStart;
     try {
         const resp = await searchClipboard(lastQuery, mySeq, kind, cursorAtStart);
         if (mySeq !== seq || !active || pageCursor !== cursorAtStart) return;
@@ -458,12 +468,14 @@ async function loadMore() {
         hasMore = !!resp.has_more;
         pageCursor = hasMore ? (resp.next_cursor || null) : null;
     } catch (e) {
+        if (mySeq !== seq || !active || pageCursor !== cursorAtStart) return;
         console.error("[clipboard-mode] loadMore failed:", e);
         hasMore = false; // 失败即停（下轮 query/kind 变化或重新进入时重试）
     } finally {
-        loadingMore = false;
+        // 旧请求不能释放新会话的在途标记；同一会话的新查询仍需继续预取。
+        if (loadingMore === cursorAtStart) loadingMore = false;
+        maybeLoadMore();
     }
-    maybeLoadMore();
 }
 
 /** 0.25.29: 流式状态快照（results.refreshStatusbar 的 step 模式条数区间用）。 */
@@ -487,10 +499,19 @@ export function isStepWheel() {
     return wheelMode === "step";
 }
 
-/** 0.25.29: 从 AppConfig 刷新滚轮模式快照（lifecycle SHOWN 时调用）。
+/** 供滚轮累积器区分查询、模式与配置切换，余量不能跨上下文继承。 */
+export function getWheelRevision() {
+    return wheelRevision;
+}
+
+/** 从 AppConfig 刷新滚轮模式快照（启动、SHOWN 与配置广播共用）。
  *  默认逐条平移（用户裁决），仅显式 "page" 才整页翻——与后端 serde default 同语义。 */
 export function refreshWheelMode(clipCfg) {
-    wheelMode = clipCfg?.wheel_mode === "page" ? "page" : "step";
+    const next = clipCfg?.wheel_mode === "page" ? "page" : "step";
+    if (next === wheelMode) return;
+    wheelMode = next;
+    wheelRevision++;
+    if (active) results.refreshStatusbar();
 }
 
 // ── 0.20.2 多选键盘处理 ────────────────────────────────────────────────────
@@ -725,27 +746,28 @@ export async function batchPaste() {
  * 成功后定向清理本次选择的 key 并刷新列表（维持页号）；失败保留选择与结果，显示错误。
  *
  * 与批量复制不同，删除是幂等 DB 副作用——不使用 copy generation 拒绝执行，
- * 只需防迟到反馈污染退出模式后的新会话（reloadList 内部有 active 守卫）。
+ * DB 删除照常完成；选择、局部移除和反馈仅提交到原选择 epoch。
  */
 export async function batchDelete() {
     const keys = selection.getSelectedKeys();
     if (keys.length === 0) return;
+    const epoch = selection.getSelectionEpoch();
 
     console.log("[clipboard-mode] batchDelete: starting with", keys.length, "items:", keys);
     showFeedback(t("clipboard.deleting_count", {count: keys.length}), {type: "info", durationMs: 0});
 
     try {
         await deleteClipboardItemsBatch(keys);
+        if (!active || epoch !== selection.getSelectionEpoch()) return;
         // 只清本次删除的 key：删除期间用户新增的选择不受迟到结果影响
         selection.removeKeys(keys);
         // 0.25.29: 局部移除替代 reloadList——全量重查会让已加载几百条退回首批
         // （游标重置）；删除是确定性的 DB 副作用，就地 splice 保持浏览位置
         removeLocalItems(keys);
-        if (!active) return; // 模式已退出：清态照做，但不污染新会话反馈
         showFeedback(t("clipboard.deleted_count", {count: keys.length}), {type: "success", durationMs: 2000});
     } catch (e) {
         console.error("[clipboard-mode] batchDelete failed:", e);
-        if (!active) return;
+        if (!active || epoch !== selection.getSelectionEpoch()) return;
         showFeedback(t("clipboard.delete_failed", {message: e?.message || "unknown"}), {type: "error"});
     }
 }
@@ -779,6 +801,7 @@ export async function batchEdit() {
             title: "合并编辑选中的内容",
             source: {kind: "clipboard_item", itemRef: null},
         });
+        if (!selection.isCopyStillValid(gen)) return;
         hideWindow();
     } catch (e) {
         if (!selection.isCopyStillValid(gen)) return;
@@ -808,7 +831,9 @@ export async function batchSticky() {
         }
 
         const note = await createStickyNote(composed.texts.join("\n"));
+        if (!selection.isCopyStillValid(gen)) return;
         await showStickyWindow(note.id, true);
+        if (!selection.isCopyStillValid(gen)) return;
         hideWindow();
     } catch (e) {
         if (!selection.isCopyStillValid(gen)) return;
@@ -822,6 +847,7 @@ export async function batchSticky() {
  * 图片项与非剪贴板来源不响应（与 Alt+E 的门禁一致）。
  */
 async function handleStickyActive() {
+    const gen = selection.beginCopy();
     const activeItem = results.getActive();
     const hitId = activeItem?.actions?.[0]?.hitId;
     if (!activeItem || activeItem.isImage || activeItem.source !== "clipboard" || !hitId) {
@@ -831,11 +857,15 @@ async function handleStickyActive() {
 
     try {
         const text = await getClipboardText(hitId);
+        if (!selection.isCopyStillValid(gen)) return;
         if (!text) return; // 条目已被清理，静默放弃
         const note = await createStickyNote(text);
+        if (!selection.isCopyStillValid(gen)) return;
         await showStickyWindow(note.id, true);
+        if (!selection.isCopyStillValid(gen)) return;
         hideWindow();
     } catch (e) {
+        if (!selection.isCopyStillValid(gen)) return;
         console.error(`[clipboard-mode] sticky active failed for ${hitId}:`, e);
         showActionError("pin_text_item", e);
     }
@@ -987,6 +1017,7 @@ function handleEditActive() {
  * 颜色降级结果等非历史项不响应。删除成功后维持 clipboard mode 并刷新当前页。
  */
 async function handleDeleteActive() {
+    const epoch = selection.getSelectionEpoch();
     const activeItem = results.getActive();
     const target = findDeleteTarget(activeItem);
     if (!target) {
@@ -1000,10 +1031,12 @@ async function handleDeleteActive() {
         } else {
             await deleteClipboardImage(target.id);
         }
+        if (!active || epoch !== selection.getSelectionEpoch()) return;
         console.log(`[clipboard-mode] deleted ${target.type} item: ${target.id}`);
         // 0.25.29: 局部移除（同 batchDelete），维持浏览位置与已加载深度
         removeLocalItems([target.id]);
     } catch (e) {
+        if (!active || epoch !== selection.getSelectionEpoch()) return;
         console.error(`[clipboard-mode] delete failed for ${target.type} ${target.id}:`, e);
         // 失败时保留结果、模式和选择，显示可见错误
         showStatusError(e?.message || "delete failed");
@@ -1015,9 +1048,8 @@ async function handleDeleteActive() {
 /**
  * 剪贴板模式「激活」统一分派（Enter / Alt+数字 / 双击 共用，保证路径一致）。
  *
- * 文本项（LazyCopy）：拉取完整 text → 频率加权 → `paste_to_input` 上屏。
- *   - 目标（唤起前的前台窗口）在文本输入框 → 直接注入
- *   - 目标非输入框 → 后端回退为复制（文本写入系统剪贴板），语义与旧 Enter 一致
+ * 文本项（LazyCopy）：拉取全文并校验会话 → 频率加权 → `paste_to_input`。
+ * 后端恢复并核验唤起前的原窗口后发粘贴键；目标失效时保留复制，不依赖 UIA 门控。
  * 图片项 / 其他：复用 activateItem 原复制路径。
  *
  * @param {object|null} data results.itemData 形状（actions 数组 / isImage / …）
@@ -1031,15 +1063,18 @@ export async function activateByData(data) {
 
     // 文本项走上屏（含复制兜底）
     if (kind === "copy" && action.hitId) {
+        const gen = selection.beginCopy();
         let text = action.payload ?? data.calcValue;
         if (!text) {
             try {
                 text = await getClipboardText(action.hitId);
             } catch (e) {
+                if (!selection.isCopyStillValid(gen)) return;
                 showActionError("get_clipboard_text", e);
                 return; // 保留窗口，让用户察觉并重试
             }
         }
+        if (!selection.isCopyStillValid(gen)) return;
         if (!text) return; // 无可上屏内容（空/缺省），保留窗口
         // fire-and-forget 频率加权（与 actions.js LazyCopy 一致；失败不阻塞上屏）
         recordClipboardHit(action.hitId).catch((e) =>
@@ -1048,6 +1083,7 @@ export async function activateByData(data) {
         try {
             await pasteToInput(text); // 后端负责隐藏窗口
         } catch (e) {
+            if (!selection.isCopyStillValid(gen)) return;
             showActionError("paste_to_input", e);
         }
         return;

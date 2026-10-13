@@ -113,7 +113,7 @@ pub async fn update_managed_setting(
         | ManagedSettingId::ClipboardDisplayCount
         | ManagedSettingId::ClipboardDisplayPages
         | ManagedSettingId::ClipboardCandidateLimit => {
-            let mut cfg = ConfigStore::get::<ClipboardConfig>(pool).await;
+            let mut cfg = ConfigStore::get_checked::<ClipboardConfig>(pool).await?;
             match setting_id {
                 ManagedSettingId::ClipboardEnabled => cfg.enabled = value.as_bool().unwrap(),
                 ManagedSettingId::ClipboardRetentionDays => {
@@ -211,9 +211,19 @@ pub async fn apply_autosuggest(
     save_suggestion(app, &cfg).await
 }
 
-pub async fn apply_clipboard(app: &tauri::AppHandle, cfg: &ClipboardConfig) -> Result<(), String> {
+pub async fn apply_clipboard(
+    app: &tauri::AppHandle,
+    patch: Value,
+    expected: Option<Value>,
+) -> Result<ClipboardConfig, String> {
     let _guard = SETTING_UPDATE_LOCK.lock().await;
-    save_clipboard(app, cfg).await
+    let pool = &app.state::<crate::infra::data::DbPools>().config;
+    let previous = ConfigStore::get_checked::<ClipboardConfig>(pool).await?;
+    let cfg =
+        crate::domain::config::clipboard_config::update_clipboard_config(pool, patch, expected)
+            .await?;
+    publish_clipboard(app, &cfg, &previous).await;
+    Ok(cfg)
 }
 
 async fn update_appearance(
@@ -264,7 +274,21 @@ async fn save_suggestion(app: &tauri::AppHandle, cfg: &SuggestionConfig) -> Resu
 
 async fn save_clipboard(app: &tauri::AppHandle, cfg: &ClipboardConfig) -> Result<(), String> {
     let pool = &app.state::<crate::infra::data::DbPools>().config;
-    ConfigStore::set(pool, cfg).await?;
+    let previous = ConfigStore::get_checked::<ClipboardConfig>(pool).await?;
+    ConfigStore::update::<ClipboardConfig>(pool, |current| {
+        *current = cfg.clone();
+        Ok(())
+    })
+    .await?;
+    publish_clipboard(app, cfg, &previous).await;
+    Ok(())
+}
+
+async fn publish_clipboard(
+    app: &tauri::AppHandle,
+    cfg: &ClipboardConfig,
+    previous: &ClipboardConfig,
+) {
     crate::infra::platform::clipboard::update_runtime_config(cfg);
     if let Some(service) = app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>() {
         // 0.25.29：display_pages 已退役（流式加载），不再转发
@@ -272,13 +296,22 @@ async fn save_clipboard(app: &tauri::AppHandle, cfg: &ClipboardConfig) -> Result
         service.update_clipboard_search_enabled(cfg.search_enabled);
         service.update_clipboard_retention_days(cfg.retention_days);
     }
-    let pools = app.state::<crate::infra::data::DbPools>();
-    crate::infra::data::clipboard::cleanup_old(&pools.history, cfg.retention_days).await;
-    crate::infra::data::clipboard::cleanup_excess(&pools.history, cfg.max_items).await;
-    crate::infra::data::clipboard_images::cleanup_excess_images(&pools.cache, cfg.max_image_items)
-        .await;
+    // 保存和运行时更新完成即广播；滚轮等展示项不必等待或触发历史清理。
     emit_changed(app, "clipboard:config");
-    Ok(())
+    let pools = app.state::<crate::infra::data::DbPools>();
+    if cfg.retention_days != previous.retention_days {
+        crate::infra::data::clipboard::cleanup_old(&pools.history, cfg.retention_days).await;
+    }
+    if cfg.max_items != previous.max_items {
+        crate::infra::data::clipboard::cleanup_excess(&pools.history, cfg.max_items).await;
+    }
+    if cfg.max_image_items != previous.max_image_items {
+        crate::infra::data::clipboard_images::cleanup_excess_images(
+            &pools.cache,
+            cfg.max_image_items,
+        )
+        .await;
+    }
 }
 
 pub(crate) fn emit_changed(app: &tauri::AppHandle, key: &str) {

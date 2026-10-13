@@ -180,7 +180,7 @@ impl Service for HotkeyService {
                                 if let Some(win) = app.get_webview_window("main") {
                                     let _ = win.set_focus();
                                 }
-                                let _ = app.emit(crate::domain::event_names::EventNames::SHOWN, ());
+                                crate::infra::platform::window::emit_main_window_shown(&app);
                             } else {
                                 crate::infra::platform::window::hide(&app, "toggle");
                             }

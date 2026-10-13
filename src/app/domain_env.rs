@@ -526,54 +526,41 @@ impl SurfacePort for TauriDomainEnv {
     }
 
     fn open_clipboard_mode(&self) -> Result<(), SurfaceError> {
-        // 0.21.2：Chord clipboard_history binding 的 GUI starter target。
-        // 旧 ClipboardHistoryAction 的行为：主窗 show + emit CHORD_ENTER_MODE
-        // 0.24.7 C3：主窗隐藏的全局唤起场景，在 show 抢占焦点**之前**同步捕获
-        // 焦点元素（O(1) <5ms，同 orchestrator 的划词捕获模式），invoke 之后再
-        // 拿元素引用慢查 caret 定位（时序详见 windows.rs 函数注释）。
-        // 主窗可见（chord 场景）时跳过——窗口已在屏幕，无需重定位。
-        let was_hidden = self
-            .app
-            .get_webview_window("main")
+        use crate::infra::platform::window;
+        let was_hidden = self.app.get_webview_window("main")
             .and_then(|w| w.is_visible().ok())
             .map(|v| !v)
             .unwrap_or(true);
-        // 在 UIA 慢查之前固定鼠标与宿主窗口，后续鼠标移动不改变本次落点。
-        let cursor = was_hidden
-            .then(crate::infra::platform::window::cursor_pos_virtual)
-            .flatten();
-        let owner = was_hidden
-            .then(crate::infra::platform::window::get_foreground_hwnd)
-            .flatten();
-        let caret_elem = if was_hidden {
-            crate::infra::platform::selection::capture_focused_element()
-        } else {
-            None
-        };
-        // CHORD_ENTER_MODE 先于 show emit（0.24.7）：让前端在 SHOWN 到达前完成
-        // 模式切换——消除"先普通搜索态再闪成剪贴板模式"的一帧闪现，SHOWN 的
-        // 默认上下文搜索也被模式分支跳过。主窗隐藏态 hide() 不停 WebView JS
-        // 循环，事件一般可送达；极端丢失时下方 invoke 后补发兜底（enter 幂等）。
+        if !was_hidden {
+            // 可见窗口仅原地切模式，不重设尺寸、位置或重新采集自家 UIA 焦点。
+            let _ = self.app.emit(
+                crate::domain::event_names::EventNames::CHORD_ENTER_MODE,
+                serde_json::json!({
+                    "mode": "clipboard", "preserveQuery": true,
+                    "revision": window::main_window_revision(),
+                }),
+            );
+            // 主窗可能可见但位于设置页之后；保持几何不变仍需恢复原生输入焦点。
+            if let Some(win) = self.app.get_webview_window("main")
+                && let Err(error) = win.set_focus()
+            {
+                tracing::warn!(%error, "clipboard-mode: 原地切换后聚焦失败");
+            }
+            return Ok(());
+        }
+        let cursor = window::cursor_pos_virtual();
+        let owner = window::get_foreground_hwnd();
+        let caret_elem = crate::infra::platform::selection::capture_focused_element();
+        // 预先准备模式；SHOWN 自带模式和实际 revision，兜底首次监听器未接到预告。
         let _ = self.app.emit(
             crate::domain::event_names::EventNames::CHORD_ENTER_MODE,
-            serde_json::json!({ "mode": "clipboard" }),
+            serde_json::json!({ "mode": "clipboard", "revision": window::main_window_revision() + 1 }),
         );
-        crate::app::window_orchestrator::invoke_with_cursor(&self.app, cursor);
-        // 0.25.29：caret 元素缺失也照常调度 refine——elem=None 时走「屏幕工作区
-        // 中心」兜底（用户裁决：无可信定位时鼠标落点不顺手）。主窗可见的 chord
-        // 场景不重定位（cursor/elem 均为 None 时 refine 自然短路）。
-        let caret_elem = if was_hidden { caret_elem } else { None };
-        crate::infra::platform::window::spawn_main_window_caret_refine(
+        crate::app::window_orchestrator::invoke_with_placement(
             &self.app,
-            caret_elem,
-            owner,
-            cursor,
+            window::MainWindowPlacement::Clipboard { owner_hwnd: owner, cursor },
         );
-        // 幂等补发：前置 emit 若因隐藏态丢失，此处到达时前端照常 enter
-        let _ = self.app.emit(
-            crate::domain::event_names::EventNames::CHORD_ENTER_MODE,
-            serde_json::json!({ "mode": "clipboard" }),
-        );
+        window::spawn_main_window_caret_refine(&self.app, caret_elem);
         Ok(())
     }
 

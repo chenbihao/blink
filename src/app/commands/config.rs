@@ -19,6 +19,8 @@ pub async fn get_config(app: tauri::AppHandle) -> Result<serde_json::Value, Stri
     ConfigStore::get_checked::<HotkeyConfig>(pool).await?;
     ConfigStore::get_checked::<ChordConfig>(pool).await?;
     ConfigStore::get_checked::<DisableConfig>(pool).await?;
+    ConfigStore::get_checked::<crate::app::config::SearchConfig>(pool).await?;
+    ConfigStore::get_checked::<crate::infra::data::clipboard::ClipboardConfig>(pool).await?;
     let cfg = crate::app::config::get_config(pool).await;
     let mut value = serde_json::to_value(cfg).map_err(|e| e.to_string())?;
     value["auto_start_registration_skipped"] = serde_json::json!(cfg!(debug_assertions));
@@ -136,12 +138,12 @@ async fn set_config_value(
         }
         "clipboard_enabled" => {
             let enabled: bool = serde_json::from_value(value).map_err(|e| e.to_string())?;
-            let mut clip_cfg = crate::app::config::ConfigStore::get::<
-                crate::infra::data::clipboard::ClipboardConfig,
-            >(pool)
-            .await;
-            clip_cfg.enabled = enabled;
-            crate::app::setting_service::apply_clipboard(&app, &clip_cfg).await?;
+            crate::app::setting_service::apply_clipboard(
+                &app,
+                serde_json::json!({"enabled": enabled}),
+                expected.map(|v| serde_json::json!({"enabled": v})),
+            )
+            .await?;
             tracing::info!(enabled, "剪贴板监听开关已更新");
         }
 
@@ -265,15 +267,13 @@ async fn set_config_value(
             tracing::info!("Chord 键位绑定已更新");
         }
         "clipboard_config" => {
-            // 0.20.1：剪贴板历史详细配置（retention_days / max_items / blacklist_keywords / display_pages）
-            let cfg: crate::infra::data::clipboard::ClipboardConfig =
-                serde_json::from_value(value).map_err(|e| e.to_string())?;
-            crate::app::setting_service::apply_clipboard(&app, &cfg).await?;
+            let cfg = crate::app::setting_service::apply_clipboard(&app, value, expected).await?;
             tracing::info!(
                 enabled = cfg.enabled,
                 max_items = cfg.max_items,
                 retention_days = cfg.retention_days,
-                display_pages = cfg.display_pages,
+                max_image_items = cfg.max_image_items,
+                wheel_mode = %cfg.wheel_mode,
                 candidate_limit = cfg.candidate_limit,
                 "剪贴板配置已更新"
             );

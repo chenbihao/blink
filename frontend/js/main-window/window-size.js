@@ -1,67 +1,99 @@
-//! 窗口高度自适配：测 #app 真实渲染高度，回传 resize_window。
-//!
-//! 取代旧的硬编码估算（INPUT_HEIGHT + itemCount*ITEM_HEIGHT）。CSS 的 padding/
-//! 圆角/间距随便调，窗口都自动贴合内容——改样式不必再回头改 JS。
-//!
-//! **maxHeight 踩踏**（翻页不缩窗口）：同一搜索会话内，窗口高度只增不减。
-//! 翻到末页（不足 PAGE_SIZE 条）时窗口不缩小，避免鼠标滚轮溢出到背后窗口。
-//! 新搜索（seq 变化 / clear）时调 `resetMaxHeight()` 归零，让窗口正确收缩。
+//! 内容高度测量与布局会话：合并同一帧的测量，拒绝隐藏/旧会话的回调。
+//! 同一搜索内高度只增不减；新搜索或临时 UI 收回时允许重新基准。
 
 import {appEl} from "./dom.js";
 import {resizeWindow} from "../shared/api.js";
 
-/** 窗口宽度（暂固定，未来可配置）。 */
 const WIDTH = 700;
-
-/** 当前搜索会话内的最大高度（px）。0 表示未初始化。 */
 let maxHeight = 0;
+let windowVisible = false;
+let revision = 0;
+let sequence = 0;
+let generation = 0;
+let pendingFrame = null;
+let pendingRebase = false;
+let clipboard = false;
+let clipboardReady = false;
+let interacted = false;
 
-/**
- * 在下一帧（layout 完成后）测量 #app 实际高度并 resize 窗口。
- * 必须等 rAF：DOM 刚改完直接读高度会拿到旧 layout。
- *
- * maxHeight 机制：同一搜索会话内窗口只增不减。
- * - 当前内容更高 → 更新 maxHeight，窗口长高
- * - 当前内容更矮（末页不足一页）→ 保持 maxHeight，窗口不缩
- * - maxHeight 归零时（新搜索 / clear）→ 按实际内容高度设置
- */
-export function syncWindowSize() {
-    requestAnimationFrame(() => {
-        // offsetHeight 含 padding/border，正是窗口需要的物理内容高度
+function invalidateMeasurement() {
+    generation++;
+    if (pendingFrame !== null) cancelAnimationFrame(pendingFrame);
+    pendingFrame = null;
+    pendingRebase = false;
+}
+
+/** 旧的模式预告/显隐事件不得覆盖较新的唤起。 */
+export function acceptsWindowRevision(nextRevision) {
+    return Number.isSafeInteger(nextRevision) && nextRevision >= revision;
+}
+
+/** 后端是可见性真源；返回 false 表示旧事件，调用方须连同 UI 复位一起丢弃。 */
+export function setWindowVisibility(visible, nextRevision) {
+    if (!acceptsWindowRevision(nextRevision)) return false;
+    if (nextRevision !== revision || visible !== windowVisible) {
+        invalidateMeasurement();
+        sequence = 0;
+        interacted = false;
+    }
+    revision = nextRevision;
+    windowVisible = visible;
+    return true;
+}
+
+/** 模式开始时首搜尚未完成；布局 ready 只能由当前请求成功/失败的结果确认。 */
+export function setClipboardLayout(active, ready = false) {
+    clipboard = active;
+    clipboardReady = active && ready;
+}
+
+export function markClipboardLayoutReady() {
+    if (!clipboard) return;
+    clipboardReady = true;
+    syncWindowSize();
+}
+
+/** 用户开始操作后及时上报，后台光标结果不能再把列表移走。 */
+export function lockWindowPlacement() {
+    if (!windowVisible || interacted) return;
+    interacted = true;
+    syncWindowSize();
+}
+
+function measure(rebase = false) {
+    if (!windowVisible) return;
+    pendingRebase ||= rebase;
+    if (pendingFrame !== null) return;
+    const myGeneration = generation;
+    const myRevision = revision;
+    pendingFrame = requestAnimationFrame(() => {
+        if (!windowVisible || myGeneration !== generation || myRevision !== revision) return;
+        pendingFrame = null;
         const height = appEl.offsetHeight;
-        if (height > maxHeight) {
-            maxHeight = height;
-        }
-        // 用 minHeight 让 #app 撑满窗口高度（避免 #app 下方出现透明间隙）
+        if (height <= 0) { pendingRebase = false; return; }
+        maxHeight = pendingRebase ? height : Math.max(maxHeight, height);
+        pendingRebase = false;
         appEl.style.minHeight = maxHeight + "px";
-        resizeWindow(WIDTH, maxHeight);
+        resizeWindow(WIDTH, maxHeight, {
+            revision: myRevision, sequence: ++sequence,
+            clipboard, ready: !clipboard || clipboardReady, interacted,
+        }).catch((error) => console.warn("主窗口布局提交失败", error));
     });
 }
 
-/**
- * 归零 maxHeight（新搜索会话开始时调）。
- *
- * 清空 minHeight 内联样式，让 #app 回归内容驱动高度，
- * 随后的 syncWindowSize() 会按实际内容重新踩踏。
- */
+/** DOM 改动后在下一帧测量；多个来源的同步调用只发一次 IPC。 */
+export function syncWindowSize() {
+    measure();
+}
+
 export function resetMaxHeight() {
+    invalidateMeasurement();
     maxHeight = 0;
     appEl.style.minHeight = "";
 }
 
-/**
- * 以当前实际内容重新基准 maxHeight（允许缩小）。
- *
- * 与 syncWindowSize 的区别：syncWindowSize 只增不减（同一会话内窗口只增不减，
- * 避免翻页/流式过程反复 resize）；本函数先清除 minHeight 让 #app 回到内容驱动
- * 高度，再按实际高度重新踩踏——用于临时 UI 移除后窗口需缩回的场景（如 AI 确认卡片）。
- */
 export function resyncWindowSize() {
+    if (!windowVisible) return;
     appEl.style.minHeight = "";
-    requestAnimationFrame(() => {
-        const height = appEl.offsetHeight;
-        maxHeight = height;
-        appEl.style.minHeight = maxHeight + "px";
-        resizeWindow(WIDTH, maxHeight);
-    });
+    measure(true);
 }

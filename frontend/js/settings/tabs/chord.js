@@ -27,6 +27,9 @@ import {normalizeCombo, renderComboHTML} from "../../shared/kbd.js";
 import {canRetryGlobalHotkey, globalHotkeyStatusTextKey, normalizeRecordedGlobalHotkey} from "../../shared/global-hotkey.js";
 
 import {connectConfigActivity, createConfigRefresher, withConfigActivity} from "../../shared/config-sync.js";
+import {createClipboardConfigWriter} from "./chord-clipboard.js";
+
+const clipboardConfigWriter = createClipboardConfigWriter({onError: showChordSaveError});
 let actionsLoadRevision = 0;
 const actionsRefresher = createConfigRefresher({read: readChordActions, apply: renderChordActions});
 export function refreshChordActions() { return actionsRefresher.refresh(); }
@@ -59,7 +62,7 @@ export function initChordTab() {
     // 必须消费后端配置广播，否则首次加载出的 4 项会一直保留到窗口重建。
     listen(EVENTS.CONFIG_CHANGED, (event) => {
         const key = event.payload?.key;
-        if (key === "ai_config" || key === "stt:config") {
+        if (key === "ai_config" || key === "stt:config" || key === "clipboard:config") {
             loadChordActions();
         }
     }).then(loadChordActions).catch((e) => console.error("listen config-changed for chord failed:", e));
@@ -151,6 +154,7 @@ function renderChordActions(data) {
         return;
     }
     confirmedDisabledChordActions = data.disabledChordActions;
+    clipboardConfigWriter.setConfirmed(clipboardCfg);
     replaceConfirmedGlobalBindings(chordBindings);
 
     // Chord id → 副标题（不再用 emoji 图标，标题/副标题足够承载语义）
@@ -1038,7 +1042,7 @@ function bindRowEvents(container) {
     const detail = container.querySelector(".chord-clipboard-detail");
     if (detail) {
         detail.querySelectorAll(".clip-field").forEach((el) => {
-            el.addEventListener("change", () => saveClipboardDetail(container));
+            el.addEventListener("change", () => clipboardConfigWriter.save(el));
             // 阻止 input 内点击冒泡到 header 触发展开
             el.addEventListener("click", (e) => e.stopPropagation());
         });
@@ -1173,44 +1177,6 @@ function flashCombo(comboEl, origCombo, msg) {
             comboEl.textContent = origCombo;
         }
     }, 1500);
-}
-
-/**
- * 保存剪贴板详细配置。
- * 0.25.29：display_pages 不再读写（流式加载退役）；新增 wheel_mode / max_image_items。
- */
-async function saveClipboardDetail(container) {
-    const detail = container.querySelector(".chord-clipboard-detail");
-    if (!detail) return;
-    try {
-        const fullCfg = await invoke("get_config");
-        const clip = fullCfg?.clipboard || {};
-        const wheelMode = detail.querySelector('[data-field="wheel_mode"]')?.value;
-        const maxItems = parseInt(detail.querySelector('[data-field="max_items"]')?.value, 10);
-        const maxImageItems = parseInt(detail.querySelector('[data-field="max_image_items"]')?.value, 10);
-        const retentionDays = parseInt(detail.querySelector('[data-field="retention_days"]')?.value, 10);
-        const searchEnabled = detail.querySelector('[data-field="search_enabled"]')?.checked !== false;
-        const blacklistStr = detail.querySelector('[data-field="blacklist_keywords"]')?.value || "";
-        const blacklist = blacklistStr
-            .split(",")
-            .map((s) => s.trim())
-            .filter(Boolean);
-
-        const newCfg = {
-            enabled: clip.enabled !== false,
-            max_items: isNaN(maxItems) ? 10000 : maxItems,
-            max_image_items: isNaN(maxImageItems) ? 1000 : maxImageItems,
-            retention_days: isNaN(retentionDays) ? 180 : retentionDays,
-            search_enabled: searchEnabled,
-            blacklist_keywords: blacklist,
-            capture_images: clip.capture_images !== false,
-            candidate_limit: clip.candidate_limit ?? 500,
-            wheel_mode: wheelMode === "step" ? "step" : "page",
-        };
-        await saveConfig("clipboard_config", newCfg);
-    } catch (e) {
-        console.error("save clipboard detail failed:", e);
-    }
 }
 
 /**

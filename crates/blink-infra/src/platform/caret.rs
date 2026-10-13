@@ -16,9 +16,12 @@ use windows::Win32::System::Ole::{
     SafeArrayAccessData, SafeArrayDestroy, SafeArrayGetDim, SafeArrayGetLBound, SafeArrayGetUBound,
     SafeArrayUnaccessData,
 };
+use windows::Win32::System::Variant::{VARIANT, VT_BOOL};
 use windows::Win32::UI::Accessibility::{
     IUIAutomationTextPattern, IUIAutomationTextPattern2, IUIAutomationTextRange,
-    TextUnit_Character, UIA_TextPattern2Id, UIA_TextPatternId,
+    IUIAutomationValuePattern, TextPatternRangeEndpoint_End, TextPatternRangeEndpoint_Start,
+    TextUnit_Character, UIA_EditControlTypeId, UIA_IsReadOnlyAttributeId, UIA_TextPattern2Id,
+    UIA_TextPatternId, UIA_ValuePatternId,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GUITHREADINFO, GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId,
@@ -128,7 +131,7 @@ fn caret_via_guithreadinfo(owner_hwnd: Option<isize>) -> Option<RECT> {
 /// 窗口，`GetFocusedElement` 会返回自家元素——拒绝，宁可用鼠标降级也不定错位。
 fn caret_via_uia(owner_hwnd: Option<isize>) -> Option<RECT> {
     let Some(elem) = crate::platform::uia::get_focused_element() else {
-        tracing::debug!("caret: UIA GetFocusedElement 失败");
+        tracing::trace!("caret: UIA GetFocusedElement 失败");
         return None;
     };
     let Some(owner_pid) = owner_process_id(owner_hwnd) else {
@@ -169,15 +172,30 @@ pub fn clipboard_anchor_from_captured(
     if unsafe { elem.0.CurrentIsOffscreen() }.ok()?.as_bool() {
         return None;
     }
-    if let Some(rect) = try_caret_patterns(&elem.0, "captured") {
-        return Some(ClipboardAnchor::Caret(rect));
+    let control_type = unsafe { elem.0.CurrentControlType() }.ok()?.0;
+    let read_only = unsafe {
+        elem.0
+            .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+    }
+    .ok()
+    .and_then(|pattern| unsafe { pattern.CurrentIsReadOnly() }.ok())
+    .map(|value| value.as_bool());
+    if read_only == Some(true) {
+        tracing::debug!(control_type, "clipboard-caret: 只读控件，保持主窗口兜底位置");
+        return None;
+    }
+    if let Some(anchor) = try_clipboard_caret_patterns(&elem.0, control_type, read_only) {
+        return Some(anchor);
     }
     // TextPattern 不支持时退化为控件包围矩形——0.24.7 实测 Chrome 地址栏
     // （OmniboxViewViews）等自绘 Edit 控件不实现 TextPattern，caret 无解；
-    // 而"定位到输入框附近"的语义本就是控件级近似，Edit/Document 控件的
-    // 包围矩形比 caret 更稳（任何输入控件都有）。非输入控件不兜底——
-    // 避免把主窗定位到整窗/整页矩形。
-    control_rect_fallback(&elem.0).map(ClipboardAnchor::Control)
+    // 仅 Edit 可使用控件级近似。Document 无可靠插入点时使用主窗口兜底，不能再用
+    // 文档矩形绕过选区可信度校验；本规则只影响定位，不影响显式粘贴。
+    if control_type == UIA_EditControlTypeId.0 {
+        return control_rect_fallback(&elem.0).map(ClipboardAnchor::Control);
+    }
+    tracing::debug!(control_type, "clipboard-caret: 无可信输入锚点，保持主窗口兜底位置");
+    None
 }
 
 /// 输入控件包围矩形兜底：仅 Edit（50004）/ Document（50030）类控件。
@@ -193,28 +211,40 @@ fn control_rect_fallback(
     const UIA_DOCUMENT_CONTROL_TYPE: i32 = 50030;
     let control_type = unsafe { elem.CurrentControlType() }.ok()?.0;
     if control_type != UIA_EDIT_CONTROL_TYPE && control_type != UIA_DOCUMENT_CONTROL_TYPE {
-        tracing::debug!(control_type, "caret: 非输入控件，不做控件矩形兜底");
+        tracing::trace!(control_type, "caret: 非输入控件，不做控件矩形兜底");
         return None;
     }
     let rect = unsafe { elem.CurrentBoundingRectangle() }.ok()?;
     if rect.right <= rect.left || rect.bottom <= rect.top {
         return None;
     }
-    tracing::debug!("caret: TextPattern 不支持，退化为输入控件包围矩形");
+    tracing::trace!("caret: TextPattern 不支持，退化为输入控件包围矩形");
     Some(rect)
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum ClipboardAnchor {
+    /// TextPattern2 返回的插入光标。
     Caret(RECT),
+    /// 已确认可编辑且零长度的 TextPattern.GetSelection 回退。
+    EditableInsertion(RECT),
     Control(RECT),
     Mouse(POINT),
 }
 
 impl ClipboardAnchor {
+    pub fn source(&self) -> &'static str {
+        match self {
+            Self::Caret(_) => "uia_caret_range",
+            Self::EditableInsertion(_) => "editable_insertion",
+            Self::Control(_) => "input_control",
+            Self::Mouse(_) => "mouse",
+        }
+    }
+
     pub fn point(&self) -> POINT {
         match self {
-            Self::Caret(rect) | Self::Control(rect) => POINT {
+            Self::Caret(rect) | Self::EditableInsertion(rect) | Self::Control(rect) => POINT {
                 x: rect.left,
                 y: rect.top,
             },
@@ -226,7 +256,7 @@ impl ClipboardAnchor {
     /// 阈值按目标屏 DPI 缩放，避免高 DPI 下正常输入框被误判。
     pub fn is_usable(&self, work: &RECT, owner: Option<&RECT>, dpi: u32) -> bool {
         let (rect, max_height) = match self {
-            Self::Caret(rect) => (rect, 64),
+            Self::Caret(rect) | Self::EditableInsertion(rect) => (rect, 64),
             Self::Control(rect) => (rect, 96),
             Self::Mouse(_) => return true,
         };
@@ -262,6 +292,31 @@ fn clipboard_allowed_rect(work: &RECT, owner: Option<&RECT>) -> RECT {
 
 /// 可信光标/紧凑控件在下方展开，底部空间不足时翻到上方。
 /// 鼠标回退只钳制工作区，避免被原应用边界拉回左上角或另一块屏。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClipboardPopupSide {
+    Above,
+    Below,
+}
+
+pub fn clipboard_popup_side(
+    anchor: &ClipboardAnchor,
+    win_h: i32,
+    work: &RECT,
+    owner: Option<&RECT>,
+) -> ClipboardPopupSide {
+    let (bottom, gap, allowed) = match anchor {
+        ClipboardAnchor::Caret(rect)
+        | ClipboardAnchor::EditableInsertion(rect)
+        | ClipboardAnchor::Control(rect) => (rect.bottom, 8, clipboard_allowed_rect(work, owner)),
+        ClipboardAnchor::Mouse(point) => (point.y, 12, *work),
+    };
+    if bottom + gap + win_h <= allowed.bottom {
+        ClipboardPopupSide::Below
+    } else {
+        ClipboardPopupSide::Above
+    }
+}
+
 pub fn compute_clipboard_popup_placement(
     anchor: &ClipboardAnchor,
     win_w: i32,
@@ -269,8 +324,23 @@ pub fn compute_clipboard_popup_placement(
     work: &RECT,
     owner: Option<&RECT>,
 ) -> (i32, i32) {
+    let side = clipboard_popup_side(anchor, win_h, work, owner);
+    compute_clipboard_popup_placement_on_side(anchor, win_w, win_h, work, owner, side)
+}
+
+/// 本次唤起确定展开方向后，内容变高仍沿相同边展开，不重新上下翻转。
+pub fn compute_clipboard_popup_placement_on_side(
+    anchor: &ClipboardAnchor,
+    win_w: i32,
+    win_h: i32,
+    work: &RECT,
+    owner: Option<&RECT>,
+    side: ClipboardPopupSide,
+) -> (i32, i32) {
     let (x, top, bottom, gap, allowed) = match anchor {
-        ClipboardAnchor::Caret(rect) | ClipboardAnchor::Control(rect) => (
+        ClipboardAnchor::Caret(rect)
+        | ClipboardAnchor::EditableInsertion(rect)
+        | ClipboardAnchor::Control(rect) => (
             rect.left,
             rect.top,
             rect.bottom,
@@ -280,7 +350,7 @@ pub fn compute_clipboard_popup_placement(
         ClipboardAnchor::Mouse(point) => (point.x + 12, point.y, point.y, 12, *work),
     };
     let below_y = bottom + gap;
-    let y = if below_y + win_h <= allowed.bottom {
+    let y = if side == ClipboardPopupSide::Below {
         below_y
     } else {
         top - gap - win_h
@@ -294,7 +364,120 @@ pub fn compute_clipboard_popup_placement(
     )
 }
 
-/// 在焦点元素上依次尝试 TextPattern2.GetCaretRange / TextPattern.GetSelection。
+#[derive(Clone, Copy, Debug)]
+enum ClipboardRangeSource {
+    CaretRange,
+    Selection,
+}
+
+/// 先确认语义再读取/扩展矩形，避免普通文档选区的末行被误当作插入光标。
+fn accepts_clipboard_range(
+    source: ClipboardRangeSource,
+    control_type: i32,
+    read_only: Option<bool>,
+    collapsed: Option<bool>,
+) -> bool {
+    if collapsed != Some(true) || read_only == Some(true) {
+        return false;
+    }
+    match source {
+        ClipboardRangeSource::CaretRange => {
+            read_only == Some(false) || control_type == UIA_EditControlTypeId.0
+        }
+        ClipboardRangeSource::Selection => read_only == Some(false),
+    }
+}
+
+fn strict_variant_bool(value: &VARIANT) -> Option<bool> {
+    // UIA 的 mixed/not-supported 为保留对象；VT_EMPTY 也不能强转成 false。
+    (value.vt() == VT_BOOL)
+        .then(|| bool::try_from(value).ok())
+        .flatten()
+}
+
+fn clipboard_range_evidence(range: &IUIAutomationTextRange) -> (Option<bool>, Option<bool>) {
+    let read_only = unsafe { range.GetAttributeValue(UIA_IsReadOnlyAttributeId) }
+        .ok()
+        .as_ref()
+        .and_then(strict_variant_bool);
+    let collapsed = unsafe {
+        range.CompareEndpoints(
+            TextPatternRangeEndpoint_Start,
+            range,
+            TextPatternRangeEndpoint_End,
+        )
+    }
+    .ok()
+    .map(|distance| distance == 0);
+    (read_only, collapsed)
+}
+
+/// 元素在 show 前已捕获。show 后原控件 isActive=false 是正常失焦，不能据此
+/// 拒绝它自己的插入点；可编辑性与零长度证据仍必须成立。语音通道保持原策略。
+fn try_clipboard_caret_patterns(
+    elem: &windows::Win32::UI::Accessibility::IUIAutomationElement,
+    control_type: i32,
+    element_read_only: Option<bool>,
+) -> Option<ClipboardAnchor> {
+    if let Ok(pattern) =
+        unsafe { elem.GetCurrentPatternAs::<IUIAutomationTextPattern2>(UIA_TextPattern2Id) }
+    {
+        let mut active = Default::default();
+        if let Ok(range) = unsafe { pattern.GetCaretRange(&mut active) } {
+            let (read_only, collapsed) = clipboard_range_evidence(&range);
+            let read_only = read_only.or(element_read_only);
+            let accepted = accepts_clipboard_range(
+                ClipboardRangeSource::CaretRange,
+                control_type,
+                read_only,
+                collapsed,
+            );
+            tracing::trace!(
+                control_type,
+                ?read_only,
+                ?collapsed,
+                active = active.as_bool(),
+                accepted,
+                "clipboard-caret: GetCaretRange 证据"
+            );
+            if accepted && let Some(rect) = text_range_caret_rect(&range, "captured-caret") {
+                return Some(ClipboardAnchor::Caret(rect));
+            }
+        }
+    }
+    let pattern =
+        unsafe { elem.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId) }.ok()?;
+    let selections = unsafe { pattern.GetSelection() }.ok()?;
+    let count = unsafe { selections.Length() }.ok()?;
+    if count != 1 {
+        tracing::debug!(
+            control_type,
+            count,
+            "clipboard-caret: 非单一插入点，忽略选区定位"
+        );
+        return None;
+    }
+    let range = unsafe { selections.GetElement(0) }.ok()?;
+    let (read_only, collapsed) = clipboard_range_evidence(&range);
+    let read_only = read_only.or(element_read_only);
+    if !accepts_clipboard_range(
+        ClipboardRangeSource::Selection,
+        control_type,
+        read_only,
+        collapsed,
+    ) {
+        tracing::debug!(
+            control_type,
+            ?read_only,
+            ?collapsed,
+            "clipboard-caret: 选区缺少可编辑插入点证据，忽略选区定位"
+        );
+        return None;
+    }
+    text_range_caret_rect(&range, "editable-insertion").map(ClipboardAnchor::EditableInsertion)
+}
+
+/// 通用 caret 查询（语音浮窗）：保持原有 TextPattern2 / GetSelection 策略。
 fn try_caret_patterns(
     elem: &windows::Win32::UI::Accessibility::IUIAutomationElement,
     tag: &str,
@@ -329,11 +512,11 @@ fn try_caret_patterns(
     let Ok(pattern) =
         (unsafe { elem.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId) })
     else {
-        tracing::debug!(tag, "caret: 焦点元素不支持 TextPattern，无法取光标");
+        tracing::trace!(tag, "caret: 焦点元素不支持 TextPattern，无法取光标");
         return None;
     };
     let Ok(selections) = (unsafe { pattern.GetSelection() }) else {
-        tracing::debug!(tag, "caret: GetSelection 调用失败");
+        tracing::trace!(tag, "caret: GetSelection 调用失败");
         return None;
     };
     let count = unsafe { selections.Length() }.unwrap_or(0);
@@ -355,13 +538,13 @@ fn text_range_caret_rect(range: &IUIAutomationTextRange, source: &str) -> Option
         return Some(rect);
     }
     if (unsafe { range.ExpandToEnclosingUnit(TextUnit_Character) }).is_err() {
-        tracing::debug!(source, "caret: range 无矩形且扩展失败");
+        tracing::trace!(source, "caret: range 无矩形且扩展失败");
         return None;
     }
     match read_bounding_rects(range) {
         Some(rect) => Some(rect),
         None => {
-            tracing::debug!(source, "caret: 扩展到单字符后仍无矩形");
+            tracing::trace!(source, "caret: 扩展到单字符后仍无矩形");
             None
         }
     }
@@ -432,6 +615,115 @@ mod tests {
     }
 
     #[test]
+    fn document_text_selections_never_become_insertion_points() {
+        let document = 50030;
+        for read_only in [Some(true), Some(false), None] {
+            assert!(!accepts_clipboard_range(
+                ClipboardRangeSource::Selection,
+                document,
+                read_only,
+                Some(false)
+            ));
+        }
+        // 对应 ZCode 点击正文后保留文本范围的场景，与矩形只有一行无关。
+        assert!(!accepts_clipboard_range(
+            ClipboardRangeSource::Selection,
+            document,
+            Some(true),
+            Some(true)
+        ));
+        assert!(!accepts_clipboard_range(
+            ClipboardRangeSource::Selection,
+            document,
+            None,
+            Some(true)
+        ));
+    }
+
+    #[test]
+    fn editable_document_requires_explicit_zero_length_evidence() {
+        assert!(accepts_clipboard_range(
+            ClipboardRangeSource::Selection,
+            50030,
+            Some(false),
+            Some(true)
+        ));
+        assert!(!accepts_clipboard_range(
+            ClipboardRangeSource::Selection,
+            50030,
+            Some(false),
+            None
+        ));
+        assert!(!accepts_clipboard_range(
+            ClipboardRangeSource::CaretRange,
+            50030,
+            None,
+            Some(true)
+        ));
+        assert!(accepts_clipboard_range(
+            ClipboardRangeSource::CaretRange,
+            50030,
+            Some(false),
+            Some(true)
+        ));
+    }
+
+    #[test]
+    fn edit_caret_can_use_strong_caret_api_but_not_unknown_selection() {
+        let edit = UIA_EditControlTypeId.0;
+        assert!(accepts_clipboard_range(
+            ClipboardRangeSource::CaretRange,
+            edit,
+            None,
+            Some(true)
+        ));
+        assert!(!accepts_clipboard_range(
+            ClipboardRangeSource::CaretRange,
+            edit,
+            Some(true),
+            Some(true)
+        ));
+        assert!(!accepts_clipboard_range(
+            ClipboardRangeSource::Selection,
+            edit,
+            None,
+            Some(true)
+        ));
+        assert!(accepts_clipboard_range(
+            ClipboardRangeSource::Selection,
+            edit,
+            Some(false),
+            Some(true)
+        ));
+    }
+
+    #[test]
+    fn unsupported_read_only_attribute_is_not_coerced_to_editable() {
+        assert_eq!(strict_variant_bool(&VARIANT::default()), None);
+        assert_eq!(strict_variant_bool(&VARIANT::from(0i32)), None);
+        assert_eq!(strict_variant_bool(&VARIANT::from(false)), Some(false));
+        assert_eq!(strict_variant_bool(&VARIANT::from(true)), Some(true));
+    }
+
+    #[test]
+    fn editable_insertion_keeps_caret_geometry_and_reports_its_source() {
+        let anchor = ClipboardAnchor::EditableInsertion(rect(300, 500, 302, 520));
+        assert_eq!(anchor.source(), "editable_insertion");
+        assert!(anchor.is_usable(&work(), None, 96));
+        assert_eq!(
+            compute_clipboard_popup_placement(&anchor, 600, 98, &work(), None),
+            (300, 528)
+        );
+        assert!(
+            !ClipboardAnchor::EditableInsertion(rect(300, 500, 900, 800)).is_usable(
+                &work(),
+                None,
+                96
+            )
+        );
+    }
+
+    #[test]
     fn document_and_medium_editor_rects_do_not_override_mouse_position() {
         // Obsidian 滚动后仍返回容器矩形；即便未达到旧的半屏阈值也不应锚顶部。
         for r in [rect(100, 100, 1800, 1000), rect(100, 100, 900, 450)] {
@@ -493,6 +785,19 @@ mod tests {
             compute_clipboard_popup_placement(&caret, 600, 98, &work(), None),
             (300, 894)
         );
+    }
+
+    #[test]
+    fn chosen_above_side_keeps_bottom_edge_when_content_shrinks() {
+        let caret = ClipboardAnchor::Caret(rect(300, 700, 302, 720));
+        let side = clipboard_popup_side(&caret, 500, &work(), None);
+        assert_eq!(side, ClipboardPopupSide::Above);
+        let (_, tall_y) =
+            compute_clipboard_popup_placement_on_side(&caret, 600, 500, &work(), None, side);
+        let (_, short_y) =
+            compute_clipboard_popup_placement_on_side(&caret, 600, 98, &work(), None, side);
+        assert_eq!(tall_y + 500, 692);
+        assert_eq!(short_y + 98, 692);
     }
 
     #[test]
@@ -569,15 +874,22 @@ mod tests {
             ..Default::default()
         };
         let gti_ok = (unsafe { GetGUIThreadInfo(tid, &mut gti) }).is_ok();
-        println!("[1] GUITHREADINFO: ok={gti_ok} caret_valid={} rcCaret={:?}",
-            !gti.hwndCaret.is_invalid(), gti.rcCaret);
+        println!(
+            "[1] GUITHREADINFO: ok={gti_ok} caret_valid={} rcCaret={:?}",
+            !gti.hwndCaret.is_invalid(),
+            gti.rcCaret
+        );
 
         let Some(elem) = crate::platform::uia::get_focused_element() else {
             println!("[2] UIA GetFocusedElement: 失败");
             return;
         };
-        let class = unsafe { elem.CurrentClassName() }.map(|s| s.to_string()).unwrap_or_default();
-        let control_type = unsafe { elem.CurrentControlType() }.map(|t| t.0).unwrap_or(0);
+        let class = unsafe { elem.CurrentClassName() }
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let control_type = unsafe { elem.CurrentControlType() }
+            .map(|t| t.0)
+            .unwrap_or(0);
         println!("[2] 焦点元素: control_type={control_type} class={class}");
 
         match unsafe { elem.GetCurrentPatternAs::<IUIAutomationTextPattern2>(UIA_TextPattern2Id) } {
@@ -612,19 +924,20 @@ mod tests {
             Err(_) => println!("[4] TextPattern: 不支持"),
         }
 
-        println!(
-            "[0] 当前前台: hwnd={:?} pid={}",
-            fg.0 as isize,
-            unsafe { GetWindowThreadProcessId(fg, None) }
-        );
+        println!("[0] 当前前台: hwnd={:?} pid={}", fg.0 as isize, unsafe {
+            GetWindowThreadProcessId(fg, None)
+        });
 
         // [MSAA] OBJID_CARET 探测：Java/Swing 系与部分自绘编辑器的备选光标通道
         unsafe {
-            use windows::Win32::System::Variant::{VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_I4};
+            use windows::Win32::System::Variant::{
+                VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_I4,
+            };
             use windows::Win32::UI::Accessibility::{AccessibleObjectFromWindow, IAccessible};
             use windows::Win32::UI::WindowsAndMessaging::OBJID_CARET;
             let mut pv: *mut core::ffi::c_void = std::ptr::null_mut();
-            if (AccessibleObjectFromWindow(fg, OBJID_CARET.0 as u32, &IAccessible::IID, &mut pv)).is_ok()
+            if (AccessibleObjectFromWindow(fg, OBJID_CARET.0 as u32, &IAccessible::IID, &mut pv))
+                .is_ok()
                 && !pv.is_null()
             {
                 let caret: IAccessible = windows::core::Type::from_abi(pv).unwrap();
@@ -655,6 +968,9 @@ mod tests {
             "[5] get_caret_rect_for(owner=前台): {:?}",
             get_caret_rect_for(Some(fg_raw))
         );
-        println!("[5] get_caret_rect_for(None): {:?}", get_caret_rect_for(None));
+        println!(
+            "[5] get_caret_rect_for(None): {:?}",
+            get_caret_rect_for(None)
+        );
     }
 }

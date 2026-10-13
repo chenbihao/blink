@@ -143,4 +143,13 @@ const clip = (hitId, score = 0.9) => ({
     h.context.removeItems(items.map((x) => x.actions[0].hitId));
     assert.equal(h.context.getLoadedCount(), 0, '全部移除后清零');
 }
-console.log('results 视口模型：page 页对齐、step 平移边界、流式追加去重/seq 竞态、局部移除夹紧通过');
+{
+    const h = setup();
+    h.context.render(Array.from({length: 20}, (_, i) => clip(`config${i}`)), 1);
+    h.context.scrollItems(3);
+    h.context.refreshMaxResultsFromConfigData({page_size: 7});
+    assert.equal(h.resultsEl.children.length, 7, '页大小热更新同步重绘 DOM');
+    assert.equal(h.context.getNth(1).actions[0].hitId, 'config3', '热更新保留浏览位置');
+    assert.equal(h.context.getLoadedCount(), 20, '已加载数据不重查');
+}
+console.log('results 视口模型：page/step、流式追加、局部移除与页大小热更新通过');

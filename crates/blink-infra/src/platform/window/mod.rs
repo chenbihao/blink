@@ -6,6 +6,15 @@
 #[cfg(target_os = "windows")]
 mod windows;
 
+#[cfg(target_os = "windows")]
+mod main_placement;
+
+#[cfg(target_os = "windows")]
+pub use main_placement::{
+    MainWindowLayoutRequest, MainWindowLayoutState, MainWindowPlacement, emit_main_window_shown,
+    main_window_layout_state, main_window_revision, resize_main_window, spawn_main_window_caret_refine,
+};
+
 // 0.15.8：窗口枚举（智能吸附）
 #[cfg(target_os = "windows")]
 mod list;
@@ -34,7 +43,7 @@ pub use windows::{
     mark_window_page_loading, mark_window_page_ready, on_focused, open_settings, place_at_physical,
     preheat_secondary_windows, refresh_pin_image, refresh_pin_image_by_label, restore_foreground,
     restore_foreground_g2, set_app_exiting, set_context_menu_payload, set_last_external_hwnd,
-    cursor_pos_virtual, show_main_window_with_cursor, spawn_main_window_caret_refine,
+    cursor_pos_virtual, show_main_window_with_placement,
     set_main_ai_active, set_sticky_close_fallback, show_chat_window, show_content_editor_window,
     show_image_editor_window, show_main_window, show_pin_window, show_screenshot_overlay,
     show_sticky_manager_window, show_sticky_window, show_theme_debug_window, show_voice_overlay,

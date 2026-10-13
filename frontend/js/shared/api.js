@@ -128,8 +128,8 @@ export function hideWindow() {
 }
 
 /** 调整主窗口大小（弹性窗口）。 */
-export function resizeWindow(width, height) {
-    return invoke("resize_window", {width, height});
+export function resizeWindow(width, height, layout) {
+    return invoke("resize_window", {width, height, layout});
 }
 
 /** 打开文件/快捷方式所在文件夹（explorer 定位选中）。 */

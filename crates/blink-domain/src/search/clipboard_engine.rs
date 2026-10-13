@@ -224,9 +224,7 @@ impl ClipboardEngine {
                                 query_recent_image_list_after(&self.cache_pool, c, probe as i64)
                                     .await
                             }
-                            None => {
-                                query_recent_image_list(&self.cache_pool, probe as i64).await
-                            }
+                            None => query_recent_image_list(&self.cache_pool, probe as i64).await,
                         }
                     }
                 }
@@ -303,7 +301,11 @@ impl ClipboardEngine {
             combined.push((meta.created_at, meta.id.clone(), ClipboardEntry::Text(meta)));
         }
         for item in image_items {
-            combined.push((item.created_at, item.id.clone(), ClipboardEntry::Image(item)));
+            combined.push((
+                item.created_at,
+                item.id.clone(),
+                ClipboardEntry::Image(item),
+            ));
         }
         combined.sort_by_key(|(created_at, id, _)| std::cmp::Reverse((*created_at, id.clone())));
 
@@ -635,7 +637,7 @@ fn format_subtitle(meta: &ClipboardMeta, lang: &str) -> String {
 /// nucleo fuzzy 匹配 `ClipboardMeta` 列表，按 preview 字段打分。
 ///
 /// 与 `infra::data::clipboard::search` 逻辑一致，但作用于 `ClipboardMeta`（不含 text）。
-/// 返回按 score 降序排列的 top-N `ClipboardMeta`。
+/// 匹配仅决定命中；截断前按时间/id 排序，与分页游标保持同序。
 fn fuzzy_match_metas(metas: &[ClipboardMeta], query: &str, limit: usize) -> Vec<ClipboardMeta> {
     use nucleo::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
     use nucleo::{Config, Matcher, Utf32Str};
@@ -650,21 +652,21 @@ fn fuzzy_match_metas(metas: &[ClipboardMeta], query: &str, limit: usize) -> Vec<
     );
     let mut buf = Vec::new();
 
-    let mut scored: Vec<(u32, ClipboardMeta)> = metas
+    let mut matched: Vec<ClipboardMeta> = metas
         .iter()
         .filter_map(|meta| {
             let haystack = Utf32Str::new(&meta.preview, &mut buf);
-            let score = pattern.score(haystack, &mut matcher)?;
-            Some((score, meta.clone()))
+            pattern.score(haystack, &mut matcher)?;
+            Some(meta.clone())
         })
         .collect();
 
-    scored.sort_by_key(|x| std::cmp::Reverse(x.0));
-    scored
-        .into_iter()
-        .take(limit)
-        .map(|(_, meta)| meta)
-        .collect()
+    matched.sort_by(|a, b| {
+        b.created_at
+            .cmp(&a.created_at)
+            .then_with(|| b.id.cmp(&a.id))
+    });
+    matched.into_iter().take(limit).collect()
 }
 
 #[cfg(test)]
@@ -990,7 +992,9 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .unwrap();
-        blink_infra::data::clipboard::init_db(&text_pool).await.unwrap();
+        blink_infra::data::clipboard::init_db(&text_pool)
+            .await
+            .unwrap();
         let now = chrono::Utc::now().timestamp();
         for (id, text, at) in [
             ("clip_100", "needle in haystack", now),
@@ -1016,7 +1020,9 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .unwrap();
-        blink_infra::data::clipboard_images::init_db(&cache_pool).await.unwrap();
+        blink_infra::data::clipboard_images::init_db(&cache_pool)
+            .await
+            .unwrap();
         for (id, app, at) in [
             ("clipimg_200", "needleapp.exe", now),
             ("clipimg_201", "otherapp.exe", now - 10),
@@ -1080,11 +1086,17 @@ mod tests {
     async fn kind_filter_applies_to_fuzzy_search() {
         let engine = engine_with_mixed_data().await;
         // "needle" 同时命中文本 preview 与图片 source_app
-        let text_hits = engine.search_page("needle", ClipKind::Text, None, 0).await.items;
+        let text_hits = engine
+            .search_page("needle", ClipKind::Text, None, 0)
+            .await
+            .items;
         assert_eq!(text_hits.len(), 1);
         assert!(!is_image_item(&text_hits[0]));
 
-        let image_hits = engine.search_page("needle", ClipKind::Image, None, 0).await.items;
+        let image_hits = engine
+            .search_page("needle", ClipKind::Image, None, 0)
+            .await
+            .items;
         assert_eq!(image_hits.len(), 1);
         assert!(is_image_item(&image_hits[0]));
     }
@@ -1123,7 +1135,9 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .unwrap();
-        blink_infra::data::clipboard::init_db(&text_pool).await.unwrap();
+        blink_infra::data::clipboard::init_db(&text_pool)
+            .await
+            .unwrap();
         let base = 10_000i64;
         for i in 0..10 {
             let at = base - i; // 递减时间 → id clip_{i} 与时间序一致
@@ -1180,7 +1194,9 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .unwrap();
-        blink_infra::data::clipboard::init_db(&text_pool).await.unwrap();
+        blink_infra::data::clipboard::init_db(&text_pool)
+            .await
+            .unwrap();
         let base = 30_000i64;
         for i in 0..30 {
             let at = base - i;
@@ -1219,7 +1235,9 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .unwrap();
-        blink_infra::data::clipboard::init_db(&text_pool).await.unwrap();
+        blink_infra::data::clipboard::init_db(&text_pool)
+            .await
+            .unwrap();
         // 带 query 路径走 retention_days（默认 30 天）窗口，数据必须新鲜
         let base = chrono::Utc::now().timestamp();
         for i in 0..5 {
@@ -1228,8 +1246,16 @@ mod tests {
                 &text_pool,
                 &blink_infra::data::clipboard::ClipboardItem {
                     id: format!("clip_{i}"),
-                    text: format!("needle {i}"),
-                    preview: format!("needle {i}"),
+                    text: if i == 0 {
+                        "n e e d l e".into()
+                    } else {
+                        format!("needle {i}")
+                    },
+                    preview: if i == 0 {
+                        "n e e d l e".into()
+                    } else {
+                        format!("needle {i}")
+                    },
                     created_at: at,
                     source_app: None,
                     hit_count: 0,
@@ -1243,7 +1269,9 @@ mod tests {
         let mut collected: Vec<String> = Vec::new();
         let mut cursor = None;
         loop {
-            let page = engine.search_page("needle", ClipKind::Text, cursor, 2).await;
+            let page = engine
+                .search_page("needle", ClipKind::Text, cursor, 2)
+                .await;
             collected.extend(page.items.iter().map(|x| x.id.clone()));
             match page.next_cursor {
                 Some(c) => cursor = Some(c),
@@ -1253,6 +1281,13 @@ mod tests {
         assert_eq!(collected.len(), 5);
         let unique: std::collections::HashSet<_> = collected.iter().cloned().collect();
         assert_eq!(unique.len(), 5, "fuzzy 流式不得重复");
+        assert_eq!(
+            collected,
+            (0..5)
+                .map(|i| format!("clipboard:clip_{i}"))
+                .collect::<Vec<_>>(),
+            "弱匹配的新条目不能被较旧高分匹配挤出后由游标跳过"
+        );
     }
 
     /// 测试用空 cache pool（图片表无数据场景；All 合并只出文本）。
@@ -1262,7 +1297,9 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .unwrap();
-        blink_infra::data::clipboard_images::init_db(&pool).await.unwrap();
+        blink_infra::data::clipboard_images::init_db(&pool)
+            .await
+            .unwrap();
         pool
     }
 }

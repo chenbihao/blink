@@ -38,7 +38,8 @@ function setup() {
         statusbar: {clearOverride: noop, setOverride: noop},
         document: {body: {classList: {add: noop, remove: noop}}},
         dismissFeedback: () => {feedback = null;}, showFeedback: message => {feedback = message;},
-        syncWindowSize: noop, resyncWindowSize: noop, t: key => key,
+        syncWindowSize: noop, resyncWindowSize: noop,
+        setClipboardLayout: noop, markClipboardLayoutReady: noop, t: key => key,
         setTimeout: callback => {timers.set(++timerId, callback); return timerId;},
         clearTimeout: id => {timers.delete(id);},
         searchClipboard: (query, seq, kind, cursor, batch) => {
@@ -215,6 +216,34 @@ for (const fail of [false, true]) {
     await pending;
     assert.equal(h.hiddenWindows, 1, '便签打开后主窗隐藏');
 }
+{
+    const h = setup();
+    selection.toggleSelection('a');
+    const pending = h.context.batchEdit();
+    await flush();
+    h.context.reset(); h.context.enter();
+    h.editors[0].resolve(); await pending;
+    assert.equal(h.hiddenWindows, 0, '旧编辑器打开完成不能隐藏重开的主窗');
+}
+{
+    const h = setup();
+    selection.toggleSelection('a');
+    const pending = h.context.batchDelete();
+    h.context.reset(); h.context.enter();
+    selection.toggleSelection('a');
+    h.deletes[0].resolve(); await pending;
+    assert.deepEqual(selection.getSelectedKeys(), ['a'], '旧删除不能清理新会话同 id 的选择');
+    assert.equal(h.removed.length, 0);
+}
+{
+    const h = setup();
+    const text = deferred();
+    h.context.getClipboardText = () => text.promise;
+    const pending = h.context.activateByData({actions: [{kind: 'copy', hitId: 'a'}]});
+    h.context.reset(); h.context.enter();
+    text.resolve('old text'); await pending;
+    assert.equal(h.pastes.length, 0, '旧单条全文取回不能向新会话目标发起粘贴');
+}
 
 // ── 0.25.29 流式加载状态机 ─────────────────────────────────────────────────
 // 真实链路：doSearch 设置游标后自己调 maybeLoadMore（修复前 render 阶段触发时
@@ -289,6 +318,35 @@ for (const fail of [false, true]) {
     });
     await flush();
     assert.equal(h.requests.length, 1, '距底充足不预取');
+}
+{
+    const h = setup();
+    assert.equal(h.context.isStepWheel(), true, '首次读取前默认逐条，与设置/后端一致');
+    const revision = h.context.getWheelRevision();
+    h.context.refreshWheelMode({wheel_mode: 'page'});
+    assert.equal(h.context.isStepWheel(), false);
+    assert.ok(h.context.getWheelRevision() > revision, '模式切换作废滚轮余量');
+    h.context.refreshWheelMode({wheel_mode: 'step'});
+    assert.equal(h.context.isStepWheel(), true, '配置更新立即生效，不重进模式');
+}
+for (const oldFails of [false, true]) {
+    const h = setup();
+    h.nearTail = true;
+    h.requests[0].resolve({entries: [{}], has_more: true, next_cursor: {created_at: 100, id: 'old'}});
+    await flush();
+    h.input('new'); h.tick();
+    h.requests[2].resolve({entries: [{}], has_more: true, next_cursor: {created_at: 90, id: 'new'}});
+    await flush();
+    assert.equal(h.requests.length, 4, '旧追加未完成不阻塞新查询预取');
+    if (oldFails) h.requests[1].reject(new Error('old failure'));
+    else h.requests[1].resolve({entries: [{}], has_more: false});
+    await flush();
+    assert.equal(h.context.getStreamInfo().hasMore, true, '旧追加失败/成功不能关闭新流');
+    h.context.onPageChanged();
+    assert.equal(h.requests.length, 4, '旧 finally 不能解除新追加 single-flight');
+    h.requests[3].resolve({entries: [{}], has_more: false});
+    await flush();
+    assert.equal(h.appends.length, 1);
 }
 // ── 0.25.29 Ctrl+A 全选实时提取（流式追加覆盖） ────────────────────────────
 {

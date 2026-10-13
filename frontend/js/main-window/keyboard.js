@@ -34,6 +34,11 @@ export function init() {
     // 保持满页高度，#results 下方可能有空白区域（属于 #app），监听 appEl 可覆盖
     // 全窗口，滚轮不溢出到背后窗口。
     appEl.addEventListener("wheel", (e) => {
+        const revision = clipboardMode.getWheelRevision();
+        if (revision !== wheelRevision || !clipboardMode.isActive()) {
+            wheelAccum = 0;
+            wheelRevision = revision;
+        }
         // 0.18.0: AI 模式放行默认滚动（让 #ai-display 可滚），搜索模式仍 preventDefault + 翻页
         if (aiMode.isActive()) return;
         // 0.18.6: 命令模式无结果可翻页，放行默认行为
@@ -44,7 +49,9 @@ export function init() {
         if (clipboardMode.isActive() && clipboardMode.isStepWheel()) {
             e.preventDefault();
             if (!results.hasItems()) return;
-            wheelAccum += e.deltaY;
+            const delta = e.deltaY * (e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? WHEEL_STEP : 1);
+            if (wheelAccum * delta < 0) wheelAccum = 0;
+            wheelAccum += delta;
             const steps = Math.trunc(Math.abs(wheelAccum) / WHEEL_STEP);
             if (steps > 0) {
                 const dir = wheelAccum > 0 ? 1 : -1;
@@ -58,7 +65,7 @@ export function init() {
         if (!results.hasItems()) return;
         if (e.deltaY < 0) {
             results.pageUp(); // 向上滚 → 上一页（等价于 PageUp）
-        } else {
+        } else if (e.deltaY > 0) {
             results.pageDown(); // 向下滚 → 下一页（等价于 PageDown）
         }
     });
@@ -67,6 +74,7 @@ export function init() {
 /** 0.25.29: step 滚轮累积器——deltaY 累积，每满一格（约一次标准滚轮刻度）
  *  平移 1 条；触摸板高频小 delta 需累积，避免平移过快。 */
 let wheelAccum = 0;
+let wheelRevision = -1;
 /** 一格滚轮的 deltaY 基准（标准滚轮刻度 ±100/120，取 100）。 */
 const WHEEL_STEP = 100;
 

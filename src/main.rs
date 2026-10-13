@@ -1537,6 +1537,7 @@ app::commands::generate_palette_schemes,
             app::commands::show_theme_debug_cmd, // 0.25.11 主题调试台入口
             app::commands::debug_uia_focus, // 0.25.21 焦点控件 UIA 诊断
             app::commands::resize_window,
+            app::commands::get_main_window_layout_state,
             app::commands::get_config,
             app::commands::set_config,
             app::commands::reset_config,
