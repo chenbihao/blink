@@ -28,9 +28,13 @@ use std::sync::{Arc, RwLock};
 use sqlx::SqlitePool;
 
 use super::engine::{Lane, QueryContext, SearchAction, SearchEngine, SearchItem};
-use blink_infra::data::clipboard::{ClipboardMeta, query_recent_days_meta, query_recent_meta};
+use blink_infra::data::clipboard::{
+    ClipboardCursor, ClipboardMeta, query_recent_days_meta, query_recent_days_meta_after,
+    query_recent_meta, query_recent_meta_after,
+};
 use blink_infra::data::clipboard_images::{
-    ClipboardImageListItem, query_recent_image_list, search_image_list,
+    ClipboardImageListItem, query_recent_image_list, query_recent_image_list_after,
+    search_image_list, search_image_list_after,
 };
 
 /// Engine id — 对应 `SearchEngine::id()` 与 `Route::EngineTakeover.engine_id`。
@@ -40,16 +44,14 @@ pub const ENGINE_ID: &str = "clipboard";
 /// engine 场景不做首拼弱信号派生（本体数据信号天然强，"剪贴板" 不会误命中）。
 pub const TRIGGERS: &[&str] = &["剪贴板", "clip", "jtb", "jiantieban"];
 
-/// display_pages 默认值（与 ClipboardConfig::display_pages 默认值一致 = 3）。
-const DEFAULT_DISPLAY_PAGES: usize = 3;
-/// display_pages 范围下限/上限。
-const DISPLAY_PAGES_MIN: usize = 1;
-const DISPLAY_PAGES_MAX: usize = 20;
 /// 默认 page_size（与 SearchConfig::page_size 默认值一致）。
 const DEFAULT_PAGE_SIZE: usize = 9;
-/// effective_limit 下限保护：至少返回 1 条。
+/// 0.25.29：首屏 = page_size × 2（首屏 + 预取一屏），后续流式每批由前端传 batch。
+const FIRST_BATCH_PAGES: usize = 2;
+/// 单批下限保护：至少返回 1 条。
 const EFFECTIVE_LIMIT_MIN: usize = 1;
-/// effective_limit 上限保护：防一次拉太多拖慢 UI。
+/// 单批上限保护：防一次拉太多拖慢 UI（0.25.29 起是单批钳制，
+/// 会话总量保护在前端 2000 条，不再承担一次性上限职责）。
 const EFFECTIVE_LIMIT_MAX: usize = 400;
 
 /// 搜索候选池上限默认值（与 `ClipboardConfig::candidate_limit` 默认值一致）。
@@ -84,18 +86,27 @@ impl ClipKind {
     }
 }
 
+/// 0.25.29：流式分页结果——本批条目 + 推进游标 + 是否可能还有下一批。
+///
+/// `next_cursor` 是本批最后一条的 `(created_at, id)`；`has_more` 由
+/// 「探测多拉 1 条后仍有剩余」判定。两者一致：`has_more == false` 时
+/// `next_cursor` 为 None（前端不再发起追加）。
+#[derive(Debug, Clone)]
+pub struct ClipboardPageResult {
+    pub items: Vec<SearchItem>,
+    pub next_cursor: Option<ClipboardCursor>,
+    pub has_more: bool,
+}
+
 pub struct ClipboardEngine {
     pool: SqlitePool,
     /// cache 库——clipboard_images 表所在（0.16.4 图片历史）。
     cache_pool: SqlitePool,
     /// UI 语言快照,用于 subtitle 时间描述 zh/en 切换（0.8.5.1 §6.6）。
-    /// 与 SearchService.language 联动:`SearchService::update_language` 转发到本 engine。
+    /// 与 `SearchService` 联动:`SearchService::update_language` 转发到本 engine。
     language: Arc<RwLock<String>>,
-    /// 剪贴板模式一次加载几页（`display_pages` 配置项）。
-    /// 与 `SearchService` 联动：`set_config("clipboard_config")` 时 downcast 转发到本 engine。
-    display_pages: Arc<RwLock<usize>>,
     /// 搜索结果每页条数快照（`page_size`，来自 SearchConfig）。
-    /// effective_limit = display_pages × page_size。
+    /// 0.25.29：首屏 = page_size × 2（display_pages 已退役）。
     page_size: Arc<RwLock<usize>>,
     /// 搜索候选池上限快照（`candidate_limit` 配置项）。
     /// 控制搜索时拉多少条元数据做 fuzzy 匹配。默认 500。
@@ -110,7 +121,6 @@ impl ClipboardEngine {
             pool,
             cache_pool,
             language: Arc::new(RwLock::new("zh".to_string())),
-            display_pages: Arc::new(RwLock::new(DEFAULT_DISPLAY_PAGES)),
             page_size: Arc::new(RwLock::new(DEFAULT_PAGE_SIZE)),
             candidate_limit: Arc::new(RwLock::new(DEFAULT_CANDIDATE_LIMIT)),
             retention_days: Arc::new(RwLock::new(30)),
@@ -122,19 +132,8 @@ impl ClipboardEngine {
         *self.language.write().unwrap() = lang;
     }
 
-    /// 更新剪贴板模式加载页数（设置页 `clipboard_config` 保存时转发）。
-    /// 自动 clamp 到 `[DISPLAY_PAGES_MIN, DISPLAY_PAGES_MAX]`，非法值兜底默认值。
-    pub fn update_display_pages(&self, pages: u32) {
-        let clamped = if (DISPLAY_PAGES_MIN..=DISPLAY_PAGES_MAX).contains(&(pages as usize)) {
-            pages as usize
-        } else {
-            DEFAULT_DISPLAY_PAGES
-        };
-        *self.display_pages.write().unwrap() = clamped;
-    }
-
     /// 更新搜索结果每页条数（`SearchConfig::page_size` 变化时转发）。
-    /// effective_limit = display_pages × page_size。
+    /// 0.25.29：首屏 = page_size × 2、流式每批 page_size。
     pub fn update_page_size(&self, page_size: u32) {
         let clamped = if page_size == 0 {
             DEFAULT_PAGE_SIZE
@@ -144,11 +143,10 @@ impl ClipboardEngine {
         *self.page_size.write().unwrap() = clamped;
     }
 
-    /// 计算 effective limit = display_pages × page_size，钳制到 [1, 400]。
-    fn effective_limit(&self) -> usize {
-        let pages = *self.display_pages.read().unwrap();
+    /// 首屏加载条数 = page_size × 2，钳制到 [1, 400]。
+    fn first_batch_limit(&self) -> usize {
         let ps = *self.page_size.read().unwrap();
-        let limit = pages.saturating_mul(ps);
+        let limit = ps.saturating_mul(FIRST_BATCH_PAGES);
         limit.clamp(EFFECTIVE_LIMIT_MIN, EFFECTIVE_LIMIT_MAX)
     }
 
@@ -167,12 +165,34 @@ impl ClipboardEngine {
         *self.retention_days.write().unwrap() = days;
     }
 
-    /// 剪贴板模式搜索（0.25.23 起带类型筛选）。
+    /// 剪贴板模式搜索（0.25.23 起带类型筛选；0.25.29 起带 keyset 游标分页）。
     ///
     /// kind 只决定查哪张表：Text 跳过图片查询、Image 跳过文本查询（分表存储，
     /// 筛选即下推），All 与历史行为一致（两表并行合并按时间倒序）。
-    pub async fn search_with_kind(&self, arg: &str, kind: ClipKind) -> Vec<SearchItem> {
-        let limit = self.effective_limit() as i64;
+    ///
+    /// 游标协议：`cursor` 是上一批末条的 `(created_at, id)`，两表共用（排序键
+    /// 同构）；SQL 条件与 Rust 合并比较器统一为 `(created_at, id 字符串)` 序。
+    /// 每表探测性多拉 1 条判定 `has_more`，实际只返回 `batch` 条。
+    /// 监听器持续入库顶置不影响分页（keyset 抗漂移），禁用 OFFSET。
+    pub async fn search_page(
+        &self,
+        arg: &str,
+        kind: ClipKind,
+        cursor: Option<ClipboardCursor>,
+        batch: usize,
+    ) -> ClipboardPageResult {
+        // batch 钳制：0 → 按位置兜底（首批 = 首屏两页，追加 = 一页 page_size），
+        // 上限 400 防脏参数拖垮 UI
+        let batch = if batch == 0 {
+            if cursor.is_none() {
+                self.first_batch_limit()
+            } else {
+                *self.page_size.read().unwrap()
+            }
+        } else {
+            batch.clamp(EFFECTIVE_LIMIT_MIN, EFFECTIVE_LIMIT_MAX)
+        };
+        let probe = batch + 1; // 探测 has_more 的多拉量
         let candidate_limit = *self.candidate_limit.read().unwrap() as i64;
         let retention_days = *self.retention_days.read().unwrap();
         let lang = self.language.read().unwrap().clone();
@@ -181,7 +201,7 @@ impl ClipboardEngine {
         // 并行查询文本元数据 + 图片元数据（两个不同的 SQLite pool，无竞争）。
         // 不加载 text / thumb_blob——前端通过 get_clipboard_text / blink-clipimg 协议按需懒加载。
         let (text_metas, image_items) = if arg.is_empty() {
-            // Alt+C 场景：两条简单 LIMIT 查询并行（不含 text 列）
+            // 最近历史场景：两条简单 LIMIT 查询并行（不含 text 列）
             let t_text = std::time::Instant::now();
             let t_img = std::time::Instant::now();
             let (text, images) = tokio::join!(
@@ -189,14 +209,25 @@ impl ClipboardEngine {
                     if kind == ClipKind::Image {
                         Vec::new()
                     } else {
-                        query_recent_meta(&self.pool, limit).await
+                        match &cursor {
+                            Some(c) => query_recent_meta_after(&self.pool, c, probe as i64).await,
+                            None => query_recent_meta(&self.pool, probe as i64).await,
+                        }
                     }
                 },
                 async {
                     if kind == ClipKind::Text {
                         Vec::new()
                     } else {
-                        query_recent_image_list(&self.cache_pool, limit).await
+                        match &cursor {
+                            Some(c) => {
+                                query_recent_image_list_after(&self.cache_pool, c, probe as i64)
+                                    .await
+                            }
+                            None => {
+                                query_recent_image_list(&self.cache_pool, probe as i64).await
+                            }
+                        }
                     }
                 }
             );
@@ -210,14 +241,30 @@ impl ClipboardEngine {
             );
             (text, images)
         } else {
-            // 搜索场景：文本 fuzzy + 图片 SQL LIKE 并行
-            // 文本：按配置保留期拉元数据（0=全部，不含 text），nucleo 匹配 preview
-            // 图片：SQL LIKE 过滤 source_app / source_path（不下全量再 Rust 过滤）
+            // 搜索场景：文本 fuzzy（游标下推到候选池 SQL）+ 图片 SQL LIKE 并行
             let text_query = async {
-                if retention_days == 0 {
-                    query_recent_meta(&self.pool, candidate_limit).await
-                } else {
-                    query_recent_days_meta(&self.pool, retention_days, candidate_limit).await
+                match &cursor {
+                    Some(c) => {
+                        if retention_days == 0 {
+                            query_recent_meta_after(&self.pool, c, candidate_limit).await
+                        } else {
+                            query_recent_days_meta_after(
+                                &self.pool,
+                                retention_days,
+                                c,
+                                candidate_limit,
+                            )
+                            .await
+                        }
+                    }
+                    None => {
+                        if retention_days == 0 {
+                            query_recent_meta(&self.pool, candidate_limit).await
+                        } else {
+                            query_recent_days_meta(&self.pool, retention_days, candidate_limit)
+                                .await
+                        }
+                    }
                 }
             };
             let (text_metas, image_items) = tokio::join!(
@@ -232,47 +279,68 @@ impl ClipboardEngine {
                     if kind == ClipKind::Text {
                         Vec::new()
                     } else {
-                        search_image_list(&self.cache_pool, arg, limit).await
+                        match &cursor {
+                            Some(c) => {
+                                search_image_list_after(&self.cache_pool, arg, c, probe as i64)
+                                    .await
+                            }
+                            None => search_image_list(&self.cache_pool, arg, probe as i64).await,
+                        }
                     }
                 }
             );
-            // nucleo fuzzy match on preview（不含 text）
-            let text_matched = fuzzy_match_metas(&text_metas, arg, limit as usize);
+            // nucleo fuzzy match on preview（不含 text）；多拉 1 条探测 has_more
+            let text_matched = fuzzy_match_metas(&text_metas, arg, probe);
             (text_matched, image_items)
         };
 
         let t1 = std::time::Instant::now();
 
-        // 合并文本 + 图片，按 created_at 倒序
-        let mut combined: Vec<(i64, ClipboardEntry)> = Vec::new();
+        // 合并文本 + 图片，按 (created_at, id 字符串) 倒序——与两表 SQL 的
+        // ORDER BY created_at DESC, id DESC 逐字对齐（keyset 不重不漏的前提）。
+        let mut combined: Vec<(i64, String, ClipboardEntry)> = Vec::new();
         for meta in text_metas {
-            combined.push((meta.created_at, ClipboardEntry::Text(meta)));
+            combined.push((meta.created_at, meta.id.clone(), ClipboardEntry::Text(meta)));
         }
         for item in image_items {
-            combined.push((item.created_at, ClipboardEntry::Image(item)));
+            combined.push((item.created_at, item.id.clone(), ClipboardEntry::Image(item)));
         }
-        combined.sort_by_key(|(created_at, entry)| {
-            std::cmp::Reverse((*created_at, id_recency(entry.id())))
-        });
+        combined.sort_by_key(|(created_at, id, _)| std::cmp::Reverse((*created_at, id.clone())));
 
-        let combined_len_before_take = combined.len();
+        let has_more = combined.len() > batch;
+        let page_end = combined.len().min(batch);
+        let next_cursor = if has_more {
+            combined
+                .get(page_end - 1)
+                .map(|(created_at, id, _)| ClipboardCursor {
+                    created_at: *created_at,
+                    id: id.clone(),
+                })
+        } else {
+            None
+        };
         let result: Vec<SearchItem> = combined
             .into_iter()
+            .take(page_end)
             .enumerate()
-            .map(|(i, (_, entry))| match entry {
+            .map(|(i, (_, _, entry))| match entry {
                 ClipboardEntry::Text(meta) => to_search_item(meta, i, &lang),
                 ClipboardEntry::Image(meta) => to_image_search_item(meta, i, &lang),
             })
-            .take(limit as usize)
             .collect();
         tracing::trace!(
-            total = combined_len_before_take,
+            batch,
             returned = result.len(),
+            has_more,
             db_ms = t0.elapsed().as_millis() as u64,
             merge_ms = t1.elapsed().as_millis() as u64,
-            "ClipboardEngine: search 完成"
+            "ClipboardEngine: search_page 完成"
         );
-        result
+        ClipboardPageResult {
+            items: result,
+            next_cursor,
+            has_more,
+        }
     }
 }
 
@@ -307,10 +375,12 @@ impl SearchEngine for ClipboardEngine {
     /// **不再检测 keyword**：0.8.5 §6.4 后此 engine 只在 EngineTakeover 路径被调用；
     /// route 层保证 Mixed 分支不会调到本 engine。
     ///
-    /// 0.25.23：实现主体移入 `search_with_kind`（供剪贴板模式带类型筛选复用），
-    /// keyword 路径恒为 All。
+    /// 0.25.29：实现主体移入 `search_page`（keyset 游标 + 类型筛选），
+    /// keyword 路径恒为 All 首屏（首屏 = page_size × 2）。
     async fn search(&self, query: &str, _ctx: &QueryContext<'_>) -> Vec<SearchItem> {
-        self.search_with_kind(query.trim(), ClipKind::All).await
+        self.search_page(query.trim(), ClipKind::All, None, self.first_batch_limit())
+            .await
+            .items
     }
 }
 
@@ -352,22 +422,6 @@ fn to_search_item(meta: ClipboardMeta, index: usize, lang: &str) -> SearchItem {
 enum ClipboardEntry {
     Text(ClipboardMeta),
     Image(ClipboardImageListItem),
-}
-
-impl ClipboardEntry {
-    fn id(&self) -> &str {
-        match self {
-            Self::Text(meta) => &meta.id,
-            Self::Image(meta) => &meta.id,
-        }
-    }
-}
-
-fn id_recency(id: &str) -> u128 {
-    id.rsplit('_')
-        .next()
-        .and_then(|suffix| suffix.parse().ok())
-        .unwrap_or(0)
 }
 
 /// ClipboardImageListItem → SearchItem（0.16.4）。
@@ -748,64 +802,23 @@ mod tests {
         assert!(format_subtitle(&meta, "en").contains("min ago"));
     }
 
-    #[test]
-    fn display_pages_defaults_to_3() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let pool =
-            rt.block_on(async { sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap() });
-        let cache_pool =
-            rt.block_on(async { sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap() });
-        let engine = ClipboardEngine::new(pool, cache_pool);
-        assert_eq!(*engine.display_pages.read().unwrap(), DEFAULT_DISPLAY_PAGES);
-        assert_eq!(DEFAULT_DISPLAY_PAGES, 3);
-    }
+    // ── 0.25.29：display_pages 已退役，首屏 = page_size × 2 ───────────────
 
     #[test]
-    fn update_display_pages_accepts_valid_range() {
+    fn first_batch_limit_is_two_pages() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let pool =
             rt.block_on(async { sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap() });
         let cache_pool =
             rt.block_on(async { sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap() });
         let engine = ClipboardEngine::new(pool, cache_pool);
-        engine.update_display_pages(1);
-        assert_eq!(*engine.display_pages.read().unwrap(), 1);
-        engine.update_display_pages(20);
-        assert_eq!(*engine.display_pages.read().unwrap(), 20);
-    }
-
-    #[test]
-    fn update_display_pages_clamps_out_of_range_to_default() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let pool =
-            rt.block_on(async { sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap() });
-        let cache_pool =
-            rt.block_on(async { sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap() });
-        let engine = ClipboardEngine::new(pool, cache_pool);
-        engine.update_display_pages(0);
-        assert_eq!(*engine.display_pages.read().unwrap(), DEFAULT_DISPLAY_PAGES);
-        engine.update_display_pages(9999);
-        assert_eq!(*engine.display_pages.read().unwrap(), DEFAULT_DISPLAY_PAGES);
-    }
-
-    #[test]
-    fn effective_limit_is_pages_times_page_size() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let pool =
-            rt.block_on(async { sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap() });
-        let cache_pool =
-            rt.block_on(async { sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap() });
-        let engine = ClipboardEngine::new(pool, cache_pool);
-        // 默认 3 页 × 9 条/页 = 27
-        assert_eq!(engine.effective_limit(), 27);
-        engine.update_display_pages(5);
-        engine.update_page_size(9);
-        // 5 × 9 = 45
-        assert_eq!(engine.effective_limit(), 45);
-        engine.update_display_pages(20);
-        engine.update_page_size(20);
-        // 20 × 20 = 400 (at upper clamp)
-        assert_eq!(engine.effective_limit(), 400);
+        // 默认 9 条/页 × 2 = 18
+        assert_eq!(engine.first_batch_limit(), 18);
+        engine.update_page_size(7);
+        assert_eq!(engine.first_batch_limit(), 14);
+        // 超大 page_size 钳制到 400
+        engine.update_page_size(500);
+        assert_eq!(engine.first_batch_limit(), 400);
     }
 
     #[test]
@@ -832,13 +845,6 @@ mod tests {
         assert_eq!(*engine.retention_days.read().unwrap(), 0);
         engine.update_retention_days(90);
         assert_eq!(*engine.retention_days.read().unwrap(), 90);
-    }
-
-    #[test]
-    fn id_recency_parses_text_and_image_ids() {
-        assert_eq!(id_recency("clip_123"), 123);
-        assert_eq!(id_recency("clipimg_456"), 456);
-        assert_eq!(id_recency("legacy"), 0);
     }
 
     // ── 0.17.9 resolve_source_desc 单测 ──────────────────────────────────
@@ -1049,7 +1055,7 @@ mod tests {
     #[tokio::test]
     async fn kind_all_returns_text_and_images() {
         let engine = engine_with_mixed_data().await;
-        let items = engine.search_with_kind("", ClipKind::All).await;
+        let items = engine.search_page("", ClipKind::All, None, 0).await.items;
         assert_eq!(items.len(), 2 + 2, "全量应合并文本与图片");
         assert_eq!(items.iter().filter(|x| is_image_item(x)).count(), 2);
     }
@@ -1057,7 +1063,7 @@ mod tests {
     #[tokio::test]
     async fn kind_text_skips_image_table() {
         let engine = engine_with_mixed_data().await;
-        let items = engine.search_with_kind("", ClipKind::Text).await;
+        let items = engine.search_page("", ClipKind::Text, None, 0).await.items;
         assert_eq!(items.len(), 2, "文本筛选只返回文本项");
         assert!(items.iter().all(|x| !is_image_item(x)));
     }
@@ -1065,7 +1071,7 @@ mod tests {
     #[tokio::test]
     async fn kind_image_skips_text_table() {
         let engine = engine_with_mixed_data().await;
-        let items = engine.search_with_kind("", ClipKind::Image).await;
+        let items = engine.search_page("", ClipKind::Image, None, 0).await.items;
         assert_eq!(items.len(), 2, "图片筛选只返回图片项");
         assert!(items.iter().all(is_image_item));
     }
@@ -1074,12 +1080,189 @@ mod tests {
     async fn kind_filter_applies_to_fuzzy_search() {
         let engine = engine_with_mixed_data().await;
         // "needle" 同时命中文本 preview 与图片 source_app
-        let text_hits = engine.search_with_kind("needle", ClipKind::Text).await;
+        let text_hits = engine.search_page("needle", ClipKind::Text, None, 0).await.items;
         assert_eq!(text_hits.len(), 1);
         assert!(!is_image_item(&text_hits[0]));
 
-        let image_hits = engine.search_with_kind("needle", ClipKind::Image).await;
+        let image_hits = engine.search_page("needle", ClipKind::Image, None, 0).await.items;
         assert_eq!(image_hits.len(), 1);
         assert!(is_image_item(&image_hits[0]));
+    }
+
+    // ── 0.25.29 流式游标分页 ─────────────────────────────────────────────
+
+    /// has_more 与 next_cursor 恒同真假；跨批遍历不重不漏（小集合：2 文本 + 2 图片）。
+    #[tokio::test]
+    async fn search_page_small_set_streams_exactly_once() {
+        let engine = engine_with_mixed_data().await;
+        let mut collected: Vec<String> = Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = engine.search_page("", ClipKind::All, cursor, 2).await;
+            assert_eq!(
+                page.has_more,
+                page.next_cursor.is_some(),
+                "has_more 与 next_cursor 必须同真假"
+            );
+            collected.extend(page.items.iter().map(|x| x.id.clone()));
+            match page.next_cursor {
+                Some(c) => cursor = Some(c),
+                None => break,
+            }
+        }
+        assert_eq!(collected.len(), 4);
+        let unique: std::collections::HashSet<_> = collected.iter().cloned().collect();
+        assert_eq!(unique.len(), 4, "跨批不得重复");
+    }
+
+    /// All 模式下两表同游标归并、每批凑满 batch 条；10 条文本流式遍历恰好 10 条。
+    #[tokio::test]
+    async fn search_page_fills_batch_and_terminates() {
+        let text_pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        blink_infra::data::clipboard::init_db(&text_pool).await.unwrap();
+        let base = 10_000i64;
+        for i in 0..10 {
+            let at = base - i; // 递减时间 → id clip_{i} 与时间序一致
+            blink_infra::data::clipboard::save_item(
+                &text_pool,
+                &blink_infra::data::clipboard::ClipboardItem {
+                    id: format!("clip_{i}"),
+                    text: format!("text {i}"),
+                    preview: format!("text {i}"),
+                    created_at: at,
+                    source_app: None,
+                    hit_count: 0,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let engine = ClipboardEngine::new(text_pool, unused_cache_pool().await);
+
+        // 0.25.29 修复回归：batch=0（前端缺省）按位置兜底——首批 = 首屏两页
+        // （page_size 9 × 2 = 18 > 10 全返回），追加批 = 一页 9 条
+        let first = engine.search_page("", ClipKind::All, None, 0).await;
+        assert_eq!(first.items.len(), 10, "首批兜底 18 条钳制到实际 10 条");
+        assert!(!first.has_more, "数据取尽");
+
+        let mut collected: Vec<String> = Vec::new();
+        let mut cursor = None;
+        let mut batches = 0;
+        loop {
+            let page = engine.search_page("", ClipKind::All, cursor, 3).await;
+            batches += 1;
+            collected.extend(page.items.iter().map(|x| x.id.clone()));
+            // 每批凑满 3 条（末批 10 % 3 = 1 条），验证「归并取满一批」语义
+            let expect = if page.has_more { 3 } else { 10 % 3 };
+            assert_eq!(page.items.len(), expect, "批 {batches} 应凑满");
+            match page.next_cursor {
+                Some(c) => cursor = Some(c),
+                None => break,
+            }
+        }
+        assert_eq!(batches, 4, "3+3+3+1");
+        assert_eq!(collected.len(), 10);
+        assert_eq!(collected[0], "clipboard:clip_0");
+        assert_eq!(collected[9], "clipboard:clip_9");
+        let unique: std::collections::HashSet<_> = collected.iter().cloned().collect();
+        assert_eq!(unique.len(), 10, "跨批不得重复");
+    }
+
+    /// batch=0 的追加批兜底为一页（cursor=Some 区分首批/追加）。
+    #[tokio::test]
+    async fn search_page_zero_batch_append_defaults_to_one_page() {
+        let text_pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        blink_infra::data::clipboard::init_db(&text_pool).await.unwrap();
+        let base = 30_000i64;
+        for i in 0..30 {
+            let at = base - i;
+            blink_infra::data::clipboard::save_item(
+                &text_pool,
+                &blink_infra::data::clipboard::ClipboardItem {
+                    id: format!("clip_{i}"),
+                    text: format!("text {i}"),
+                    preview: format!("text {i}"),
+                    created_at: at,
+                    source_app: None,
+                    hit_count: 0,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let engine = ClipboardEngine::new(text_pool, unused_cache_pool().await);
+
+        // 首批 batch=0 → 18 条（两页）
+        let first = engine.search_page("", ClipKind::All, None, 0).await;
+        assert_eq!(first.items.len(), 18, "首批缺省 = 首屏两页");
+        assert!(first.has_more);
+        let cursor = first.next_cursor.unwrap();
+        // 追加 batch=0 → 9 条（一页）
+        let second = engine.search_page("", ClipKind::All, Some(cursor), 0).await;
+        assert_eq!(second.items.len(), 9, "追加缺省 = 一页 page_size");
+        assert_eq!(second.items[0].id, "clipboard:clip_18", "追加从游标后继续");
+    }
+
+    /// 带 query 的流式：fuzzy 命中集跨游标分批不重不漏。
+    #[tokio::test]
+    async fn search_page_fuzzy_streams_without_dupes() {
+        let text_pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        blink_infra::data::clipboard::init_db(&text_pool).await.unwrap();
+        // 带 query 路径走 retention_days（默认 30 天）窗口，数据必须新鲜
+        let base = chrono::Utc::now().timestamp();
+        for i in 0..5 {
+            let at = base - i;
+            blink_infra::data::clipboard::save_item(
+                &text_pool,
+                &blink_infra::data::clipboard::ClipboardItem {
+                    id: format!("clip_{i}"),
+                    text: format!("needle {i}"),
+                    preview: format!("needle {i}"),
+                    created_at: at,
+                    source_app: None,
+                    hit_count: 0,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let engine = ClipboardEngine::new(text_pool, unused_cache_pool().await);
+
+        let mut collected: Vec<String> = Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = engine.search_page("needle", ClipKind::Text, cursor, 2).await;
+            collected.extend(page.items.iter().map(|x| x.id.clone()));
+            match page.next_cursor {
+                Some(c) => cursor = Some(c),
+                None => break,
+            }
+        }
+        assert_eq!(collected.len(), 5);
+        let unique: std::collections::HashSet<_> = collected.iter().cloned().collect();
+        assert_eq!(unique.len(), 5, "fuzzy 流式不得重复");
+    }
+
+    /// 测试用空 cache pool（图片表无数据场景；All 合并只出文本）。
+    async fn unused_cache_pool() -> SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        blink_infra::data::clipboard_images::init_db(&pool).await.unwrap();
+        pool
     }
 }

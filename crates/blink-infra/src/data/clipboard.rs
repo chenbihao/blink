@@ -61,6 +61,10 @@ pub struct ClipboardConfig {
     /// 剪贴板模式一次加载几页（0.20.1：替代旧 `display_count`）。
     /// `effective_limit = display_pages × page_size`，`page_size` 来自 SearchConfig。
     /// 范围 1..=20，默认 3。
+    ///
+    /// **0.25.29 已退役**：流式加载后首屏固定 `page_size × 2`、每批 `page_size` 条，
+    /// 此字段仅保留反序列化兼容（与 `display_count` 同一只向前迁移模式），
+    /// 新代码不应读写；保存时不影响行为。
     #[serde(default = "default_display_pages")]
     pub display_pages: u32,
     /// 旧字段：单次展示条数。0.20.1 起废弃，仅用于反序列化迁移。
@@ -89,13 +93,36 @@ pub struct ClipboardConfig {
     /// 范围 [50, 5000]。
     #[serde(default = "default_candidate_limit")]
     pub candidate_limit: u32,
+    /// 剪贴板模式滚轮行为（0.25.29）：`"step"` = 数据窗口逐条平移（默认，
+    /// 用户裁决 20261013——一页仍 page_size 条、Alt+1~9 不变）；
+    /// `"page"` = 整页翻页（历史行为）。
+    /// 仅前端消费；未知值由前端回落 step。
+    #[serde(default = "default_wheel_mode")]
+    pub wheel_mode: String,
+}
+
+/// 0.25.29：流式加载游标——`(created_at, id)` keyset 位置。
+///
+/// 两表（`clipboard_history` / `clipboard_images`）排序键同构
+/// （`ORDER BY created_at DESC, id DESC`），单一游标跨表通用。
+/// **比较必须用字符串 id 序**（与 SQL 一致），不能用数字后缀——
+/// 一次性加载时 tie-break 差异无感，流式分批下会造成漏条/重条（0.25.29 §3.17）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ClipboardCursor {
+    pub created_at: i64,
+    pub id: String,
 }
 
 fn default_max_items() -> u32 {
     10000 // 兜底防无限增长；主要靠 retention_days 按天清理
 }
 fn default_retention_days() -> u32 {
-    30
+    // 0.25.29：默认保留期 30 → 180 天（仅影响无配置的新用户）
+    180
+}
+/// 0.25.29：滚轮行为默认值——逐条平移（用户裁决；整页翻页成为显式选项）。
+fn default_wheel_mode() -> String {
+    "step".to_string()
 }
 /// 单次展示条数默认值（旧字段，迁移用）。30 = 3 页 × 10（旧默认 page_size）。
 fn default_display_count() -> u32 {
@@ -213,22 +240,25 @@ fn default_blacklist() -> Vec<String> {
     ]
 }
 fn default_max_image_items() -> u32 {
-    200
+    // 0.25.29：200 → 1000。图片含 BLOB（缩略图 ~50KB/条 + 全图），
+    // 不跟文本 max_items 放大到万级（磁盘考量），但 200 太快耗尽。
+    super::clipboard_images::DEFAULT_MAX_IMAGE_ITEMS
 }
 
 impl Default for ClipboardConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            max_items: 10000, // 兜底；主要靠 retention_days=30 按天清理
-            retention_days: 30,
+            max_items: 10000, // 兜底；主要靠 retention_days 按天清理
+            retention_days: default_retention_days(),
             display_pages: DEFAULT_DISPLAY_PAGES,
             display_count: LEGACY_DISPLAY_COUNT_DEFAULT,
             search_enabled: true,
             blacklist_keywords: default_blacklist(),
             capture_images: true,
-            max_image_items: 200,
+            max_image_items: default_max_image_items(),
             candidate_limit: 500,
+            wheel_mode: default_wheel_mode(),
         }
     }
 }
@@ -421,6 +451,75 @@ pub async fn query_recent_meta(pool: &SqlitePool, limit: i64) -> Vec<ClipboardMe
         "SELECT id, preview, created_at, source_app, hit_count \
          FROM clipboard_history ORDER BY created_at DESC, id DESC LIMIT ?1",
     )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(
+        |(id, preview, created_at, source_app, hit_count)| ClipboardMeta {
+            id,
+            preview,
+            created_at,
+            source_app,
+            hit_count,
+        },
+    )
+    .collect()
+}
+
+/// 0.25.29：keyset 游标分页——查询严格早于 `cursor`（`(created_at, id)` 字符串序）
+/// 的元数据。与 `query_recent_meta` 排序键一致，不重不漏；新入库条目
+/// created_at 更大、落在游标之前，不影响后续批（这是弃用 OFFSET 的原因）。
+pub async fn query_recent_meta_after(
+    pool: &SqlitePool,
+    cursor: &ClipboardCursor,
+    limit: i64,
+) -> Vec<ClipboardMeta> {
+    sqlx::query_as::<_, (String, String, i64, Option<String>, u32)>(
+        "SELECT id, preview, created_at, source_app, hit_count \
+         FROM clipboard_history \
+         WHERE (created_at < ?1 OR (created_at = ?1 AND id < ?2)) \
+         ORDER BY created_at DESC, id DESC LIMIT ?3",
+    )
+    .bind(cursor.created_at)
+    .bind(&cursor.id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(
+        |(id, preview, created_at, source_app, hit_count)| ClipboardMeta {
+            id,
+            preview,
+            created_at,
+            source_app,
+            hit_count,
+        },
+    )
+    .collect()
+}
+
+/// 0.25.29：keyset 游标分页的近 N 天元数据——搜索场景 fuzzy 候选池的
+/// 游标下推版本（`query_recent_days_meta` + 游标条件）。
+pub async fn query_recent_days_meta_after(
+    pool: &SqlitePool,
+    days: u32,
+    cursor: &ClipboardCursor,
+    limit: i64,
+) -> Vec<ClipboardMeta> {
+    let cutoff = chrono::Utc::now().timestamp() - (days as i64 * 86400);
+    sqlx::query_as::<_, (String, String, i64, Option<String>, u32)>(
+        "SELECT id, preview, created_at, source_app, hit_count \
+         FROM clipboard_history \
+         WHERE created_at > ?1 \
+           AND (created_at < ?2 OR (created_at = ?2 AND id < ?3)) \
+         ORDER BY created_at DESC, id DESC LIMIT ?4",
+    )
+    .bind(cutoff)
+    .bind(cursor.created_at)
+    .bind(&cursor.id)
     .bind(limit)
     .fetch_all(pool)
     .await
@@ -712,6 +811,94 @@ mod tests {
             source_app: None,
             hit_count,
         }
+    }
+
+    // ── 0.25.29 keyset 游标分页 ──────────────────────────────────────────
+
+    /// 5 条数据按 batch=2 走游标遍历三批，收集的 id 与全量倒序严格一致（不重不漏）。
+    #[tokio::test]
+    async fn query_recent_meta_after_pages_without_gaps_or_dupes() {
+        let pool = test_pool().await;
+        for (id, at) in [
+            ("clip_a", 100),
+            ("clip_b", 200),
+            ("clip_c", 300),
+            ("clip_d", 400),
+            ("clip_e", 500),
+        ] {
+            save_item(&pool, &item(id, id, at, 0)).await.unwrap();
+        }
+
+        let mut collected = Vec::new();
+        let mut cursor: Option<ClipboardCursor> = None;
+        loop {
+            let batch = match &cursor {
+                Some(c) => query_recent_meta_after(&pool, c, 2).await,
+                None => query_recent_meta(&pool, 2).await,
+            };
+            if batch.is_empty() {
+                break;
+            }
+            let last = batch.last().unwrap();
+            collected.extend(batch.iter().map(|m| m.id.clone()));
+            cursor = Some(ClipboardCursor {
+                created_at: last.created_at,
+                id: last.id.clone(),
+            });
+        }
+        assert_eq!(collected, vec!["clip_e", "clip_d", "clip_c", "clip_b", "clip_a"]);
+    }
+
+    /// 同 created_at 的 tie-break 用字符串 id 序（与 SQL `id DESC` 一致）：
+    /// "clip_99" 字典序大于 "clip_100"，故先返回 clip_99。
+    #[tokio::test]
+    async fn query_recent_meta_after_tiebreak_is_string_order() {
+        let pool = test_pool().await;
+        for id in ["clip_100", "clip_99"] {
+            save_item(&pool, &item(id, id, 1000, 0)).await.unwrap();
+        }
+
+        let first = query_recent_meta(&pool, 1).await;
+        assert_eq!(first[0].id, "clip_99");
+
+        let second = query_recent_meta_after(
+            &pool,
+            &ClipboardCursor {
+                created_at: first[0].created_at,
+                id: first[0].id.clone(),
+            },
+            10,
+        )
+        .await;
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].id, "clip_100");
+    }
+
+    /// 游标位置之后的插入不影响已分页遍历（keyset 抗顶置漂移的根基）：
+    /// 第一批取完后插入更晚条目，第二批仍从旧游标继续，不重不漏。
+    #[tokio::test]
+    async fn query_recent_meta_after_ignores_newer_inserts() {
+        let pool = test_pool().await;
+        save_item(&pool, &item("clip_a", "a", 100, 0)).await.unwrap();
+        save_item(&pool, &item("clip_b", "b", 200, 0)).await.unwrap();
+
+        let first = query_recent_meta(&pool, 1).await;
+        assert_eq!(first[0].id, "clip_b");
+
+        // 模拟监听器在分页间隙入库新条目（created_at 更晚）
+        save_item(&pool, &item("clip_new", "new", 999, 0)).await.unwrap();
+
+        let rest = query_recent_meta_after(
+            &pool,
+            &ClipboardCursor {
+                created_at: first[0].created_at,
+                id: first[0].id.clone(),
+            },
+            10,
+        )
+        .await;
+        let ids: Vec<&str> = rest.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["clip_a"], "新条目不得混入旧游标之后的批");
     }
 
     #[tokio::test]

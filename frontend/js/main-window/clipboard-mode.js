@@ -91,6 +91,20 @@ let lastQuery = "";
 /** 最近一次 doSearch 时间戳（reloadList 短窗去重用）。 */
 let lastSearchAt = 0;
 
+// ── 0.25.29 流式加载状态 ───────────────────────────────────────────────────
+
+/** 下一批游标（上一批末条 {created_at, id}）；null = 无更多/未加载。 */
+let pageCursor = null;
+/** 后端是否还有下一批（has_more）。 */
+let hasMore = false;
+/** 追加请求进行中（防重入）。 */
+let loadingMore = false;
+
+// ── 0.25.29 滚轮模式（clipboard.wheel_mode）─────────────────────────────────
+
+/** "page"（默认，整页翻）| "step"（数据窗口逐条平移）。lifecycle SHOWN 时刷新。 */
+let wheelMode = "page";
+
 // ── 状态查询 ──────────────────────────────────────────────────────────────
 
 /** 当前是否处于剪贴板模式。 */
@@ -115,9 +129,11 @@ export function setActiveByLi(li) {
     results.setActiveByEl(li);
 }
 
-/** 0.20.2: 翻页后重新投影多选 CSS（clipboard-selected 可能因 DOM 重建丢失）。 */
+/** 0.20.2: 翻页后重新投影多选 CSS（clipboard-selected 可能因 DOM 重建丢失）。
+ *  0.25.29: 兼任流式预取触发点——renderViewport 末尾调用，末页/距底时拉下一批。 */
 export function onPageChanged() {
     refreshSelectionCss();
+    maybeLoadMore();
 }
 
 /** 0.20.2: 清空多选状态（不清 epoch/generation）。 */
@@ -277,6 +293,10 @@ export function exit() {
     // 取消防抖
     clearTimeout(timer);
     seq++;
+    // 0.25.29: 重置流式状态（在途 loadMore 由 seq++ 失效）
+    pageCursor = null;
+    hasMore = false;
+    loadingMore = false;
 
     // 移除 body 标记——恢复 chord 提示可见性
     document.body.classList.remove("clipboard-mode-active");
@@ -352,11 +372,7 @@ export function handleInput(value, {force = false, immediate = false} = {}) {
 // ── 内部 ──────────────────────────────────────────────────────────────────
 
 /**
- * 调用 search_clipboard IPC 并渲染结果。
- * @param {string} query 搜索词（已 trim）
- */
-/**
- * 调用 search_clipboard IPC 并渲染结果。
+ * 调用 search_clipboard IPC 并渲染结果（首批；流式追加走 loadMore）。
  * @param {string} query 搜索词（已 trim）
  * @param {boolean} keepPage true 时维持当前页号（右键删除后刷新用）
  */
@@ -364,6 +380,9 @@ async function doSearch(query, keepPage = false) {
     const mySeq = ++seq;
     lastQuery = query;
     lastSearchAt = Date.now();
+    // 首批重置流式状态（query/kind 变化 = 新数据集；旧游标立即失效）
+    pageCursor = null;
+    hasMore = false;
     // 刷新（keepPage）时记住当前页号和光标位置
     const savedPage = keepPage ? results.getPage() : 0;
     const savedSelected = keepPage ? results.getSelectedIndex() : 0;
@@ -378,6 +397,11 @@ async function doSearch(query, keepPage = false) {
         if (keepPage) {
             results.restorePosition(savedPage, savedSelected);
         }
+        // 0.25.29: 首批游标（后续滚到底追加）。**必须先设置游标再触发预取**——
+        // render 内部经 onPageChanged 调 maybeLoadMore 时游标尚未就绪会被跳过，
+        // 数据只有一批时翻页/平移全是 no-op、预取再无人触发（滚轮死锁实测根因）。
+        hasMore = !!resp.has_more;
+        pageCursor = hasMore ? (resp.next_cursor || null) : null;
         // 0.20.2: 渲染后保存全局文本项 hitId 列表，并重投影选择 CSS
         lastTextHitIds = extractTextHitIds(entries);
         selection.reconcileAfterReorder(lastTextHitIds);
@@ -385,9 +409,88 @@ async function doSearch(query, keepPage = false) {
         if (keepPage) {
             console.log("[clipboard-mode] reloaded after delete, page=", savedPage, "selected=", savedSelected);
         }
+        // 游标就绪后再补一次预取判定（首批不满一屏自动续拉满）
+        maybeLoadMore();
     } catch (e) {
         console.error("[clipboard-mode] searchClipboard failed:", e);
     }
+}
+
+// ── 0.25.29 流式加载 ────────────────────────────────────────────────────────
+
+/**
+ * 预取判据满足时拉下一批（onPageChanged / loadMore 完成后调用）。
+ * page 模式：翻到末页附近（nearTail 覆盖）；step 模式：数据窗口距底一屏内。
+ */
+function maybeLoadMore() {
+    if (!active || !hasMore || loadingMore || !pageCursor) return;
+    if (!results.hasItems() || !results.nearTail()) return;
+    if (results.getLoadedCount() >= 2000) {
+        // 会话总量保护：到底不再拉（与 results.js MAX_LOADED_ITEMS 同值）
+        hasMore = false;
+        results.refreshStatusbar();
+        return;
+    }
+    void loadMore();
+}
+
+/**
+ * 按当前游标拉下一批并追加渲染（batch 缺省由后端按一页 page_size 兜底）。
+ *
+ * 竞态防护（spec-frontend §5.1）：追加请求带当前 seq，响应到达时校验
+ * seq / active / 发起时游标三者——期间 query/kind 变化（doSearch 重置游标）
+ * 或退出模式都会使本次响应作废。追加走 results.appendItems 专用路径
+ * （不重排、保持视图位置），完成后若仍距底不足一屏继续补（hasMore 终止）。
+ */
+async function loadMore() {
+    if (loadingMore || !pageCursor) return;
+    loadingMore = true;
+    const mySeq = seq;
+    const cursorAtStart = pageCursor;
+    try {
+        const resp = await searchClipboard(lastQuery, mySeq, kind, cursorAtStart);
+        if (mySeq !== seq || !active || pageCursor !== cursorAtStart) return;
+        const entries = resp.entries || [];
+        results.appendItems(entries, mySeq);
+        // 0.25.29：追加后同步已加载文本项快照（Ctrl+A 已实时提取，此处维护
+        // 模块状态语义一致，避免后续消费方拿到过时的首批快照）
+        lastTextHitIds = extractTextHitIds(results.getItems());
+        hasMore = !!resp.has_more;
+        pageCursor = hasMore ? (resp.next_cursor || null) : null;
+    } catch (e) {
+        console.error("[clipboard-mode] loadMore failed:", e);
+        hasMore = false; // 失败即停（下轮 query/kind 变化或重新进入时重试）
+    } finally {
+        loadingMore = false;
+    }
+    maybeLoadMore();
+}
+
+/** 0.25.29: 流式状态快照（results.refreshStatusbar 的 step 模式条数区间用）。 */
+export function getStreamInfo() {
+    return {hasMore, loaded: results.getLoadedCount()};
+}
+
+/** 0.25.29: 删除后局部移除（右键单删入口；批量删除 batchDelete / Alt+D 内联同路径）。
+ *  替代 retrigger/reloadList 全量重查——保持已加载深度与浏览位置。 */
+export function removeLocalItems(ids) {
+    if (!active || !Array.isArray(ids) || ids.length === 0) return;
+    results.removeItems(ids);
+    lastTextHitIds = extractTextHitIds(results.getItems?.() || []);
+    selection.reconcileAfterReorder(lastTextHitIds);
+    refreshSelectionCss();
+    results.refreshStatusbar();
+}
+
+/** 0.25.29: 当前滚轮模式是否为逐条平移（keyboard.js 滚轮分流用）。 */
+export function isStepWheel() {
+    return wheelMode === "step";
+}
+
+/** 0.25.29: 从 AppConfig 刷新滚轮模式快照（lifecycle SHOWN 时调用）。
+ *  默认逐条平移（用户裁决），仅显式 "page" 才整页翻——与后端 serde default 同语义。 */
+export function refreshWheelMode(clipCfg) {
+    wheelMode = clipCfg?.wheel_mode === "page" ? "page" : "step";
 }
 
 // ── 0.20.2 多选键盘处理 ────────────────────────────────────────────────────
@@ -433,15 +536,16 @@ export function handleKeydown(e) {
         return true;
     }
 
-    // Ctrl+A：query 为空时全选文本项
+    // Ctrl+A：query 为空时全选已加载的文本项
     if (ctrl && e.key === "a") {
         if (queryEl.value.trim()) {
-            console.log("[clipboard-mode] Ctrl+A skipped: query non-empty");
             return false; // 非空 query 保留输入框全选
         }
         e.preventDefault();
-        console.log("[clipboard-mode] Ctrl+A: selecting all", lastTextHitIds.length, "text items");
-        selection.selectAll(lastTextHitIds);
+        // 0.25.29：实时从已加载条目提取——流式追加后 lastTextHitIds 只反映首批
+        // （实测 Ctrl+A 有时 11 条有时 12 条的根因），实时取保证覆盖全部已加载文本项
+        const allTextIds = extractTextHitIds(results.getItems());
+        selection.selectAll(allTextIds);
         refreshSelectionCss();
         return true;
     }
@@ -634,9 +738,10 @@ export async function batchDelete() {
         await deleteClipboardItemsBatch(keys);
         // 只清本次删除的 key：删除期间用户新增的选择不受迟到结果影响
         selection.removeKeys(keys);
-        reloadList();
+        // 0.25.29: 局部移除替代 reloadList——全量重查会让已加载几百条退回首批
+        // （游标重置）；删除是确定性的 DB 副作用，就地 splice 保持浏览位置
+        removeLocalItems(keys);
         if (!active) return; // 模式已退出：清态照做，但不污染新会话反馈
-        refreshSelectionCss();
         showFeedback(t("clipboard.deleted_count", {count: keys.length}), {type: "success", durationMs: 2000});
     } catch (e) {
         console.error("[clipboard-mode] batchDelete failed:", e);
@@ -896,8 +1001,8 @@ async function handleDeleteActive() {
             await deleteClipboardImage(target.id);
         }
         console.log(`[clipboard-mode] deleted ${target.type} item: ${target.id}`);
-        // 刷新列表（维持当前页号），由 reconcile 清理已不存在的多选 key
-        reloadList();
+        // 0.25.29: 局部移除（同 batchDelete），维持浏览位置与已加载深度
+        removeLocalItems([target.id]);
     } catch (e) {
         console.error(`[clipboard-mode] delete failed for ${target.type} ${target.id}:`, e);
         // 失败时保留结果、模式和选择，显示可见错误

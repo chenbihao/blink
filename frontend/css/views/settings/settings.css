@@ -1216,6 +1216,14 @@ input[type="number"]::-webkit-outer-spin-button {
     display: none;
 }
 
+/* 0.25.29：展开体「功能设置区 ↔ 键绑定区」分割线——仅存在功能区块时由模板注入；
+   实线略重于 detail 内部的 dashed，表达区块级分组 */
+.chord-row-divider {
+    height: 1px;
+    margin: 4px 0;
+    background: var(--surface);
+}
+
 /* ── 紧凑字段行：与 header 同构（arrow 占位 + label + 控件），gap 一致 16px，对齐自动成立 ── */
 .chord-field {
     display: flex;

@@ -63,6 +63,7 @@ export function init() {
             applyGlassOpacityFromConfigData(cfg);
             applyI18nFromConfigData(cfg);
             results.refreshMaxResultsFromConfigData(cfg);
+            clipboardMode.refreshWheelMode(cfg.clipboard); // 0.25.29: 剪贴板滚轮模式热刷新
             autosuggestConfig.refreshFromConfigData(cfg);
             chord.refreshFromConfigData(cfg).then(() => inputState.reevaluate());
         }).catch((e) => console.error("SHOWN: get_config 失败", e));
@@ -101,6 +102,7 @@ export function init() {
             applyGlassOpacityFromConfigData(cfg);
             applyI18nFromConfigData(cfg);
             results.refreshMaxResultsFromConfigData(cfg);
+            clipboardMode.refreshWheelMode(cfg.clipboard); // 0.25.29: 剪贴板滚轮模式热刷新
             // 0.24.5：接受键配置热刷新（keyboard 分派 + bar 键帽投影同源）
             autosuggestConfig.refreshFromConfigData(cfg);
             chord.refreshFromConfigData(cfg).then(() => inputState.reevaluate());

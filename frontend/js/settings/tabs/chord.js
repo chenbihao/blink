@@ -207,11 +207,18 @@ function renderActionRow(a, subtitle, clipboardCfg, screenshotCfg, binding) {
         ? `<div class="chord-locked-note">${t("chord.global.voice_input.locked")}</div>`
         : renderGlobalBlock(a, binding, chordComboStr);
 
-    // 展开体内容（用 .chord-field 紧凑布局，label 用 --settings-label-width 对齐）
+    // 展开体内容（用 .chord-field 紧凑布局，label 用 --settings-label-width 对齐）。
+    // 0.25.29（用户裁决）：功能设置（clipboard/screenshot detail）在前，
+    // 触发键绑定与全局快捷键是一组（chord-field + chord-global-block）沉底，
+    // 功能区与键区之间加分割线，见 spec-frontend §5.9。
+    const hasFunctionalBlock = !!(clipboardDetailHtml || screenshotDetailHtml);
     const bodyInnerHtml = keyLocked
         ? `<div class="chord-locked-note">${lockedMsg}</div>
        ${globalBlockHtml}`
-        : `<div class="chord-field">
+        : `${clipboardDetailHtml}
+       ${screenshotDetailHtml}
+       ${hasFunctionalBlock ? '<div class="chord-row-divider"></div>' : ""}
+       <div class="chord-field">
          <label class="setting-label chord-field-label">${t("chord.binding.key.label")}
            <span class="field-hint-icon" title="${escapeAttr(t("chord.binding.key.hint"))}">ⓘ</span>
          </label>
@@ -222,9 +229,7 @@ function renderActionRow(a, subtitle, clipboardCfg, screenshotCfg, binding) {
            <button class="btn-small chord-binding-reset" data-id="${escapeAttr(a.id)}">${t("chord.binding.reset")}</button>
          </div>
        </div>
-       ${globalBlockHtml}
-       ${clipboardDetailHtml}
-       ${screenshotDetailHtml}`;
+       ${globalBlockHtml}`;
 
     return `<div class="action-list-row chord-row ${rowClass}" data-chord-id="${escapeAttr(a.id)}">
     <div class="chord-row-header" data-id="${escapeAttr(a.id)}" role="button" aria-expanded="false" tabindex="0">
@@ -651,30 +656,45 @@ function setGlobalModeRadio(id, value) {
  *
  * 注意：tooltip 用 t() 直接渲染 title 属性——动态生成 HTML 不走 applyI18n，
  * 故 data-i18n-title 在此处无效，必须用 title=。
+ *
+ * 0.25.29：display_pages 退役（流式加载按需分批，不再有单次加载页数概念）；
+ * 新增滚轮行为（page/step）与图片历史上限；默认值与后端 serde default 对齐
+ * （max_items 10000 / max_image_items 1000 / retention_days 180）。
  */
 function renderClipboardDetail(cfg) {
-    cfg = cfg || {display_pages: 3, max_items: 200, retention_days: 30, search_enabled: true, blacklist_keywords: []};
+    cfg = cfg || {max_items: 10000, max_image_items: 1000, retention_days: 180, search_enabled: true, blacklist_keywords: []};
     const blacklist = Array.isArray(cfg.blacklist_keywords)
         ? cfg.blacklist_keywords.join(", ")
         : "";
+    // 0.25.29：默认逐条滚动（用户裁决），仅显式 page 才整页翻页
+    const wheelMode = cfg.wheel_mode === "page" ? "page" : "step";
     return `<div class="chord-clipboard-detail">
     <div class="chord-field">
-      <label class="setting-label chord-field-label">${t("chord.clipboard.display_pages.label")}
-        <span class="field-hint-icon" title="${escapeAttr(t("chord.clipboard.display_pages.hint"))}">ⓘ</span>
+      <label class="setting-label chord-field-label">${t("chord.clipboard.wheel_mode.label")}
+        <span class="field-hint-icon" title="${escapeAttr(t("chord.clipboard.wheel_mode.hint"))}">ⓘ</span>
       </label>
-      <input type="number" class="clip-field" data-field="display_pages" min="1" max="20" value="${cfg.display_pages ?? 3}" />
+      <select class="clip-field" data-field="wheel_mode">
+        <option value="page" ${wheelMode === "page" ? "selected" : ""}>${t("chord.clipboard.wheel_mode.page")}</option>
+        <option value="step" ${wheelMode === "step" ? "selected" : ""}>${t("chord.clipboard.wheel_mode.step")}</option>
+      </select>
     </div>
     <div class="chord-field">
       <label class="setting-label chord-field-label">${t("chord.clipboard.max_items.label")}
         <span class="field-hint-icon" title="${escapeAttr(t("chord.clipboard.max_items.hint"))}">ⓘ</span>
       </label>
-      <input type="number" class="clip-field" data-field="max_items" min="10" max="5000" value="${cfg.max_items ?? 200}" />
+      <input type="number" class="clip-field" data-field="max_items" min="10" max="100000" value="${cfg.max_items ?? 10000}" />
+    </div>
+    <div class="chord-field">
+      <label class="setting-label chord-field-label">${t("chord.clipboard.max_image_items.label")}
+        <span class="field-hint-icon" title="${escapeAttr(t("chord.clipboard.max_image_items.hint"))}">ⓘ</span>
+      </label>
+      <input type="number" class="clip-field" data-field="max_image_items" min="10" max="10000" value="${cfg.max_image_items ?? 1000}" />
     </div>
     <div class="chord-field">
       <label class="setting-label chord-field-label">${t("chord.clipboard.retention_days.label")}
         <span class="field-hint-icon" title="${escapeAttr(t("chord.clipboard.retention_days.hint"))}">ⓘ</span>
       </label>
-      <input type="number" class="clip-field" data-field="retention_days" min="0" max="3650" value="${cfg.retention_days ?? 30}" />
+      <input type="number" class="clip-field" data-field="retention_days" min="0" max="3650" value="${cfg.retention_days ?? 180}" />
     </div>
     <!-- 允许搜索召回 / 黑名单关键词：用户无需调整，注释隐藏（保留默认值）
     <div class="chord-field">
@@ -1157,6 +1177,7 @@ function flashCombo(comboEl, origCombo, msg) {
 
 /**
  * 保存剪贴板详细配置。
+ * 0.25.29：display_pages 不再读写（流式加载退役）；新增 wheel_mode / max_image_items。
  */
 async function saveClipboardDetail(container) {
     const detail = container.querySelector(".chord-clipboard-detail");
@@ -1164,8 +1185,9 @@ async function saveClipboardDetail(container) {
     try {
         const fullCfg = await invoke("get_config");
         const clip = fullCfg?.clipboard || {};
-        const displayPages = parseInt(detail.querySelector('[data-field="display_pages"]')?.value, 10);
+        const wheelMode = detail.querySelector('[data-field="wheel_mode"]')?.value;
         const maxItems = parseInt(detail.querySelector('[data-field="max_items"]')?.value, 10);
+        const maxImageItems = parseInt(detail.querySelector('[data-field="max_image_items"]')?.value, 10);
         const retentionDays = parseInt(detail.querySelector('[data-field="retention_days"]')?.value, 10);
         const searchEnabled = detail.querySelector('[data-field="search_enabled"]')?.checked !== false;
         const blacklistStr = detail.querySelector('[data-field="blacklist_keywords"]')?.value || "";
@@ -1176,11 +1198,14 @@ async function saveClipboardDetail(container) {
 
         const newCfg = {
             enabled: clip.enabled !== false,
-            display_pages: isNaN(displayPages) ? 3 : displayPages,
-            max_items: isNaN(maxItems) ? 200 : maxItems,
-            retention_days: isNaN(retentionDays) ? 30 : retentionDays,
+            max_items: isNaN(maxItems) ? 10000 : maxItems,
+            max_image_items: isNaN(maxImageItems) ? 1000 : maxImageItems,
+            retention_days: isNaN(retentionDays) ? 180 : retentionDays,
             search_enabled: searchEnabled,
             blacklist_keywords: blacklist,
+            capture_images: clip.capture_images !== false,
+            candidate_limit: clip.candidate_limit ?? 500,
+            wheel_mode: wheelMode === "step" ? "step" : "page",
         };
         await saveConfig("clipboard_config", newCfg);
     } catch (e) {

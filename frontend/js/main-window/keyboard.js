@@ -38,6 +38,21 @@ export function init() {
         if (aiMode.isActive()) return;
         // 0.18.6: 命令模式无结果可翻页，放行默认行为
         if (cmdMode.isActive()) return;
+        // 0.25.29: 剪贴板 step 滚轮模式 = 数据窗口逐条平移。表现形式零变化
+        // （仍一屏 page_size 条、窗口贴合、Alt+1~9 不变）；累积器把 deltaY
+        // 换算成条数（一格 ±100/120 → 1 条，触摸板小 delta 累积过阈值才动）。
+        if (clipboardMode.isActive() && clipboardMode.isStepWheel()) {
+            e.preventDefault();
+            if (!results.hasItems()) return;
+            wheelAccum += e.deltaY;
+            const steps = Math.trunc(Math.abs(wheelAccum) / WHEEL_STEP);
+            if (steps > 0) {
+                const dir = wheelAccum > 0 ? 1 : -1;
+                wheelAccum -= dir * steps * WHEEL_STEP;
+                results.scrollItems(dir * steps);
+            }
+            return;
+        }
         // 0.19.15: 剪贴板模式有结果，正常翻页
         e.preventDefault(); // 阻止默认滚动（列表本来就不滚动）
         if (!results.hasItems()) return;
@@ -48,6 +63,12 @@ export function init() {
         }
     });
 }
+
+/** 0.25.29: step 滚轮累积器——deltaY 累积，每满一格（约一次标准滚轮刻度）
+ *  平移 1 条；触摸板高频小 delta 需累积，避免平移过快。 */
+let wheelAccum = 0;
+/** 一格滚轮的 deltaY 基准（标准滚轮刻度 ±100/120，取 100）。 */
+const WHEEL_STEP = 100;
 
 // ── Autosuggestion 采纳（0.24 §3.2 键随槽走）───────────────────────────
 

@@ -559,9 +559,16 @@ impl SurfacePort for TauriDomainEnv {
             serde_json::json!({ "mode": "clipboard" }),
         );
         crate::app::window_orchestrator::invoke_with_cursor(&self.app, cursor);
-        if let Some(elem) = caret_elem {
-            crate::infra::platform::window::spawn_main_window_caret_refine(&self.app, elem, owner);
-        }
+        // 0.25.29：caret 元素缺失也照常调度 refine——elem=None 时走「屏幕工作区
+        // 中心」兜底（用户裁决：无可信定位时鼠标落点不顺手）。主窗可见的 chord
+        // 场景不重定位（cursor/elem 均为 None 时 refine 自然短路）。
+        let caret_elem = if was_hidden { caret_elem } else { None };
+        crate::infra::platform::window::spawn_main_window_caret_refine(
+            &self.app,
+            caret_elem,
+            owner,
+            cursor,
+        );
         // 幂等补发：前置 emit 若因隐藏态丢失，此处到达时前端照常 enter
         let _ = self.app.emit(
             crate::domain::event_names::EventNames::CHORD_ENTER_MODE,

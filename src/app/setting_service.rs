@@ -267,8 +267,7 @@ async fn save_clipboard(app: &tauri::AppHandle, cfg: &ClipboardConfig) -> Result
     ConfigStore::set(pool, cfg).await?;
     crate::infra::platform::clipboard::update_runtime_config(cfg);
     if let Some(service) = app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>() {
-        // 0.20.1: 转发 display_pages（而非旧 display_count）
-        service.update_clipboard_display_pages(cfg.display_pages);
+        // 0.25.29：display_pages 已退役（流式加载），不再转发
         service.update_clipboard_candidate_limit(cfg.candidate_limit);
         service.update_clipboard_search_enabled(cfg.search_enabled);
         service.update_clipboard_retention_days(cfg.retention_days);

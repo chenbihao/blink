@@ -478,8 +478,9 @@ function itemMenu(li) {
                 label: t("menu.delete"),
                 shortcut: "Alt+D",
                 run: () => {
+                    // 0.25.29: 局部移除（retrigger 全量重查会让流式已加载条目退回首批）
                     deleteClipboardImage(lnkPath)
-                        .then(() => retrigger())
+                        .then(() => clipboardMode.removeLocalItems([lnkPath]))
                         .catch((e) => console.error("deleteClipboardImage failed:", e));
                 },
                 danger: true,
@@ -492,7 +493,7 @@ function itemMenu(li) {
                 shortcut: "Alt+D",
                 run: () => {
                     deleteClipboardItem(clipboardId)
-                        .then(() => retrigger())
+                        .then(() => clipboardMode.removeLocalItems([clipboardId]))
                         .catch((e) => console.error("deleteClipboardItem failed:", e));
                 },
                 danger: true,

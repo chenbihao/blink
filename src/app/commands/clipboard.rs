@@ -4,7 +4,6 @@ use tauri::Manager;
 
 use crate::domain::clipboard::ClipboardWriteSource;
 use crate::domain::event::CapabilityEnv;
-use crate::domain::search::SearchResponse;
 
 // 同一时刻只允许一次上屏，避免后一次请求覆盖前一次尚未粘贴的剪贴板。
 static PASTE_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -17,40 +16,54 @@ static PASTE_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 ///
 /// 0.25.23: `kind` 类型筛选（"text"/"image"，缺省或未知 = 全部）——文本与图片
 /// 分表存储，筛选下推为跳过另一张表的查询。
+///
+/// 0.25.29: keyset 流式分页——`cursor`（上一批末条的 `{created_at, id}`，缺省 = 首批）
+/// 与 `batch`（本批条数，缺省 = 一页 page_size）；响应携带 `next_cursor` / `has_more`，
+/// 前端滚到底继续追加。batch=0 由 engine 兜底为一页。
+#[derive(serde::Serialize)]
+pub struct SearchClipboardResponse {
+    pub entries: Vec<crate::domain::search::AppEntry>,
+    /// 下一批起点；`has_more=false` 时为 None。
+    pub next_cursor: Option<crate::infra::data::clipboard::ClipboardCursor>,
+    pub has_more: bool,
+}
+
 #[tauri::command]
 pub async fn search_clipboard(
     app: tauri::AppHandle,
     query: String,
     seq: u64,
     kind: Option<String>,
-) -> SearchResponse {
-    tracing::debug!(%query, seq, kind = kind.as_deref(), "search_clipboard: 收到请求");
+    cursor: Option<crate::infra::data::clipboard::ClipboardCursor>,
+    batch: Option<u32>,
+) -> SearchClipboardResponse {
+    tracing::debug!(%query, seq, kind = kind.as_deref(), has_cursor = cursor.is_some(), batch, "search_clipboard: 收到请求");
     let service = app.state::<std::sync::Arc<crate::domain::search::SearchService>>();
     // 复用 SearchService 持有的 ClipboardEngine 实例（不重复建池）
-    let entries = service.search_clipboard_mode(&query, kind.as_deref()).await;
+    let page = service
+        .search_clipboard_page(
+            &query,
+            kind.as_deref(),
+            cursor,
+            batch.unwrap_or(0) as usize,
+        )
+        .await;
+    let entries: Vec<crate::domain::search::AppEntry> = page
+        .items
+        .into_iter()
+        .map(crate::domain::search::SearchItem::into_app_entry)
+        .collect();
     tracing::debug!(
         count = entries.len(),
+        has_more = page.has_more,
         %query,
         "search_clipboard: 返回结果"
     );
-    for (i, item) in entries.iter().enumerate() {
-        let detail = item.score_detail.as_deref().unwrap_or("");
-        tracing::trace!(
-            index = i,
-            score = if detail.is_empty() {
-                format!("{:.4}", item.score)
-            } else {
-                format!("{:.4} ({})", item.score, detail)
-            },
-            source = %item.source,
-            name = %item.name,
-            lnk_path = %item.lnk_path,
-            "剪贴板模式结果项"
-        );
-    }
-    SearchResponse {
+    // 0.25.29：逐项 trace 已删（每批 N 条刷屏）——召回条数与 has_more 在上一行
+    SearchClipboardResponse {
         entries,
-        suggestion: None,
+        next_cursor: page.next_cursor,
+        has_more: page.has_more,
     }
 }
 

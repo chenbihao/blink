@@ -337,22 +337,8 @@ impl SearchService {
         tracing::debug!("SearchService 界面语言已热更新");
     }
 
-    /// 更新 ClipboardEngine 的加载页数（设置页 `clipboard_config` 保存时转发）。
-    /// downcast 模式同 `update_language`。
-    pub fn update_clipboard_display_pages(&self, pages: u32) {
-        for engine in &self.sync_engines {
-            if let Some(clip) = engine
-                .as_any()
-                .downcast_ref::<super::clipboard_engine::ClipboardEngine>()
-            {
-                clip.update_display_pages(pages);
-            }
-        }
-        tracing::debug!(pages, "ClipboardEngine 加载页数已热更新");
-    }
-
     /// 更新 ClipboardEngine 的每页条数（SearchConfig::page_size 变化时转发）。
-    /// effective_limit = display_pages × page_size。
+    /// 0.25.29：首屏 = page_size × 2、流式每批 page_size（display_pages 已退役）。
     pub fn update_clipboard_page_size(&self, page_size: u32) {
         for engine in &self.sync_engines {
             if let Some(clip) = engine
@@ -510,58 +496,77 @@ impl SearchService {
     /// 剪贴板模式直接搜索（bypass SearchService pipeline）。
     ///
     /// Alt+C 进入剪贴板模式后，前端直接调此方法，不经过 route / get_weights / Mixed 分派。
-    /// 只走 ClipboardEngine，返回已转换的 `AppEntry` 列表。
+    /// 只走 ClipboardEngine，返回流式分页结果（0.25.29 游标协议）。
     ///
-    /// 0.20.1: 不使用 `max_results` 截断——ClipboardEngine 内部已按
-    /// `effective_limit = display_pages × page_size` 截断，普通搜索的 `max_results`
-    /// 不再干扰剪贴板模式的结果上限。
+    /// 0.20.1: 不使用 `max_results` 截断——ClipboardEngine 内部已按单批钳制截断，
+    /// 普通搜索的 `max_results` 不干扰剪贴板模式的结果上限。
     ///
     /// 0.25.23: `kind` 类型筛选（全部/文本/图片）下推到 engine——文本与图片分表，
     /// 筛选即跳过另一张表的查询；未知值回落 All。
-    pub async fn search_clipboard_mode(&self, query: &str, kind: Option<&str>) -> Vec<AppEntry> {
+    ///
+    /// 0.25.29: keyset 游标分页（`search_clipboard` command 透传 cursor/batch）。
+    pub async fn search_clipboard_page(
+        &self,
+        query: &str,
+        kind: Option<&str>,
+        cursor: Option<blink_infra::data::clipboard::ClipboardCursor>,
+        batch: usize,
+    ) -> super::clipboard_engine::ClipboardPageResult {
         let arg = query.trim();
         let clip_kind = super::clipboard_engine::ClipKind::parse(kind);
         let t0 = std::time::Instant::now();
 
         for engine in &self.sync_engines {
             if engine.id() == "clipboard" {
-                let items = match engine.as_any().downcast_ref::<super::clipboard_engine::ClipboardEngine>() {
+                let page = match engine
+                    .as_any()
+                    .downcast_ref::<super::clipboard_engine::ClipboardEngine>()
+                {
                     Some(clipboard_engine) => {
-                        clipboard_engine.search_with_kind(arg, clip_kind).await
+                        clipboard_engine
+                            .search_page(arg, clip_kind, cursor, batch)
+                            .await
                     }
                     // 理论不可达：id == "clipboard" 的 engine 就是 ClipboardEngine。
-                    // 兜底走 trait search（恒 All），不让类型分支丢结果。
+                    // 兜底走 trait search（恒 All 首屏），不让类型分支丢结果。
                     None => {
-                        let history = std::collections::HashMap::new();
-                        let snapshot = ContextSnapshot::default();
-                        let disabled: Vec<String> = Vec::new();
-                        let disabled_ctx: Vec<String> = Vec::new();
-                        let language = self.language.read().unwrap().clone();
-                        let search_ctx = QueryContext {
-                            history: &history,
-                            snapshot: &snapshot,
-                            disabled_builtin_actions: &disabled,
-                            disabled_context_bindings: &disabled_ctx,
-                            language: &language,
+                        let items = {
+                            let history = std::collections::HashMap::new();
+                            let snapshot = ContextSnapshot::default();
+                            let disabled: Vec<String> = Vec::new();
+                            let disabled_ctx: Vec<String> = Vec::new();
+                            let language = self.language.read().unwrap().clone();
+                            let search_ctx = QueryContext {
+                                history: &history,
+                                snapshot: &snapshot,
+                                disabled_builtin_actions: &disabled,
+                                disabled_context_bindings: &disabled_ctx,
+                                language: &language,
+                            };
+                            engine.search(arg, &search_ctx).await
                         };
-                        engine.search(arg, &search_ctx).await
+                        super::clipboard_engine::ClipboardPageResult {
+                            items,
+                            next_cursor: None,
+                            has_more: false,
+                        }
                     }
                 };
-                let t1 = std::time::Instant::now();
-                // 0.20.1: 不使用 max_results 截断，engine 内部已截断
-                let entries: Vec<AppEntry> =
-                    items.into_iter().map(SearchItem::into_app_entry).collect();
                 tracing::trace!(
                     query = %arg,
-                    count = entries.len(),
+                    count = page.items.len(),
+                    has_more = page.has_more,
                     engine_ms = t0.elapsed().as_millis() as u64,
-                    fuse_ms = t1.elapsed().as_millis() as u64,
-                    "search_clipboard_mode: 完成"
+                    "search_clipboard_page: 完成"
                 );
-                return entries;
+                return page;
             }
         }
-        Vec::new()
+        super::clipboard_engine::ClipboardPageResult {
+            items: Vec::new(),
+            next_cursor: None,
+            has_more: false,
+        }
     }
 
     /// 搜索:先路由 → 按 Takeover/Mixed 分支执行 → 返回首批结果 + spawn 增量。

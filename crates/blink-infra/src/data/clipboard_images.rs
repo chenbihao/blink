@@ -44,7 +44,7 @@ pub struct ClipboardImage {
 
 /// 默认图片上限。
 #[allow(dead_code)]
-pub const DEFAULT_MAX_IMAGE_ITEMS: u32 = 200;
+pub const DEFAULT_MAX_IMAGE_ITEMS: u32 = 1000;
 
 /// 初始化 clipboard_images 表（放 cache 库）。
 pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
@@ -210,6 +210,27 @@ pub async fn query_recent_image_list(pool: &SqlitePool, limit: i64) -> Vec<Clipb
     .unwrap_or_default()
 }
 
+/// 0.25.29：keyset 游标分页——查询严格早于 `cursor`（`(created_at, id)` 字符串序）
+/// 的图片元数据。与 `query_recent_image_list` 排序键一致，不重不漏。
+pub async fn query_recent_image_list_after(
+    pool: &SqlitePool,
+    cursor: &super::clipboard::ClipboardCursor,
+    limit: i64,
+) -> Vec<ClipboardImageListItem> {
+    sqlx::query_as::<_, ClipboardImageListItem>(
+        "SELECT id, width, height, created_at, source_app, source_path
+         FROM clipboard_images
+         WHERE (created_at < ?1 OR (created_at = ?1 AND id < ?2))
+         ORDER BY created_at DESC, id DESC LIMIT ?3",
+    )
+    .bind(cursor.created_at)
+    .bind(&cursor.id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+}
+
 /// SQL 级搜索图片元数据（按 source_app / source_path LIKE 过滤）。
 ///
 /// 替代旧方案（加载 200 条全量元数据 → Rust 层 `String::contains` 过滤），
@@ -231,6 +252,30 @@ pub async fn search_image_list(
          ORDER BY created_at DESC, id DESC LIMIT ?2",
     )
     .bind(&pattern)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+}
+
+/// 0.25.29：keyset 游标分页的图片 SQL 搜索——LIKE 过滤 + 严格早于 cursor。
+pub async fn search_image_list_after(
+    pool: &SqlitePool,
+    query: &str,
+    cursor: &super::clipboard::ClipboardCursor,
+    limit: i64,
+) -> Vec<ClipboardImageListItem> {
+    let pattern = format!("%{query}%");
+    sqlx::query_as::<_, ClipboardImageListItem>(
+        "SELECT id, width, height, created_at, source_app, source_path
+         FROM clipboard_images
+         WHERE (source_app LIKE ?1 OR source_path LIKE ?1)
+           AND (created_at < ?2 OR (created_at = ?2 AND id < ?3))
+         ORDER BY created_at DESC, id DESC LIMIT ?4",
+    )
+    .bind(&pattern)
+    .bind(cursor.created_at)
+    .bind(&cursor.id)
     .bind(limit)
     .fetch_all(pool)
     .await
@@ -363,6 +408,67 @@ pub async fn count(pool: &SqlitePool) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 0.25.29：构造带唯一 sha256 的图片条目（save_image 按 sha256 删旧留新，
+    /// 测试要多条共存必须 sha 各异）。
+    fn img(id: &str, created_at: i64, source_app: Option<&str>) -> ClipboardImage {
+        ClipboardImage {
+            id: id.to_string(),
+            png_blob: vec![1, 2, 3],
+            thumb_blob: vec![4, 5, 6],
+            width: 100,
+            height: 200,
+            sha256: format!("sha_{id}"),
+            created_at,
+            source_app: source_app.map(|s| s.to_string()),
+            source_path: None,
+        }
+    }
+
+    /// 0.25.29：keyset 游标分页不重不漏 + LIKE 场景的游标下推。
+    #[tokio::test]
+    async fn image_list_after_pages_without_gaps_or_dupes() {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        init_db(&pool).await.unwrap();
+        for (id, at) in [("img_a", 100), ("img_b", 200), ("img_c", 300)] {
+            save_image(&pool, &img(id, at, Some("TestApp"))).await.unwrap();
+        }
+
+        let mut collected = Vec::new();
+        let mut cursor: Option<crate::data::clipboard::ClipboardCursor> = None;
+        loop {
+            let batch = match &cursor {
+                Some(c) => query_recent_image_list_after(&pool, c, 2).await,
+                None => query_recent_image_list(&pool, 2).await,
+            };
+            if batch.is_empty() {
+                break;
+            }
+            let last = batch.last().unwrap();
+            collected.extend(batch.iter().map(|m| m.id.clone()));
+            cursor = Some(crate::data::clipboard::ClipboardCursor {
+                created_at: last.created_at,
+                id: last.id.clone(),
+            });
+        }
+        assert_eq!(collected, vec!["img_c", "img_b", "img_a"]);
+
+        // LIKE 搜索的游标下推：取第一条做游标，剩余应恰好是更旧的两条
+        let first_search = search_image_list(&pool, "TestApp", 1).await;
+        assert_eq!(first_search.len(), 1);
+        let rest = search_image_list_after(
+            &pool,
+            "TestApp",
+            &crate::data::clipboard::ClipboardCursor {
+                created_at: first_search[0].created_at,
+                id: first_search[0].id.clone(),
+            },
+            10,
+        )
+        .await;
+        let ids: Vec<&str> = rest.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["img_b", "img_a"]);
+    }
 
     #[tokio::test]
     async fn save_and_query_image() {

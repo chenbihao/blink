@@ -1310,48 +1310,77 @@ pub fn compute_cursor_titlebar_position(phys_w: i32) -> Option<(i32, i32)> {
 
 /// resize / 多屏 DPI 切换后把窗口原点限制在最近显示器工作区内。
 /// 窗口大于工作区时贴齐左上，计算使用 i64 避免异常尺寸溢出。
+///
+/// 0.25.29：读-判-写整段搬到主线程执行——此前在调用线程读 `outer_position`、
+/// 经 tao 异步写回，与主线程的窗口定位（剪贴板 caret 精化/中心兜底）存在竞态：
+/// clamp 读到旧位置后、写回前被定位抢先，会用旧位置的钳制结果**覆盖**新定位
+/// （实测：中心兜底 (930,373) 被 resize-clamp 覆盖回 (1317,745)）。主线程串行后
+/// 后执行者看到前者结果，中心位置必在区内 → clamp no-op。
 pub fn clamp_to_work_area(win: &WebviewWindow) {
-    let Ok(pos) = win.outer_position() else {
+    let Ok(hwnd_raw) = win.hwnd() else {
         return;
     };
-    let Ok(size) = win.outer_size() else { return };
-    let Ok(hwnd_raw) = win.hwnd() else { return };
-    let hwnd = HWND(hwnd_raw.0 as _);
+    // HWND 裸指针非 Send——用 isize 跨线程，闭包内重建（refine/兜底同模式）
+    let hwnd_isize = hwnd_raw.0 as isize;
+    let queued = win.app_handle().run_on_main_thread(move || unsafe {
+        clamp_hwnd_to_work_area(HWND(hwnd_isize as *mut _));
+    });
+    if let Err(error) = queued {
+        // 主线程调度失败（退出边缘）——原线程直接做，保持既有行为
+        tracing::trace!(%error, "clamp_to_work_area: 主线程调度失败，调用线程执行");
+        unsafe {
+            clamp_hwnd_to_work_area(hwnd_raw);
+        }
+    }
+}
 
-    unsafe {
-        let hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-        let mut mi: MONITORINFO = std::mem::zeroed();
-        mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
-        if !GetMonitorInfoW(hmon, &mut mi).as_bool() {
-            return;
-        }
-        let work = mi.rcWork; // 工作区(排除任务栏)
-        let width = i64::from(size.width);
-        let height = i64::from(size.height);
-        let left = i64::from(work.left);
-        let top = i64::from(work.top);
-        let right = i64::from(work.right);
-        let bottom = i64::from(work.bottom);
-        let max_x = (right - width).max(left);
-        let max_y = (bottom - height).max(top);
-        let new_x = i64::from(pos.x).clamp(left, max_x) as i32;
-        let new_y = i64::from(pos.y).clamp(top, max_y) as i32;
-        if new_x != pos.x || new_y != pos.y {
-            let _ = win.set_position(PhysicalPosition::new(new_x, new_y));
-            tracing::debug!(
-                old_x = pos.x,
-                old_y = pos.y,
-                new_x,
-                new_y,
-                work_left = work.left,
-                work_top = work.top,
-                work_right = work.right,
-                work_bottom = work.bottom,
-                width = size.width,
-                height = size.height,
-                "窗口已限制到显示器工作区"
-            );
-        }
+/// `clamp_to_work_area` 的主线程实现：GetWindowRect 读位置尺寸（物理像素，
+/// 与 SetWindowPos 同坐标系）→ 工作区钳制 → SetWindowPos。
+unsafe fn clamp_hwnd_to_work_area(hwnd: HWND) {
+    let hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    let mut mi: MONITORINFO = std::mem::zeroed();
+    mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+    if !GetMonitorInfoW(hmon, &mut mi).as_bool() {
+        return;
+    }
+    let mut rect = std::mem::zeroed();
+    if GetWindowRect(hwnd, &mut rect).is_err() {
+        return;
+    }
+    let work = mi.rcWork; // 工作区(排除任务栏)
+    let width = i64::from(rect.right - rect.left);
+    let height = i64::from(rect.bottom - rect.top);
+    let left = i64::from(work.left);
+    let top = i64::from(work.top);
+    let right = i64::from(work.right);
+    let bottom = i64::from(work.bottom);
+    let max_x = (right - width).max(left);
+    let max_y = (bottom - height).max(top);
+    let new_x = i64::from(rect.left).clamp(left, max_x) as i32;
+    let new_y = i64::from(rect.top).clamp(top, max_y) as i32;
+    if new_x != rect.left || new_y != rect.top {
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            new_x,
+            new_y,
+            0,
+            0,
+            SET_WINDOW_POS_FLAGS(SWP_NOSIZE.0 | SWP_NOZORDER.0 | SWP_NOACTIVATE.0),
+        );
+        tracing::debug!(
+            old_x = rect.left,
+            old_y = rect.top,
+            new_x,
+            new_y,
+            work_left = work.left,
+            work_top = work.top,
+            work_right = work.right,
+            work_bottom = work.bottom,
+            width = width as i32,
+            height = height as i32,
+            "窗口已限制到显示器工作区"
+        );
     }
 }
 
@@ -2743,8 +2772,9 @@ fn spawn_voice_overlay_caret_refine(hwnd: HWND, owner_hwnd: isize) {
 /// 仅当前会话的及时结果可校准到可信光标/紧凑输入框，失败继续保持鼠标落点。
 pub fn spawn_main_window_caret_refine(
     app: &AppHandle,
-    elem: crate::platform::selection::SendableElement,
+    elem: Option<crate::platform::selection::SendableElement>,
     owner_hwnd: Option<isize>,
+    cursor: Option<(i32, i32)>,
 ) {
     let Some(win) = app.get_webview_window("main") else {
         return;
@@ -2775,13 +2805,33 @@ pub fn spawn_main_window_caret_refine(
     let spawned = std::thread::Builder::new()
         .name("main-caret".into())
         .spawn(move || {
-            let Some(anchor) = crate::platform::caret::clipboard_anchor_from_captured(&elem) else {
-                tracing::debug!("clipboard-mode: 无可信定位信息，保持鼠标定位");
+            let anchor =
+                elem.as_ref().and_then(crate::platform::caret::clipboard_anchor_from_captured);
+            let Some(anchor) = anchor else {
+                // 0.25.29（用户裁决）：无可信定位时兜底屏幕工作区中心（原保持鼠标
+                // 定位——鼠标可能停在屏幕任意角落，不顺手）。仍走与 refine 相同的
+                // revision/时限/前台校验，防止移动后来唤起的窗口。
+                tracing::debug!("clipboard-mode: 无可信定位信息，兜底到屏幕工作区中心");
+                let queued = app.run_on_main_thread(move || {
+                    if WINDOW_REVISION.load(Ordering::SeqCst) != revision
+                        || started.elapsed() > Duration::from_millis(250)
+                    {
+                        return;
+                    }
+                    let hwnd = HWND(hwnd_raw as *mut _);
+                    if !foreground_is_main_or_child(hwnd) {
+                        return;
+                    }
+                    relocate_main_window_centered(hwnd, owner.as_ref(), cursor);
+                });
+                if let Err(error) = queued {
+                    tracing::debug!(%error, "clipboard-mode: 兜底定位调度失败，保持原位");
+                }
                 return;
             };
             // UIA 跨进程调用不阻塞 show；慢返回不再移动已开始操作的弹窗。
             if started.elapsed() > Duration::from_millis(250) {
-                tracing::debug!("clipboard-mode: 定位结果过晚，保持鼠标定位");
+                tracing::debug!("clipboard-mode: 定位结果过晚，保持原位");
                 return;
             }
             let queued = app.run_on_main_thread(move || {
@@ -2792,24 +2842,90 @@ pub fn spawn_main_window_caret_refine(
                     return;
                 }
                 let hwnd = HWND(hwnd_raw as *mut _);
-                let fg = unsafe { GetForegroundWindow() };
-                let root = unsafe {
-                    windows::Win32::UI::WindowsAndMessaging::GetAncestor(
-                        fg,
-                        windows::Win32::UI::WindowsAndMessaging::GA_ROOT,
-                    )
-                };
-                if fg != hwnd && root != hwnd {
+                if !foreground_is_main_or_child(hwnd) {
                     return;
                 }
-                refine_main_window_to_caret(hwnd, &anchor, owner.as_ref());
+                refine_main_window_to_caret(hwnd, &anchor, owner.as_ref(), cursor);
             });
             if let Err(error) = queued {
-                tracing::debug!(%error, "clipboard-mode: 定位调度失败，保持鼠标定位");
+                tracing::debug!(%error, "clipboard-mode: 定位调度失败，保持原位");
             }
         });
     if let Err(error) = spawned {
-        tracing::debug!(%error, "main-caret 线程启动失败，保持鼠标定位");
+        tracing::debug!(%error, "main-caret 线程启动失败，保持原位");
+    }
+}
+
+/// 前台窗口是否为 blink 主窗（或其子窗口）——refine/兜底移动前校验，
+/// 防止移动用户已切去操作的其他应用时期的窗口。
+fn foreground_is_main_or_child(hwnd: HWND) -> bool {
+    unsafe {
+        let fg = GetForegroundWindow();
+        let root = windows::Win32::UI::WindowsAndMessaging::GetAncestor(
+            fg,
+            windows::Win32::UI::WindowsAndMessaging::GA_ROOT,
+        );
+        fg == hwnd || root == hwnd
+    }
+}
+
+/// 0.25.29（用户裁决）：caret 校准失败的兜底落点——目标屏**工作区中心**。
+///
+/// 选屏优先级：owner 窗口中心（用户操作的目标应用）→ 捕获时鼠标点 → 主屏。
+/// 窗口尺寸按目标屏 DPI 换算（tao 挪屏自动缩放，与 refine 同规则）。
+fn relocate_main_window_centered(
+    hwnd: HWND,
+    owner: Option<&RECT>,
+    cursor: Option<(i32, i32)>,
+) {
+    unsafe {
+        if !IsWindowVisible(hwnd).as_bool() {
+            return;
+        }
+        let pt = owner
+            .map(|r| POINT {
+                x: (r.left + r.right) / 2,
+                y: (r.top + r.bottom) / 2,
+            })
+            .or_else(|| cursor.map(|(x, y)| POINT { x, y }))
+            .unwrap_or(POINT { x: 0, y: 0 });
+        let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(hmon, &mut info).as_bool() {
+            return;
+        }
+        let rc = info.rcWork;
+
+        let mut window_rect = std::mem::zeroed();
+        if GetWindowRect(hwnd, &mut window_rect).is_err() {
+            return;
+        }
+        let width = window_rect.right - window_rect.left;
+        let height = window_rect.bottom - window_rect.top;
+        let current_dpi = crate::platform::dpi::get_dpi_for_hwnd(hwnd).max(1);
+        let target_dpi = crate::platform::dpi::get_dpi_for_hmonitor(hmon).max(1);
+        let width = (i64::from(width) * i64::from(target_dpi) / i64::from(current_dpi)) as i32;
+        let height = (i64::from(height) * i64::from(target_dpi) / i64::from(current_dpi)) as i32;
+
+        let cx = rc.left + (rc.right - rc.left) / 2;
+        let cy = rc.top + (rc.bottom - rc.top) / 2;
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            cx - width / 2,
+            cy - height / 2,
+            0,
+            0,
+            SET_WINDOW_POS_FLAGS(SWP_NOSIZE.0 | SWP_NOZORDER.0 | SWP_NOACTIVATE.0),
+        );
+        tracing::debug!(
+            center_x = cx,
+            center_y = cy,
+            "clipboard-mode: 已兜底到屏幕工作区中心"
+        );
     }
 }
 
@@ -2832,11 +2948,13 @@ fn clipboard_anchor_monitor(
     }
 }
 
-/// 仅可信文本定位可覆盖唤起时的鼠标落点；整页或滚出视口的矩形直接丢弃。
+/// 仅可信文本定位可覆盖唤起时的鼠标落点；整页或滚出视口的矩形直接丢弃——
+/// 0.25.29 起不可信锚点兜底到屏幕工作区中心（用户裁决，原保持鼠标定位）。
 fn refine_main_window_to_caret(
     hwnd: HWND,
     anchor: &crate::platform::caret::ClipboardAnchor,
     owner: Option<&RECT>,
+    cursor: Option<(i32, i32)>,
 ) {
     unsafe {
         if !IsWindowVisible(hwnd).as_bool() {
@@ -2850,13 +2968,15 @@ fn refine_main_window_to_caret(
         let height = window_rect.bottom - window_rect.top;
 
         let Some((work, dpi)) = clipboard_anchor_monitor(anchor) else {
+            relocate_main_window_centered(hwnd, owner, cursor);
             return;
         };
         if !anchor.is_usable(&work, owner, dpi) {
             tracing::debug!(
                 ?anchor,
-                "clipboard-mode: 非光标行/紧凑输入框或超出可见区，保持鼠标定位"
+                "clipboard-mode: 非光标行/紧凑输入框或超出可见区，兜底到屏幕工作区中心"
             );
+            relocate_main_window_centered(hwnd, owner, cursor);
             return;
         }
         // 鼠标与文本可位于不同 DPI 的屏幕；挪屏后 tao 会按目标 DPI 缩放，

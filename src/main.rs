@@ -603,8 +603,7 @@ fn main() {
             tauri::async_runtime::block_on(async {
                 search_service.update_language(app_config.language.clone());
             });
-            // 初始化 ClipboardEngine 展示页数快照（0.20.1：display_pages 配置项）
-            search_service.update_clipboard_display_pages(app_config.clipboard.display_pages);
+            // 0.25.29：display_pages 已退役（流式加载首屏 = page_size × 2），不再接线
             search_service.update_clipboard_search_enabled(app_config.clipboard.search_enabled);
             search_service.update_clipboard_retention_days(app_config.clipboard.retention_days);
             search_service.update_clipboard_candidate_limit(app_config.clipboard.candidate_limit);

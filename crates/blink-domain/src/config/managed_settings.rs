@@ -136,7 +136,7 @@ impl ManagedSettingId {
                 Some(1.0),
                 Some(20.0),
                 None,
-                "剪贴板模式一次加载几页（每页条数由 search.page_size 控制）",
+                "（0.25.29 已废弃：流式加载后不再有单次加载上限，此键仅兼容保留，写入无行为效果）",
             ),
             Self::ClipboardCandidateLimit => (
                 "integer",

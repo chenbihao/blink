@@ -48,10 +48,15 @@
     box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 20%, transparent);
 }
 
-/* 0.20.2: 剪贴板多选态——左侧强调条 + 淡色背景，区别于键盘选中态 */
+/* 0.20.2: 剪贴板多选态——左侧强调条 + 淡色背景，区别于键盘选中态。
+   强调条必须走 border-left 而非 inset box-shadow：box-shadow 在圆角上的
+   反锯齿会溢出 border-box 1px，而失效重绘矩形只含 border-box，WebView2
+   透明窗口下多选切换会在每行左上/左下残留高亮像素点。
+   padding-left 同步减 3px，border+padding 总量不变，内容位置不动。 */
 #results li.clipboard-selected {
     background: color-mix(in srgb, var(--accent) 8%, transparent);
-    box-shadow: inset 3px 0 0 var(--accent);
+    border-left: 3px solid var(--accent);
+    padding-left: calc(var(--space-md) - 3px);
 }
 
 #results li .app-icon {
@@ -173,8 +178,10 @@ body.alt-active #results li .item-badge {
    原 subtitle 在此场景下反而冗余，直接被参数替换更清爽。 */
 
 #results li.context-aware {
-    /* 用左内边框做强调条；不改 padding-left 避免图标位错位（原 padding-left: 10px 保持） */
-    box-shadow: inset 3px 0 0 var(--accent);
+    /* 左强调条与 clipboard-selected 同理走 border-left（inset box-shadow
+       圆角 AA 溢出会在元素增删后残留）；padding-left 减 3px 补偿，图标位不动 */
+    border-left: 3px solid var(--accent);
+    padding-left: calc(var(--space-md) - 3px);
 }
 
 #results li.context-aware.active,

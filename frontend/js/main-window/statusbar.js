@@ -150,8 +150,21 @@ function buildSecondary() {
     return secondary;
 }
 
-/** 右侧：翻页提示（多于一屏才显示）。 */
+/** 右侧：翻页提示（多于一屏才显示）。
+ *  0.25.29: 条数区间形态（剪贴板 step 滚轮模式）——`第 12-18 条 · 共 245 条`，
+ *  has_more 时总数带 `+`（还有更早的可加载）。 */
 function buildRight(paging) {
+    if (paging.rangeStart != null) {
+        const total = paging.hasMore ? `${paging.total}+` : String(paging.total);
+        const right = document.createElement("span");
+        right.className = "hint-right";
+        right.appendChild(renderHint(t("statusbar.range"), {
+            start: paging.rangeStart,
+            end: paging.rangeEnd,
+            total,
+        }));
+        return right;
+    }
     if (paging.pageCount <= 1) return null;
     const right = document.createElement("span");
     right.className = "hint-right";

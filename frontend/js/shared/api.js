@@ -34,9 +34,13 @@ export function resetSuggestionSession() {
  *  @param {string} query 搜索词（用户原始输入，无需"剪贴板"前缀）
  *  @param {number} seq 请求序号
  *  @param {string} [kind] 0.25.23 类型筛选："text"/"image"，缺省 = 全部
- *  @returns {Promise<{entries: Array, suggestion: *}>} */
-export function searchClipboard(query, seq, kind) {
-    return invoke("search_clipboard", {query, seq, kind});
+ *  @param {{created_at: number, id: string}} [cursor] 0.25.29 流式游标
+ *    （上一批末条位置，缺省 = 首批）
+ *  @param {number} [batch] 0.25.29 本批条数（缺省 = 后端按一页 page_size 兜底）
+ *  @returns {Promise<{entries: Array, next_cursor: ?{created_at: number, id: string},
+ *    has_more: boolean, suggestion: *}>} */
+export function searchClipboard(query, seq, kind, cursor = null, batch = null) {
+    return invoke("search_clipboard", {query, seq, kind, cursor, batch});
 }
 
 /** 启动应用（打开 lnk）。 */
