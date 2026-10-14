@@ -4,7 +4,7 @@
 
 > 📖 **文档入口**：[docs/README.md](docs/README.md)（文档体系总览）→ [docs/product.md](docs/product.md)（产品是什么、为什么）→ [docs/specs/](docs/specs/)（怎么做·铁则）→ [docs/phases/](docs/phases/)（各版做了什么）。
 
-更新时间 20261008
+更新时间 20261014
 
 ---
 
@@ -137,5 +137,7 @@ cargo test -p blink-domain-stt
 ## 6. 文档变更回写约定
 
 **任何文档变更回写需用户确认（除了单纯的状态更新）** 文档是决策的 single source of truth，改动影响后续所有人，不能静默修改。
+
+**使用指南同步**：涉及用户可见功能、交互、快捷键或用户体验优化，或新增实用小妙招时，必须检查并补充 [中文指南](docs/guide.md) 与 [英文指南](docs/guide.en.md) 中适用的操作说明和技巧，同步修正过时内容。**更新前先向用户说明拟更新要点并确认**；用户已在当前任务明确确认的范围可直接回写，不重复询问。
 
 文档运作规则（三层分工 / 新增决策怎么分流 / phase 生命周期 / 引用约定）见 [docs/README.md §五](docs/README.md)。

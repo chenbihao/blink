@@ -667,11 +667,8 @@ pub async fn update_item_text(pool: &SqlitePool, id: &str, text: &str) -> Result
 }
 
 /// 删除指定条目。
-pub async fn delete_item(pool: &SqlitePool, id: &str) {
-    let _ = sqlx::query("DELETE FROM clipboard_history WHERE id = ?1")
-        .bind(id)
-        .execute(pool)
-        .await;
+pub async fn delete_item(pool: &SqlitePool, id: &str) -> Result<(), sqlx::Error> {
+    delete_items_by_ids(pool, &[id]).await
 }
 
 /// 0.25.27：按 id 批量删除条目（剪贴板模式多选右键删除用）。
@@ -846,7 +843,10 @@ mod tests {
                 id: last.id.clone(),
             });
         }
-        assert_eq!(collected, vec!["clip_e", "clip_d", "clip_c", "clip_b", "clip_a"]);
+        assert_eq!(
+            collected,
+            vec!["clip_e", "clip_d", "clip_c", "clip_b", "clip_a"]
+        );
     }
 
     /// 同 created_at 的 tie-break 用字符串 id 序（与 SQL `id DESC` 一致）：
@@ -879,14 +879,20 @@ mod tests {
     #[tokio::test]
     async fn query_recent_meta_after_ignores_newer_inserts() {
         let pool = test_pool().await;
-        save_item(&pool, &item("clip_a", "a", 100, 0)).await.unwrap();
-        save_item(&pool, &item("clip_b", "b", 200, 0)).await.unwrap();
+        save_item(&pool, &item("clip_a", "a", 100, 0))
+            .await
+            .unwrap();
+        save_item(&pool, &item("clip_b", "b", 200, 0))
+            .await
+            .unwrap();
 
         let first = query_recent_meta(&pool, 1).await;
         assert_eq!(first[0].id, "clip_b");
 
         // 模拟监听器在分页间隙入库新条目（created_at 更晚）
-        save_item(&pool, &item("clip_new", "new", 999, 0)).await.unwrap();
+        save_item(&pool, &item("clip_new", "new", 999, 0))
+            .await
+            .unwrap();
 
         let rest = query_recent_meta_after(
             &pool,
@@ -904,12 +910,8 @@ mod tests {
     #[tokio::test]
     async fn delete_items_batch_removes_all_and_ignores_missing() {
         let pool = test_pool().await;
-        save_item(&pool, &item("clip_1", "a", 1, 0))
-            .await
-            .unwrap();
-        save_item(&pool, &item("clip_2", "b", 2, 0))
-            .await
-            .unwrap();
+        save_item(&pool, &item("clip_1", "a", 1, 0)).await.unwrap();
+        save_item(&pool, &item("clip_2", "b", 2, 0)).await.unwrap();
         // 含不存在的 id（clip_missing）：幂等跳过，不报错
         delete_items_by_ids(&pool, &["clip_1", "clip_missing", "clip_2"])
             .await

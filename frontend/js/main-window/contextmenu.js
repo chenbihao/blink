@@ -7,9 +7,8 @@ import {queryEl, resultsEl} from "./dom.js";
 import {activateItem} from "./actions.js";
 import {
     copyToClipboard,
+    manageClipboardEntries,
     createStickyNote,
-    deleteClipboardImage,
-    deleteClipboardItem,
     hideWindow,
     invoke,
     listChordActions,
@@ -31,6 +30,7 @@ import {normalizeError} from "../shared/tauri.js";
 import {EVENTS} from "../shared/event-names.js";
 import {parse as parseColor} from "../shared/color.js";
 import * as clipboardMode from "./clipboard-mode.js";
+import {refFromLi, refKey, selectionActions} from './clipboard-entry.js';
 
 /** 0.20.3：判断 shortcut 文本是否为颜色格式预览（#xxx / rgb(...) / hsl(...)）。 */
 function isColorShortcut(s) {
@@ -113,6 +113,9 @@ function colorMenuItems(colorHex) {
 
 /** 当前菜单数据（用于 Popup 点击时回调执行）。 */
 let currentItems = [];
+let currentMenuId = '';
+let menuSerial = 0;
+const menuOwner = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
 
 /** Chord 动作缓存（shown 时预拉取，右键时同步读）。只含 semantic=tap 的动作。 */
 let cachedChordActions = [];
@@ -131,6 +134,7 @@ export function init() {
 
         let items = [];
         const li = closestLi(target);
+        clipboardMode.prepareContextMenu(li);
         if (li) {
             items = itemMenu(li);
         } else {
@@ -141,13 +145,19 @@ export function init() {
         // 与批量指向混杂会产生「复制的是哪条」歧义）；右键空白处保留通用菜单
         // （粘贴/设置等与选择集无指向冲突），批量组置顶插入。
         if (clipboardMode.isActive() && clipboardMode.hasSelection()) {
-            const selectionItems = buildSelectionMenu();
+            const task = clipboardMode.getSelectionSnapshot();
+            const selectionItems = li && task.refs.length === 1 && items.length ? items : buildSelectionMenu(task);
             items = li
                 ? selectionItems
                 : [...selectionItems, {separator: true}, ...items];
         }
 
+        while (items[0]?.separator) items.shift();
+        while (items.at(-1)?.separator) items.pop();
+        items = items.filter((item, index) => !item.separator || !items[index - 1]?.separator);
         if (!items.length) return;
+        currentMenuId = menuOwner + ":" + (++menuSerial);
+        items = items.map(item => ({...item, menuId: currentMenuId}));
         currentItems = items;
 
         // 估算菜单尺寸（CSS 像素，后端会按目标显示器 DPI 缩放为物理像素）
@@ -186,8 +196,10 @@ export function init() {
     // 监听来自 Popup 窗口的菜单项点击事件
     import("../shared/tauri.js").then(({listen}) => {
         listen(EVENTS.CONTEXT_MENU_ACTION, (event) => {
-            const actionId = event.payload;
+            const {actionId, menuId} = event.payload || {};
+            if (!menuId || menuId !== currentMenuId) return;
             const item = currentItems[actionId];
+            currentMenuId = ''; currentItems = [];
             if (item && item.run && !item.separator) {
                 item.run();
             }
@@ -195,6 +207,7 @@ export function init() {
 
         // 主窗 shown 时预拉取 chord 动作，右键时同步读缓存（无延迟）
         listen(EVENTS.SHOWN, refreshChordActions);
+        listen(EVENTS.HIDDEN, close);
     });
 }
 
@@ -236,7 +249,10 @@ function showPopupWindow(width, height, items) {
 
 /** 关闭菜单（通知后端销毁 Popup 窗口）。 */
 function close() {
-    invoke("hide_context_menu").catch(() => {
+    const menuId = currentMenuId;
+    currentMenuId = ""; currentItems = [];
+    if (!menuId) return;
+    invoke("hide_context_menu", {menuId}).catch(() => {
     });
 }
 
@@ -246,20 +262,24 @@ function close() {
  * 0.25.27：剪贴板多选批量菜单组——非破坏操作（复制/上屏/编辑/便签）一组，
  * 删除独立一组（danger），取消选择收尾（escape hatch）。
  * 标注的快捷键与键盘实际行为一致（菜单即契约）：
- * Ctrl+C / Enter / Alt+E / Alt+S 多选时均为批量语义，Esc 清空多选。
+ * 只有纯文本选择标注文本快捷键；混选显式操作类型子集，Esc 清空选择。
  */
-function buildSelectionMenu() {
-    const count = clipboardMode.getSelectionCount();
-    return [
-        {label: t("menu.copySelected", {count}), shortcut: "Ctrl+C", run: () => clipboardMode.batchCopy()},
-        {label: t("menu.pasteSelected", {count}), shortcut: "Enter", run: () => clipboardMode.batchPaste()},
-        {label: t("menu.editSelected", {count}), shortcut: "Alt+E", run: () => clipboardMode.batchEdit()},
-        {label: t("menu.stickySelected", {count}), shortcut: "Alt+S", run: () => clipboardMode.batchSticky()},
-        {separator: true},
-        {label: t("menu.deleteSelected", {count}), run: () => clipboardMode.batchDelete(), danger: true},
-        {separator: true},
-        {label: t("menu.deselect"), shortcut: "Esc", run: () => clipboardMode.clearSelection()},
-    ];
+function buildSelectionMenu(task) {
+    const operations = {copy: clipboardMode.batchCopy, paste: clipboardMode.batchPaste,
+        edit: clipboardMode.batchEdit, sticky: clipboardMode.batchSticky,
+        pin: clipboardMode.batchPin, delete: clipboardMode.batchDelete};
+    const items = [];
+    let destructive = false;
+    for (const action of selectionActions(task.refs)) {
+        if (action.danger && !destructive) { items.push({separator: true}); destructive = true; }
+        const key = action.id === 'delete' ? 'menu.delete_scope_' + action.scope : 'menu.selection_' + action.id;
+        const frozenTask = {...task, refs: action.refs, keys: action.refs.map(refKey)};
+        items.push({label: t(key, {count: action.count}), shortcut: action.shortcut,
+            danger: !!action.danger, run: () => operations[action.id](frozenTask)});
+    }
+    items.push({separator: true}, {label: t('menu.deselect'), shortcut: 'Esc',
+        run: () => clipboardMode.clearSelection(task)});
+    return items;
 }
 
 function unifiedMenu() {
@@ -385,8 +405,17 @@ const KIND_LABELS = {
  * (c) 0.16.0 止血分支删除，由 actions 派生取代
  */
 function itemMenu(li) {
+    const data = readData(li);
+    const inClipboard = clipboardMode.isActive();
     const source = li.dataset.source || "";
     const lnkPath = li.dataset.lnkPath || "";
+    const clipboardRef = refFromLi(li);
+    const task = {...clipboardMode.getSelectionSnapshot(), refs: clipboardRef ? [clipboardRef] : [],
+        keys: clipboardRef ? [refKey(clipboardRef)] : []};
+    const closeAfterOpen = () => {
+        const current = clipboardMode.getSelectionSnapshot();
+        if (!inClipboard || (clipboardMode.isActive() && current.epoch === task.epoch && current.revision === task.revision)) hideWindow();
+    };
     let actions = [];
     try {
         actions = JSON.parse(li.dataset.actions || "[]");
@@ -404,12 +433,17 @@ function itemMenu(li) {
     for (const action of actions) {
         const label = action.hint ? t(action.hint) : (KIND_LABELS[action.kind]?.() ?? null);
         if (!label) continue; // 无标签的动作（如无 hint 的 run）跳过
-        const shortcut = action.runId === "edit_text_item" ? "Alt+E"
+        const isClipboardCopy = inClipboard && (
+            (clipboardRef?.kind === 'text' && action.kind === 'copy')
+            || (clipboardRef?.kind === 'image' && action.kind === 'run' && action.runId === 'copy_clipboard_image')
+        );
+        const shortcut = isClipboardCopy ? "Ctrl+C"
+            : action.runId === "edit_text_item" ? "Alt+E"
             : action.runId === "pin_text_item" ? "Alt+S" : undefined;
         items.push({
             label,
             shortcut,
-            run: () => activateItem({...readData(li), actions: [action]}),
+            run: () => activateItem({...data, actions: [action]}),
         });
     }
 
@@ -434,71 +468,46 @@ function itemMenu(li) {
         }
     }
 
-    // 0.16.5：剪贴板图片项追加"钉图"动作
-    // 图片项的 lnkPath 存的是 image_id，调 pin_clipboard_image 后端命令
-    const isImage = li.dataset.isImage === "true";
-    if (isImage && lnkPath) {
+    // 图片操作使用显式类型引用；剪贴板模式复用批量管线及选择快照。
+    if (clipboardRef?.kind === "image") {
         items.push({separator: true});
         items.push({
             label: t("menu.pin"),
             run: () => {
-                pinClipboardImage(lnkPath).catch((e) => console.error("pinClipboardImage failed:", e));
-                hideWindow();
+                if (inClipboard) clipboardMode.batchPin(task);
+                else pinClipboardImage(clipboardRef.id).then(closeAfterOpen).catch(e => showActionError('pin_clipboard_image', e));
             },
         });
         // 0.20.4：历史图片右键"编辑"——直接进入图片编辑器，不先覆盖剪贴板
         items.push({
             label: t("menu.editImage"),
             run: () => {
-                openImageEditorFromHistory(lnkPath)
-                    .then(() => hideWindow())
+                openImageEditorFromHistory(clipboardRef.id)
+                    .then(closeAfterOpen)
                     .catch((e) => {
                         const err = normalizeError(e);
                         // 0.20.7：同时判断 code 与 detail.reason，未来新增其他 invalid_state 不会被误当作成功
                         if (err.code === "invalid_state" && err.detail?.reason === "already_active") {
                             // 后端已激活现有编辑器窗口，只需关闭主窗
-                            hideWindow();
+                            closeAfterOpen();
                         } else {
-                            console.error("openImageEditorFromHistory failed:", err.message);
+                            showActionError('open_image_editor_from_history', err);
                         }
                     });
             },
         });
     }
 
-    // 0.16.13：剪贴板文本项追加“删除”动作
-    // 0.17.0：图片项也追加“删除”，按 isImage 分发到不同后端命令
-    // hitId 在首个 action（Copy）上，为 clipboard_history 表主键（仅文本项）
-    const clipboardId = actions[0]?.hitId;
-    if (source === "clipboard") {
-        if (isImage && lnkPath) {
-            // 图片项：lnkPath 持有 image_id（engine.rs image 分支投影）
-            items.push({separator: true});
-            items.push({
-                label: t("menu.delete"),
-                shortcut: "Alt+D",
-                run: () => {
-                    // 0.25.29: 局部移除（retrigger 全量重查会让流式已加载条目退回首批）
-                    deleteClipboardImage(lnkPath)
-                        .then(() => clipboardMode.removeLocalItems([lnkPath]))
-                        .catch((e) => console.error("deleteClipboardImage failed:", e));
-                },
-                danger: true,
-            });
-        } else if (clipboardId) {
-            // 文本项：clipboardId 为 clipboard_history 表主键
-            items.push({separator: true});
-            items.push({
-                label: t("menu.delete"),
-                shortcut: "Alt+D",
-                run: () => {
-                    deleteClipboardItem(clipboardId)
-                        .then(() => clipboardMode.removeLocalItems([clipboardId]))
-                        .catch((e) => console.error("deleteClipboardItem failed:", e));
-                },
-                danger: true,
-            });
-        }
+    if (clipboardRef && selectionActions([clipboardRef]).some(action => action.id === 'delete')) {
+        items.push({separator: true}, {label: t('menu.delete'), shortcut: 'Alt+D',
+            danger: true, run: () => {
+                if (inClipboard) clipboardMode.batchDelete(task);
+                else manageClipboardEntries('delete', [clipboardRef]).then(outcomes => {
+                    const failure = outcomes.find(outcome => !outcome.success);
+                    if (failure) throw new Error(failure.error);
+                    retrigger();
+                }).catch(e => showActionError('delete_clipboard_item', e));
+            }});
     }
 
     // (b) 文件管理附加项（不混入 capability actions，仍由前端按 lnkPath 追加）
@@ -564,6 +573,7 @@ function readData(li) {
         lnkPath: li.dataset.lnkPath,
         calcValue: li.dataset.calcValue,
         isError: li.dataset.isError === "true",
+        clipboardRef: refFromLi(li),
         actions,
     };
 }

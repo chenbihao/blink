@@ -83,9 +83,10 @@ Open with: `Alt+C` in the main window (or type `剪贴板` / `clip`). Text and i
 |---|---|---|
 | Filter | Just type | Fuzzy-search your clipboard history |
 | Type filter | Top "All / Text / Image" chips, or cycle with `Tab` / `Shift+Tab` | Switching type clears the multi-selection |
+| Copy entry | Select one entry and press `Ctrl+C`, or right-click "Copy" | Works for text and images; the single-entry context menu shows `Ctrl+C` |
 | Paste out | `Enter` / double-click / `Alt+number` | Text is really pasted into the focused-before-summon window's input box (falls back to copy when the target isn't an input box); images go back to the clipboard |
 | Edit entry | `Alt+E` or right-click "Edit" | Opens the content editor; saving creates a new history entry |
-| Delete entry | `Alt+D`, right-click "Delete record", or bare `Delete` (with empty input) | All three are equivalent |
+| Delete entry | `Alt+D`, the context menu's delete options, or bare `Delete` (with empty input) | Shortcuts delete the selection, or the highlighted entry if none; the context menu lets you choose the scope |
 | Image entry menu | Right-click an image item | Pin to desktop, or open the image editor directly (without overwriting the clipboard) |
 | Frequency weighting | On every paste / copy | The entry rises in the list — the more you use it, the easier to find |
 
@@ -93,19 +94,21 @@ Open with: `Alt+C` in the main window (or type `剪贴板` / `clip`). Text and i
 
 | Operation | Trigger | Notes |
 |---|---|---|
-| Multi-select | `Ctrl+click` entries | Any number (text items only); click again to deselect; plain clicks only move the caret, never activate |
-| Select all | `Ctrl+A` (with empty input) | Selects all returned text items |
-| Batch copy | `Ctrl+C` after selecting | Joins in click order with newlines into a single clipboard write; **the combination is automatically saved as one new history entry** for one-shot pasting later |
-| Batch paste | `Enter` after selecting | Joins in click order and pastes in one go |
-| Merge & edit | `Alt+E` after selecting | Merges into a new history entry in the editor (originals kept) — fits the "merge → review → delete old" cleanup flow |
-| Merge into note | `Alt+S` after selecting | Joins in click order into a single sticky note |
-| Batch menu | Right-click any entry after selecting | The menu is fully taken over by the batch group: copy / paste / edit / note / delete the N selected / clear selection |
-| Clear selection | `Esc` | With a selection active, `Esc` clears it first (window stays); press again to hide the window |
+| Single / multiple selection | Click / `Ctrl+click` | Text and images can be mixed; Ctrl toggles an entry, plain click replaces the selection |
+| Range selection | `Shift+click` | Selects from the anchor through the clicked entry across loaded pages; `Ctrl+Shift+click` adds a range |
+| Select all | `Ctrl+A` (with empty input) | Selects all currently loaded history entries, including images |
+| Batch copy / paste | `Ctrl+C` / `Enter` with text selected | Joins in selection order with newlines; saves the combination as one new history entry |
+| Merge & edit / note | `Alt+E` / `Alt+S` with text selected | Merge editing keeps the originals; note creation produces one note |
+| Actions by type | Right-click a selected entry in a mixed selection | Text copy / paste / edit / note come before image pinning; deletion always follows "Text only → Images only → All selected", regardless of selection order |
+| Batch pin images | Select images, then right-click "Pin" | Opens images sequentially with offset positions, up to 16 per operation; a failed image does not stop the rest |
+| Batch delete | `Alt+D` / `Delete` with empty input | Deletes the selection, or the highlighted history entry if nothing is selected; failed entries stay selected with feedback |
+| Right-click selection | Right-click a selected / unselected entry | Keeps the selected group / selects that entry alone; blank space keeps the selection |
+| Clear selection | `Esc` | Clears selection first, then exits clipboard mode on the next press |
 
 ### Silky tricks
 
 - Multi-selection survives paging and list refreshes; it resets automatically when the window hides, so it never lingers by mistake.
-- `Alt+D` and bare `Delete` always delete only the currently highlighted entry — batch deletion goes through the right-click menu.
+- With mixed selections, `Ctrl+C` / `Enter` / `Alt+E` / `Alt+S` ask you to choose a type from the context menu to avoid silently dropping images; a single image can still be copied.
 - Combination entries created by batch copy / paste **keep only the latest one per combination**, auto-pinned to top; repeated use never piles up.
 
 ---
@@ -121,7 +124,7 @@ Summon: `Alt+A` in the main window (empty input; can be promoted to a global hot
 | Adjust region | Drag the 8 edge handles / drag inside the region | Resize / move (clamped to the monitor) |
 | Toolbar | Appears automatically after selection | Shapes (rectangle/ellipse/spotlight/magnifier), pens (pencil/arrow/highlighter), text (text/numbered badge/watermark), mosaic/Gaussian blur, eraser |
 | Undo / redo / reset | `Alt+Z` / `Alt+Y` / `Alt+R` | Annotation-command-level undo |
-| Output | Copy / save / pin / OCR / translate / translate & pin (see §5) | Double-click the region = copy; after OCR, translate on the image or select-copy the original text |
+| Output | Copy / save / pin / OCR / translate / translate & pin (see §5) | Double-click inside the region to confirm copying the screenshot, including over OCR text; after OCR, translate on the image or drag-select text to copy |
 | Scrolling capture | Toolbar "Scrolling capture" | Scrolls the target window and stitches frames; supports "auto scroll"; enters annotation mode when done |
 | Cancel | `Esc` / `✕` / right-click without a selection | Layered closing: OCR panel / subpanels / dropdowns first, then the whole layer |
 
@@ -136,7 +139,7 @@ Summon: `Alt+A` in the main window (empty input; can be promoted to a global hot
 | `E` key | Press `E` while annotating | Toggles the OCR panel |
 | Double-click full-screen copy | Double-click the dim overlay without a selection | Copies the whole screen |
 | Right-click has three meanings | No selection = cancel / annotating = copy region / selecting text = text menu | One right-click, three semantics |
-| Silent text layer | OCR runs in the background right after you select | Text on the image becomes directly draggable-selectable: `Ctrl+C` to copy, double-click selects the whole line, right-click copies everything |
+| Silent text layer | OCR runs in the background right after you select | Drag-select text, then press `Ctrl+C` to copy; right-click can copy all text. Double-click still confirms copying the screenshot. Recognition does not open the panel automatically; press `E` when needed |
 | Pixel magnifier | Follows automatically during selection | Built-in hints: `Shift` toggles HEX/RGB/HSL, `C` copies the color |
 | Eyedropper | "Pick from screenshot" in the color panel | Full-screen click sampling; arrow keys fine-tune by 1px; `Esc` exits only the picker, not the screenshot |
 | Arrow-key nudge | Arrow keys in annotation mode | Moves the region by 1 physical pixel |
@@ -242,7 +245,7 @@ Things you would almost never discover without this list:
 2. **Main window wheel = paging** — with more than 9 results, the wheel flips a whole page.
 3. **Type `>` to run commands** — `Enter` executes in a terminal, no need to open one first.
 4. **Type `#fff` to detect colors** — works in both the main window and the clipboard panel; `Enter` copies HEX.
-5. **Clipboard `Ctrl+click` multi-select** — then `Ctrl+C` to batch copy, `Enter` to batch paste, `Alt+E` to merge & edit, `Alt+S` to merge into a note, right-click for batch delete; batch-copied combinations are automatically saved as one new history entry.
+5. **Clipboard mixed selection** — use `Ctrl+click` to toggle entries and `Shift+click` for ranges. Text-only selections support batch copy / paste; mixed selections offer actions by type in the context menu, including batch image pinning.
 6. **Clipboard bare `Delete` deletes** — no need to reach for `Alt+D`.
 7. **Hold `Alt` in a screenshot to reveal shortcuts** — every toolbar button shows its number badge.
 8. **The screenshot wheel tunes everything** — wheel over tool buttons / thickness / sliders / hue bar / preset swatches; all respond.
@@ -287,12 +290,13 @@ Things you would almost never discover without this list:
 | Keys | Action |
 |---|---|
 | `Ctrl+click` | Multi-select entries |
-| `Ctrl+A` | Select all text items (with empty input) |
-| `Ctrl+C` | Batch-copy the selection |
-| `Enter` | Paste out (batch paste when multi-selected) |
+| `Shift+click` / `Ctrl+Shift+click` | Select / add a range |
+| `Ctrl+A` | Select all loaded history entries (with empty input) |
+| `Ctrl+C` | Batch-copy text / copy a single image; use the context menu for mixed selections |
+| `Enter` | Paste text / copy a single image; batch-paste text-only selections |
 | `Tab` / `Shift+Tab` | Cycle the type filter |
-| `Alt+E` / `Alt+S` | Edit / pin as note (merge semantics when multi-selected) |
-| `Alt+D` / `Delete` | Delete the current entry |
+| `Alt+E` / `Alt+S` | Edit / create a note from text-only selections (merge multiple entries) |
+| `Alt+D` / `Delete` | Delete the selection, or the current entry if none; Delete requires empty input |
 
 ### Inside screenshot annotation
 

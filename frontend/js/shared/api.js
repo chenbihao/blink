@@ -170,6 +170,11 @@ export function deleteClipboardItemsBatch(ids) {
     return invoke("delete_clipboard_items_batch", {ids});
 }
 
+/** 类型化批量操作；逐项返回结果，大图片内容不经过前端。 */
+export function manageClipboardEntries(operation, entries) {
+    return invoke("manage_clipboard_entries", {operation, entries});
+}
+
 /** 0.17.0：删除指定剪贴板图片条目。imageId 为 clipboard_images 表 id。 */
 export function deleteClipboardImage(imageId) {
     return invoke("delete_clipboard_image", {imageId});

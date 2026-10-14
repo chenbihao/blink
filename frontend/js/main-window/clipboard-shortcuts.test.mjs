@@ -8,7 +8,6 @@ import {describe, test} from "node:test";
 import assert from "node:assert/strict";
 
 import {
-    findDeleteTarget,
     findEditAction,
     isImeComposing,
     isPureAlt,
@@ -217,7 +216,7 @@ describe("resolveShortcutAction — 快捷键类型解析", () => {
 describe("findEditAction — 从 active 项查找 edit_text_item action", () => {
     test("有 edit_text_item action 时返回该 action", () => {
         const item = {
-            isImage: false,
+            isImage: false, clipboardRef: {kind: 'text', id: 'test'},
             actions: [
                 {kind: "copy", hitId: "clip_1"},
                 {kind: "run", runId: "edit_text_item", runArg: {originRef: "clip_1"}},
@@ -231,7 +230,7 @@ describe("findEditAction — 从 active 项查找 edit_text_item action", () => 
 
     test("无 edit_text_item action 时返回 null", () => {
         const item = {
-            isImage: false,
+            isImage: false, clipboardRef: {kind: 'text', id: 'test'},
             actions: [{kind: "copy", hitId: "clip_1"}],
         };
         assert.equal(findEditAction(item), null);
@@ -250,7 +249,7 @@ describe("findEditAction — 从 active 项查找 edit_text_item action", () => 
     });
 
     test("actions 为空数组返回 null", () => {
-        assert.equal(findEditAction({isImage: false, actions: []}), null);
+        assert.equal(findEditAction({isImage: false, clipboardRef: {kind: 'text', id: 'test'}, actions: []}), null);
     });
 
     test("actions 为 undefined 返回 null", () => {
@@ -259,7 +258,7 @@ describe("findEditAction — 从 active 项查找 edit_text_item action", () => 
 
     test("有多个 action 时仍能找到 edit_text_item", () => {
         const item = {
-            isImage: false,
+            isImage: false, clipboardRef: {kind: 'text', id: 'test'},
             actions: [
                 {kind: "copy", hitId: "clip_1"},
                 {kind: "run", runId: "pin_text_item"},
@@ -268,78 +267,5 @@ describe("findEditAction — 从 active 项查找 edit_text_item action", () => 
         };
         const result = findEditAction(item);
         assert.equal(result?.runId, "edit_text_item");
-    });
-});
-
-// ── findDeleteTarget ───────────────────────────────────────────────────────
-
-describe("findDeleteTarget — 从 active 项解析删除目标", () => {
-    test("文本项返回 { type: 'text', id: hitId }", () => {
-        const item = {
-            isImage: false,
-            source: "clipboard",
-            actions: [{kind: "copy", hitId: "clip_42"}],
-        };
-        const result = findDeleteTarget(item);
-        assert.deepEqual(result, {type: "text", id: "clip_42"});
-    });
-
-    test("图片项返回 { type: 'image', id: lnkPath }", () => {
-        const item = {
-            isImage: true,
-            source: "clipboard",
-            lnkPath: "img_99",
-            actions: [{kind: "run", runId: "copy_clipboard_image", runArg: "img_99"}],
-        };
-        const result = findDeleteTarget(item);
-        assert.deepEqual(result, {type: "image", id: "img_99"});
-    });
-
-    test("非 clipboard 来源返回 null（颜色降级结果不可删除）", () => {
-        const item = {
-            isImage: false,
-            source: "color",
-            actions: [{kind: "copy", payload: "#ff0000"}],
-        };
-        assert.equal(findDeleteTarget(item), null);
-    });
-
-    test("source 为 undefined 返回 null", () => {
-        const item = {
-            isImage: false,
-            actions: [{kind: "copy", hitId: "clip_1"}],
-        };
-        assert.equal(findDeleteTarget(item), null);
-    });
-
-    test("无 active 项返回 null", () => {
-        assert.equal(findDeleteTarget(null), null);
-    });
-
-    test("文本项缺少 hitId 返回 null", () => {
-        const item = {
-            isImage: false,
-            source: "clipboard",
-            actions: [{kind: "copy"}],
-        };
-        assert.equal(findDeleteTarget(item), null);
-    });
-
-    test("图片项缺少 lnkPath 返回 null", () => {
-        const item = {
-            isImage: true,
-            source: "clipboard",
-            actions: [{kind: "run", runId: "copy_clipboard_image"}],
-        };
-        assert.equal(findDeleteTarget(item), null);
-    });
-
-    test("actions 为空数组返回 null", () => {
-        const item = {
-            isImage: false,
-            source: "clipboard",
-            actions: [],
-        };
-        assert.equal(findDeleteTarget(item), null);
     });
 });

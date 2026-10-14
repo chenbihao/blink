@@ -6,13 +6,15 @@
 //! **快捷键契约**（§3.7）：
 //! - `Alt+E` 编辑 active 文本项（复用 `edit_text_item` action）；
 //!   0.25.27 起多选时改为合并编辑选中（菜单即契约，与右键标注一致）
-//! - `Alt+D` 删除 active 文本或图片历史（多选时保持单条，破坏面小）
+//! - `Alt+D` / 空查询 Delete 删除选择集；无选择时删除 active 历史项
 //! - `Alt+S` 0.25.27：active 文本项贴为便签；多选时合并选中为一张便签
 //! - 裸 `Delete` 仅在 query 为空时等价 `Alt+D`；query 非空时保留输入框前删字符语义
 //! - IME composition 期间全部放行
 //! - 图片项不响应 `Alt+E`（不误开文本编辑器）
 //! - 颜色降级结果等非历史项不响应删除
 //! - AltGr 组合键（Windows 上表现为 Ctrl+Alt）必须被 `!e.ctrlKey` 排除
+
+import {entryRef} from './clipboard-entry.js';
 
 // ── 快捷键类型 ─────────────────────────────────────────────────────────────────
 
@@ -92,45 +94,12 @@ export function resolveShortcutAction(e, queryIsEmpty) {
  *   图片项或无 active 项返回 null。
  */
 export function findEditAction(activeItem) {
-    if (!activeItem) return null;
-    if (activeItem.isImage) return null; // 图片项不响应 Alt+E
+    if (entryRef(activeItem)?.kind !== 'text') return null;
 
     const actions = activeItem.actions;
     if (!Array.isArray(actions)) return null;
 
     return actions.find((a) => a.kind === "run" && a.runId === "edit_text_item") ?? null;
-}
-
-/**
- * 从 active 项数据中解析删除目标。
- *
- * @param {{ actions?: Array<{kind?: string, hitId?: string}>, isImage?: boolean, lnkPath?: string, source?: string } | null} activeItem
- * @returns {{ type: "text", id: string } | { type: "image", id: string } | null}
- *   文本项返回 { type: "text", id: hitId }；图片项返回 { type: "image", id: lnkPath }。
- *   无 active 项、非 clipboard 来源、或缺少 id 时返回 null。
- */
-export function findDeleteTarget(activeItem) {
-    if (!activeItem) return null;
-
-    // 只有 clipboard 来源的历史项可删除
-    // 颜色降级结果 (source="color") 等非历史项不得删除
-    if (activeItem.source !== "clipboard") return null;
-
-    if (activeItem.isImage) {
-        // 图片项：lnkPath 持有 image_id
-        const id = activeItem.lnkPath;
-        if (!id) return null;
-        return {type: "image", id};
-    }
-
-    // 文本项：hitId 在首个 action（copy）上
-    const actions = activeItem.actions;
-    if (!Array.isArray(actions)) return null;
-
-    const hitId = actions[0]?.hitId;
-    if (!hitId) return null;
-
-    return {type: "text", id: hitId};
 }
 
 // ── 重置（单测用）───────────────────────────────────────────────────────────

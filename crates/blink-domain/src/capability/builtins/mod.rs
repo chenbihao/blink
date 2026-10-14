@@ -34,6 +34,7 @@ pub mod image_input;
 pub mod list_clipboard_images;
 pub mod list_sticky;
 pub mod list_windows;
+pub mod manage_clipboard_history;
 pub mod manage_window;
 pub mod ocr_engine;
 pub mod ocr_image;

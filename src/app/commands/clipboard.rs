@@ -2,8 +2,80 @@
 
 use tauri::Manager;
 
+use crate::app::command_error::CommandError;
 use crate::domain::clipboard::ClipboardWriteSource;
-use crate::domain::event::CapabilityEnv;
+use crate::domain::clipboard::history::{
+    ClipboardEntryKind, ClipboardEntryOutcome, ClipboardEntryRef,
+};
+
+/// UI 协议适配：所有删除/钉图都落到同一个 Capability，结果逐项透传。
+#[tauri::command]
+pub async fn manage_clipboard_entries(
+    app: tauri::AppHandle,
+    operation: String,
+    entries: Vec<ClipboardEntryRef>,
+) -> Result<Vec<ClipboardEntryOutcome>, CommandError> {
+    let env = app
+        .state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
+        .inner()
+        .clone();
+    let registry = app.state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>();
+    let ctx = crate::domain::capability::InvokeContext {
+        env: env.as_ref(),
+        origin: crate::domain::capability::InvocationOrigin::LocalSurface,
+        runtime: crate::domain::capability::RuntimeCapabilities {
+            surface: Some(env.as_ref()),
+            main_process: true,
+            desktop_session: true,
+        },
+        deadline: None,
+    };
+    let result = registry
+        .invoke(
+            "manage_clipboard_history",
+            serde_json::json!({"operation":operation,"entries":entries}),
+            &ctx,
+        )
+        .await?;
+    match result {
+        crate::domain::capability::CapabilityResult::Items { items } => items
+            .into_iter()
+            .map(|item| {
+                serde_json::from_value(item.data)
+                    .map_err(|e| CommandError::new("internal", e.to_string(), false))
+            })
+            .collect(),
+        _ => Err(CommandError::new(
+            "internal",
+            "剪贴板操作返回了无效结果",
+            false,
+        )),
+    }
+}
+
+async fn manage_legacy_entries(
+    app: tauri::AppHandle,
+    operation: &str,
+    kind: ClipboardEntryKind,
+    ids: Vec<String>,
+) -> Result<(), String> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let outcomes = manage_clipboard_entries(
+        app,
+        operation.into(),
+        ids.into_iter()
+            .map(|id| ClipboardEntryRef { kind, id })
+            .collect(),
+    )
+    .await
+    .map_err(|e| e.message)?;
+    if let Some(error) = outcomes.into_iter().find_map(|o| o.error) {
+        return Err(error);
+    }
+    Ok(())
+}
 
 // 同一时刻只允许一次上屏，避免后一次请求覆盖前一次尚未粘贴的剪贴板。
 static PASTE_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -41,12 +113,7 @@ pub async fn search_clipboard(
     let service = app.state::<std::sync::Arc<crate::domain::search::SearchService>>();
     // 复用 SearchService 持有的 ClipboardEngine 实例（不重复建池）
     let page = service
-        .search_clipboard_page(
-            &query,
-            kind.as_deref(),
-            cursor,
-            batch.unwrap_or(0) as usize,
-        )
+        .search_clipboard_page(&query, kind.as_deref(), cursor, batch.unwrap_or(0) as usize)
         .await;
     let entries: Vec<crate::domain::search::AppEntry> = page
         .items
@@ -254,9 +321,7 @@ pub async fn get_clipboard_text_batch(
 /// 删除指定剪贴板条目。
 #[tauri::command]
 pub async fn delete_clipboard_item(app: tauri::AppHandle, id: String) -> Result<(), String> {
-    let pool = &app.state::<crate::infra::data::DbPools>().history;
-    crate::infra::data::clipboard::delete_item(pool, &id).await;
-    Ok(())
+    manage_legacy_entries(app, "delete", ClipboardEntryKind::Text, vec![id]).await
 }
 
 /// 0.25.27：按 id 批量删除剪贴板文本条目（多选右键「删除选中的 N 条」）。
@@ -267,26 +332,16 @@ pub async fn delete_clipboard_items_batch(
     app: tauri::AppHandle,
     ids: Vec<String>,
 ) -> Result<(), String> {
-    let pool = &app.state::<crate::infra::data::DbPools>().history;
-    let count = ids.len();
-    let id_refs: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
-    crate::infra::data::clipboard::delete_items_by_ids(pool, &id_refs)
-        .await
-        .map_err(|e| e.to_string())?;
-    tracing::info!(count, "剪贴板条目已批量删除");
-    Ok(())
+    manage_legacy_entries(app, "delete", ClipboardEntryKind::Text, ids).await
 }
 
 /// 0.17.0：删除指定剪贴板图片条目。
 ///
 /// 图片项的 `lnkPath` 实际持有 image_id（`engine.rs` image 分支投影），
-/// 前端 `contextmenu.js` 按 `isImage` 分发到此命令。
+/// 兼容旧入口；新的混选菜单使用 manage_clipboard_entries。
 #[tauri::command]
 pub async fn delete_clipboard_image(app: tauri::AppHandle, image_id: String) -> Result<(), String> {
-    let pool = &app.state::<crate::infra::data::DbPools>().cache;
-    crate::infra::data::clipboard_images::delete_image(pool, &image_id).await;
-    tracing::info!(id = %image_id, "剪贴板图片已删除");
-    Ok(())
+    manage_legacy_entries(app, "delete", ClipboardEntryKind::Image, vec![image_id]).await
 }
 
 /// 0.17.0：清空所有剪贴板图片历史。
@@ -354,17 +409,5 @@ pub async fn copy_clipboard_image(app: tauri::AppHandle, image_id: String) -> Re
 /// 调 `show_pin_window` 创建/复用钉图窗口。位置居中于主显示器。
 #[tauri::command]
 pub async fn pin_clipboard_image(app: tauri::AppHandle, image_id: String) -> Result<(), String> {
-    let pools = app.state::<crate::infra::data::DbPools>();
-    let png_data = crate::domain::clipboard::load_history_png(&pools.cache, &image_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    let env = app
-        .state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
-        .inner()
-        .clone();
-    let (screen_x, screen_y) = env.show_pin_image(png_data, None, None)?;
-
-    tracing::debug!(id = %image_id, screen_x, screen_y, "pin_clipboard_image");
-    tracing::info!(id = %image_id, "剪贴板图片已钉到桌面");
-    Ok(())
+    manage_legacy_entries(app, "pin", ClipboardEntryKind::Image, vec![image_id]).await
 }

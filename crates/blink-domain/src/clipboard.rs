@@ -4,6 +4,7 @@
 //! BGRA 校验和历史图片加载统一收敛在这里。平台层仍只提供同步 Win32 原语。
 
 use sqlx::SqlitePool;
+pub mod history;
 
 /// 剪贴板读取结果。图片优先，未读到图片时再读取文本。
 #[derive(Debug, Clone, PartialEq, Eq)]

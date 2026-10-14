@@ -20,6 +20,7 @@
 
     /** 渲染菜单项（复用窗口时可反复调用）。 */
     function renderMenu(items) {
+        displayedMenuId = items.find(item => item.menuId)?.menuId || '';
         const menuEl = document.getElementById('menu');
         menuEl.innerHTML = '';
         const fragment = document.createDocumentFragment();
@@ -54,7 +55,7 @@
                 isClickingItem = true;
             });
             row.addEventListener('click', () => {
-                if (invoke) invoke('context_menu_action', {actionId: index});
+                if (invoke) invoke('context_menu_action', {actionId: index, menuId: item.menuId});
                 isClickingItem = false;
             });
             fragment.appendChild(row);
@@ -69,6 +70,7 @@
     };
 
     let isClickingItem = false;
+    let displayedMenuId = '';
 
     // ── 初始渲染（从 URL 参数，首次创建窗口时）──
     const params = new URLSearchParams(window.location.search);
@@ -107,17 +109,18 @@
 
     // ESC 关闭
     document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape' && invoke) invoke('hide_context_menu');
+        if (e.key === 'Escape' && invoke) invoke('hide_context_menu', {menuId: displayedMenuId});
     });
 
     // 失焦关闭：点击菜单项时不立即关闭（等 click 事件执行）
     window.addEventListener('blur', () => {
+        const menuId = displayedMenuId;
         if (isClickingItem) {
             setTimeout(() => {
-                if (invoke) invoke('hide_context_menu');
+                if (invoke) invoke('hide_context_menu', {menuId});
             }, 100);
         } else {
-            if (invoke) invoke('hide_context_menu');
+            if (invoke) invoke('hide_context_menu', {menuId});
         }
     });
 </script>

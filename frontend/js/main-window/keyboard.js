@@ -178,26 +178,26 @@ function onNavigation(e) {
     if (e.key === "ArrowDown") {
         e.preventDefault();
         results.move(1);
+        clipboardMode.onNavigate(e);
     } else if (e.key === "ArrowUp") {
         e.preventDefault();
         results.move(-1);
+        clipboardMode.onNavigate(e);
     } else if (e.key === "PageDown") {
         e.preventDefault();
         results.pageDown();
+        clipboardMode.onNavigate(e);
     } else if (e.key === "PageUp") {
         e.preventDefault();
         results.pageUp();
+        clipboardMode.onNavigate(e);
     } else if (e.key === "Enter") {
         e.preventDefault();
         // 0.21.x: 剪贴板模式 Enter = 上屏（文本）或复制（图片），与双击/Alt+数字同语义
         // 0.25.24: 有多选时 Enter = 批量上屏选中内容（点击顺序拼接）；
         //   Alt+数字 / 双击不经此分支，保持单条语义
         if (clipboardMode.isActive()) {
-            if (clipboardMode.hasSelection()) {
-                clipboardMode.batchPaste();
-            } else {
-                clipboardMode.activateByData(results.getActive());
-            }
+            clipboardMode.activateSelection();
             return;
         }
         activateItem(results.getActive());

@@ -317,11 +317,23 @@ pub async fn get_thumb_by_id(pool: &SqlitePool, id: &str) -> Option<Vec<u8>> {
 }
 
 /// 删除指定图片条目。
-pub async fn delete_image(pool: &SqlitePool, id: &str) {
-    let _ = sqlx::query("DELETE FROM clipboard_images WHERE id = ?1")
-        .bind(id)
-        .execute(pool)
-        .await;
+pub async fn delete_image(pool: &SqlitePool, id: &str) -> Result<(), sqlx::Error> {
+    delete_images_by_ids(pool, &[id]).await
+}
+
+/// 每库单事务；不存在的 ID 幂等成功，任何 SQL 错误均回滚并返回调用方。
+pub async fn delete_images_by_ids(pool: &SqlitePool, ids: &[&str]) -> Result<(), sqlx::Error> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let mut tx = pool.begin().await?;
+    for id in ids {
+        sqlx::query("DELETE FROM clipboard_images WHERE id = ?1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await
 }
 
 /// 清空所有剪贴板图片历史。
@@ -431,7 +443,9 @@ mod tests {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
         init_db(&pool).await.unwrap();
         for (id, at) in [("img_a", 100), ("img_b", 200), ("img_c", 300)] {
-            save_image(&pool, &img(id, at, Some("TestApp"))).await.unwrap();
+            save_image(&pool, &img(id, at, Some("TestApp")))
+                .await
+                .unwrap();
         }
 
         let mut collected = Vec::new();

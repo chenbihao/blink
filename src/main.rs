@@ -445,19 +445,21 @@ fn main() {
                     .map(|d| d.join("plugins").join("builtin"))
                     .unwrap_or_else(|_| domain::plugin::builtin_plugins_dir())
             };
-            let mut plugins = domain::plugin::load_builtin_plugins(&plugins_dir, proxy.clone());
+            let plugins = domain::plugin::load_builtin_plugins(&plugins_dir, proxy.clone());
             // 0.25.20：dev 额外加载 examples 示例插件（echo-python / echo-node
             // 验证托管脚本解释器链路；release 包不含 examples 资源——编译期
             // 排除，与 examples_plugins_dir 的 cfg 对齐）。
             #[cfg(debug_assertions)]
-            {
+            let plugins = {
+                let mut plugins = plugins;
                 let examples = domain::plugin::load_builtin_plugins(
                     &domain::plugin::examples_plugins_dir(),
                     proxy.clone(),
                 );
                 tracing::debug!(count = examples.len(), "已加载 examples 示例插件");
                 plugins.extend(examples);
-            }
+                plugins
+            };
             // 构造意图路由 RuleRouter,从插件 manifest 注入规则(合并用户自定义 triggers)。
             let router = std::sync::Arc::new(domain::intent::RuleRouter::new(app_config.surface_takeover_enabled));
             // 0.24.2 §3.7：SuggestionCoordinator 由编排层（SearchService）持有，
@@ -1582,6 +1584,7 @@ app::commands::search_clipboard_history,
             app::commands::record_clipboard_hit,
             app::commands::delete_clipboard_item,
             app::commands::delete_clipboard_items_batch,
+            app::commands::manage_clipboard_entries,
             app::commands::delete_clipboard_image,
             app::commands::clear_clipboard_history,
             app::commands::clear_clipboard_images,

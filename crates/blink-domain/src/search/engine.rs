@@ -225,6 +225,12 @@ impl SearchItem {
                 // **与 Copy 分支的区别**：run_arg 不含 `text` 字段，前端检测到缺 text 时
                 // 先 `getClipboardText(originRef)` 拉取再执行后续逻辑。
                 AppEntry {
+                    clipboard_ref: (self.source == "clipboard").then(|| {
+                        crate::clipboard::history::ClipboardEntryRef {
+                            kind: crate::clipboard::history::ClipboardEntryKind::Text,
+                            id: hit_id.clone(),
+                        }
+                    }),
                     name: self.title,
                     pinyin_name: String::new(),
                     pinyin_full: String::new(),
@@ -305,6 +311,12 @@ impl SearchItem {
                     pinyin_name: String::new(),
                     pinyin_full: String::new(),
                     description: self.subtitle,
+                    clipboard_ref: (is_image && self.source == "clipboard").then(|| {
+                        crate::clipboard::history::ClipboardEntryRef {
+                            kind: crate::clipboard::history::ClipboardEntryKind::Image,
+                            id: lnk_path.clone(),
+                        }
+                    }),
                     lnk_path,
                     is_calc: false,
                     score,
@@ -434,5 +446,66 @@ mod tests {
         assert!(matches!(e.actions[0].kind, ActionKind::Copy));
         // text 透传到 payload(前端复制优先取 payload)
         assert_eq!(e.actions[0].payload.as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn clipboard_projection_carries_typed_identity_without_loading_content() {
+        use crate::clipboard::history::{ClipboardEntryKind, ClipboardEntryRef};
+        let project = |source: &str, action| {
+            SearchItem {
+                id: "search-result-id".into(),
+                title: "preview".into(),
+                subtitle: None,
+                score: 1.0,
+                action,
+                source: source.into(),
+                score_detail: None,
+                context_aware: false,
+                color_list_hex: None,
+            }
+            .into_app_entry()
+        };
+        let text = project(
+            "clipboard",
+            SearchAction::LazyCopy {
+                hit_id: "same".into(),
+            },
+        );
+        let image_action = SearchAction::RunAction {
+            id: "copy_clipboard_image".into(),
+            arg: Some(serde_json::json!("same")),
+        };
+        let image = project("clipboard", image_action.clone());
+        assert_eq!(
+            text.clipboard_ref,
+            Some(ClipboardEntryRef {
+                kind: ClipboardEntryKind::Text,
+                id: "same".into()
+            })
+        );
+        assert_eq!(
+            image.clipboard_ref,
+            Some(ClipboardEntryRef {
+                kind: ClipboardEntryKind::Image,
+                id: "same".into()
+            })
+        );
+        assert!(text.actions[0].payload.is_none(), "搜索结果不内联全文");
+        assert!(
+            project("plugin", image_action).clipboard_ref.is_none(),
+            "相同动作不能赋予其他来源历史身份"
+        );
+        assert!(
+            project(
+                "color",
+                SearchAction::Copy {
+                    text: "#ff0000".into(),
+                    hit_id: None
+                }
+            )
+            .clipboard_ref
+            .is_none(),
+            "临时颜色结果不进入历史选择"
+        );
     }
 }

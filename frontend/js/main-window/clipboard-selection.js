@@ -1,189 +1,89 @@
-//! 剪贴板文本多选纯状态模块（0.20.2）。
-//!
-//! **设计动机**（§5.3）：
-//! 剪贴板模式下的多选需要跨页保持稳定。翻页或同 query 增量重排后，
-//! 选择状态应保留仍存在的 key，清理已消失的 key。
-//! 此模块是纯逻辑（无 DOM 依赖），可单测跨页顺序、重排和删除。
-//!
-//! **状态契约**：
-//! ```text
-//! selectedKeys: Set<stableTextHitId>
-//! selectionEpoch: number
-//! copyGeneration: number
-//! ```
-//!
-//! **键盘/鼠标规则**：
-//! 1. IME composition 优先，期间不接管快捷键。
-//! 2. `Ctrl+单击` 切换当前文本项选中态（0.21.x：单击只移动 active 光标）；图片项无选择态。
-//! 3. query 为空时 `Ctrl+A` 全选当前返回的全部文本项；
-//!    query 非空时保留输入框全选。
-//! 4. 存在多选时 `Ctrl+C` 批量复制；不存在多选时保留输入框原生复制。
-//! 5. `Esc` 顺序：清空多选 → 退出 clipboard mode → 隐藏窗口。
-
-// ── 状态 ─────────────────────────────────────────────────────────────────────
-
-/** 已选中的稳定文本 hitId 集合。 */
+//! 来源无关的剪贴板选择状态：稳定 key、区间锚点和异步快照版本。
 let selectedKeys = new Set();
-
-/** 选择 epoch：每次进入剪贴板模式 +1，退出时 +1 使旧 epoch 失效。
- *  批量复制请求发起时记录当前 epoch，完成后比对 epoch 判断是否仍有效。 */
+let anchorKey = null;
+let rangeBase = null;
+let rangeAdditive = false;
 let selectionEpoch = 0;
-
-/** 复制 generation：每次发起批量复制 +1，退出/隐藏/query 变化 +1。
- *  旧 generation 的请求结果不得写剪贴板。 */
+let selectionRevision = 0;
 let copyGeneration = 0;
 
-// ── 状态查询 ─────────────────────────────────────────────────────────────────
+export function getSelectedKeys() { return [...selectedKeys]; }
+export function hasSelection() { return selectedKeys.size > 0; }
+export function selectedCount() { return selectedKeys.size; }
+export function getSelectionEpoch() { return selectionEpoch; }
+export function getSelectionRevision() { return selectionRevision; }
+export function getCopyGeneration() { return copyGeneration; }
+export function getAnchorKey() { return anchorKey; }
+export function isSelected(key) { return selectedKeys.has(key); }
 
-/** 获取当前选中 key 列表（按插入顺序排列）。 */
-export function getSelectedKeys() {
-    return [...selectedKeys];
-}
-
-/** 当前是否有任何选中项。 */
-export function hasSelection() {
-    return selectedKeys.size > 0;
-}
-
-/** 选中项数量。 */
-export function selectedCount() {
-    return selectedKeys.size;
-}
-
-/** 获取当前 epoch（批量复制时快照用）。 */
-export function getSelectionEpoch() {
-    return selectionEpoch;
-}
-
-/** 获取当前 copy generation（批量复制发起时快照用）。 */
-export function getCopyGeneration() {
-    return copyGeneration;
-}
-
-/** 检查某个 key 是否已选中。 */
-export function isSelected(key) {
-    return selectedKeys.has(key);
-}
-
-// ── 状态变更 ─────────────────────────────────────────────────────────────────
-
-/**
- * 进入剪贴板模式时调用：递增 epoch 使旧选择失效，清空状态。
- */
-export function onEnterMode() {
-    selectionEpoch++;
-    clearSelection();
-}
-
-/**
- * 退出剪贴板模式时调用：递增 epoch + generation，清空状态。
- */
-export function onExitMode() {
-    selectionEpoch++;
-    copyGeneration++;
-    clearSelection();
-}
-
-/**
- * 窗口隐藏时调用：递增 generation，清空状态。
- */
-export function onWindowHidden() {
-    copyGeneration++;
-    clearSelection();
-}
-
-/**
- * query 变化时调用：递增 generation，清空状态。
- * 选择状态依赖当前结果集，query 变化意味着结果集会变。
- */
-export function onQueryChanged() {
-    copyGeneration++;
-    clearSelection();
-}
-
-/**
- * 清空所有选中状态（不清 epoch/generation）。
- */
 export function clearSelection() {
     selectedKeys = new Set();
+    anchorKey = null;
+    rangeBase = null;
+    selectionRevision++;
 }
+export function onEnterMode() { selectionEpoch++; copyGeneration++; clearSelection(); }
+export function onExitMode() { selectionEpoch++; copyGeneration++; clearSelection(); }
+export function onWindowHidden() { copyGeneration++; clearSelection(); }
+export function onQueryChanged() { selectionEpoch++; copyGeneration++; clearSelection(); }
 
-/**
- * 0.25.27：从选中集合移除指定 key（批量删除成功后调用）。
- * 只清本次删除的 key——删除期间用户新增的选择不受迟到结果影响。
- */
-export function removeKeys(keys) {
-    for (const key of keys) {
-        selectedKeys.delete(key);
-    }
+export function selectSingle(key) {
+    if (!key) return;
+    selectedKeys = new Set([key]);
+    anchorKey = key;
+    rangeBase = null;
+    selectionRevision++;
 }
-
-// ── 选择操作 ─────────────────────────────────────────────────────────────────
-
-/**
- * 单击：切换当前项的选中态。
- * 图片项不进入选择集合（调用方负责过滤）。
- * @param {string} key 当前项的 stableTextHitId
- * @returns {boolean} 切换后该 key 是否选中
- */
 export function toggleSelection(key) {
     if (!key) return false;
-    if (selectedKeys.has(key)) {
-        selectedKeys.delete(key);
-        return false;
-    } else {
-        selectedKeys.add(key);
-        return true;
+    if (selectedKeys.has(key)) selectedKeys.delete(key);
+    else selectedKeys.add(key);
+    anchorKey = key;
+    rangeBase = null;
+    selectionRevision++;
+    return selectedKeys.has(key);
+}
+export function selectAll(keys) {
+    selectedKeys = new Set(keys);
+    anchorKey = keys[0] ?? null;
+    rangeBase = null;
+    selectionRevision++;
+}
+export function selectRange(orderedKeys, target, additive = false) {
+    const end = orderedKeys.indexOf(target);
+    if (end < 0) return;
+    let start = orderedKeys.indexOf(anchorKey);
+    if (start < 0) { anchorKey = target; start = end; }
+    if (rangeBase === null || rangeAdditive !== additive) {
+        rangeBase = additive ? new Set(selectedKeys) : new Set();
+        rangeAdditive = additive;
     }
+    selectedKeys = new Set([...rangeBase, ...orderedKeys.slice(Math.min(start, end), Math.max(start, end) + 1)]);
+    selectionRevision++;
 }
-
-/**
- * Ctrl+A（query 为空时）：全选当前返回的全部文本项。
- * @param {string[]} allTextKeys 当前全局结果中所有文本项的 hitId
- */
-export function selectAll(allTextKeys) {
-    selectedKeys = new Set(allTextKeys);
+export function removeKeys(keys) {
+    for (const key of keys) selectedKeys.delete(key);
+    if (keys.includes(anchorKey)) anchorKey = null;
+    rangeBase = null;
+    selectionRevision++;
 }
-
-/**
- * 翻页或同 query 增量重排后，保留仍存在的 key，清理已消失的 key。
- *
- * @param {string[]} currentTextKeys 重排后当前全局结果中所有文本项的 hitId
- */
-export function reconcileAfterReorder(currentTextKeys) {
-    const validSet = new Set(currentTextKeys);
-    const newSelected = new Set();
-    for (const key of selectedKeys) {
-        if (validSet.has(key)) {
-            newSelected.add(key);
-        }
-    }
-    selectedKeys = newSelected;
+export function reconcileAfterReorder(keys) {
+    const valid = new Set(keys);
+    const removed = [...selectedKeys].filter(key => !valid.has(key));
+    if (removed.length) removeKeys(removed);
+    if (!valid.has(anchorKey)) { anchorKey = null; rangeBase = null; }
 }
-
-/**
- * 发起批量复制时调用：递增 copy generation，返回新 generation。
- * 调用方持有此 generation，复制完成后比对判断是否仍有效。
- */
-export function beginCopy() {
-    copyGeneration++;
-    return copyGeneration;
+export function capture() {
+    return {keys: getSelectedKeys(), epoch: selectionEpoch, revision: selectionRevision};
 }
-
-/**
- * 检查 generation 和 epoch 是否仍然有效（复制完成时调用）。
- * @param {number} gen beginCopy 返回的 generation
- * @returns {boolean} true = 仍然有效，可以写剪贴板
- */
-export function isCopyStillValid(gen) {
-    return gen === copyGeneration;
+export function isCurrent(snapshot) { return snapshot.epoch === selectionEpoch; }
+/** 不清理新选择手势，成功只清快照目标，其他类型保留。 */
+export function complete(snapshot, keys = snapshot.keys) {
+    if (isCurrent(snapshot) && snapshot.revision === selectionRevision) removeKeys(keys);
 }
-
-// ── 内部辅助（供单测使用）──────────────────────────────────────────────────
-
-/** 重置所有状态（单测用）。 */
+export function beginCopy() { return ++copyGeneration; }
+export function isCopyStillValid(gen) { return gen === copyGeneration; }
 export function _resetForTest() {
-    selectedKeys = new Set();
-    selectionEpoch = 0;
-    copyGeneration = 0;
+    selectedKeys = new Set(); anchorKey = null; rangeBase = null;
+    selectionEpoch = 0; selectionRevision = 0; copyGeneration = 0;
 }

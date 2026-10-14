@@ -18,6 +18,7 @@ import * as statusbar from "./statusbar.js";
 import {renderIcon} from "../shared/icon.js";
 import {createSwatch, getColorPayload, isColorEntry, parse as parseColor} from "../shared/color.js";
 import * as clipboardMode from "./clipboard-mode.js";
+import {entryRef, refKey, refFromLi} from './clipboard-entry.js';
 
 // 0.17.6: showAiConfirm / getAiConfirmData / updateAiStream 已删除。
 // 主窗口 AI 改走 ChatService，流式渲染由 ai-mode.js 负责。
@@ -327,6 +328,8 @@ export function hasUserItems() {
 
 /** 去重键：应用按路径（小写），计算结果按名，占位按名，颜色按 canonical hex，其余按 kind+名+描述。 */
 function itemKey(item) {
+    const clipboardRef = entryRef(item);
+    if (clipboardRef) return 'clipboard:' + refKey(clipboardRef);
     const action = item.actions?.[0];
     if (action?.runId === "open_system_entry" && action.runArg?.entry_id) return action.runArg.entry_id;
     if (item.lnk_path) return "open:" + item.lnk_path.toLowerCase();
@@ -458,19 +461,18 @@ export function appendItems(items, seq) {
 /**
  * 0.25.29: 删除局部移除（替代删除后全量 reloadList 的游标重置问题）。
  *
- * 按 hitId（文本项 actions[0].hitId）或 lnkPath（图片项存 image id）匹配移除，
+ * 按显式的 kind + id 匹配移除，跨类型同 id 不会互相删除，
  * 视口位置与光标就地夹紧——已加载几百条不退回首批。
  *
- * @param {Set<string>|string[]} keys 要移除的 hitId / imageId 集合
+ * @param {{kind: string, id: string}[]} keys 要移除的历史条目引用
  */
 export function removeItems(keys) {
-    const ids = keys instanceof Set ? keys : new Set(keys);
+    const ids = new Set([...keys].map(refKey));
     if (ids.size === 0 || !allItems.length) return;
     const before = allItems.length;
     allItems = allItems.filter((x) => {
-        const hitId = x.actions?.[0]?.hitId;
-        if (hitId && ids.has(hitId)) return false;
-        if (x.lnk_path && ids.has(x.lnk_path)) return false;
+        const ref = entryRef(x);
+        if (ref && ids.has(refKey(ref))) return false;
         return true;
     });
     if (allItems.length === before) return;
@@ -497,6 +499,11 @@ function createItem(app, i) {
     const li = document.createElement("li");
     li.dataset.lnkPath = app.lnk_path;
     li.dataset.source = app.source || "";
+    const clipboardRef = entryRef(app);
+    if (clipboardRef) {
+        li.dataset.clipboardKind = clipboardRef.kind;
+        li.dataset.clipboardId = clipboardRef.id;
+    }
     // 0.16.4：图片项标记（右键菜单钉图用）
     if (app.is_image) {
         li.dataset.isImage = "true";
@@ -675,7 +682,7 @@ function createItem(app, i) {
     // 用 mousedown 代替 click：避免拖动区域检测拦截了第一次点击（"需要双击" bug）
     li.addEventListener("mousedown", (e) => {
         if (e.button !== 0) return; // 只响应左键
-        // 0.21.x: 剪贴板模式下 Ctrl+单击文本项 → 切换选中态；其余 → 移动光标
+        // 剪贴板历史项的单选、切换和区间选择统一交给 clipboard-mode。
         if (clipboardMode.handleMousedown(e, li)) return;
         // 0.20.2: 剪贴板模式下普通点击只移动光标到点击项，不直接激活
         if (clipboardMode.isActive()) {
@@ -687,7 +694,7 @@ function createItem(app, i) {
     // 0.21.x: 剪贴板模式下双击 = Enter（文本项上屏 / 图片项复制）；
     // 普通模式首击 mousedown 已激活并隐藏，双击无需另处理。
     li.addEventListener("dblclick", (e) => {
-        if (e.button !== 0) return; // 只响应左键
+        if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey) return;
         if (clipboardMode.isActive()) {
             e.preventDefault();
             clipboardMode.activateByLi(li);
@@ -705,14 +712,14 @@ function itemData(li) {
         console.error("actions parse failed:", e);
     }
     // 0.17.6: AI 确认卡片相关代码已删除（主窗口 AI 改走 ai-mode.js）
-    // 0.20.2: 返回 isImage 供 clipboard-mode 多选过滤图片项
-    // 0.20.8: 返回 source 供 clipboard-shortcuts findDeleteTarget 检查来源
+    // 显式引用用于选择和操作；isImage 只保留给原有图片展示消费者。
     return {
         lnkPath: li.dataset.lnkPath,
         source: li.dataset.source || "",
         calcValue: li.dataset.calcValue,
         isError: li.dataset.isError === "true",
         isImage: li.dataset.isImage === "true",
+        clipboardRef: refFromLi(li),
         actions,
     };
 }

@@ -33,9 +33,8 @@ import {syncWindowSize, resyncWindowSize, setClipboardLayout, markClipboardLayou
 import {
     copyToClipboard,
     createStickyNote,
-    deleteClipboardImage,
-    deleteClipboardItem,
-    deleteClipboardItemsBatch,
+    manageClipboardEntries,
+    copyClipboardImage,
     getClipboardText,
     getClipboardTextBatch,
     hideWindow,
@@ -50,9 +49,11 @@ import * as selection from "./clipboard-selection.js";
 import {parse as parseColor} from "../shared/color.js";
 import {activateItem} from "./actions.js";
 import {showActionError} from "./action-error.js";
-import {findDeleteTarget, findEditAction, resolveShortcutAction} from "./clipboard-shortcuts.js";
+import {findEditAction, resolveShortcutAction} from "./clipboard-shortcuts.js";
 import {KIND_ORDER, nextKind} from "./clipboard-kind.js";
 import * as inputState from "./input-state.js";
+import {entryRef, refFromLi, refFromKey, refKey, supportsTextOperation} from './clipboard-entry.js';
+import {createClipboardBatch} from './clipboard-batch.js';
 
 // 0.20.1: 从 results.js 导入 setClipboardMode，进入/退出模式时设置标志。
 
@@ -138,7 +139,8 @@ export function onPageChanged() {
 }
 
 /** 0.20.2: 清空多选状态（不清 epoch/generation）。 */
-export function clearSelection() {
+export function clearSelection(task = null) {
+    if (task && (!selection.isCurrent(task) || task.revision !== selection.getSelectionRevision())) return;
     selection.clearSelection();
     refreshSelectionCss();
 }
@@ -411,8 +413,7 @@ async function doSearch(query, keepPage = false) {
         hasMore = !!resp.has_more;
         pageCursor = hasMore ? (resp.next_cursor || null) : null;
         // 0.20.2: 渲染后保存全局文本项 hitId 列表，并重投影选择 CSS
-        lastTextHitIds = extractTextHitIds(entries);
-        selection.reconcileAfterReorder(lastTextHitIds);
+        selection.reconcileAfterReorder(collectEntryKeys(entries));
         refreshSelectionCss();
         if (keepPage) {
             console.log("[clipboard-mode] reloaded after delete, page=", savedPage, "selected=", savedSelected);
@@ -462,9 +463,6 @@ async function loadMore() {
         if (mySeq !== seq || !active || pageCursor !== cursorAtStart) return;
         const entries = resp.entries || [];
         results.appendItems(entries, mySeq);
-        // 0.25.29：追加后同步已加载文本项快照（Ctrl+A 已实时提取，此处维护
-        // 模块状态语义一致，避免后续消费方拿到过时的首批快照）
-        lastTextHitIds = extractTextHitIds(results.getItems());
         hasMore = !!resp.has_more;
         pageCursor = hasMore ? (resp.next_cursor || null) : null;
     } catch (e) {
@@ -485,11 +483,10 @@ export function getStreamInfo() {
 
 /** 0.25.29: 删除后局部移除（右键单删入口；批量删除 batchDelete / Alt+D 内联同路径）。
  *  替代 retrigger/reloadList 全量重查——保持已加载深度与浏览位置。 */
-export function removeLocalItems(ids) {
-    if (!active || !Array.isArray(ids) || ids.length === 0) return;
-    results.removeItems(ids);
-    lastTextHitIds = extractTextHitIds(results.getItems?.() || []);
-    selection.reconcileAfterReorder(lastTextHitIds);
+export function removeLocalItems(refs) {
+    if (!active || !Array.isArray(refs) || refs.length === 0) return;
+    results.removeItems(refs);
+    selection.reconcileAfterReorder(collectEntryKeys(results.getItems?.() || []));
     refreshSelectionCss();
     results.refreshStatusbar();
 }
@@ -524,17 +521,16 @@ export function refreshWheelMode(clipCfg) {
  * 键盘规则：
  * 1. IME composition 优先，期间不接管快捷键。
  * 2. Tab/Shift+Tab 循环类型筛选（0.25.23；Alt 按下放行——Alt+Tab 归系统）。
- * 3. query 为空时 Ctrl+A 全选当前返回的全部文本项；
+ * 3. query 为空时 Ctrl+A 全选当前已加载的全部历史项；
  *    query 非空时保留输入框全选。
- * 4. 存在多选时 Ctrl+C 批量复制；不存在多选时保留输入框原生复制。
+ * 4. 选择全为文本时 Ctrl+C / Enter 批量复制 / 上屏；混选时提示从菜单选类型。
  * 5. Esc 顺序：清空多选 → 退出 clipboard mode（由 keyboard.js onEscape 处理）。
- * 6. Enter / Alt+数字：走 activateByData——文本项上屏（目标输入框）或复制兜底，
- *    图片项复制。见 dispatchActivate 注释。
+ * 6. 单项 Enter / Alt+数字：文本上屏或复制兜底，图片复制。
+ * 7. Alt+D / 空查询 Delete 删除选择；没有选择时删除 active 历史项。
  *
  * 鼠标规则（在 results.js mousedown 中由 handleMousedown 处理）：
- * - 单击文本项 → 只移动 active 光标（返回 false 交给 results.js setActiveByLi）
- * - Ctrl+单击文本项 → 切换多选选中态
- * - 单击图片项 → 只移动 active 光标，不选中
+ * - 单击历史项 → 单选；Ctrl+单击 → 切换该项；类型不影响选择。
+ * - Shift+单击 → 从锚点按完整已加载顺序选区间；Ctrl+Shift 追加区间。
  * - 双击 → activateByLi（与 Enter 同语义：文本上屏 / 图片复制）
  *
  * @param {KeyboardEvent} e
@@ -557,16 +553,15 @@ export function handleKeydown(e) {
         return true;
     }
 
-    // Ctrl+A：query 为空时全选已加载的文本项
+    // Ctrl+A：query 为空时全选已加载的历史项
     if (ctrl && e.key === "a") {
         if (queryEl.value.trim()) {
             return false; // 非空 query 保留输入框全选
         }
         e.preventDefault();
-        // 0.25.29：实时从已加载条目提取——流式追加后 lastTextHitIds 只反映首批
-        // （实测 Ctrl+A 有时 11 条有时 12 条的根因），实时取保证覆盖全部已加载文本项
-        const allTextIds = extractTextHitIds(results.getItems());
-        selection.selectAll(allTextIds);
+        // 流式追加后实时取完整已加载顺序，包含所有类型。
+        const allKeys = collectEntryKeys(results.getItems());
+        selection.selectAll(allKeys);
         refreshSelectionCss();
         return true;
     }
@@ -579,10 +574,7 @@ export function handleKeydown(e) {
         return true;
     }
 
-    // 0.20.8：Alt+E / Alt+D / Delete 快捷操作
-    // 0.25.27：多选时 Alt+E = 合并编辑选中（菜单即契约）；Alt+D 保持删 active
-    // 单条（破坏面小，批量删除走菜单/右键）；新增 Alt+S 贴便签（多选=合并，
-    // 无多选=active 单条，对齐右键「钉为便签」标注）
+    // 编辑/便签只接受纯文本选择；删除作用于完整选择，无选择时回退 active。
     const queryIsEmpty = !queryEl.value.trim();
     const shortcutAction = resolveShortcutAction(e, queryIsEmpty);
     if (shortcutAction === "edit") {
@@ -605,336 +597,101 @@ export function handleKeydown(e) {
     }
     if (shortcutAction === "delete") {
         e.preventDefault();
-        handleDeleteActive();
+        if (selection.hasSelection()) batchDelete();
+        else handleDeleteActive();
         return true;
     }
 
     return false;
 }
 
-// ── 0.20.2 批量原子复制 ────────────────────────────────────────────────────
-
-/**
- * 批量取数拼接共用路径（0.25.24，batchCopy / batchPaste 共用）：
- * 按 `getSelectedKeys()` 的点击顺序批量拉取选中项完整文本（一次 IPC 往返）。
- *
- * @param {number} gen beginCopy 返回的 generation
- * @param {string[]} keys 选中项 hitId 列表（点击顺序）
- * @returns {Promise<{texts: string[]} | {missing: true} | null>}
- *   `{texts}` — 全部命中；`{missing: true}` — 有项已不可用（整体放弃）；
- *   `null` — generation/epoch 已失效（调用方静默放弃，不动剪贴板/不上屏）。
- */
-async function composeSelectedTexts(gen, keys) {
-    // 后端单次批量查询（逐 id 查询但一次 IPC 往返，SQLite 连接池排队）
-    const batchResults = await getClipboardTextBatch(keys);
-
-    // generation / epoch 失效检查
-    if (!selection.isCopyStillValid(gen)) return null;
-
-    const texts = [];
-    for (const item of batchResults) {
-        if (item.text === null || item.text === undefined) {
-            return {missing: true};
-        }
-        texts.push(item.text);
-    }
-    return {texts};
+// ── 选择快照与批量操作 ──────────────────────────────────────────────
+export function getSelectionSnapshot() {
+    const task = selection.capture();
+    return {...task, refs: task.keys.map(refFromKey).filter(Boolean)};
 }
-
-/**
- * 批量原子复制：所有请求成功且 generation/epoch 仍有效后，使用 `\n` 拼接并单次写剪贴板。
- * 任一失败、取消或 epoch 失效均不修改原剪贴板。
- */
-export async function batchCopy() {
-    const keys = selection.getSelectedKeys();
-    if (keys.length === 0) return;
-
-    console.log("[clipboard-mode] batchCopy: starting with", keys.length, "items:", keys);
-    const gen = selection.beginCopy();
-    showStatusLoading(keys.length);
-
-    try {
-        const composed = await composeSelectedTexts(gen, keys);
-        if (!composed) return; // epoch/generation 失效，静默放弃
-        if (composed.missing) {
-            showStatusError(t("clipboard.copy_failed", {message: t("clipboard.item_unavailable")}));
-            return;
-        }
-
-        // 所有成功，拼接写剪贴板（组合同样入库：删旧留新去重，同组合只留一条
-        // 顶置——0.25.27 曾改中转不入库，用户实测要求组合在历史中可见可复用）
-        const combined = composed.texts.join("\n");
-        await copyToClipboard(combined);
-
-        // 再次检查 generation（写剪贴板是异步的）
-        if (!selection.isCopyStillValid(gen)) return;
-
-        // fire-and-forget 记录命中
-        for (const key of keys) {
-            recordClipboardHit(key).catch(() => {
-            });
-        }
-
-        showStatusCopied(composed.texts.length);
-        // 复制成功后清空选择
-        selection.clearSelection();
-        refreshSelectionCss();
-        // 组合已入库（监听器采集，同组合删旧留新顶置）——刷新列表使其立即可见。
-        // 入库是监听线程的异步任务，若本刷新赶在入库前，入库完成的
-        // awareness-updated → retrigger 链（主窗可见时）会在 250ms 短窗外补刷。
-        reloadList();
-    } catch (e) {
-        if (!selection.isCopyStillValid(gen)) return;
-        console.error("[clipboard-mode] batchCopy failed:", e);
-        showStatusError(e?.message || "unknown");
-    }
+function activeSnapshot() {
+    const ref = entryRef(results.getActive());
+    return {...selection.capture(), keys: ref ? [refKey(ref)] : [], refs: ref ? [ref] : []};
 }
-
-// ── 0.25.24 批量上屏 ────────────────────────────────────────────────────────
-
-/**
- * 批量上屏：选择非空时 Enter = 按点击顺序拼接选中内容上屏（`\n` 连接）。
- *
- * 与 batchCopy 共用 `composeSelectedTexts` 取数路径，仅终点不同：
- * `pasteToInput`（真实粘贴，成功后后端隐藏主窗）vs `copyToClipboard`。
- * 成功后清空选择（HIDDEN reset 兜底再清一次）；上屏请求在窗口隐藏前的失败
- * （粘贴互斥占用等）保留窗口与选择并显示错误——隐藏后的发送失败仅后端日志。
- * Alt+数字 / 双击不经此路径——保持单条上屏语义。
- */
-export async function batchPaste() {
-    const keys = selection.getSelectedKeys();
-    if (keys.length === 0) return;
-
-    console.log("[clipboard-mode] batchPaste: starting with", keys.length, "items:", keys);
-    const gen = selection.beginCopy();
-    showStatusLoading(keys.length);
-
-    try {
-        const composed = await composeSelectedTexts(gen, keys);
-        if (!composed) return; // epoch/generation 失效，静默放弃
-        if (composed.missing) {
-            showStatusError(t("clipboard.paste_failed", {message: t("clipboard.item_unavailable")}));
-            return;
-        }
-
-        // 拼接顺序 = 点击顺序（getSelectedKeys 语义）；换行在真实粘贴下是惰性数据。
-        // 组合同样入库（去重顶置，与 batchCopy 同语义）；上屏后主窗隐藏，
-        // 下次唤起重查自然可见
-        const combined = composed.texts.join("\n");
-        await pasteToInput(combined);
-        // fire-and-forget 记录命中
-        for (const key of keys) {
-            recordClipboardHit(key).catch(() => {
-            });
-        }
-        // HIDDEN 已负责清理旧会话；迟到的成功仅记录命中，不修改后来唤起的 UI。
-        if (!selection.isCopyStillValid(gen)) return;
-        dismissFeedback();
-        selection.clearSelection();
-        refreshSelectionCss();
-    } catch (e) {
-        if (!selection.isCopyStillValid(gen)) return;
-        console.error("[clipboard-mode] batchPaste failed:", e);
-        showActionError("paste_to_input", e);
-    }
-}
-
-// ── 0.25.27 批量删除 ────────────────────────────────────────────────────────
-
-/**
- * 0.25.27：右键「删除选中的 N 条」——单事务批量删除多选文本项。
- * 成功后定向清理本次选择的 key 并刷新列表（维持页号）；失败保留选择与结果，显示错误。
- *
- * 与批量复制不同，删除是幂等 DB 副作用——不使用 copy generation 拒绝执行，
- * DB 删除照常完成；选择、局部移除和反馈仅提交到原选择 epoch。
- */
-export async function batchDelete() {
-    const keys = selection.getSelectedKeys();
-    if (keys.length === 0) return;
-    const epoch = selection.getSelectionEpoch();
-
-    console.log("[clipboard-mode] batchDelete: starting with", keys.length, "items:", keys);
-    showFeedback(t("clipboard.deleting_count", {count: keys.length}), {type: "info", durationMs: 0});
-
-    try {
-        await deleteClipboardItemsBatch(keys);
-        if (!active || epoch !== selection.getSelectionEpoch()) return;
-        // 只清本次删除的 key：删除期间用户新增的选择不受迟到结果影响
-        selection.removeKeys(keys);
-        // 0.25.29: 局部移除替代 reloadList——全量重查会让已加载几百条退回首批
-        // （游标重置）；删除是确定性的 DB 副作用，就地 splice 保持浏览位置
-        removeLocalItems(keys);
-        showFeedback(t("clipboard.deleted_count", {count: keys.length}), {type: "success", durationMs: 2000});
-    } catch (e) {
-        console.error("[clipboard-mode] batchDelete failed:", e);
-        if (!active || epoch !== selection.getSelectionEpoch()) return;
-        showFeedback(t("clipboard.delete_failed", {message: e?.message || "unknown"}), {type: "error"});
-    }
-}
-
-/**
- * 0.25.27：右键/Alt+E「编辑选中的 N 条」——合并为一条新历史条目编辑。
- *
- * 取数共用批量原子路径（缺项整体放弃）；编辑器以 `itemRef: null` 的
- * clipboard_item 来源打开——保存即新建历史条目（顶置），原条目保留，
- * 与「删除选中的 N 条」形成合并 → 检查 → 删旧的工作流。
- * 编辑器是独立窗口任务，打开成功后主窗隐藏（多选态由 HIDDEN 复位兜底清理）。
- */
-export async function batchEdit() {
-    const keys = selection.getSelectedKeys();
-    if (keys.length === 0) return;
-
-    console.log("[clipboard-mode] batchEdit: starting with", keys.length, "items:", keys);
-    const gen = selection.beginCopy();
-    showStatusLoading(keys.length);
-
-    try {
-        const composed = await composeSelectedTexts(gen, keys);
-        if (!composed) return; // epoch/generation 失效，静默放弃
-        if (composed.missing) {
-            showStatusError(t("clipboard.copy_failed", {message: t("clipboard.item_unavailable")}));
-            return;
-        }
-
-        await openContentEditor({
-            body: composed.texts.join("\n"),
-            title: "合并编辑选中的内容",
-            source: {kind: "clipboard_item", itemRef: null},
-        });
-        if (!selection.isCopyStillValid(gen)) return;
-        hideWindow();
-    } catch (e) {
-        if (!selection.isCopyStillValid(gen)) return;
-        console.error("[clipboard-mode] batchEdit failed:", e);
-        showActionError("open_content_editor", e);
-    }
-}
-
-/**
- * 0.25.27：右键/Alt+S「合并 N 条为便签」——按点击顺序拼接选中内容贴一张便签。
- * 打开成功后主窗隐藏（与单条 pin_text_item 一致）。
- */
-export async function batchSticky() {
-    const keys = selection.getSelectedKeys();
-    if (keys.length === 0) return;
-
-    console.log("[clipboard-mode] batchSticky: starting with", keys.length, "items:", keys);
-    const gen = selection.beginCopy();
-    showStatusLoading(keys.length);
-
-    try {
-        const composed = await composeSelectedTexts(gen, keys);
-        if (!composed) return; // epoch/generation 失效，静默放弃
-        if (composed.missing) {
-            showStatusError(t("clipboard.copy_failed", {message: t("clipboard.item_unavailable")}));
-            return;
-        }
-
-        const note = await createStickyNote(composed.texts.join("\n"));
-        if (!selection.isCopyStillValid(gen)) return;
-        await showStickyWindow(note.id, true);
-        if (!selection.isCopyStillValid(gen)) return;
-        hideWindow();
-    } catch (e) {
-        if (!selection.isCopyStillValid(gen)) return;
-        console.error("[clipboard-mode] batchSticky failed:", e);
-        showActionError("pin_text_item", e);
-    }
-}
-
-/**
- * 0.25.27：Alt+S（无多选）——active 剪贴板文本项贴为便签（LazyCopy 按需拉全文）。
- * 图片项与非剪贴板来源不响应（与 Alt+E 的门禁一致）。
- */
-async function handleStickyActive() {
-    const gen = selection.beginCopy();
-    const activeItem = results.getActive();
-    const hitId = activeItem?.actions?.[0]?.hitId;
-    if (!activeItem || activeItem.isImage || activeItem.source !== "clipboard" || !hitId) {
-        console.log("[clipboard-mode] Alt+S: no sticky-able active item");
+const batch = createClipboardBatch({selection, snapshot: getSelectionSnapshot, active: () => active,
+    refresh: refreshSelectionCss, reload: reloadList, remove: removeLocalItems,
+    api: {getClipboardTextBatch, copyToClipboard, pasteToInput, openContentEditor,
+        createStickyNote, showStickyWindow, hideWindow, recordClipboardHit, manageClipboardEntries},
+    feedback: showFeedback, dismiss: dismissFeedback, t});
+export async function batchCopy(task = getSelectionSnapshot()) {
+    if (!active || !selection.isCurrent(task) || task.revision !== selection.getSelectionRevision()) return;
+    if (task.refs.length === 1 && task.refs[0].kind === 'image') {
+        const gen = selection.beginCopy();
+        try {
+            await copyClipboardImage(task.refs[0].id);
+            if (!active || !selection.isCurrent(task) || !selection.isCopyStillValid(gen)) return;
+            selection.complete(task); refreshSelectionCss();
+            showFeedback(t('clipboard.image_copied'), {type: 'success'});
+        } catch (e) { if (selection.isCurrent(task)) showActionError('copy_clipboard_image', e); }
         return;
     }
-
-    try {
-        const text = await getClipboardText(hitId);
-        if (!selection.isCopyStillValid(gen)) return;
-        if (!text) return; // 条目已被清理，静默放弃
-        const note = await createStickyNote(text);
-        if (!selection.isCopyStillValid(gen)) return;
-        await showStickyWindow(note.id, true);
-        if (!selection.isCopyStillValid(gen)) return;
-        hideWindow();
-    } catch (e) {
-        if (!selection.isCopyStillValid(gen)) return;
-        console.error(`[clipboard-mode] sticky active failed for ${hitId}:`, e);
-        showActionError("pin_text_item", e);
+    return batch.textOperation('copy', task);
+}
+export function batchPaste(task) { return batch.textOperation('paste', task); }
+export function batchEdit(task) { return batch.textOperation('edit', task); }
+export function batchSticky(task) { return batch.textOperation('sticky', task); }
+export function batchDelete(task) { return batch.resourceOperation('delete', task); }
+export function batchPin(task) { return batch.resourceOperation('pin', task); }
+function handleStickyActive() { return batchSticky(activeSnapshot()); }
+export function activateSelection() {
+    const task = getSelectionSnapshot();
+    if (!task.refs.length) return activateByData(results.getActive());
+    if (task.refs.length === 1) {
+        const key = refKey(task.refs[0]);
+        const item = results.getItems().find(item => { const ref = entryRef(item); return ref && refKey(ref) === key; });
+        if (item) return activateByData({...item, isImage: item.is_image, lnkPath: item.lnk_path, clipboardRef: entryRef(item)});
+        return;
     }
+    return batchPaste(task);
 }
 
 // ── 0.20.2 辅助函数 ─────────────────────────────────────────────────────────
 
-/**
- * 从结果项列表中提取文本项的 hitId（过滤图片项）。
- * @param {Array} items results.render 的 appEntries
- * @returns {string[]} hitId 列表（按全局顺序）
- */
-function extractTextHitIds(items) {
-    const ids = [];
-    for (const item of items) {
-        if (item.is_image) continue; // 图片项不参与多选
-        const hitId = item.actions?.[0]?.hitId;
-        if (hitId) ids.push(hitId);
-    }
-    return ids;
+/** 仅真实历史条目参与选择，颜色等临时结果不混入。 */
+function collectEntryKeys(items) {
+    return items.map(entryRef).filter(Boolean).map(refKey);
 }
-
-/** 最后一次渲染的文本项 hitId 列表（跨页全局，供 Ctrl+A 全选用）。 */
-let lastTextHitIds = [];
 
 // ── 0.20.2 鼠标多选支持 ──────────────────────────────────────────────────────
 
-/**
- * 鼠标点击项时的多选拦截。
- * 在 results.js createItem 的 mousedown handler 中调用。
- *
- * 剪贴板模式下（0.21.x，方案 A）：
- * - 单击文本项 → 返回 false，交给 results.js setActiveByLi 只移动 active 光标
- * - Ctrl+单击文本项 → 切换选中态（多选批量复制用）
- * - 单击图片项 → 返回 false（不参与多选，同样只移动 active 光标）
- * - 非剪贴板模式 → 不拦截（返回 false）
- *
- * @param {MouseEvent} e
- * @param {HTMLElement} li 被点击的 <li>
- * @returns {boolean} true = 已处理（选中/取消），false = 未处理（走 setActiveByLi 或正常激活）
- */
+/** 普通单选、Ctrl 切换、Shift 区间；只操作明确的历史资源身份。 */
 export function handleMousedown(e, li) {
-    if (!active) return false;
-    if (e.button !== 0) return false;
-
-    // 图片项不参与多选，交给 results.js setActiveByLi 移动光标
-    if (li.dataset.isImage === "true") return false;
-
-    let hitId = null;
-    try {
-        const actions = JSON.parse(li.dataset.actions || "[]");
-        hitId = actions[0]?.hitId;
-    } catch {
-        // ignore
-    }
-    if (!hitId) return false;
-
-    // 0.21.x：单击只移动 active 光标（返回 false 交给 results.js）；
-    // 多选 toggle 收敛到 Ctrl+单击，避免「移动光标」与「切换选中」抢同一手势。
+    if (!active || e.button !== 0) return false;
+    const ref = refFromLi(li);
+    if (!ref) return false;
+    e.preventDefault(); e.stopPropagation();
+    results.setActiveByEl(li);
+    const key = refKey(ref);
     const ctrl = e.ctrlKey || e.metaKey;
-    if (!ctrl) return false;
-
-    e.preventDefault();
-    e.stopPropagation();
-
-    // Ctrl+单击：切换选中态
-    selection.toggleSelection(hitId);
+    if (e.shiftKey) selection.selectRange(collectEntryKeys(results.getItems()), key, ctrl);
+    else if (ctrl) selection.toggleSelection(key);
+    else selection.selectSingle(key);
     refreshSelectionCss();
     return true;
+}
+export function prepareContextMenu(li) {
+    if (!active || !li) return;
+    const ref = refFromLi(li);
+    if (!ref) { clearSelection(); return; }
+    results.setActiveByEl(li);
+    if (!selection.isSelected(refKey(ref))) selection.selectSingle(refKey(ref));
+    refreshSelectionCss();
+}
+export function onNavigate(e) {
+    const ctrl = e.ctrlKey || e.metaKey;
+    if (!active || (ctrl && !e.shiftKey)) return;
+    const ref = entryRef(results.getActive());
+    if (!ref) return;
+    const key = refKey(ref);
+    if (e.shiftKey) selection.selectRange(collectEntryKeys(results.getItems()), key, !!ctrl);
+    else selection.selectSingle(key);
+    refreshSelectionCss();
 }
 
 // ── 0.20.2 选择 CSS 投影 ────────────────────────────────────────────────────
@@ -946,19 +703,8 @@ export function handleMousedown(e, li) {
 function refreshSelectionCss() {
     const lis = resultsEl.querySelectorAll("li");
     for (const li of lis) {
-        // 图片项永不上 clipboard-selected
-        if (li.dataset.isImage === "true") {
-            li.classList.remove("clipboard-selected");
-            continue;
-        }
-        let hitId = null;
-        try {
-            const actions = JSON.parse(li.dataset.actions || "[]");
-            hitId = actions[0]?.hitId;
-        } catch {
-            // ignore
-        }
-        li.classList.toggle("clipboard-selected", !!hitId && selection.isSelected(hitId));
+        const ref = refFromLi(li);
+        li.classList.toggle('clipboard-selected', !!ref && selection.isSelected(refKey(ref)));
     }
     // 更新状态栏覆写：有选择 → 多选计数覆写；无选择 → 恢复常规 footer
     if (selection.hasSelection()) {
@@ -975,17 +721,9 @@ function refreshSelectionCss() {
 
 /** 多选计数覆写 ResultFooter（selection 存续期间持续显示）。 */
 function showStatusSelected(count) {
-    statusbar.setOverride(t("clipboard.hint_selected", {count}));
-}
-
-/** 批量复制进行中（持续显示直到被 success/error 替换或 dismiss）。 */
-function showStatusLoading(count) {
-    showFeedback(t("clipboard.loading_count", {count}), {type: "info", durationMs: 0});
-}
-
-/** 批量复制成功（瞬态）。 */
-function showStatusCopied(count) {
-    showFeedback(t("clipboard.copied_count", {count}), {type: "success", durationMs: 2000});
+    const refs = getSelectionSnapshot().refs;
+    statusbar.setOverride(t(supportsTextOperation(refs) ? 'clipboard.hint_selected' : 'clipboard.hint_mixed',
+        {count, text: refs.filter(r => r.kind === 'text').length, image: refs.filter(r => r.kind === 'image').length}));
 }
 
 /** 批量复制/删除失败（瞬态错误）。 */
@@ -1013,35 +751,10 @@ function handleEditActive() {
 
 /**
  * 0.20.8：Alt+D / Delete — 删除 active 文本或图片历史。
- * 只对 source=clipboard 的 active 项复用既有单删命令；
+ * 只处理带显式类型引用的 active 历史项；
  * 颜色降级结果等非历史项不响应。删除成功后维持 clipboard mode 并刷新当前页。
  */
-async function handleDeleteActive() {
-    const epoch = selection.getSelectionEpoch();
-    const activeItem = results.getActive();
-    const target = findDeleteTarget(activeItem);
-    if (!target) {
-        console.log("[clipboard-mode] Alt+D: no deletable active item");
-        return;
-    }
-
-    try {
-        if (target.type === "text") {
-            await deleteClipboardItem(target.id);
-        } else {
-            await deleteClipboardImage(target.id);
-        }
-        if (!active || epoch !== selection.getSelectionEpoch()) return;
-        console.log(`[clipboard-mode] deleted ${target.type} item: ${target.id}`);
-        // 0.25.29: 局部移除（同 batchDelete），维持浏览位置与已加载深度
-        removeLocalItems([target.id]);
-    } catch (e) {
-        if (!active || epoch !== selection.getSelectionEpoch()) return;
-        console.error(`[clipboard-mode] delete failed for ${target.type} ${target.id}:`, e);
-        // 失败时保留结果、模式和选择，显示可见错误
-        showStatusError(e?.message || "delete failed");
-    }
-}
+async function handleDeleteActive() { return batchDelete(activeSnapshot()); }
 
 // ── 0.21.x 激活分派：上屏 / 复制 ────────────────────────────────────────────
 
@@ -1060,14 +773,15 @@ export async function activateByData(data) {
 
     const action = data.actions?.[0];
     const kind = action?.kind;
+    const ref = entryRef(data);
 
     // 文本项走上屏（含复制兜底）
-    if (kind === "copy" && action.hitId) {
+    if (kind === "copy" && ref?.kind === 'text') {
         const gen = selection.beginCopy();
         let text = action.payload ?? data.calcValue;
         if (!text) {
             try {
-                text = await getClipboardText(action.hitId);
+                text = await getClipboardText(ref.id);
             } catch (e) {
                 if (!selection.isCopyStillValid(gen)) return;
                 showActionError("get_clipboard_text", e);
@@ -1077,7 +791,7 @@ export async function activateByData(data) {
         if (!selection.isCopyStillValid(gen)) return;
         if (!text) return; // 无可上屏内容（空/缺省），保留窗口
         // fire-and-forget 频率加权（与 actions.js LazyCopy 一致；失败不阻塞上屏）
-        recordClipboardHit(action.hitId).catch((e) =>
+        recordClipboardHit(ref.id).catch((e) =>
             console.warn("record_clipboard_hit failed:", e)
         );
         try {
@@ -1107,6 +821,7 @@ export function activateByLi(li) {
         calcValue: li.dataset.calcValue,
         isError: li.dataset.isError === "true",
         isImage: li.dataset.isImage === "true",
+        clipboardRef: refFromLi(li),
         actions,
     });
 }

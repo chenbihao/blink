@@ -1,6 +1,7 @@
 //! 独立右键菜单窗口 commands。
 
 use super::*;
+static ACTIVE_MENU_ID: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 /// 显示右键菜单独立窗口（突破主窗口边界裁剪）。
 /// 复用已有窗口：首次创建，后续 hide → 更新数据 → show，避免重复创建 WebView2 的开销。
@@ -15,6 +16,13 @@ pub async fn show_context_menu(
     height: f64,
     items: String,
 ) -> Result<(), String> {
+    let menu_id = serde_json::from_str::<serde_json::Value>(&items)
+        .map_err(|e| e.to_string())?
+        .as_array()
+        .and_then(|items| items.iter().find_map(|item| item.get("menuId")?.as_str()))
+        .map(str::to_owned)
+        .ok_or("右键菜单缺少会话标识")?;
+    *ACTIVE_MENU_ID.lock().map_err(|e| e.to_string())? = Some(menu_id.clone());
     // 主题 resolve（auto → dark/light）
     let theme = {
         let pool = &app.state::<crate::infra::data::DbPools>().config;
@@ -35,6 +43,9 @@ pub async fn show_context_menu(
         }
     };
 
+    if ACTIVE_MENU_ID.lock().map_err(|e| e.to_string())?.as_deref() != Some(menu_id.as_str()) {
+        return Ok(());
+    }
     // 多屏感知定位：Win32 直接拿光标物理坐标 + 目标屏 DPI 缩放 + 智能翻转
     let (fx, fy, fw, fh) = crate::infra::platform::window::clamp_context_menu(width, height);
     crate::infra::platform::window::set_context_menu_payload(items.clone(), theme.clone());
@@ -146,7 +157,20 @@ pub fn take_context_menu_payload() -> Option<serde_json::Value> {
 
 /// 隐藏右键菜单窗口（hide 而非 close，保留窗口供下次复用）。
 #[tauri::command]
-pub async fn hide_context_menu(app: tauri::AppHandle) -> Result<(), String> {
+pub async fn hide_context_menu(
+    app: tauri::AppHandle,
+    menu_id: Option<String>,
+) -> Result<(), String> {
+    {
+        let mut active = ACTIVE_MENU_ID.lock().map_err(|e| e.to_string())?;
+        if menu_id
+            .as_ref()
+            .is_some_and(|id| active.as_ref() != Some(id))
+        {
+            return Ok(());
+        }
+        *active = None;
+    }
     if let Some(win) = app.get_webview_window("context-menu") {
         // DWM Cloak 先行：瞬间消失无 fade 动画，避免截图时拍到右键窗口残影
         if let Ok(hwnd) = win.hwnd() {
@@ -170,16 +194,27 @@ pub async fn hide_context_menu(app: tauri::AppHandle) -> Result<(), String> {
 /// `execCommand("paste")` 同样失效——症状就是「点粘贴，输入框仍空」（右键在
 /// 主窗口边框时尤其容易复现，此时主窗口本就不是前台）。
 #[tauri::command]
-pub async fn context_menu_action(app: tauri::AppHandle, action_id: u32) -> Result<(), String> {
+pub async fn context_menu_action(
+    app: tauri::AppHandle,
+    action_id: u32,
+    menu_id: String,
+) -> Result<(), String> {
+    if ACTIVE_MENU_ID.lock().map_err(|e| e.to_string())?.as_deref() != Some(menu_id.as_str()) {
+        tracing::debug!("丢弃已失效的右键菜单回调");
+        return Ok(());
+    }
     // 1. 先隐藏 Popup 窗口，让主窗口有机会重回前台
-    hide_context_menu(app.clone()).await?;
+    hide_context_menu(app.clone(), Some(menu_id.clone())).await?;
     // 2. 显式把主窗口置为前台并聚焦，保证 clipboard/execCommand 可用
     if let Some(main) = app.get_webview_window("main") {
         let _ = main.show();
         let _ = main.set_focus();
     }
     // 3. 最后再通知前端执行动作
-    app.emit(EventNames::CONTEXT_MENU_ACTION, action_id)
-        .map_err(|e| e.to_string())?;
+    app.emit(
+        EventNames::CONTEXT_MENU_ACTION,
+        serde_json::json!({"actionId":action_id,"menuId":menu_id}),
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }

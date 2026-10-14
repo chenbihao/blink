@@ -5,6 +5,7 @@
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
+import * as clipboardEntry from './clipboard-entry.js';
 
 const source = readFileSync(new URL('./results.js', import.meta.url), 'utf8')
     .replace(/^import[\s\S]*?from\s+["'][^"']+["'];\s*/gm, '')
@@ -29,6 +30,7 @@ function setup() {
     const pageChanged = [];
     let created = 0, clipActive = false, stepWheel = false;
     const context = vm.createContext({
+        ...clipboardEntry,
         resultsEl,
         resetMaxHeight: () => {}, syncWindowSize: () => {},
         activateItem: () => {}, statusbar: {update: (a, p) => statusCalls.push({a, p})},
@@ -58,8 +60,18 @@ function setup() {
 /** 构造剪贴板文本条目（itemKey 走 actions[0].hitId 分支）。 */
 const clip = (hitId, score = 0.9) => ({
     name: `item-${hitId}`, source: 'clipboard', score,
+    clipboard_ref: {kind: 'text', id: hitId},
     actions: [{kind: 'lazy_copy', hitId}],
 });
+
+{
+    const h = setup();
+    h.context.render([clip('same'), {name: 'picture', source: 'clipboard', actions: [], clipboard_ref: {kind: 'image', id: 'same'}}], 1);
+    assert.equal(h.context.getLoadedCount(), 2, '同 ID 不同类型不能误去重');
+    h.context.removeItems([{kind: 'image', id: 'same'}]);
+    assert.equal(h.context.getLoadedCount(), 1);
+    assert.equal(h.context.getItems()[0].clipboard_ref.kind, 'text', '按类型局部删除不误删另一类');
+}
 
 {
     // page 模式行为不变：pageDown 页对齐、末页 stop、getPage 换算
@@ -132,15 +144,15 @@ const clip = (hitId, score = 0.9) => ({
     const items = Array.from({length: 20}, (_, i) => clip(`r${i}`));
     h.context.render(items, 1);
     h.context.pageDown(); // viewStart = 9
-    h.context.removeItems(['r9', 'r10', 'r11']);
+    h.context.removeItems(['r9', 'r10', 'r11'].map(id => ({kind: 'text', id})));
     assert.equal(h.context.getLoadedCount(), 17);
     assert.equal(h.context.getNth(1).actions[0].hitId, 'r12', '视口起点越过已删条目，指向 r12（页对齐保持）');
     // 图片项按 lnkPath 匹配
-    h.context.appendItems([{name: 'img', source: 'clipboard', lnk_path: 'clipimg_x', actions: []}], 1);
-    h.context.removeItems(['clipimg_x']);
+    h.context.appendItems([{name: 'img', source: 'clipboard', clipboard_ref: {kind: 'image', id: 'clipimg_x'}, actions: []}], 1);
+    h.context.removeItems([{kind: 'image', id: 'clipimg_x'}]);
     assert.equal(h.context.getLoadedCount(), 17, 'lnkPath 匹配的图片项被移除');
     // 全删光
-    h.context.removeItems(items.map((x) => x.actions[0].hitId));
+    h.context.removeItems(items.map(x => x.clipboard_ref));
     assert.equal(h.context.getLoadedCount(), 0, '全部移除后清零');
 }
 {

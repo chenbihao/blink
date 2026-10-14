@@ -92,6 +92,9 @@ impl Default for Action {
 /// 两者皆 false 时为普通结果项，与查询路径一致。
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct AppEntry {
+    /// 剪贴板资源身份独立于默认动作和文件路径；供选择、菜单与批量操作共用。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clipboard_ref: Option<crate::clipboard::history::ClipboardEntryRef>,
     /// 显示名（lnk 文件名去掉 .lnk）
     pub name: String,
     /// 拼音首字母（如 "微信" → "wx"），用于拼音首字母匹配
