@@ -198,7 +198,7 @@ ss._invalidateSelectionContent = invalidateSelectionContent;
 ss._enterAnnotationMode = enterAnnotationMode;
 ss._exitAnnotationMode = exitAnnotationMode;
 ss._redrawAnnotPreview = redrawAnnotPreview;
-ss._showOcrResult = showOcrResult;
+ss._handleScreenshotDoubleClick = handleScreenshotDoubleClick;
 ss._showTransientHint = showTransientHint;
 ss._doCancel = doCancel;
 ss._compositeSelection = compositeSelection;
@@ -206,13 +206,6 @@ ss._doPinSelection = doPinSelection;
 ss._outputEditorPng = outputEditorPng;
 // 0.23.12：hide 前全量清场（cleanupCanvasVisuals 经此回调调用，避免循环依赖）
 ss._cleanupSessionVisuals = cleanupSessionVisuals;
-// 0.23.11.2：划词层真空白双击 → 复制选区（hit-canvas 与主 canvas 是兄弟元素，
-// dblclick 冒泡不可达，经此回调转发；语义对齐主 canvas dblclick 的标注分支）
-ss._dblClickBlankCopy = function (e) {
-    if (ss.isAnnotating && ss.selCss && pointInEditableImage(e)) {
-        doCopySelection();
-    }
-};
 // 0.15.7：长截图回调
 ss._enterCanvasImageEditor = enterCanvasImageEditor;
 
@@ -1977,7 +1970,8 @@ canvas.addEventListener('lostpointercapture', (e) => {
     abortSelectionInteraction(e);
 });
 
-canvas.addEventListener('dblclick', (e) => {
+/** 主画布与 OCR 命中层共用双击确认，坐标统一为主画布 CSS 像素。 */
+function handleScreenshotDoubleClick(e) {
     console.debug('[screenshot] dblclick', {isAnnotating: ss.isAnnotating, hasSelCss: !!ss.selCss, sent: ss.sent});
     if ((!ss.screenshot && !ss.editorSession.canvasBacked) || ss.sent) return;
     if (ss.singleClickTimeout) {
@@ -1986,14 +1980,17 @@ canvas.addEventListener('dblclick', (e) => {
     }
 
     if (ss.isAnnotating && ss.selCss) {
-        if (pointInEditableImage(e)) {
+        const rect = ss.canvas.getBoundingClientRect();
+        const point = {offsetX: e.clientX - rect.left, offsetY: e.clientY - rect.top};
+        if (pointInEditableImage(point)) {
             doCopySelection();
         }
         return;
     }
 
     doCopyFullScreen();
-});
+}
+canvas.addEventListener('dblclick', handleScreenshotDoubleClick);
 
 canvas.addEventListener('contextmenu', (e) => {
     e.preventDefault();

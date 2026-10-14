@@ -156,7 +156,7 @@ export const ss = {
     _enterAnnotationMode: null,         // 进入标注模式
     _exitAnnotationMode: null,          // 退出标注模式
     _redrawAnnotPreview: null,          // 标注预览重绘
-    _showOcrResult: null,               // 显示 OCR 面板
+    _handleScreenshotDoubleClick: null, // 主画布与 OCR 层统一双击确认
     _showTransientHint: null,           // 临时提示
     _doCancel: null,                    // 取消截图
     _compositeSelection: null,          // 合成选区 PNG

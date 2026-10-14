@@ -19,6 +19,9 @@ import {
 } from './ss-interaction.js';
 import {copyToClipboard} from '../shared/api.js';
 import {cssPointToBitmap, cssRectToBitmap, getRenderScale} from './ss-selection-geometry.js';
+import {capturePointer, releasePointer} from './ss-pointer.js';
+
+const TEXT_DRAG_THRESHOLD_CSS = 3;
 
 /**
  * 从后端 `char_ranges` 生成 UTF-16 offset 供 textarea selection API 使用。
@@ -237,7 +240,7 @@ function redrawHitLayer() {
 }
 
 /**
- * 进入阅读模式：定位 hit-canvas + 装事件 + 首次全选。
+ * 进入阅读模式：定位 hit-canvas + 装事件，等待用户拖动划选。
  *
  * **0.22.8 三层契约**：当 `result.char_boxes` 非空时，构建 char_box → word
  * 映射表，hit-test 优先走 char_boxes（逐字符精确定位），高亮也画 char_boxes。
@@ -324,6 +327,7 @@ export function enterReadingMode(result) {
         selectionEnd: null,
         panelDirty: false,
         dragStart: null,
+        dragOrigin: null,
         hoverWord: null,
     };
 
@@ -351,6 +355,7 @@ export function clearReadingSelection() {
     ss.reading.selectionStart = null;
     ss.reading.selectionEnd = null;
     ss.reading.dragStart = null;
+    ss.reading.dragOrigin = null;
     redrawHitLayer();
 }
 
@@ -364,13 +369,33 @@ function bindHitCanvasEvents() {
     const beginPointerSelection = (kind, e, handle = null) => {
         const viewportEvent = {offsetX: e.clientX, offsetY: e.clientY};
         beginSelectionInteraction(kind, viewportEvent, handle);
-        if (ss.selectionInteraction && typeof hitCanvas.setPointerCapture === 'function') {
-            hitCanvas.setPointerCapture(e.pointerId);
+        if (ss.selectionInteraction) capturePointer(hitCanvas, e);
+    };
+
+    const updateReadingDrag = (e) => {
+        const reading = ss.reading;
+        const origin = reading?.dragOrigin;
+        if (!origin || e.pointerId !== origin.pointerId) return;
+        const starting = reading.dragStart === null;
+        if (starting && Math.hypot(e.clientX - origin.x, e.clientY - origin.y) < TEXT_DRAG_THRESHOLD_CSS) return;
+        const idx = hitTestWord(e.offsetX, e.offsetY);
+        const endIdx = idx >= 0 ? idx : nearestWordByLine(e.offsetX, e.offsetY);
+        if (endIdx < 0) return;
+        if (!starting && reading.selectionEnd === endIdx) return;
+        if (starting) {
+            reading.dragStart = origin.index;
+            reading.selectionStart = origin.index;
+            console.debug('[screenshot] text selection drag started', {charTrack: useCharTrack()});
         }
+        reading.selectionEnd = endIdx;
+        redrawHitLayer();
+        syncSelectionToPanel();
     };
 
     hitCanvas.addEventListener('pointerdown', (e) => {
         if (!ss.reading || e.button !== 0) return;
+        ss.reading.dragStart = null;
+        ss.reading.dragOrigin = null;
         const handle = getSelectionHandle(e.clientX, e.clientY, ss.selCss);
         if (handle) {
             e.stopPropagation();
@@ -398,12 +423,9 @@ function bindHitCanvasEvents() {
         if (idx < 0) return;
         e.stopPropagation();
         e.preventDefault();
-        ss.reading.dragStart = idx;
-        ss.reading.selectionStart = idx;
-        ss.reading.selectionEnd = idx;
-        redrawHitLayer();
-        syncSelectionToPanel();
-        if (typeof hitCanvas.setPointerCapture === 'function') hitCanvas.setPointerCapture(e.pointerId);
+        // 按下只记录候选起点；真实拖动后再高亮/同步面板，避免双击确认前抢焦点。
+        ss.reading.dragOrigin = {index: idx, x: e.clientX, y: e.clientY, pointerId: e.pointerId};
+        capturePointer(hitCanvas, e);
     });
 
     hitCanvas.addEventListener('pointermove', (e) => {
@@ -415,16 +437,11 @@ function bindHitCanvasEvents() {
         const idx = hitTestWord(e.offsetX, e.offsetY);
         // 0.23.13：真空白处保持普通箭头光标（可拖动选区不再用 move 四向箭头提示）；
         // 文字上与划词拖动中保持 text
-        hitCanvas.style.cursor = (idx < 0 && ss.reading.dragStart === null && isBlankForMove(e.offsetX, e.offsetY))
+        hitCanvas.style.cursor = (idx < 0 && !ss.reading.dragOrigin && isBlankForMove(e.offsetX, e.offsetY))
             ? 'default'
             : 'text';
-        if (ss.reading.dragStart !== null) {
-            const endIdx = idx >= 0 ? idx : nearestWordByLine(e.offsetX, e.offsetY);
-            if (endIdx >= 0) {
-                ss.reading.selectionEnd = endIdx;
-                redrawHitLayer();
-                syncSelectionToPanel();
-            }
+        if (ss.reading.dragOrigin) {
+            updateReadingDrag(e);
         } else {
             if (idx !== ss.reading.hoverWord) {
                 ss.reading.hoverWord = idx >= 0 ? idx : null;
@@ -433,72 +450,47 @@ function bindHitCanvasEvents() {
         }
     });
 
-    const finishHitPointer = (e) => {
+    const finishHitPointer = (e, cancelled = false) => {
+        if (ss.reading?.dragOrigin && ss.reading.dragOrigin.pointerId !== e.pointerId) return;
         if (ss.selectionInteraction) {
             hitCanvas.removeAttribute('data-resizing');
             hitCanvas.removeAttribute('data-interacting');
             hitCanvas.style.cursor = 'text';
             finishSelectionInteraction({offsetX: e.clientX, offsetY: e.clientY});
         } else if (ss.reading) {
+            // 松手使用最终坐标；取消事件只清理，不能把候选点击提交成文字选择。
+            if (!cancelled) updateReadingDrag(e);
             ss.reading.dragStart = null;
+            ss.reading.dragOrigin = null;
         }
-        if (typeof hitCanvas.hasPointerCapture === 'function' && hitCanvas.hasPointerCapture(e.pointerId)) {
-            hitCanvas.releasePointerCapture(e.pointerId);
-        }
+        releasePointer(hitCanvas, e);
     };
     hitCanvas.addEventListener('pointerup', finishHitPointer);
-    hitCanvas.addEventListener('pointercancel', finishHitPointer);
+    hitCanvas.addEventListener('pointercancel', (e) => finishHitPointer(e, true));
+    hitCanvas.addEventListener('lostpointercapture', (e) => {
+        if (!ss.reading || ss.reading.dragOrigin?.pointerId !== e.pointerId) return;
+        ss.reading.dragStart = null;
+        ss.reading.dragOrigin = null;
+    });
 
     hitCanvas.addEventListener('mouseleave', () => {
         if (!ss.reading || ss.selectionInteraction) return;
         ss.reading.hoverWord = null;
         ss.reading.dragStart = null;
+        ss.reading.dragOrigin = null;
         hitCanvas.style.cursor = 'text';
         redrawHitLayer();
     });
 
-    // 双击选一整行——若面板未开则先召唤面板，之后再高亮整行；
-    // 真空白双击放行回"复制选区"（主 canvas 是兄弟元素，冒泡不可达，
-    // 经 ss._dblClickBlankCopy 回调转发，与 pointerdown 空白放行同语义）
+    // 双击统一确认截图。hit-canvas 与主 canvas 是兄弟元素，经共同入口转发，
+    // 文字、文字附近及真空白均不再承担选整行/自动弹面板语义。
     hitCanvas.addEventListener('dblclick', (e) => {
         if (!ss.reading) return;
-        let idx = hitTestWord(e.offsetX, e.offsetY);
-        if (idx < 0) {
-            if (isBlankForMove(e.offsetX, e.offsetY)) {
-                if (typeof ss._dblClickBlankCopy === 'function') {
-                    ss._dblClickBlankCopy({offsetX: e.clientX, offsetY: e.clientY});
-                }
-                return;
-            }
-            idx = nearestWordByLine(e.offsetX, e.offsetY);
+        e.preventDefault();
+        e.stopPropagation();
+        if (typeof ss._handleScreenshotDoubleClick === 'function') {
+            ss._handleScreenshotDoubleClick(e);
         }
-        if (idx < 0) return;
-        // 0.22.10: char 轨下双击 = 该行的连续 char_box 段
-        if (useCharTrack()) {
-            const charLine = ss.reading.charBoxes[idx].lineIndex;
-            let clo = idx, chi = idx;
-            while (clo > 0 && ss.reading.charBoxes[clo - 1].lineIndex === charLine) clo--;
-            while (chi < ss.reading.charBoxes.length - 1 && ss.reading.charBoxes[chi + 1].lineIndex === charLine) chi++;
-            ss.reading.selectionStart = clo;
-            ss.reading.selectionEnd = chi;
-            redrawHitLayer();
-            if (!document.getElementById('ocr-panel') && ss.ocrResultCache) {
-                if (typeof ss._showOcrResult === 'function') ss._showOcrResult(ss.ocrResultCache);
-            }
-            syncSelectionToPanel();
-            return;
-        }
-        const line = ss.reading.words[idx].lineIndex;
-        let lo = idx, hi = idx;
-        while (lo > 0 && ss.reading.words[lo - 1].lineIndex === line) lo--;
-        while (hi < ss.reading.words.length - 1 && ss.reading.words[hi + 1].lineIndex === line) hi++;
-        ss.reading.selectionStart = lo;
-        ss.reading.selectionEnd = hi;
-        redrawHitLayer();
-        if (!document.getElementById('ocr-panel') && ss.ocrResultCache) {
-            if (typeof ss._showOcrResult === 'function') ss._showOcrResult(ss.ocrResultCache);
-        }
-        syncSelectionToPanel();
     });
 
     // 右键菜单（阅读模式激活时弹菜单）
