@@ -4,7 +4,7 @@
 >
 > **维护规则**：只保留尚未完成的方向；已立项内容迁入 `phases/`，已完成内容直接移出本文件。
 >
-> **当前判断**：短期优先保护主链路、补齐现有 Agent 交互与 Provider 适配；不立项 RAG、向量数据库或记忆向量化。
+> **当前判断**：短期优先保护主链路；插件系统升级已立项 [0.26](phases/0.26-plugin-system-upgrade.md)，首批天气插件按 0.26.0–0.26.4 五个里程碑交付；AI 交互与 Provider 适配规划见 [0.27](phases/0.27-ai-interaction-enhancement.md)。本文件只保留其余未立项方向，不立项 RAG、向量数据库或记忆向量化。
 
 ---
 
@@ -27,13 +27,12 @@
 | 方向 | 状态 | 当前结论 | 进入 Phase 的条件 |
 |---|---|---|---|
 | 主链路可靠性与性能 | **持续优先** | 始终高于新功能 | 出现焦点、唤起、输入或首结果回退时立即处理 |
-| 天气插件接入和风、彩云天气 | **条件候选** | 两家均列入候选，首期仅适配现有实况与 7 天预报，独立凭据配置；暂缓实现 | 安排需求插入，并完成免费额度、账号权限、接口联调与查询时间预算核验 |
 | 跨 Provider 深度思考模式适配 | **近期优先** | 当前按钮默认开启，实时 reasoning 展示已接通；请求侧尚缺统一、诚实的 Provider/模型能力映射 | 明确 OpenAI-compatible/vLLM/DeepSeek、Anthropic、Gemini、Ollama 的开启/关闭协议、能力声明、custom params 覆盖和历史元数据语义 |
 | Agent 能力增强 | **条件候选** | 集中评估路径级授权、`write_text_file`、受控 `read_url` 与长任务边界 | 出现稳定的“读取→修改→保存”或“URL→正文→处理”高频场景 |
 | 多类型 API 扩展（生图/TTS 等） | **条件候选** | 语言大模型 API 为主；生图端点覆盖差（DeepSeek/Anthropic 无），TTS 未立项 | 支持配置独立类型的 API 端点（生图/STT/TTS）后，再评估 rig image_generation/audio_generation 接入收益 |
-| rig 原生国产 provider 方言适配 | **条件候选** | factory 内按供应商选 dialect（DeepSeek tool_choice 抑制、Moonshot required 降级等）；zhipu/doubao/siliconflow 无方言仍走通用层 | 出现厂商兼容性实际问题；0.26.1 的 /responses 路由核验已先行 |
+| rig 原生国产 provider 方言适配 | **条件候选** | factory 内按供应商选 dialect（DeepSeek tool_choice 抑制、Moonshot required 降级等）；zhipu/doubao/siliconflow 无方言仍走通用层 | 出现厂商兼容性实际问题；先完成规划中的 0.27.1 /responses 路由核验 |
 | 剪贴板历史音频类型 | **条件候选** | 监听器仅采集 CF_UNICODETEXT/CF_DIB/CF_HDROP | 音频格式（CF_WAVE 等）的采集、存储与预览成本评估清楚 |
-| 极轻量文件快速预览 | **条件候选** | 收敛为文本/图片两类的轻量预览；复用 pin 窗口体系（blink-pin:// 协议）与 sticky 轻窗形态 | 文件选中感知（0.26.3）落地后出现稳定预览诉求 |
+| 极轻量文件快速预览 | **条件候选** | 收敛为文本/图片两类的轻量预览；复用 pin 窗口体系（blink-pin:// 协议）与 sticky 轻窗形态 | 文件选中感知（0.27.3）落地后出现稳定预览诉求 |
 | 结构化输出抽取（rig extractor/prompt_typed） | **条件候选** | 标题生成现状鲁棒、无必需场景；依赖 `rig_core::schemars` re-export，落点为 domain::ai 新模块（受 rig 隔离墙约束，不能进 AIProvider trait） | 出现首个真结构化输出需求（意图兜底、批量操作确认等） |
 | per-conversation MCP 工具限定 | **条件候选** | 工具池现为全局 disabled_tools 过滤 + epoch 重建 | /mcp scoping 涉及 agent 组装链路与 epoch 语义，需单独设计 |
 | 外部 agent 作为 subagent | **条件候选** | 可借力长任务生态，但不能把 Blink 变成 agent 壳 | 文件长任务成为高频核心场景，且权限范围可控 |
@@ -43,7 +42,7 @@
 | 事实记忆（tool-based） | **远期观察** | 与向量检索解耦，先证明显式长期记忆的用户价值 | 写入、查看、纠正、删除的产品模型明确 |
 | 记忆向量召回 | **远期观察** | FTS5 + token-aware 窗口继续作为正式方案 | 有数据证明关键词召回无法满足真实对话 |
 | RAG 本地知识库 | **远期观察** | 短期不做摄取、分块、embedding 与索引生命周期 | 本地知识问答成为高频场景且轻量方案不足 |
-| 完整多模态模型投影 | **远期观察** | 图片输入（vision）已立项 0.26.10；输出侧与 document/audio 内容类型投影仍远期 | 模型输出侧多模态相对结构化结果引用有显著收益 |
+| 完整多模态模型投影 | **远期观察** | 图片输入（vision）已立项 0.27.10；输出侧与 document/audio 内容类型投影仍远期 | 模型输出侧多模态相对结构化结果引用有显著收益 |
 | 完整 QuickLook 式预览 | **不建议** | 解码器、体积和维护成本偏离核心定位；极轻量文本/图片预览已单列为条件候选 | — |
 
 ---
@@ -99,11 +98,11 @@
 
 ### 4.6 多类型 API 扩展（生图/TTS 等）
 
-生图与 TTS 不随语言大模型 provider 混做：rig image_generation 仅覆盖 OpenAI 系/Gemini/Venice（硅基流动需 additional_params 方言），DeepSeek/Anthropic 无生图端点，收益配不上集成面（0.26 规划时移出）。立项条件是先支持"按类型独立配置 API 端点"（生图/STT/TTS 各自的 provider/base_url/key 配置面），再评估接入；届时生成结果走 ResourceStore image_ref → pin_image/写剪贴板消费链路。
+生图与 TTS 不随语言大模型 provider 混做：rig image_generation 仅覆盖 OpenAI 系/Gemini/Venice（硅基流动需 additional_params 方言），DeepSeek/Anthropic 无生图端点，收益配不上集成面（0.27 规划时移出）。立项条件是先支持"按类型独立配置 API 端点"（生图/STT/TTS 各自的 provider/base_url/key 配置面），再评估接入；届时生成结果走 ResourceStore image_ref → pin_image/写剪贴板消费链路。
 
 ### 4.7 rig 原生国产 provider 方言适配
 
-rig 0.43 国产"原生 provider"实为 openai 方言机制（DEEPSEEK/MOONSHOT/MINIMAX/XIAOMIMIMO 常量 + quirks），不新增 ProviderKind 也能在 factory 内按供应商选 dialect（`OpenAIConfig::with_key(dialect, key)`，with_base_url 正交保留）。实际增量收益：DeepSeek 的 tool_choice 抑制与消息拍平、Moonshot required 降级、DeepSeek 缓存命中 token 统计。zhipu/doubao/siliconflow/aliyun 在 rig 无方言，仍走通用层——双轨心智是主要成本。前置：0.26.1 的 /responses 路由核验完成。
+rig 0.43 国产"原生 provider"实为 openai 方言机制（DEEPSEEK/MOONSHOT/MINIMAX/XIAOMIMIMO 常量 + quirks），不新增 ProviderKind 也能在 factory 内按供应商选 dialect（`OpenAIConfig::with_key(dialect, key)`，with_base_url 正交保留）。实际增量收益：DeepSeek 的 tool_choice 抑制与消息拍平、Moonshot required 降级、DeepSeek 缓存命中 token 统计。zhipu/doubao/siliconflow/aliyun 在 rig 无方言，仍走通用层——双轨心智是主要成本。前置：0.27.1 的 /responses 路由核验完成。
 
 ### 4.8 剪贴板历史音频类型
 
@@ -111,7 +110,7 @@ rig 0.43 国产"原生 provider"实为 openai 方言机制（DEEPSEEK/MOONSHOT/M
 
 ### 4.9 极轻量文件快速预览
 
-不做完整 QuickLook（解码器、体积和维护成本偏离核心定位）。收敛方向：仅文本与图片两类的极轻量预览——图片复用 pin 窗口体系（blink-pin:// 自定义协议 + spare 预热），文本参考 sticky/voice-overlay 的轻量无框窗形态。前置：文件选中感知（0.26.3）落地后验证真实预览诉求。
+不做完整 QuickLook（解码器、体积和维护成本偏离核心定位）。收敛方向：仅文本与图片两类的极轻量预览——图片复用 pin 窗口体系（blink-pin:// 自定义协议 + spare 预热），文本参考 sticky/voice-overlay 的轻量无框窗形态。前置：文件选中感知（0.27.3）落地后验证真实预览诉求。
 
 ### 4.10 结构化输出抽取（rig extractor / prompt_typed）
 
@@ -119,17 +118,7 @@ rig-agent ExtractorBuilder 提供 schema 约束输出 + 可配置重试（含"�
 
 ### 4.11 per-conversation MCP 工具限定
 
-`/mcp` 查看已在 0.26.7 落地；"限定当前对话只用某个 MCP 来源"是另一件事：工具池现为全局 disabled_tools 过滤 + epoch 触发 Agent 重建（chat_service 组装时 collect_tools 无 conversation 维度参数）。对话级白名单需要 InvokeContext/agent 组装链路带 conversation 级 tool 过滤并重新定义缓存键语义，单独设计后再立项。
-
----
-
-### 4.12 天气插件接入和风、彩云天气
-
-和风与彩云均列入候选，可按账号权限与联调结果分批安排。首期仅在现有 `builtin.weather` 内适配供应商，保持城市查询、默认城市、温度单位、当前天气与未来 7 天预报，以及搜索和 `get_weather` 两条出口。和风采用 API Key + API Host；彩云优先评估稳定版 v2.6 与 App Key + App Secret 签名认证，已有 Token 的兼容范围立项时确定。各家独立配置，密钥复用插件 `secret` 字段与 Credential Manager；保留 Open-Meteo，允许选择供应商。自动降级、分钟降雨、AQI 与预警不纳入首期，后续有需求再评估。
-
-复杂度为局部中等：宿主 HTTP headers 与插件配置可复用，但需适配城市解析、实况和逐日接口、统一单位与时间，并处理现有查询总超时 5 秒与单次 HTTP 超时 15 秒不一致的问题。彩云另需明确城市到坐标的解析来源、中国大陆 GCJ-02 与其他地区 WGS84 的坐标系适配，以及请求签名。立项时核验 Gzip 解压、来源归因、错误分类和取消后停止后续请求；避免为两家供应商预建通用调度框架。
-
-2026-10-15 调研时，[和风官方定价](https://dev.qweather.com/docs/finance/pricing/)列明天气和基础服务价格组每月前 50,000 次请求免费；城市解析、实况与逐日均需按 API 请求计数，不能将一次插件查询视为一次请求。[彩云官方公开价格单](https://caiyunapp.com/api/caiyun_api_service_price.pdf)列出免费用户 1,000 次/天，但未标明生效日期；[当前计费文档](https://docs.caiyunapp.com/weather-api/billing.html)要求到开放平台查看套餐，因此新账号实际赠送额度、有效期及 7 天预报权限须登录控制台核验，不作为已确认承诺。立项时重新核验两家价格、账号权限与当前接口文档，再以真实凭据验证中文城市、海外城市、摄氏/华氏、鉴权失败及超时路径。当前仅留作候选，不预占版本号。
+`/mcp` 查看已列入 0.27.7 规划，尚未按该阶段验收；"限定当前对话只用某个 MCP 来源"是另一件事：工具池现为全局 disabled_tools 过滤 + epoch 触发 Agent 重建（chat_service 组装时 collect_tools 无 conversation 维度参数）。对话级白名单需要 InvokeContext/agent 组装链路带 conversation 级 tool 过滤并重新定义缓存键语义，单独设计后再立项。
 
 ---
 
