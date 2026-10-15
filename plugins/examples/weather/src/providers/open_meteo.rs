@@ -154,6 +154,7 @@ pub fn parse_weather(
             daily.push(DailyWeather {
                 date: date.clone(),
                 condition_code,
+                condition: None,
                 day_condition: None,
                 night_condition: None,
                 temperature_max_c,

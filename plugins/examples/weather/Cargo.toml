@@ -1,6 +1,6 @@
 [package]
 name = "blink-plugin-weather"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 
 [lints]
@@ -11,3 +11,9 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 urlencoding = "2.1"
+# 彩云 v2.6 HMAC-SHA256 签名 + URL-safe Base64 + OS CSPRNG nonce
+# （版本与 workspace 树内一致：sha2/base64 为根 crate 同版本，hmac 0.12 已在锁内）
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+getrandom = "0.3"

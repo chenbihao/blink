@@ -5,10 +5,10 @@
     "zh": "天气",
     "en": "Weather"
   },
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": {
-    "zh": "查询城市天气（默认 Open-Meteo 免费；可配置和风天气）",
-    "en": "City weather (Open-Meteo by default; QWeather configurable)"
+    "zh": "查询城市天气（默认 Open-Meteo 免费；可配置和风天气或彩云天气）",
+    "en": "City weather (Open-Meteo by default; QWeather or Caiyun configurable)"
   },
   "builtin": true,
   "runtime": {
@@ -82,6 +82,10 @@
               },
               "name": {
                 "type": "string"
+              },
+              "in_mainland_china": {
+                "type": "boolean",
+                "description": "明确声明该坐标是否位于中国大陆（彩云天气按大陆 GCJ-02/其余 WGS84 请求；保存地点已有解析器证据时可省略）"
               }
             },
             "required": [
@@ -96,7 +100,7 @@
       },
       "danger_class": "Safe",
       "result_type": "items",
-      "hint": "读取 status/warnings 判断数据完整度；部分可用时明确说明缺失项。逐日天气是当天最严重现象，不代表全天持续。返回来源、地点、有效时间和实际可用预报。",
+      "hint": "读取 status/warnings 判断数据完整度；部分可用时明确说明缺失项。逐日天气语义见 daily_condition_semantics：和风按白天/夜间分段、彩云为全天主导现象、Open-Meteo 为当天最严重现象，均不代表全天持续。返回来源、地点、有效时间和实际可用预报。",
       "progress_hint": "查询天气",
       "projection": {
         "result_shape": "items",
@@ -188,8 +192,8 @@
       },
       "default": "open_meteo",
       "description": {
-        "zh": "切换天气数据来源；已保存的默认地点与单位保持不变。和风需要先配置 API Host 与 API Key",
-        "en": "Switch the weather data source; the saved location and unit stay unchanged. QWeather requires its API Host and API Key"
+        "zh": "切换天气数据来源；已保存的默认地点与单位保持不变。和风需要 API Host 与 API Key，彩云需要 App Key 与 App Secret",
+        "en": "Switch the weather data source; the saved location and unit stay unchanged. QWeather requires its API Host and API Key; Caiyun requires its App Key and App Secret"
       },
       "options": [
         {
@@ -204,6 +208,13 @@
           "label": {
             "zh": "和风天气（需 API Key）",
             "en": "QWeather (API key required)"
+          }
+        },
+        {
+          "value": "caiyun",
+          "label": {
+            "zh": "彩云天气（需 App Key/Secret）",
+            "en": "Caiyun (App key & secret required)"
           }
         }
       ]
@@ -233,6 +244,34 @@
       "description": {
         "zh": "和风控制台创建的 API Key；留空表示未修改，可点右侧按钮清除",
         "en": "The API Key created in the QWeather console; leave empty to keep the saved one, use the button to clear"
+      }
+    },
+    {
+      "key": "caiyun_app_key",
+      "type": "string",
+      "secret": true,
+      "title": {
+        "zh": "彩云 App Key",
+        "en": "Caiyun App Key"
+      },
+      "default": "",
+      "description": {
+        "zh": "彩云控制台创建的 App Key（令牌，只含字母、数字与 . _ ~ -）；按凭据保存，留空表示未修改，可点右侧按钮清除",
+        "en": "The App Key (token) from the Caiyun console (letters, digits and . _ ~ - only); stored as a credential, leave empty to keep the saved one, use the button to clear"
+      }
+    },
+    {
+      "key": "caiyun_app_secret",
+      "type": "string",
+      "secret": true,
+      "title": {
+        "zh": "彩云 App Secret",
+        "en": "Caiyun App Secret"
+      },
+      "default": "",
+      "description": {
+        "zh": "彩云控制台的 App Secret（API Secret），用于生成请求签名；留空表示未修改，可点右侧按钮清除",
+        "en": "The App Secret (API Secret) from the Caiyun console, used to sign requests; leave empty to keep the saved one, use the button to clear"
       }
     }
   ]

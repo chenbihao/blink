@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Blink",
-  "version": "0.26.2",
+  "version": "0.26.3",
   "identifier": "com.blink.launcher",
   "build": {
     "frontendDist": "frontend"
@@ -36,8 +36,14 @@
     "active": true,
     "targets": "all",
     "createUpdaterArtifacts": true,
-    "icon": ["icons/icon.ico", "icons/icon.png"],
-    "resources": ["plugins/builtin/**/*", "resources/bin/funasr-worker/**/*"],
+    "icon": [
+      "icons/icon.ico",
+      "icons/icon.png"
+    ],
+    "resources": [
+      "plugins/builtin/**/*",
+      "resources/bin/funasr-worker/**/*"
+    ],
     "windows": {
       "nsis": {
         "installerHooks": "nsis/uninstall-cleanup.nsh"

@@ -3,6 +3,7 @@
 use crate::model::ResolvedLocation;
 use crate::protocol::PluginError;
 
+pub mod coordinates;
 pub mod open_meteo;
 pub mod qweather;
 
@@ -184,6 +185,7 @@ mod tests {
             source: "open_meteo",
             source_id: Some("open_meteo:1".into()),
             resolved_at: "2026-10-15T00:00:00Z".into(),
+            in_mainland_china: Some(true),
         }
     }
 

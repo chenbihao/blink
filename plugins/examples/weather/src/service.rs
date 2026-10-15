@@ -6,7 +6,7 @@
 //! 查询容量（4 槽）按逻辑查询计，不按 HTTP 计。
 use crate::model::{CurrentWeather, DailyWeather, ResolvedLocation, WeatherSnapshot};
 use crate::protocol::*;
-use crate::providers::{open_meteo, qweather};
+use crate::providers::{caiyun, open_meteo, qweather};
 use crate::settings::{self, Provider, RequestParameters, Resolver, TemperatureUnit};
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
@@ -45,6 +45,8 @@ enum Stage {
         current: Option<Result<(CurrentWeather, Vec<String>), PluginError>>,
         daily: Option<Result<(Vec<DailyWeather>, Vec<String>), PluginError>>,
     },
+    /// 彩云综合 weather 单请求同时覆盖实况+逐日。
+    WeatherCaiyun(ResolvedLocation),
 }
 
 struct Pending {
@@ -53,6 +55,7 @@ struct Pending {
     deadline: Instant,
     provider: Provider,
     qweather: Option<settings::QWeatherCredentials>,
+    caiyun: Option<settings::CaiyunCredentials>,
     stage: Stage,
     inflight: usize,
 }
@@ -264,6 +267,21 @@ impl WeatherService {
                         daily: None,
                     }
                 }
+                Provider::Caiyun => {
+                    let credentials = parameters.caiyun.as_ref().expect("validated");
+                    // 区域未确认/签名失败不占槽，直接按 invalid_arguments 反馈
+                    let signed = crate::location::coordinates::caiyun_request_coordinates(
+                        &location,
+                    )
+                    .and_then(|coordinates| caiyun::weather_request(credentials, &coordinates));
+                    match signed {
+                        Ok(request) => {
+                            requests.push((request.url, request.headers, HttpSlot::Only));
+                            Stage::WeatherCaiyun(location)
+                        }
+                        Err(e) => return vec![failed(id, reply, e)],
+                    }
+                }
             }
         } else {
             // 名称解析来源独立于天气来源：已配置和风时优先和风，否则 Open-Meteo。
@@ -304,6 +322,7 @@ impl WeatherService {
                 deadline: now + Duration::from_millis(budget),
                 provider: parameters.provider,
                 qweather: parameters.qweather.clone(),
+                caiyun: parameters.caiyun.clone(),
                 stage,
                 inflight,
             },
@@ -356,6 +375,7 @@ impl WeatherService {
                 deadline: now + Duration::from_millis(budget),
                 provider: Provider::OpenMeteo,
                 qweather: None,
+                caiyun: None,
                 stage: Stage::Geocoding {
                     query,
                     resolver,
@@ -441,6 +461,7 @@ impl WeatherService {
             Stage::Geocoding { resolver, .. } => format!("geocoding:{resolver}"),
             Stage::WeatherOpenMeteo(_) => "weather:open_meteo".to_owned(),
             Stage::WeatherQWeather { .. } => "weather:qweather".to_owned(),
+            Stage::WeatherCaiyun(_) => "weather:caiyun".to_owned(),
         };
         eprintln!(
             "[weather] HTTP completed: stage={stage_label} http_id={http_id} status={status}"
@@ -464,6 +485,12 @@ impl WeatherService {
             return Some(self.finish_qweather(query_id, pending));
         }
 
+        // 彩云综合 weather：单请求即聚合点，错误按彩云错误表细分。
+        if matches!(pending.stage, Stage::WeatherCaiyun(_)) {
+            let pending = self.queries.remove(&query_id)?;
+            return Some(self.finish_caiyun(query_id, pending, status, body, network_error));
+        }
+
         let pending = self.queries.remove(&query_id)?;
         let body = match classify_http(status, body, network_error) {
             Ok(body) => body,
@@ -475,6 +502,7 @@ impl WeatherService {
             deadline,
             provider,
             qweather,
+            caiyun,
             stage,
             ..
         } = pending;
@@ -491,6 +519,7 @@ impl WeatherService {
                 deadline,
                 provider,
                 qweather,
+                caiyun,
                 body,
                 query,
                 resolver,
@@ -502,7 +531,7 @@ impl WeatherService {
                 Ok(snapshot) => Some(self.complete(query_id, reply, &snapshot, unit)),
                 Err(e) => Some(failed(query_id, reply, e)),
             },
-            Stage::WeatherQWeather { .. } => None,
+            Stage::WeatherQWeather { .. } | Stage::WeatherCaiyun(_) => None,
         }
     }
 
@@ -515,6 +544,7 @@ impl WeatherService {
         deadline: Instant,
         provider: Provider,
         qweather: Option<settings::QWeatherCredentials>,
+        caiyun: Option<settings::CaiyunCredentials>,
         body: String,
         query: crate::location::LocationQuery,
         resolver: &'static str,
@@ -565,6 +595,7 @@ impl WeatherService {
                     deadline,
                     provider,
                     qweather,
+                    caiyun,
                 },
             );
             return self.issue(&query_id, url, vec![], HttpSlot::Only, now).ok();
@@ -622,6 +653,20 @@ impl WeatherService {
                         daily: None,
                     }
                 }
+                Provider::Caiyun => {
+                    let credentials = caiyun.as_ref().expect("validated at start");
+                    let signed = crate::location::coordinates::caiyun_request_coordinates(
+                        &location,
+                    )
+                    .and_then(|coordinates| caiyun::weather_request(credentials, &coordinates));
+                    match signed {
+                        Ok(request) => {
+                            requests.push((request.url, request.headers, HttpSlot::Only));
+                            Stage::WeatherCaiyun(location)
+                        }
+                        Err(e) => return Some(failed(query_id, reply, e)),
+                    }
+                }
             };
             self.queries.insert(
                 query_id.clone(),
@@ -633,6 +678,7 @@ impl WeatherService {
                     deadline,
                     provider,
                     qweather,
+                    caiyun,
                 },
             );
             return self
@@ -708,6 +754,43 @@ impl WeatherService {
             snapshot.daily.len()
         );
         self.complete(query_id, pending.reply, &snapshot, pending.unit)
+    }
+
+    /// 彩云聚合：单请求覆盖实况+逐日；网络/超时先行，HTTP 错误按彩云错误表
+    /// 细分（含重定向拒绝的 3xx），成功进统一快照（partial 语义在 provider 内）。
+    fn finish_caiyun(
+        &mut self,
+        query_id: String,
+        pending: Pending,
+        status: u16,
+        body: Option<&str>,
+        network_error: Option<&str>,
+    ) -> PluginToCore {
+        let Stage::WeatherCaiyun(location) = pending.stage else {
+            unreachable!("finish_caiyun requires caiyun stage");
+        };
+        let snapshot = if network_error.is_some() || status != 200 {
+            if network_error.is_some_and(|e| e.starts_with("busy:")) {
+                Err(error("busy", "宿主天气请求繁忙，请稍后重试"))
+            } else if network_error.is_some_and(|e| e.starts_with("timeout:")) {
+                Err(error("timeout", "天气服务请求超时，请稍后重试"))
+            } else {
+                Err(caiyun::error_from_response(status, body.unwrap_or("")))
+            }
+        } else {
+            caiyun::parse_weather(body.unwrap_or(""), location)
+        };
+        match snapshot {
+            Ok(snapshot) => {
+                eprintln!(
+                    "[weather] completed: provider=caiyun status={} daily_days={}",
+                    snapshot.status(),
+                    snapshot.daily.len()
+                );
+                self.complete(query_id, pending.reply, &snapshot, pending.unit)
+            }
+            Err(e) => failed(query_id, pending.reply, e),
+        }
     }
 
     fn complete(
@@ -837,6 +920,18 @@ mod tests {
         })
     }
 
+    fn caiyun_settings() -> serde_json::Value {
+        json!({
+            "default_provider": "caiyun",
+            "caiyun_app_key": "test-app-key",
+            "caiyun_app_secret": "test-app-secret",
+            "default_location": {
+                "latitude": 31.1774276, "longitude": 121.5272106,
+                "coordinate_system": "wgs84", "name": "上海", "in_mainland_china": true
+            }
+        })
+    }
+
     fn tool(id: &str, budget_ms: Option<u64>) -> CoreToPlugin {
         CoreToPlugin::ToolCall {
             id: id.into(),
@@ -875,6 +970,182 @@ mod tests {
 
     const QW_DAILY_ONE: &str = r#"{"days":[{"forecastStartTime":"2026-10-15T06:00+08:00","temperatureMax":{"value":30,"unit":"°C"},"temperatureMin":{"value":20,"unit":"°C"},"daytime":{"condition":{"text":"小雨","code":"305"},"wind":{"speed":{"value":1.87,"unit":"m/s"}},"precipitation":{"probability":0.4}},"nighttime":{"condition":{"text":"多云","code":101},"wind":{"speed":{"value":8.0,"unit":"km/h"}},"precipitation":{"probability":0.64}}}]}"#;
     const QW_CURRENT: &str = r#"{"condition":{"text":"阴","code":104},"temperature":{"value":21.5,"unit":"°C"},"wind":{"speed":{"value":3.0,"unit":"m/s"}},"metadata":{"attributions":["https://developer.qweather.com/attribution.html"]}}"#;
+
+    #[test]
+    fn caiyun_unconfirmed_region_fails_before_any_http_request() {
+        let mut service = WeatherService::default();
+        let now = Instant::now();
+        let result = service.handle(
+            CoreToPlugin::ToolCall {
+                id: "cy-unknown".into(),
+                tool_name: "get_weather".into(),
+                arguments: json!({"location":{"latitude":39.9,"longitude":116.4,"coordinate_system":"wgs84"}}),
+                settings: Some(caiyun_settings()),
+                budget_ms: None,
+            },
+            now,
+        );
+        let PluginToCore::RawResult(raw) = &result[0] else {
+            panic!("expected error");
+        };
+        let error = raw.error.as_ref().unwrap();
+        assert_eq!(error.code, "invalid_arguments");
+        assert!(error.message.contains("中国大陆"));
+        assert!(service.queries.is_empty() && service.http.is_empty());
+    }
+
+    #[test]
+    fn caiyun_single_request_signs_derived_gcj02_coordinates() {
+        let mut service = WeatherService::default();
+        let now = Instant::now();
+        let result = service.handle(
+            CoreToPlugin::ToolCall {
+                id: "cy".into(),
+                tool_name: "get_weather".into(),
+                arguments: json!({}),
+                settings: Some(caiyun_settings()),
+                budget_ms: Some(9000),
+            },
+            now,
+        );
+        let PluginToCore::HttpRequest(request) = &result[0] else {
+            panic!("expected http request");
+        };
+        // 经度在前；上海 WGS84→GCJ-02 派生坐标；查询 7 天
+        assert_eq!(
+            request.url,
+            "https://api.caiyunapp.com/v2.6/test-app-key/121.531542,31.175304/weather?dailysteps=7&unit=metric%3Av2"
+        );
+        let names: Vec<&str> = request
+            .headers
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        assert!(names.contains(&"x-cy-signature"));
+        assert!(names.contains(&"x-cy-nonce"));
+        assert!(names.contains(&"x-cy-timestamp"));
+        assert_eq!(request.timeout_ms, 9000);
+        // Secret 不出现在 URL 或任何头值；App Key 只出现在路径
+        assert!(!request.url.contains("test-app-secret"));
+        assert!(request
+            .headers
+            .iter()
+            .all(|(_, value)| !value.contains("test-app-secret")));
+        // 原始地点仍是 WGS84 原值，未被派生坐标覆盖
+        let pending = service.queries.get("cy").unwrap();
+        match &pending.stage {
+            Stage::WeatherCaiyun(location) => {
+                assert_eq!(location.latitude, 31.1774276);
+                assert_eq!(location.coordinate_system, "wgs84");
+            }
+            _ => panic!("expected caiyun stage"),
+        }
+    }
+
+    #[test]
+    fn caiyun_response_aggregates_partial_and_maps_provider_errors() {
+        // 实况可用 + 3 天预报 → partial 并说明实际天数
+        let mut service = WeatherService::default();
+        let now = Instant::now();
+        let result = service.handle(
+            CoreToPlugin::ToolCall {
+                id: "cy".into(),
+                tool_name: "get_weather".into(),
+                arguments: json!({}),
+                settings: Some(caiyun_settings()),
+                budget_ms: None,
+            },
+            now,
+        );
+        let id = http_id(&result[0]);
+        let body = r#"{"status":"ok","result":{
+            "realtime":{"status":"ok","temperature":23.5,"skycon":"CLEAR_DAY","wind":{"speed":8.2}},
+            "daily":{
+              "skycon":[{"date":"2026-10-15T00:00+08:00","value":"CLOUDY"}],
+              "temperature":[
+                {"date":"2026-10-15T00:00+08:00","max":27,"min":19},
+                {"date":"2026-10-16T00:00+08:00","max":26,"min":18},
+                {"date":"2026-10-17T00:00+08:00","max":25,"min":17}]}}}"#;
+        let result = service.handle(geo_response(id, body), now);
+        let PluginToCore::RawResult(raw) = &result[0] else {
+            panic!("expected result");
+        };
+        assert_eq!(raw.data[0]["provider"], "caiyun");
+        assert_eq!(raw.data[0]["status"], "partial");
+        assert_eq!(raw.data[0]["temp"], "24°C");
+        assert_eq!(raw.data[0]["condition"], "晴（白天）");
+        assert_eq!(raw.data[0]["daily_condition_semantics"], "all_day_dominant");
+        assert_eq!(raw.data[0]["availability"]["daily_days"], 3);
+        assert!(raw.data[0]["copy_text"].as_str().unwrap().contains("当天主导现象"));
+
+        // 400 + token 错误体 → 鉴权失败；槽位释放
+        let mut service = WeatherService::default();
+        let result = service.handle(
+            CoreToPlugin::ToolCall {
+                id: "cy2".into(),
+                tool_name: "get_weather".into(),
+                arguments: json!({}),
+                settings: Some(caiyun_settings()),
+                budget_ms: None,
+            },
+            now,
+        );
+        let result = service.handle(
+            CoreToPlugin::HttpResponse {
+                id: http_id(&result[0]),
+                status: 400,
+                body: Some(r#"{"status":"failed","error":"token is invalid"}"#.into()),
+                error: None,
+            },
+            now,
+        );
+        let PluginToCore::RawResult(raw) = &result[0] else {
+            panic!("expected error");
+        };
+        assert_eq!(raw.error.as_ref().unwrap().code, "authentication_failed");
+        assert!(service.queries.is_empty() && service.http.is_empty());
+    }
+
+    #[test]
+    fn caiyun_name_resolution_reuses_resolver_evidence_for_coordinates() {
+        // 无和风配置：名称解析走 Open-Meteo；彩云凭据不影响解析来源
+        let mut service = WeatherService::default();
+        let now = Instant::now();
+        let mut settings = caiyun_settings();
+        settings["default_location"] = serde_json::Value::Null;
+        settings["default_city"] = serde_json::json!("广州");
+        let first = service.handle(
+            CoreToPlugin::ToolCall {
+                id: "cy3".into(),
+                tool_name: "get_weather".into(),
+                arguments: json!({}),
+                settings: Some(settings),
+                budget_ms: None,
+            },
+            now,
+        );
+        let PluginToCore::HttpRequest(request) = &first[0] else {
+            panic!("expected geocoding request");
+        };
+        assert!(request.url.starts_with("https://geocoding-api.open-meteo.com/"));
+        // 唯一候选携带国家码证据 → 进入彩云天气阶段无需再次确认区域
+        let result = service.handle(
+            geo_response(
+                http_id(&first[0]),
+                r#"{"results":[{"id":1,"name":"广州","latitude":23.13,"longitude":113.26,"feature_code":"PPLA","country_code":"CN","country":"中国"}]}"#,
+            ),
+            now,
+        );
+        let PluginToCore::HttpRequest(request) = &result[0] else {
+            panic!("expected caiyun weather request");
+        };
+        assert!(request.url.starts_with("https://api.caiyunapp.com/v2.6/test-app-key/"));
+        assert!(request.url.contains("/weather?dailysteps=7"));
+        assert!(request
+            .headers
+            .iter()
+            .any(|(name, _)| name == "x-cy-signature"));
+    }
 
     #[test]
     fn default_coordinates_start_weather_without_geocoding() {

@@ -196,6 +196,22 @@
     margin-top: var(--space-sm);
 }
 
+/* 区域声明（彩云坐标系）：与解析来源同款的窄选择器 + 说明行 */
+.weather-region-section {
+    margin-top: var(--space-sm);
+}
+
+.weather-region-field {
+    max-width: 320px;
+}
+
+.weather-region-help {
+    margin: var(--space-xs) 0 0;
+    color: var(--text-sub);
+    font-size: var(--text-sm);
+    line-height: var(--leading-normal);
+}
+
 .weather-search-status,
 .weather-manual-status,
 .weather-draft-status {

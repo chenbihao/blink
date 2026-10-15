@@ -1121,6 +1121,15 @@ export const zh = {
     "weather.clear_pending": "默认地点已标记为清除，保存后生效。",
     "weather.cancel": "取消",
     "weather.save": "保存地点",
+    "weather.region_label": "坐标区域（彩云天气需要）",
+    "weather.region_unconfirmed": "未确认",
+    "weather.region_mainland": "中国大陆",
+    "weather.region_outside": "中国大陆以外",
+    "weather.region_help": "彩云天气对中国大陆使用 GCJ-02 坐标、大陆以外（含港澳台）使用 WGS84。Open-Meteo 候选按国家代码自动判定；手工坐标与和风候选需要在此确认，未确认时彩云查询会被拒绝并提示。",
+    "weather.region_mainland_short": "中国大陆（GCJ-02）",
+    "weather.region_outside_short": "中国大陆以外（WGS84）",
+    "weather.region_unconfirmed_short": "未确认（使用彩云前需确认）",
+    "weather.detail_region": "区域",
 
     // ── 主窗口：右键菜单 ──
     "menu.cut": "剪切",

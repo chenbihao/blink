@@ -652,8 +652,13 @@ async fn execute_http_request(
     // 0.26.2:带鉴权头的请求禁止跨目的地重定向——reqwest 跟随重定向时只剥离
     // Authorization/Cookie 等内建敏感头，自定义头（如 X-QW-Api-Key）会原样重发，
     // 用户凭据可能被送往配置 Host 之外的服务器。同 host 的 HTTPS 重定向仍允许。
-    let builder = if headers.iter().any(|(name, _)| is_sensitive_header(name)) {
-        match url_host(url) {
+    //
+    // 0.26.3:彩云签名请求（x-cy-signature）更严——App Key 就在 URL 路径中，
+    // 且签名覆盖精确 method/path/query，任何重定向（含同 Host 改路径/query）
+    // 都意味着凭据外发或签名失效；宿主拒绝跟随且不自动重签。
+    let builder = match redirect_rule(headers) {
+        RedirectRule::Never => Client::builder().redirect(reqwest::redirect::Policy::none()),
+        RedirectRule::SameHostHttps => match url_host(url) {
             Some(host) => {
                 Client::builder().redirect(reqwest::redirect::Policy::custom(move |attempt| {
                     if attempt.url().scheme() == "https"
@@ -666,9 +671,8 @@ async fn execute_http_request(
                 }))
             }
             None => Client::builder().redirect(reqwest::redirect::Policy::none()),
-        }
-    } else {
-        Client::builder()
+        },
+        RedirectRule::Follow => Client::builder(),
     };
     let client = match builder
         .timeout(std::time::Duration::from_millis(
@@ -747,6 +751,30 @@ fn is_sensitive_header(name: &str) -> bool {
     name.eq_ignore_ascii_case("authorization")
         || name.eq_ignore_ascii_case("x-qw-api-key")
         || name.eq_ignore_ascii_case("proxy-authorization")
+        || name.eq_ignore_ascii_case("x-cy-signature")
+}
+
+/// 重定向跟随策略分级。彩云签名请求取 Never（见 `execute_http_request` 注释）。
+enum RedirectRule {
+    /// 无凭据：默认跟随。
+    Follow,
+    /// 鉴权头（Authorization/X-QW-Api-Key 等）：仅同 host HTTPS 跟随。
+    SameHostHttps,
+    /// 彩云签名 URL（App Key 在路径、签名绑定精确 URL）：拒绝一切重定向。
+    Never,
+}
+
+fn redirect_rule(headers: &[(String, String)]) -> RedirectRule {
+    let is_caiyun = headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("x-cy-signature"));
+    if is_caiyun {
+        return RedirectRule::Never;
+    }
+    if headers.iter().any(|(name, _)| is_sensitive_header(name)) {
+        return RedirectRule::SameHostHttps;
+    }
+    RedirectRule::Follow
 }
 
 /// 从 URL 字符串提取 host（去除 userinfo 与端口）；无法解析时返回 None。
@@ -821,8 +849,157 @@ mod tests {
         assert!(is_sensitive_header("x-qw-api-key"));
         assert!(is_sensitive_header("X-QW-API-KEY"));
         assert!(is_sensitive_header("Proxy-Authorization"));
+        assert!(is_sensitive_header("X-Cy-Signature"));
         assert!(!is_sensitive_header("Accept-Encoding"));
         assert!(!is_sensitive_header("Content-Type"));
+    }
+
+    #[test]
+    fn caiyun_signed_requests_never_follow_redirects() {
+        let caiyun = vec![
+            ("x-cy-signature".to_owned(), "sig".to_owned()),
+            ("x-cy-nonce".to_owned(), "n".to_owned()),
+        ];
+        assert!(matches!(redirect_rule(&caiyun), RedirectRule::Never));
+        let mut mixed = caiyun;
+        mixed.push(("X-QW-Api-Key".to_owned(), "k".to_owned()));
+        assert!(matches!(redirect_rule(&mixed), RedirectRule::Never));
+        assert!(matches!(
+            redirect_rule(&[("X-QW-Api-Key".to_owned(), "k".to_owned())]),
+            RedirectRule::SameHostHttps
+        ));
+        assert!(matches!(redirect_rule(&[]), RedirectRule::Follow));
+        // nonce/时间戳单独出现不代表已签名请求
+        assert!(matches!(
+            redirect_rule(&[("x-cy-nonce".to_owned(), "n".to_owned())]),
+            RedirectRule::Follow
+        ));
+    }
+
+    /// 本地回环真实 HTTP 重定向验证：默认跟随；带鉴权头/彩云签名头的请求
+    /// 跨目的地重定向被停止（3xx 原样返回，目标服务器零命中），凭据不外发。
+    #[tokio::test]
+    async fn live_redirects_are_rejected_for_credential_bearing_requests() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        async fn redirect_target(
+            listener: TcpListener,
+            hits: Arc<AtomicUsize>,
+        ) -> std::io::Result<()> {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return Ok(());
+                };
+                let hits = Arc::clone(&hits);
+                tokio::spawn(async move {
+                    let mut buffer = [0u8; 2048];
+                    let mut read = 0usize;
+                    loop {
+                        match socket.read(&mut buffer[read..]).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => {
+                                read += n;
+                                if buffer[..read].windows(4).any(|w| w == b"\r\n\r\n") {
+                                    break;
+                                }
+                                if read == buffer.len() {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    let response = "HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\nsteered";
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        }
+
+        async fn redirect_origin(listener: TcpListener, target: String) -> std::io::Result<()> {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return Ok(());
+                };
+                let target = target.clone();
+                tokio::spawn(async move {
+                    let mut buffer = [0u8; 2048];
+                    let mut read = 0usize;
+                    loop {
+                        match socket.read(&mut buffer[read..]).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => {
+                                read += n;
+                                if buffer[..read].windows(4).any(|w| w == b"\r\n\r\n") {
+                                    break;
+                                }
+                                if read == buffer.len() {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                    let response = format!(
+                        "HTTP/1.1 302 Found\r\nLocation: {target}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        }
+
+        let target_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_port = target_listener.local_addr().unwrap().port();
+        let origin_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin_port = origin_listener.local_addr().unwrap().port();
+        let hits = Arc::new(AtomicUsize::new(0));
+        tokio::spawn(redirect_target(target_listener, Arc::clone(&hits)));
+        tokio::spawn(redirect_origin(
+            origin_listener,
+            format!("http://127.0.0.1:{target_port}/steered"),
+        ));
+        let origin = format!("http://127.0.0.1:{origin_port}/origin");
+
+        // 无敏感头：默认策略跟随跨目的地重定向
+        let (status, body, error) =
+            execute_http_request("GET", &origin, None, 5_000, &[]).await;
+        assert_eq!(status, 200);
+        assert_eq!(body.as_deref(), Some("steered"));
+        assert!(error.is_none());
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+        // 和风鉴权头：跨目的地（含 http）重定向被停止，3xx 原样返回
+        let (status, _body, error) = execute_http_request(
+            "GET",
+            &origin,
+            None,
+            5_000,
+            &[("X-QW-Api-Key".to_owned(), "test-key".to_owned())],
+        )
+        .await;
+        assert_eq!(status, 302);
+        assert!(error.is_none());
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "目标服务器不得被再次命中");
+
+        // 彩云签名头：拒绝一切重定向，App Key 路径凭据不外发
+        let (status, _body, error) = execute_http_request(
+            "GET",
+            &origin,
+            None,
+            5_000,
+            &[
+                ("x-cy-signature".to_owned(), "sig".to_owned()),
+                ("x-cy-nonce".to_owned(), "nonce".to_owned()),
+                ("x-cy-timestamp".to_owned(), "1".to_owned()),
+            ],
+        )
+        .await;
+        assert_eq!(status, 302);
+        assert!(error.is_none());
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "目标服务器不得被再次命中");
     }
 
     #[test]

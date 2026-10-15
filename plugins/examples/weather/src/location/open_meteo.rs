@@ -215,7 +215,12 @@ fn convert_candidate(raw: GeocodingCandidate) -> Option<ResolvedLocation> {
         coordinate_system: "wgs84",
         administrative_area,
         country,
-        country_code,
+        country_code: country_code.clone(),
+        // "是否中国大陆"的行政证据来自解析器返回的 ISO 国家码（CN=大陆，
+        // HK/MO/TW/其他=非大陆）；缺失即证据不足，交给用户确认。
+        in_mainland_china: super::coordinates::mainland_from_country_code(
+            country_code.as_deref(),
+        ),
         administrative_areas,
         timezone,
         kind,

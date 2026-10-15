@@ -25,6 +25,7 @@ impl TemperatureUnit {
 pub enum Provider {
     OpenMeteo,
     QWeather,
+    Caiyun,
 }
 
 /// 地点解析来源；Auto = 已配置和风时优先和风，否则 Open-Meteo。
@@ -48,6 +49,14 @@ impl QWeatherCredentials {
     }
 }
 
+/// 本次调用可用的彩云凭据；App Key 只进入已验证的路径段，App Secret 只进签名，
+/// 两者都不进日志。URL 固定为官方服务，不提供可编辑 Host。
+#[derive(Clone)]
+pub struct CaiyunCredentials {
+    pub app_key: String,
+    pub app_secret: String,
+}
+
 pub struct RequestParameters {
     #[cfg(test)]
     pub city: String,
@@ -56,6 +65,50 @@ pub struct RequestParameters {
     pub location_query: Option<crate::location::LocationQuery>,
     pub provider: Provider,
     pub qweather: Option<QWeatherCredentials>,
+    pub caiyun: Option<CaiyunCredentials>,
+}
+
+/// 从 settings 提取已通过校验的彩云凭据；任一缺失即未配置（None）。
+/// 非法 App Key（不满足安全路径段字符集）在执行边界明确报错，不静默跳过。
+pub fn caiyun_credentials(
+    settings: Option<&serde_json::Map<String, Value>>,
+) -> Result<Option<CaiyunCredentials>, crate::protocol::PluginError> {
+    let Some(settings) = settings else {
+        return Ok(None);
+    };
+    let app_key = optional_string(Some(settings), "caiyun_app_key", "caiyun_app_key")?
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let app_secret = optional_string(Some(settings), "caiyun_app_secret", "caiyun_app_secret")?
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    match (app_key, app_secret) {
+        (None, _) | (_, None) => Ok(None),
+        (Some(app_key), Some(app_secret)) => {
+            if !valid_caiyun_app_key(app_key) {
+                return Err(invalid_arguments(
+                    "彩云 App Key 只能包含字母、数字与 . _ ~ -（作为安全路径段使用）",
+                ));
+            }
+            if app_secret.chars().count() > 200 {
+                return Err(invalid_arguments("彩云 App Secret 过长"));
+            }
+            Ok(Some(CaiyunCredentials {
+                app_key: app_key.to_owned(),
+                app_secret: app_secret.to_owned(),
+            }))
+        }
+    }
+}
+
+/// App Key 直接拼进 URL 路径段：只允许无需转义且无路径/查询语义的字符，
+/// 从结构上排除 `/`、`?`、`#`、`%` 等注入，长度不超过 128。
+pub fn valid_caiyun_app_key(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'~' | b'-'))
 }
 
 /// 从 settings 提取已通过校验的和风凭据；host/key 任一缺失即未配置（None）。
@@ -137,10 +190,11 @@ pub fn parse(
     {
         None | Some("open_meteo") => Provider::OpenMeteo,
         Some("qweather") => Provider::QWeather,
+        Some("caiyun") => Provider::Caiyun,
         Some(_) => {
             return Err(crate::protocol::PluginError {
                 code: "invalid_arguments".into(),
-                message: "天气来源必须是 open_meteo 或 qweather".into(),
+                message: "天气来源必须是 open_meteo、qweather 或 caiyun".into(),
             });
         }
     };
@@ -149,6 +203,13 @@ pub fn parse(
         return Err(crate::protocol::PluginError {
             code: "provider_not_configured".into(),
             message: "和风天气需要先在设置中配置 API Host 与 API Key".into(),
+        });
+    }
+    let caiyun = caiyun_credentials(settings)?;
+    if provider == Provider::Caiyun && caiyun.is_none() {
+        return Err(crate::protocol::PluginError {
+            code: "provider_not_configured".into(),
+            message: "彩云天气需要先在设置中配置 App Key 与 App Secret".into(),
         });
     }
     let country = optional_string(arguments, "country_code", "arguments.country_code")?;
@@ -200,6 +261,7 @@ pub fn parse(
             .unwrap_or(TemperatureUnit::Celsius),
         provider,
         qweather,
+        caiyun,
     })
 }
 
@@ -311,6 +373,13 @@ pub fn parse_location(
         Some("qweather") if trusted => "qweather",
         _ => "user",
     };
+    // 区域声明：保存地点保留解析器证据（Open-Meteo 国家码派生）；显式 location
+    // 携带的是用户明确声明，同样有效（彩云据此决定 GCJ-02/WGS84），缺失即待确认。
+    let in_mainland_china = match obj.get("in_mainland_china") {
+        None | Some(Value::Null) => None,
+        Some(Value::Bool(value)) => Some(*value),
+        Some(_) => return Err(invalid_arguments("in_mainland_china 必须是布尔值")),
+    };
     Ok(crate::model::ResolvedLocation {
         name,
         display_name,
@@ -331,6 +400,7 @@ pub fn parse_location(
             None
         }
         .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+        in_mainland_china,
     })
 }
 
@@ -408,8 +478,8 @@ fn invalid_arguments(message: impl Into<String>) -> crate::protocol::PluginError
 mod tests {
     use super::TemperatureUnit;
     use super::{
-        Provider, Resolver, parse, parse_resolver, parse_search, qweather_credentials,
-        valid_qweather_host,
+        Provider, Resolver, caiyun_credentials, parse, parse_resolver, parse_search,
+        valid_caiyun_app_key, valid_qweather_host,
     };
     use crate::protocol::PluginError;
     use serde_json::{Value, json};
@@ -666,7 +736,7 @@ mod tests {
             error_code(parse(
                 None,
                 Some(&json!({})),
-                Some(&json!({"default_provider": "caiyun"}))
+                Some(&json!({"default_provider": "visualcrossing"}))
             )),
             "invalid_arguments"
         );
@@ -678,6 +748,102 @@ mod tests {
         .unwrap();
         assert_eq!(open_meteo.provider, Provider::OpenMeteo);
         assert!(open_meteo.qweather.is_some());
+    }
+
+    #[test]
+    fn caiyun_provider_requires_both_credentials_and_validates_app_key() {
+        // 显式彩云未配置 / 只有一半 → provider_not_configured，不混用一新一旧快照
+        assert_eq!(
+            error_code(parse(
+                None,
+                Some(&json!({})),
+                Some(&json!({"default_provider": "caiyun"}))
+            )),
+            "provider_not_configured"
+        );
+        assert_eq!(
+            error_code(parse(
+                None,
+                Some(&json!({})),
+                Some(&json!({"default_provider": "caiyun", "caiyun_app_key": "key-only"}))
+            )),
+            "provider_not_configured"
+        );
+        // 完整凭据 + 明确区域声明的默认地点可直接执行
+        let configured = parse(
+            None,
+            Some(&json!({})),
+            Some(&json!({
+                "default_provider": "caiyun",
+                "caiyun_app_key": "T1FpNxFaceFhxX-0C",
+                "caiyun_app_secret": "secret",
+                "default_location": {"latitude": 39.9, "longitude": 116.4, "coordinate_system": "wgs84", "name": "北京", "in_mainland_china": true}
+            })),
+        )
+        .unwrap();
+        assert_eq!(configured.provider, Provider::Caiyun);
+        let caiyun = configured.caiyun.as_ref().unwrap();
+        assert_eq!(caiyun.app_key, "T1FpNxFaceFhxX-0C");
+        assert_eq!(configured.location.unwrap().in_mainland_china, Some(true));
+        // App Key 是路径段：斜杠/查询/编码字符/非 ASCII 拒绝
+        for key in [
+            "key/with/slash",
+            "key?query",
+            "key#fragment",
+            "key%2F",
+            "key with space",
+            "密钥",
+        ] {
+            assert!(
+                !valid_caiyun_app_key(key),
+                "应拒绝 App Key: {key}"
+            );
+            assert_eq!(
+                error_code(parse(
+                    None,
+                    Some(&json!({})),
+                    Some(&json!({"caiyun_app_key": key, "caiyun_app_secret": "s"}))
+                )),
+                "invalid_arguments",
+                "key={key}"
+            );
+        }
+        // 未选择彩云时，无效 Key 也不影响其他来源执行（凭据只在需要时提取）
+        let open_meteo = parse(
+            None,
+            Some(&json!({"city": "北京"})),
+            Some(&json!({"caiyun_app_key": "bad key", "caiyun_app_secret": "s"})),
+        );
+        // 注意：凭据提取在 parse 内统一执行，非法形状即使未选用也拒绝（配置错误应可见）
+        assert!(open_meteo.is_err());
+        // 凭据提取独立可用：缺失/空白=未配置（None），不报错
+        assert!(caiyun_credentials(None).unwrap().is_none());
+        let blank = json!({"caiyun_app_key": "  ", "caiyun_app_secret": ""});
+        assert!(caiyun_credentials(blank.as_object()).unwrap().is_none());
+    }
+
+    #[test]
+    fn location_region_declaration_round_trips_for_saved_and_explicit_locations() {
+        // 保存地点：解析器证据随地点保留
+        let saved = json!({"latitude":39.9,"longitude":116.4,"coordinate_system":"wgs84","name":"北京","in_mainland_china":true});
+        let defaults = parse(None, Some(&json!({})), Some(&json!({"default_location":saved}))).unwrap();
+        assert_eq!(defaults.location.unwrap().in_mainland_china, Some(true));
+        // 显式 location：用户声明同样保留（香港=非大陆）
+        let explicit = json!({"latitude":22.32,"longitude":114.17,"coordinate_system":"wgs84","in_mainland_china":false});
+        let manual = parse(None, Some(&json!({"location":explicit})), None).unwrap();
+        assert_eq!(manual.location.unwrap().in_mainland_china, Some(false));
+        // 缺失 = 待确认；非法形状拒绝
+        let unknown = json!({"latitude":0,"longitude":0,"coordinate_system":"wgs84"});
+        let manual = parse(None, Some(&json!({"location":unknown})), None).unwrap();
+        assert_eq!(manual.location.unwrap().in_mainland_china, None);
+        assert_eq!(
+            error_code(parse(
+                None,
+                Some(&json!({"location":{"latitude":0,"longitude":0,"coordinate_system":"wgs84","in_mainland_china":"yes"}})),
+                None
+            )),
+            "invalid_arguments"
+        );
     }
 
     #[test]

@@ -1,7 +1,8 @@
 //! 搜索与工具出口共用的格式化；兼容旧数据字段。
 //!
-//! 条件描述双轨：供应商原始文本（和风）优先，否则 WMO 数值代码映射（Open-Meteo）；
-//! 两轨都缺失即"未知"，不用缺省代码伪造晴天。
+//! 条件描述多轨：供应商原始文本（和风/彩云）优先，否则 WMO 数值代码映射
+//! （Open-Meteo）；两轨都缺失即"未知"，不用缺省代码伪造晴天。逐日语义三分：
+//! 和风白天/夜间分段、彩云全天主导现象、Open-Meteo 当天最严重现象。
 use crate::conditions::wmo_description;
 use crate::model::{CurrentWeather, DailyWeather, ProviderCondition, WeatherSnapshot};
 use crate::protocol::{PluginAction, PluginItem};
@@ -12,6 +13,7 @@ use serde_json::{Value, json};
 pub fn provider_label(provider: &str) -> &'static str {
     match provider {
         "qweather" => "QWeather",
+        "caiyun" => "彩云天气",
         _ => "Open-Meteo",
     }
 }
@@ -25,7 +27,9 @@ fn attribution_url(attributions: &[String]) -> Option<String> {
         let allowed = host == "open-meteo.com"
             || host.ends_with(".open-meteo.com")
             || host == "qweather.com"
-            || host.ends_with(".qweather.com");
+            || host.ends_with(".qweather.com")
+            || host == "caiyunapp.com"
+            || host.ends_with(".caiyunapp.com");
         allowed.then(|| value.clone())
     })
 }
@@ -38,6 +42,10 @@ fn condition_label(current: &CurrentWeather) -> String {
 }
 
 fn daily_condition_label(day: &DailyWeather) -> String {
+    if let Some(all_day) = &day.condition {
+        // 彩云逐日 skycon：全天主导现象，不标注白天/夜间分段。
+        return all_day.text.clone();
+    }
     match (&day.day_condition, &day.night_condition) {
         (Some(daytime), Some(nighttime)) => format!("白天{}/夜间{}", daytime.text, nighttime.text),
         (Some(daytime), None) => format!("白天{}", daytime.text),
@@ -112,6 +120,7 @@ pub fn render(snapshot: &WeatherSnapshot, unit: TemperatureUnit) -> (Vec<PluginI
         .daily
         .iter()
         .any(|d| d.day_condition.is_some() || d.night_condition.is_some());
+    let all_day_dominant = snapshot.daily.iter().any(|d| d.condition.is_some());
     let daily: Vec<Value> = snapshot
         .daily
         .iter()
@@ -120,6 +129,8 @@ pub fn render(snapshot: &WeatherSnapshot, unit: TemperatureUnit) -> (Vec<PluginI
                 "date":d.date,
                 "condition":daily_condition_label(d),
                 "condition_code":d.condition_code,
+                "condition_all_day":d.condition.as_ref().map(|c| c.text.clone()),
+                "condition_all_day_code":d.condition.as_ref().map(|c| c.code.clone()),
                 "condition_day":d.day_condition.as_ref().map(|c| c.text.clone()),
                 "condition_night":d.night_condition.as_ref().map(|c| c.text.clone()),
                 "condition_day_code":d.day_condition.as_ref().map(|c| c.code.clone()),
@@ -162,6 +173,8 @@ pub fn render(snapshot: &WeatherSnapshot, unit: TemperatureUnit) -> (Vec<PluginI
     }
     if day_night_split {
         copy.push_str("\n逐日现象按白天/夜间分段描述。");
+    } else if all_day_dominant {
+        copy.push_str("\n逐日天气现象为当天主导现象，不代表全天持续。");
     } else {
         copy.push_str("\n逐日天气现象表示当天最严重天气，不代表全天持续。");
     }
@@ -174,7 +187,7 @@ pub fn render(snapshot: &WeatherSnapshot, unit: TemperatureUnit) -> (Vec<PluginI
         "warnings":snapshot.warnings, "attributions":snapshot.attributions,
         "availability":{"current":current.is_some(),"daily_days":snapshot.daily.len()},
         "temperature_unit":unit,
-        "daily_condition_semantics":if day_night_split { "day_night_split" } else { "most_severe_of_day" },
+        "daily_condition_semantics":if day_night_split { "day_night_split" } else if all_day_dominant { "all_day_dominant" } else { "most_severe_of_day" },
         "copy_text":copy,
     }]);
     let mut subtitle = format!("{} · {label}", snapshot.location.display_name);
@@ -229,6 +242,7 @@ mod tests {
             source: "open_meteo",
             source_id: None,
             resolved_at: "2026-10-15T00:00:00Z".into(),
+            in_mainland_china: Some(true),
         }
     }
 
@@ -248,6 +262,7 @@ mod tests {
             daily: vec![DailyWeather {
                 date: "2026-10-15".into(),
                 condition_code: None,
+                condition: None,
                 day_condition: None,
                 night_condition: None,
                 temperature_max_c: Some(10.0),
@@ -294,6 +309,7 @@ mod tests {
             daily: vec![DailyWeather {
                 date: "2026-10-15".into(),
                 condition_code: None,
+                condition: None,
                 day_condition: Some(ProviderCondition {
                     text: "小雨".into(),
                     code: "305".into(),

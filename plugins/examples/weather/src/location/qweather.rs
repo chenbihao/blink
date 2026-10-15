@@ -223,6 +223,8 @@ fn convert_candidate(raw: LookupCandidate) -> Option<ResolvedLocation> {
         country,
         // 和风不提供国家代码；宁缺勿伪造，不从国家名或时区反推。
         country_code: None,
+        // 同上：国家名文本不能当彩云"是否大陆"的行政证据，留待用户确认。
+        in_mainland_china: None,
         administrative_areas,
         timezone,
         kind,

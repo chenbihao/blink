@@ -7,7 +7,7 @@ use serde_json::Value;
 pub(super) fn validate_settings(settings: &Value) -> Result<(), String> {
     let invalid = || "invalid_arguments: 天气地点或设置格式无效".to_string();
     if let Some(provider) = settings.get("default_provider") {
-        if !matches!(provider.as_str(), Some("open_meteo" | "qweather")) {
+        if !matches!(provider.as_str(), Some("open_meteo" | "qweather" | "caiyun")) {
             return Err(invalid());
         }
     }
@@ -32,6 +32,15 @@ pub(super) fn validate_settings(settings: &Value) -> Result<(), String> {
         // 密钥明文不经过此处落库（CM 还原前已是空串占位）；只拒绝非文本形状。
         if !key.as_str().is_some_and(|v| v.chars().count() <= 200) {
             return Err(invalid());
+        }
+    }
+    // 彩云凭据与和风同规则：secret 明文不落库，这里只校验文本形状；
+    // App Key 会拼进 URL 路径段，字符集由插件执行边界再校验一次。
+    for field in ["caiyun_app_key", "caiyun_app_secret"] {
+        if let Some(value) = settings.get(field).filter(|v| !v.is_null()) {
+            if !value.as_str().is_some_and(|v| v.chars().count() <= 200) {
+                return Err(invalid());
+            }
         }
     }
     if let Some(version) = settings.get("settings_version") {
@@ -79,6 +88,12 @@ pub(super) fn validate_settings(settings: &Value) -> Result<(), String> {
             .filter(|s| !s.is_empty())
         {
             if code.len() != 2 || !code.bytes().all(|b| b.is_ascii_alphabetic()) {
+                return Err(invalid());
+            }
+        }
+        // 区域声明（彩云坐标系规则用）：可选布尔；缺失 = 待用户确认
+        if let Some(region) = obj.get("in_mainland_china").filter(|v| !v.is_null()) {
+            if !region.is_boolean() {
                 return Err(invalid());
             }
         }
@@ -166,11 +181,34 @@ mod tests {
             "settings_version": 1
         }))
         .unwrap();
-        assert!(validate_settings(&json!({"default_provider": "caiyun"})).is_err());
+        assert!(validate_settings(&json!({"default_provider": "visualcrossing"})).is_err());
         assert!(validate_settings(&json!({"qweather_api_host": "abc"})).is_err());
         assert!(validate_settings(&json!({"qweather_api_key": 17})).is_err());
         // 空串/缺失 host 表示未配置，合法
         validate_settings(&json!({"qweather_api_host": ""})).unwrap();
         validate_settings(&json!({})).unwrap();
+    }
+
+    #[test]
+    fn settings_validation_accepts_caiyun_credentials_and_region_declaration() {
+        validate_settings(&json!({
+            "default_provider": "caiyun",
+            "caiyun_app_key": "T1FpNxFaceFhxX-0C",
+            "caiyun_app_secret": "",
+            "default_location": {
+                "latitude": 31.1774, "longitude": 121.5272,
+                "coordinate_system": "wgs84", "name": "上海",
+                "in_mainland_china": true
+            }
+        }))
+        .unwrap();
+        // 区域声明只接受布尔；凭据非文本形状拒绝
+        assert!(validate_settings(&json!({
+            "default_location": {"latitude": 0, "longitude": 0, "coordinate_system": "wgs84", "in_mainland_china": "yes"}
+        }))
+        .is_err());
+        assert!(validate_settings(&json!({"caiyun_app_key": 17})).is_err());
+        assert!(validate_settings(&json!({"caiyun_app_secret": false})).is_err());
+        validate_settings(&json!({"caiyun_app_key": ""})).unwrap();
     }
 }

@@ -77,6 +77,13 @@ function locationSourceLabel(source) {
     return String(source || t("weather.source_unknown"));
 }
 
+/** 区域状态文案：彩云对大陆用 GCJ-02、其余 WGS84；未确认时使用彩云前需补充。 */
+function regionLabel(inMainlandChina) {
+    if (inMainlandChina === true) return t("weather.region_mainland_short");
+    if (inMainlandChina === false) return t("weather.region_outside_short");
+    return t("weather.region_unconfirmed_short");
+}
+
 function renderLocationDetails(location, {candidate = false} = {}) {
     if (!location || typeof location !== "object") return "";
 
@@ -95,6 +102,9 @@ function renderLocationDetails(location, {candidate = false} = {}) {
     const sourceText = locationSourceLabel(location.source);
     const kindText = locationKindLabel(location.kind);
     const coordinates = `${formatCoordinate(location.latitude)}, ${formatCoordinate(location.longitude)}`;
+    const regionText = regionLabel(
+        typeof location.in_mainland_china === "boolean" ? location.in_mainland_china : null,
+    );
 
     return `<div class="weather-location-details${candidate ? " is-candidate" : ""}">
       <div class="weather-location-name"><strong>${escapeHtml(name)}</strong><span>${escapeHtml(displayName)}</span></div>
@@ -103,6 +113,7 @@ function renderLocationDetails(location, {candidate = false} = {}) {
         <span>${escapeHtml(t("weather.detail_country"))}：${escapeHtml(countryText)}</span>
         <span>${escapeHtml(t("weather.detail_kind"))}：${escapeHtml(kindText)}</span>
         <span>${escapeHtml(t("weather.detail_coordinates"))}：WGS84 ${escapeHtml(coordinates)}</span>
+        <span>${escapeHtml(t("weather.detail_region"))}：${escapeHtml(regionText)}</span>
         <span>${escapeHtml(t("weather.detail_source"))}：${escapeHtml(sourceText)}</span>
       </div>
     </div>`;
@@ -170,6 +181,18 @@ export function renderWeatherSettings(plugin) {
           </label>
           <p class="weather-search-status" data-weather-search-status aria-live="polite">${escapeHtml(enabled ? t("weather.search_idle") : t("weather.search_disabled"))}</p>
           <div class="weather-candidates" data-weather-candidates role="listbox" aria-label="${escapeHtml(t("weather.candidates_label"))}"></div>
+        </div>
+
+        <div class="weather-region-section">
+          <label class="weather-field weather-region-field">
+            <span>${escapeHtml(t("weather.region_label"))}</span>
+            <select class="weather-region">
+              <option value="unknown">${escapeHtml(t("weather.region_unconfirmed"))}</option>
+              <option value="mainland">${escapeHtml(t("weather.region_mainland"))}</option>
+              <option value="outside">${escapeHtml(t("weather.region_outside"))}</option>
+            </select>
+          </label>
+          <p class="weather-region-help">${escapeHtml(t("weather.region_help"))}</p>
         </div>
 
         <details class="weather-manual-section">
@@ -242,10 +265,13 @@ function normalizeCandidate(candidate) {
         source,
         source_id: typeof candidate.source_id === "string" ? candidate.source_id : null,
         resolved_at: candidate.resolved_at,
+        in_mainland_china: typeof candidate.in_mainland_china === "boolean"
+            ? candidate.in_mainland_china
+            : null,
     };
 }
 
-function createManualLocation(latitude, longitude, name) {
+function createManualLocation(latitude, longitude, name, inMainlandChina) {
     const cleanName = name.trim();
     const coordinateName = `${formatCoordinate(latitude)}, ${formatCoordinate(longitude)}`;
     const displayName = cleanName || coordinateName;
@@ -264,6 +290,7 @@ function createManualLocation(latitude, longitude, name) {
         source: "user",
         source_id: null,
         resolved_at: new Date().toISOString(),
+        in_mainland_china: typeof inMainlandChina === "boolean" ? inMainlandChina : null,
     };
 }
 
@@ -284,6 +311,7 @@ export function mountWeatherSettings(card, plugin) {
     const countryInput = root.querySelector(".weather-country-code");
     const adminInput = root.querySelector(".weather-admin");
     const resolverSelect = root.querySelector(".weather-resolver");
+    const regionSelect = root.querySelector(".weather-region");
     const latitudeInput = root.querySelector(".weather-latitude");
     const longitudeInput = root.querySelector(".weather-longitude");
     const manualNameInput = root.querySelector(".weather-manual-name");
@@ -297,6 +325,22 @@ export function mountWeatherSettings(card, plugin) {
     let searchTimer = null;
     let candidates = [];
     let activeCandidateIndex = -1;
+    /** 区域声明选择：unknown/mainland/outside，与当前草稿绑定（地点更换即失效重置）。 */
+    let regionChoice = "unknown";
+
+    const REGION_VALUES = {unknown: null, mainland: true, outside: false};
+
+    function regionChoiceValue() {
+        return REGION_VALUES[regionSelect?.value] ?? null;
+    }
+
+    function syncRegionSelect(inMainlandChina) {
+        if (!regionSelect) return;
+        regionChoice = inMainlandChina === true
+            ? "mainland"
+            : inMainlandChina === false ? "outside" : "unknown";
+        regionSelect.value = regionChoice;
+    }
 
     function setSearchStatus(key, values = {}, state = "") {
         if (!searchStatus) return;
@@ -391,6 +435,7 @@ export function mountWeatherSettings(card, plugin) {
         if (countryInput) countryInput.value = "";
         if (adminInput) adminInput.value = "";
         if (resolverSelect) resolverSelect.value = "auto";
+        syncRegionSelect(null);
         clearManualInputs();
         setSearchStatus(enabled ? "weather.search_idle" : "weather.search_disabled");
         const CustomEventType = root.ownerDocument?.defaultView?.CustomEvent ?? globalThis.CustomEvent;
@@ -472,7 +517,13 @@ export function mountWeatherSettings(card, plugin) {
         const location = candidates[index];
         if (!location || disposed) return;
         invalidateSearch();
-        draftLocation = location;
+        // 候选自带解析器区域证据（Open-Meteo 国家码）；证据不足时沿用用户在
+        // 本会话中的显式选择，仍无则保持未确认。
+        const region = typeof location.in_mainland_china === "boolean"
+            ? location.in_mainland_china
+            : regionChoiceValue();
+        draftLocation = {...location, in_mainland_china: region};
+        syncRegionSelect(region);
         refreshCurrentView();
         setSearchStatus("weather.draft_selected");
     }
@@ -488,9 +539,19 @@ export function mountWeatherSettings(card, plugin) {
             return;
         }
         invalidateSearch();
-        draftLocation = createManualLocation(latitude, longitude, manualNameInput?.value || "");
+        // 手工坐标没有解析器证据，区域只能来自用户显式选择
+        draftLocation = createManualLocation(latitude, longitude, manualNameInput?.value || "", regionChoiceValue());
         refreshCurrentView();
         setManualStatus("weather.manual_selected", "success");
+    }
+
+    /** 区域选择变化：立即写入当前草稿（不落库）；无草稿时记住，供下一个候选/手工坐标使用。 */
+    function handleRegionChange() {
+        regionChoice = regionSelect?.value || "unknown";
+        if (draftLocation && draftLocation !== NO_DRAFT) {
+            draftLocation = {...draftLocation, in_mainland_china: regionChoiceValue()};
+            refreshCurrentView();
+        }
     }
 
     function markClearLocation() {
@@ -593,6 +654,7 @@ export function mountWeatherSettings(card, plugin) {
     root.addEventListener("input", handleInput);
     root.addEventListener("change", (event) => {
         if (event.target.matches(".weather-resolver")) handleResolverChange();
+        if (event.target.matches(".weather-region")) handleRegionChange();
     });
     root.addEventListener("compositionstart", handleCompositionStart);
     root.addEventListener("compositionend", handleCompositionEnd);

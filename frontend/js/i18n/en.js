@@ -1127,6 +1127,15 @@ export const en = {
     "weather.clear_pending": "Default location is marked for removal and will be cleared after saving.",
     "weather.cancel": "Cancel",
     "weather.save": "Save location",
+    "weather.region_label": "Coordinate region (needed by Caiyun)",
+    "weather.region_unconfirmed": "Unconfirmed",
+    "weather.region_mainland": "Mainland China",
+    "weather.region_outside": "Outside mainland China",
+    "weather.region_help": "Caiyun uses GCJ-02 coordinates for mainland China and WGS84 elsewhere (including Hong Kong, Macau and Taiwan). Open-Meteo candidates are derived from the country code automatically; manual coordinates and QWeather candidates must be confirmed here, otherwise Caiyun queries are rejected with a hint.",
+    "weather.region_mainland_short": "Mainland China (GCJ-02)",
+    "weather.region_outside_short": "Outside mainland China (WGS84)",
+    "weather.region_unconfirmed_short": "Unconfirmed (confirm before using Caiyun)",
+    "weather.detail_region": "Region",
 
     // ── Main window: context menu ──
     "menu.cut": "Cut",

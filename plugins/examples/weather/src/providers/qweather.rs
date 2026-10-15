@@ -271,6 +271,7 @@ pub fn parse_daily(body: &str) -> Result<(Vec<DailyWeather>, Vec<String>), Plugi
         daily.push(DailyWeather {
             date,
             condition_code: None,
+            condition: None,
             day_condition,
             night_condition,
             temperature_max_c,

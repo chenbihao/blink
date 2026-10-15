@@ -63,3 +63,25 @@ test("weather search results are accepted only for the current live editor lease
         assert.equal(isWeatherSearchCurrent({...current, ...stale}), false, JSON.stringify(stale));
     }
 });
+
+test("weather location patch carries the region declaration when present", () => {
+    // 区域声明随地点一起保存（彩云按大陆/非大陆选择坐标系）；未确认时为 null
+    const confirmed = {
+        name: "Shanghai",
+        display_name: "Shanghai · China",
+        latitude: 31.18,
+        longitude: 121.53,
+        coordinate_system: "wgs84",
+        in_mainland_china: true,
+    };
+    assert.deepEqual(buildWeatherSettingsPatch(confirmed), {
+        settings_version: 1,
+        default_location: confirmed,
+        default_city: "",
+    });
+    const unconfirmed = {...confirmed, in_mainland_china: null};
+    assert.equal(
+        buildWeatherSettingsPatch(unconfirmed).default_location.in_mainland_china,
+        null,
+    );
+});

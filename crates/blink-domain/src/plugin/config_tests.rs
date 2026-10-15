@@ -42,6 +42,10 @@ impl MemorySecretStore {
         self.0.lock().unwrap().fail_write_at = Some(call);
     }
 
+    fn clear_failures(&self) {
+        self.0.lock().unwrap().fail_write_at = None;
+    }
+
     fn counts(&self) -> (usize, usize) {
         let state = self.0.lock().unwrap();
         (state.reads, state.writes)
@@ -89,6 +93,14 @@ async fn setup_engine(
     initial: Option<PluginConfig>,
     cache_initial: bool,
 ) -> (PluginEngine, SqlitePool) {
+    setup_engine_with_secrets(initial, cache_initial, &["api_key"]).await
+}
+
+async fn setup_engine_with_secrets(
+    initial: Option<PluginConfig>,
+    cache_initial: bool,
+    secret_fields: &[&str],
+) -> (PluginEngine, SqlitePool) {
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
@@ -101,6 +113,10 @@ async fn setup_engine(
     .await
     .expect("创建内存 config 表");
 
+    let schema: Vec<Value> = secret_fields
+        .iter()
+        .map(|key| json!({"key": key, "type": "string", "title": "API key", "secret": true}))
+        .collect();
     let manifest: PluginManifest = serde_json::from_value(json!({
         "schema_version": 1,
         "id": PLUGIN_ID,
@@ -109,9 +125,7 @@ async fn setup_engine(
         "runtime": {"exec": "never-start.exe"},
         "triggers": [],
         "capabilities": [],
-        "settings_schema": [
-            {"key": "api_key", "type": "string", "title": "API key", "secret": true}
-        ]
+        "settings_schema": schema
     }))
     .expect("测试 manifest 应合法");
     let plugin = Arc::new(PluginHandle::new(Arc::new(manifest), PathBuf::new(), None));
@@ -373,4 +387,70 @@ async fn config_read_failure_is_not_treated_as_missing_default() {
         .await
         .unwrap();
     assert_eq!(persisted, original);
+}
+
+/// 0.26.3：天气插件同时持有和风 Key 与彩云 App Secret 两个 secret 字段。
+/// 一起更新时第二个 CM 写失败 → 两个字段都恢复旧值、revision 不推进；
+/// 成功路径下一次快照读到的是同一代次的两个新值（不出现一新一旧）。
+#[tokio::test]
+async fn two_secret_fields_update_fails_together_and_rolls_back_both() {
+    let fields = ["qweather_api_key", "caiyun_app_secret"];
+    let baseline = config(
+        3,
+        json!({"qweather_api_key": "", "caiyun_app_secret": "", "default_city": "Osaka"}),
+    );
+    let (engine, pool) =
+        setup_engine_with_secrets(Some(baseline.clone()), true, &fields).await;
+    let store = MemorySecretStore::default();
+    store.seed(PLUGIN_ID, "qweather_api_key", "old-qw-key");
+    store.seed(PLUGIN_ID, "caiyun_app_secret", "old-cy-secret");
+    // 第二个写失败（字段顺序来自 manifest secret_field_keys：qweather 先写成功）
+    store.fail_write_at(2);
+    let mut incoming = config(
+        3,
+        json!({"qweather_api_key": "new-qw-key", "caiyun_app_secret": "new-cy-secret"}),
+    );
+
+    let error = engine
+        .update_config_with_store(PLUGIN_ID, &mut incoming, &store, vec![])
+        .await
+        .unwrap_err();
+    assert_eq!(error, "secret_write_failed");
+
+    // 两个密钥都恢复旧值；DB/内存 revision 与 settings 保持基线
+    assert_eq!(
+        store.value(PLUGIN_ID, "qweather_api_key").as_deref(),
+        Some("old-qw-key")
+    );
+    assert_eq!(
+        store.value(PLUGIN_ID, "caiyun_app_secret").as_deref(),
+        Some("old-cy-secret")
+    );
+    let persisted = database_config(&pool).await;
+    assert_eq!(persisted.revision, baseline.revision);
+    assert_eq!(persisted.settings, baseline.settings);
+
+    // 重试成功：revision 推进，两个字段同代次生效
+    store.clear_failures();
+    let mut incoming = config(
+        3,
+        json!({"qweather_api_key": "new-qw-key", "caiyun_app_secret": "new-cy-secret"}),
+    );
+    engine
+        .update_config_with_store(PLUGIN_ID, &mut incoming, &store, vec![])
+        .await
+        .unwrap();
+    assert_eq!(
+        store.value(PLUGIN_ID, "qweather_api_key").as_deref(),
+        Some("new-qw-key")
+    );
+    assert_eq!(
+        store.value(PLUGIN_ID, "caiyun_app_secret").as_deref(),
+        Some("new-cy-secret")
+    );
+    assert_eq!(database_config(&pool).await.revision, 4);
+    assert_eq!(
+        engine.get_config(PLUGIN_ID).unwrap().settings,
+        json!({"qweather_api_key": "", "caiyun_app_secret": "", "default_city": "Osaka"})
+    );
 }
