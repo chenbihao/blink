@@ -484,10 +484,10 @@ pub struct VisibleWhen {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupConfig {
     /// 分组标题。
-    pub title: String,
+    pub title: LocalizableText,
     /// 分组描述(可选,如申请地址)。
     #[serde(default)]
-    pub description: Option<String>,
+    pub description: Option<LocalizableText>,
 }
 
 /// 反序列化 group：兼容字符串 `"group": "xxx"` 和对象 `"group": { "title": "xxx", "description": "..." }`。
@@ -525,7 +525,7 @@ where
             E: de::Error,
         {
             Ok(Some(GroupConfig {
-                title: value.to_string(),
+                title: LocalizableText::Plain(value.to_string()),
                 description: None,
             }))
         }
@@ -536,16 +536,9 @@ where
         {
             let map: serde_json::Map<String, serde_json::Value> =
                 de::Deserialize::deserialize(de::value::MapAccessDeserializer::new(map))?;
-            let title = map
-                .get("title")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let description = map
-                .get("description")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            Ok(Some(GroupConfig { title, description }))
+            serde_json::from_value(serde_json::Value::Object(map))
+                .map(Some)
+                .map_err(de::Error::custom)
         }
     }
 
@@ -717,6 +710,38 @@ fn strip_windows_verbatim_prefix(p: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn weather_manifest_localizes_credential_groups_and_keeps_app_key_visible() {
+        let manifest: super::PluginManifest = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/builtin/weather/manifest.json"
+        )))
+        .unwrap();
+        let key = manifest
+            .settings_schema
+            .iter()
+            .find(|field| field.key == "caiyun_app_key")
+            .unwrap();
+        assert!(!key.secret);
+        assert!(key.no_space);
+        let group = key.group.as_ref().unwrap();
+        assert_eq!(group.title.resolve("en"), "Caiyun");
+        assert!(
+            group
+                .description
+                .as_ref()
+                .unwrap()
+                .resolve("en")
+                .contains("https://platform.caiyunapp.com/")
+        );
+        let host = manifest
+            .settings_schema
+            .iter()
+            .find(|field| field.key == "qweather_api_host")
+            .unwrap();
+        assert_eq!(host.group.as_ref().unwrap().title.resolve("en"), "QWeather");
+    }
+
     use super::*;
 
     const SAMPLE: &str = r#"{

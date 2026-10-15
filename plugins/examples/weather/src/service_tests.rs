@@ -291,8 +291,8 @@ fn qweather_weather_issues_two_parallel_requests_with_key_header() {
         (PluginToCore::HttpRequest(a), PluginToCore::HttpRequest(b)) => (a, b),
         _ => panic!("expected http requests"),
     };
-    assert!(first.url.contains("/weather/v1/current/23.13/113.26/"));
-    assert!(second.url.contains("/weather/v1/daily/23.13/113.26/"));
+    assert!(first.url.contains("/weather/v1/current/23.13/113.26?"));
+    assert!(second.url.contains("/weather/v1/daily/23.13/113.26?"));
     assert!(second.url.contains("days=7"));
     for request in [first, second] {
         assert_eq!(request.timeout_ms, 8000);

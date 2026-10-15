@@ -1,6 +1,21 @@
 /** 中文字典。扁平点分 key，与 en.js 必须对齐。 */
 export const zh = {
-    "weather.save_conflict": "保存未应用：配置已变化，已加载最新设置，请重新确认后保存。",
+    "weather.region_auto": "自动（按和风行政区信息）",
+
+    "menu.copyError": "复制错误信息",
+    "weather.region_provider_auto": "按和风行政区信息判断",
+
+    "plugin.reload_settings": "重新加载设置",
+
+    "clipboard.preview_loading": "正在加载完整内容…",
+    "clipboard.preview_missing": "内容已被清理或暂时无法读取",
+
+    "plugin.group_empty": "未配置",
+    "plugin.group_partial": "配置不完整",
+    "plugin.group_ready": "已配置",
+    "common.saved": "已保存",
+
+    "weather.save_conflict": "保存未应用：配置已被其他操作修改。当前草稿已保留。请核对后点击“重新加载设置”读取最新值（放弃当前未保存草稿）。",
     "weather.config_changed": "天气配置已有更新。当前编辑暂未覆盖；保存冲突时将重新加载，请重新确认地点。",
     "config.auto_start.pending": "正在保存自启动设置…",
     "config.auto_start.debug": "开发版本仅保存偏好，不注册系统自启动；正式版本将应用此设置。",

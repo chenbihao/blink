@@ -18,7 +18,7 @@ fn coordinate(value: f64) -> String {
 
 pub fn current_url(credentials: &QWeatherCredentials, location: &ResolvedLocation) -> String {
     format!(
-        "{}/weather/v1/current/{}/{}/?lang=zh",
+        "{}/weather/v1/current/{}/{}?localTime=true&lang=zh",
         credentials.host,
         coordinate(location.latitude),
         coordinate(location.longitude),
@@ -27,7 +27,7 @@ pub fn current_url(credentials: &QWeatherCredentials, location: &ResolvedLocatio
 
 pub fn daily_url(credentials: &QWeatherCredentials, location: &ResolvedLocation) -> String {
     format!(
-        "{}/weather/v1/daily/{}/{}/?days=7&localTime=true&lang=zh",
+        "{}/weather/v1/daily/{}/{}?days=7&localTime=true&lang=zh",
         credentials.host,
         coordinate(location.latitude),
         coordinate(location.longitude),
@@ -83,7 +83,10 @@ pub fn error_from_response(status: u16, body: &str) -> PluginError {
                 "和风拒绝了该请求（额度、权限或 Host 受限）",
             ),
             429 => error("rate_limited", "和风请求过于频繁，请稍后重试"),
-            404 => error("invalid_response", "和风服务路径不可用，请检查 API Host"),
+            404 => error(
+                "invalid_response",
+                "和风服务地址或接口路径不可用，请核对 API Host 与接口版本",
+            ),
             _ => error("network_failed", "和风服务连接失败，请稍后重试"),
         },
     }
@@ -397,17 +400,20 @@ mod tests {
         let base = location();
         assert_eq!(
             current_url(&credentials(), &base),
-            "https://abc123.re.qweatherapi.com/weather/v1/current/23.13/113.26/?lang=zh"
+            "https://abc123.re.qweatherapi.com/weather/v1/current/23.13/113.26?localTime=true&lang=zh"
         );
         assert_eq!(
             daily_url(&credentials(), &base),
-            "https://abc123.re.qweatherapi.com/weather/v1/daily/23.13/113.26/?days=7&localTime=true&lang=zh"
+            "https://abc123.re.qweatherapi.com/weather/v1/daily/23.13/113.26?days=7&localTime=true&lang=zh"
         );
         // 零值与负值；默认地点原精度不动
         let mut zero = location();
         zero.latitude = -0.001;
         zero.longitude = 0.0;
-        assert!(current_url(&credentials(), &zero).ends_with("/current/0.00/0.00/?lang=zh"));
+        assert!(
+            current_url(&credentials(), &zero)
+                .ends_with("/current/0.00/0.00?localTime=true&lang=zh")
+        );
         assert_eq!(zero.latitude, -0.001);
         let mut negative = location();
         negative.latitude = -41.876;

@@ -19,6 +19,7 @@ import {renderIcon} from "../shared/icon.js";
 import {createSwatch, getColorPayload, isColorEntry, parse as parseColor} from "../shared/color.js";
 import * as clipboardMode from "./clipboard-mode.js";
 import {entryRef, refKey, refFromLi} from './clipboard-entry.js';
+import {bindClipboardPreview, bindErrorPreview, hideClipboardPreview} from "./clipboard-preview.js";
 
 // 0.17.6: showAiConfirm / getAiConfirmData / updateAiStream 已删除。
 // 主窗口 AI 改走 ChatService，流式渲染由 ai-mode.js 负责。
@@ -185,6 +186,7 @@ function appendNew(items, didReset) {
 
 /** 清空列表与状态。 */
 export function clear() {
+    hideClipboardPreview();
     allItems = [];
     currentSeq = -1;
     pageLis = [];
@@ -400,6 +402,7 @@ export function getItems() {
  * 仅新建缺失项、更新页内 badge 编号，并按本页 key 集合重排/裁剪缓存。
  */
 function renderViewport() {
+    hideClipboardPreview();
     const slice = allItems.slice(viewStart, viewStart + PAGE_SIZE);
 
     const nextCache = new Map();
@@ -503,6 +506,7 @@ function createItem(app, i) {
     if (clipboardRef) {
         li.dataset.clipboardKind = clipboardRef.kind;
         li.dataset.clipboardId = clipboardRef.id;
+        bindClipboardPreview(li, clipboardRef);
     }
     // 0.16.4：图片项标记（右键菜单钉图用）
     if (app.is_image) {
@@ -530,6 +534,8 @@ function createItem(app, i) {
     if (app.is_error) {
         li.classList.add("error-item");
         li.dataset.isError = "true";
+        li.dataset.errorText = [app.name, app.description].filter(Boolean).join("\n");
+        bindErrorPreview(li, li.dataset.errorText);
     }
 
     // 0.9.2 §6.4 + 0.11.0 §3.1:AI lane 结果——区分两种形态
@@ -665,7 +671,7 @@ function createItem(app, i) {
             desc.classList.add("item-desc-arg");
         } else {
             desc.textContent = app.description;
-            desc.title = app.description; // 过长省略时悬浮看全
+            if (!app.is_error && clipboardRef?.kind !== "text") desc.title = app.description;
         }
         body.appendChild(desc);
     }

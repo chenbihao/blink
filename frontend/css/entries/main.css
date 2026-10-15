@@ -36,6 +36,7 @@
 @import '../views/main-window/mode-header.css';
 @import '../views/main-window/suggestion-bar.css';
 @import '../views/main-window/result-item.css';
+@import '../views/main-window/clipboard-preview.css';
 @import '../views/main-window/statusbar.css';
 @import '../views/main-window/transient-feedback.css';
 @import '../views/main-window/ai-mode.css';

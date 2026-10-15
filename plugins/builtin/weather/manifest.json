@@ -5,7 +5,7 @@
     "zh": "天气",
     "en": "Weather"
   },
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": {
     "zh": "查询城市天气（默认 Open-Meteo 免费；可配置和风天气或彩云天气）",
     "en": "City weather (Open-Meteo by default; QWeather or Caiyun configurable)"
@@ -220,21 +220,44 @@
       ]
     },
     {
+      "key": "allow_fallback",
+      "type": "boolean",
+      "title": {"zh": "允许降级到其他来源", "en": "Allow fallback to other providers"},
+      "description": {"zh": "查询失败时按顺序尝试已配置来源；部分可用的数据直接返回，不混合不同来源", "en": "Try configured providers in order after failure; partial data is returned without mixing providers"},
+      "default": false
+    },
+    {
+      "key": "fallback_order",
+      "type": "sortable_list",
+      "title": {"zh": "降级顺序", "en": "Fallback order"},
+      "visible_when": {"key": "allow_fallback", "equals": true},
+      "options": [
+        {"value": "open_meteo", "label": {"zh": "Open-Meteo", "en": "Open-Meteo"}},
+        {"value": "qweather", "label": {"zh": "和风天气", "en": "QWeather"}},
+        {"value": "caiyun", "label": {"zh": "彩云天气", "en": "Caiyun"}}
+      ],
+      "default": ["open_meteo", "qweather", "caiyun"]
+    },
+    {
       "key": "qweather_api_host",
       "type": "string",
+      "no_space": true,
+      "group": {"title": {"zh": "和风天气", "en": "QWeather"}, "description": {"zh": "申请地址（每月免费额度）：https://console.qweather.com/", "en": "Registration (monthly free quota): https://console.qweather.com/"}},
       "title": {
         "zh": "和风 API Host",
         "en": "QWeather API Host"
       },
       "default": "",
       "description": {
-        "zh": "和风控制台分配的 API Host，如 https://abc123.re.qweatherapi.com；只填服务根地址",
-        "en": "The API Host from the QWeather console, e.g. https://abc123.re.qweatherapi.com; root address only"
+        "zh": "粘贴控制台分配的域名，如 abc123.re.qweatherapi.com；也支持 HTTPS 根地址，无需填写接口路径",
+        "en": "Paste the assigned hostname, e.g. abc123.re.qweatherapi.com; an HTTPS root URL is also accepted, without an API path"
       }
     },
     {
       "key": "qweather_api_key",
       "type": "string",
+      "no_space": true,
+      "group": {"title": {"zh": "和风天气", "en": "QWeather"}},
       "secret": true,
       "title": {
         "zh": "和风 API Key",
@@ -249,20 +272,23 @@
     {
       "key": "caiyun_app_key",
       "type": "string",
-      "secret": true,
+      "no_space": true,
+      "group": {"title": {"zh": "彩云天气", "en": "Caiyun"}, "description": {"zh": "注册并创建应用：https://platform.caiyunapp.com/", "en": "Register and create an application: https://platform.caiyunapp.com/"}},
       "title": {
         "zh": "彩云 App Key",
         "en": "Caiyun App Key"
       },
       "default": "",
       "description": {
-        "zh": "彩云控制台创建的 App Key（令牌，只含字母、数字与 . _ ~ -）；按凭据保存，留空表示未修改，可点右侧按钮清除",
-        "en": "The App Key (token) from the Caiyun console (letters, digits and . _ ~ - only); stored as a credential, leave empty to keep the saved one, use the button to clear"
+        "zh": "彩云控制台的 App Key，只含字母、数字与 . _ ~ -；作为普通配置保存并显示",
+        "en": "The App Key from the Caiyun console (letters, digits and . _ ~ - only); saved and displayed as a regular setting"
       }
     },
     {
       "key": "caiyun_app_secret",
       "type": "string",
+      "no_space": true,
+      "group": {"title": {"zh": "彩云天气", "en": "Caiyun"}},
       "secret": true,
       "title": {
         "zh": "彩云 App Secret",

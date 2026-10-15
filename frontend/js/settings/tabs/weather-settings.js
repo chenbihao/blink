@@ -102,9 +102,9 @@ function renderLocationDetails(location, {candidate = false} = {}) {
     const sourceText = locationSourceLabel(location.source);
     const kindText = locationKindLabel(location.kind);
     const coordinates = `${formatCoordinate(location.latitude)}, ${formatCoordinate(location.longitude)}`;
-    const regionText = regionLabel(
-        typeof location.in_mainland_china === "boolean" ? location.in_mainland_china : null,
-    );
+    const regionText = typeof location.in_mainland_china !== "boolean" && location.source === "qweather"
+        ? t("weather.region_provider_auto")
+        : regionLabel(typeof location.in_mainland_china === "boolean" ? location.in_mainland_china : null);
 
     return `<div class="weather-location-details${candidate ? " is-candidate" : ""}">
       <div class="weather-location-name"><strong>${escapeHtml(name)}</strong><span>${escapeHtml(displayName)}</span></div>
@@ -294,14 +294,14 @@ function createManualLocation(latitude, longitude, name, inMainlandChina) {
     };
 }
 
-/** 挂载搜索、草稿、手工坐标和键盘交互；持久化仍由宿主保存整张插件卡片。 */
+/** 挂载搜索、草稿、手工坐标和键盘交互；地点草稿由宿主独立提交。 */
 export function mountWeatherSettings(card, plugin) {
     const root = card?.querySelector?.(".weather-settings");
     if (!root) {
         return {collect: () => ({}), dispose() {}, setEnabled() {}};
     }
 
-    const settings = getSettings(plugin);
+    let settings = getSettings(plugin);
     const editor = root.querySelector("[data-weather-editor]");
     const currentView = root.querySelector("[data-weather-current]");
     const candidatesView = root.querySelector("[data-weather-candidates]");
@@ -334,8 +334,10 @@ export function mountWeatherSettings(card, plugin) {
         return REGION_VALUES[regionSelect?.value] ?? null;
     }
 
-    function syncRegionSelect(inMainlandChina) {
+    function syncRegionSelect(inMainlandChina, source = "") {
         if (!regionSelect) return;
+        const unknown = regionSelect.querySelector('option[value="unknown"]');
+        if (unknown) unknown.textContent = t(source === "qweather" ? "weather.region_auto" : "weather.region_unconfirmed");
         regionExplicit = false;
         regionSelect.value = inMainlandChina === true
             ? "mainland"
@@ -446,7 +448,7 @@ export function mountWeatherSettings(card, plugin) {
 
     function openEditor() {
         const location = draftLocation === NO_DRAFT ? settings.default_location : draftLocation;
-        syncRegionSelect(location?.in_mainland_china);
+        syncRegionSelect(location?.in_mainland_china, location?.source);
         setEditorOpen(true);
         setSearchStatus(enabled ? "weather.search_idle" : "weather.search_disabled");
         queryInput?.focus({preventScroll: true});
@@ -525,7 +527,7 @@ export function mountWeatherSettings(card, plugin) {
             ? location.in_mainland_china
             : regionExplicit ? regionChoiceValue() : null;
         draftLocation = {...location, in_mainland_china: region};
-        syncRegionSelect(region);
+        syncRegionSelect(region, location.source);
         refreshCurrentView();
         setSearchStatus("weather.draft_selected");
     }
@@ -694,5 +696,11 @@ export function mountWeatherSettings(card, plugin) {
     }
 
     renderCandidates();
-    return {collect, dispose, setEnabled};
+    function commit(patch) {
+        const unchanged = JSON.stringify(collect()) === JSON.stringify(patch);
+        settings = {...settings, ...patch};
+        if (unchanged) closeEditor();
+        else refreshCurrentView();
+    }
+    return {collect, commit, dispose, setEnabled};
 }

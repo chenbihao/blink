@@ -7,12 +7,31 @@ use serde_json::Value;
 pub(super) fn validate_settings(settings: &Value) -> Result<(), String> {
     let invalid = || "invalid_arguments: 天气地点或设置格式无效".to_string();
     if let Some(provider) = settings.get("default_provider") {
-        if !matches!(provider.as_str(), Some("open_meteo" | "qweather" | "caiyun")) {
+        if !matches!(
+            provider.as_str(),
+            Some("open_meteo" | "qweather" | "caiyun")
+        ) {
             return Err(invalid());
         }
     }
     if let Some(unit) = settings.get("temperature_unit") {
         if !matches!(unit.as_str(), Some("celsius" | "fahrenheit")) {
+            return Err(invalid());
+        }
+    }
+    if settings
+        .get("allow_fallback")
+        .is_some_and(|value| !value.is_boolean())
+    {
+        return Err(invalid());
+    }
+    if let Some(order) = settings.get("fallback_order") {
+        if !order.as_array().is_some_and(|values| {
+            values.len() <= 3
+                && values.iter().all(|value| {
+                    matches!(value.as_str(), Some("open_meteo" | "qweather" | "caiyun"))
+                })
+        }) {
             return Err(invalid());
         }
     }
@@ -22,7 +41,7 @@ pub(super) fn validate_settings(settings: &Value) -> Result<(), String> {
             Some(value) if valid_qweather_host(value) => {}
             _ => {
                 return Err(
-                    "invalid_arguments: 和风 API Host 必须是 https 服务根地址（如 https://abc.re.qweatherapi.com）"
+                    "invalid_arguments: 和风 API Host 请填写域名或 HTTPS 根地址（如 abc.re.qweatherapi.com）"
                         .to_string(),
                 )
             }
@@ -34,7 +53,7 @@ pub(super) fn validate_settings(settings: &Value) -> Result<(), String> {
             return Err(invalid());
         }
     }
-    // 彩云凭据与和风同规则：secret 明文不落库，这里只校验文本形状；
+    // App Secret 使用 CM；App Key 为普通可见设置，这里校验文本形状；
     // App Key 会拼进 URL 路径段，字符集由插件执行边界再校验一次。
     for field in ["caiyun_app_key", "caiyun_app_secret"] {
         if let Some(value) = settings.get(field).filter(|v| !v.is_null()) {
@@ -118,9 +137,9 @@ pub(super) fn validate_settings(settings: &Value) -> Result<(), String> {
 /// 自定义域名）；凭据安全由宿主 HTTP 执行边界保证：Key 只发往此处配置的 host，
 /// 跨目的地重定向被拒绝（见 `process.rs::execute_http_request`）。
 pub(super) fn valid_qweather_host(value: &str) -> bool {
-    let Some(rest) = value.strip_prefix("https://") else {
-        return false;
-    };
+    let value = value.trim();
+    let rest = value.strip_prefix("https://").unwrap_or(value);
+    let rest = rest.strip_suffix('/').unwrap_or(rest);
     if rest.is_empty() || rest.len() > 253 || rest.contains(['/', '?', '#', '@', ':', '\\']) {
         return false;
     }
@@ -152,6 +171,8 @@ mod tests {
     fn accepts_dedicated_hosts_and_rejects_disguised_or_partial_urls() {
         assert!(valid_qweather_host("https://abc123.re.qweatherapi.com"));
         assert!(valid_qweather_host("https://weather.example.cn"));
+        assert!(valid_qweather_host("abc.re.qweatherapi.com"));
+        assert!(valid_qweather_host("https://abc.re.qweatherapi.com/"));
         // 路径 / 查询 / 非法 scheme / 端口 / IP / 单段域 / 前后点。语法合法的
         // 伪后缀域名（qweatherapi.com.evil.net）无法在语法层拒绝——和风允许自定义
         // 域名，凭据保护依赖重定向边界，见 valid_qweather_host 文档。
@@ -165,7 +186,6 @@ mod tests {
             "https://localhost",
             "https://abc..qweatherapi.com",
             "https://-abc.re.qweatherapi.com",
-            "abc.re.qweatherapi.com",
         ] {
             assert!(!valid_qweather_host(host), "应拒绝: {host}");
         }

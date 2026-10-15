@@ -12,8 +12,10 @@ function cardFixture() {
     const save = new TestElement("plugin-save");
     const unit = new TestElement("plugin-field");
     unit.value = "fahrenheit";
+    unit.dataset.key = "temperature_unit";
     const secret = new TestElement("plugin-field plugin-secret-field");
     secret.value = "fixture-unsaved-key";
+    secret.dataset.key = "caiyun_app_secret";
     const toggle = new TestElement("trigger-tag-btn");
     toggle.dataset.keyword = "天气";
     const toggleTag = new TestElement("trigger-tag");
@@ -28,8 +30,8 @@ function cardFixture() {
     for (const [selector, element] of [
         [".plugin-enabled", enabled], [".weather-save, .plugin-save", [save]],
         ['.plugin-field[data-key="temperature_unit"]', unit],
-        ['.plugin-field[data-key="caiyun_app_key"]', secret],
-        ['.plugin-field.plugin-secret-field[data-key="caiyun_app_key"]', secret],
+        ['.plugin-field[data-key="caiyun_app_secret"]', secret],
+        ['.plugin-field.plugin-secret-field[data-key="caiyun_app_secret"]', secret],
         [".plugin-field", [unit, secret]], [".plugin-field.plugin-secret-field", [secret]],
         [".trigger-tag-btn:not(.trigger-tag-btn-delete)", [toggle]],
         [".trigger-tag-btn-delete", [remove]], [".trigger-add-inline-input", add],
@@ -37,8 +39,8 @@ function cardFixture() {
     ]) card.selectors.set(selector, element);
     const plugin = {id: "builtin.weather", revision: 4, enabled: true, settings_schema: [
         {key: "temperature_unit", type: "enum"},
-        {key: "caiyun_app_key", type: "string", secret: true},
-    ], settings: {temperature_unit: "celsius", caiyun_app_key: "", default_location: {
+        {key: "caiyun_app_secret", type: "string", secret: true},
+    ], settings: {temperature_unit: "celsius", caiyun_app_secret: "", default_location: {
         name: "Guangzhou", latitude: 23.13, longitude: 113.26, coordinate_system: "wgs84", source: "qweather",
     }}};
     const document = {
@@ -63,7 +65,7 @@ for (const action of ["toggle", "delete", "add"]) {
         window.__TAURI__ = {core: {invoke: async (command, args) => {
             if (command === "get_plugin_secret_hint") return null;
             if (command === "get_plugins") return [{...fixture.plugin, revision,
-                settings: {...writes.at(-1).settings, caiyun_app_key: ""}}];
+                settings: {...writes.at(-1).settings, caiyun_app_secret: ""}}];
             if (command === "set_config") {
                 assert.equal(args.value.expectedRevision, revision);
                 writes.push(structuredClone(args.value));
@@ -105,8 +107,9 @@ for (const action of ["toggle", "delete", "add"]) {
         assert.equal(writes.length, 0, "trigger mutation does not save settings drafts");
         await fixture.save.fire("click");
         assert.equal(writes.length, 1);
-        assert.equal(writes[0].settings.temperature_unit, "fahrenheit");
-        assert.equal(writes[0].settings.caiyun_app_key, "fixture-unsaved-key");
+        assert.equal(writes[0].settings.temperature_unit, undefined, "location save does not submit unrelated drafts");
+        assert.equal(writes[0].settings.caiyun_app_secret, undefined);
+        assert.equal(fixture.secret.value, "fixture-unsaved-key");
         assert.equal(writes[0].settings.default_location.in_mainland_china, true);
         assert.equal(writes[0].settings.default_location.source, "qweather");
     });
@@ -122,7 +125,7 @@ test("a settings save cannot race an in-flight trigger mutation", {timeout: 2000
     window.__TAURI__ = {core: {invoke: async (command) => {
         if (command === "get_plugin_secret_hint") return null;
         if (command === "toggle_default_trigger") return new Promise((resolve) => { complete = resolve; });
-        if (command === "set_config") settingsWrites++;
+        if (command === "set_config") { settingsWrites++; return; }
         else throw new Error(`Unexpected IPC ${command}`);
     }}};
     t.after(() => {
@@ -133,10 +136,82 @@ test("a settings save cannot race an in-flight trigger mutation", {timeout: 2000
     });
     bindPluginCardEvents(fixture.plugin);
     const pending = fixture.toggle.fire("click");
-    await fixture.save.fire("click");
+    const queuedSave = fixture.save.fire("click");
+    await Promise.resolve();
+    await Promise.resolve();
     assert.equal(settingsWrites, 0);
     assert.equal(fixture.secret.value, "fixture-unsaved-key");
     complete(5);
     await pending;
-    assert.equal(fixture.plugin.revision, 5);
+    await queuedSave;
+    assert.equal(settingsWrites, 1);
+    assert.equal(fixture.plugin.revision, 6);
+});
+
+test("rapid field changes are queued with fresh revisions without saving the location draft", {timeout: 2000}, async (t) => {
+    const fixture = cardFixture();
+    const previousDocument = globalThis.document;
+    const previousTauri = window.__TAURI__;
+    globalThis.document = fixture.document;
+    const writes = [];
+    let release;
+    window.__TAURI__ = {core: {invoke: async (command, args) => {
+        if (command === "get_plugin_secret_hint") return null;
+        assert.equal(command, "set_config");
+        writes.push(structuredClone(args.value));
+        if (writes.length === 1) await new Promise(resolve => { release = resolve; });
+    }}};
+    t.after(() => {
+        clearTimeout(fixture.message._t);
+        globalThis.document = previousDocument;
+        window.__TAURI__ = previousTauri;
+    });
+    bindPluginCardEvents(fixture.plugin);
+    await fixture.root.fire("click", {target: fixture.root.querySelector(".weather-edit-toggle")});
+    const region = fixture.root.querySelector(".weather-region");
+    region.value = "mainland";
+    await fixture.root.fire("change", {target: region});
+    const first = fixture.unit.fire("change");
+    fixture.unit.value = "celsius";
+    const second = fixture.unit.fire("change");
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(writes.length, 1);
+    release();
+    await Promise.all([first, second]);
+    assert.deepEqual(writes.map(write => write.expectedRevision), [4, 5]);
+    assert.deepEqual(writes.map(write => write.settings), [{temperature_unit:"fahrenheit"}, {temperature_unit:"celsius"}]);
+    assert.equal(fixture.root.querySelector("[data-weather-editor]")["aria-hidden"], "false");
+    assert.equal(fixture.secret.value, "fixture-unsaved-key");
+});
+
+test("a revision conflict keeps drafts and stops queued writes until explicit reload", {timeout:2000}, async (t) => {
+    const fixture = cardFixture();
+    const previousDocument = globalThis.document;
+    const previousTauri = window.__TAURI__;
+    globalThis.document = fixture.document;
+    t.mock.method(console,"error",() => {});
+    let writes = 0;
+    window.__TAURI__ = {core:{invoke:async command => {
+        if (command === "get_plugin_secret_hint") return null;
+        assert.equal(command,"set_config");
+        writes++;
+        throw {code:"config_conflict",message:"config_conflict"};
+    }}};
+    t.after(() => {
+        clearTimeout(fixture.message._t);
+        globalThis.document = previousDocument;
+        window.__TAURI__ = previousTauri;
+    });
+    bindPluginCardEvents(fixture.plugin);
+    const first = fixture.unit.fire("change");
+    fixture.unit.value = "celsius";
+    const second = fixture.unit.fire("change");
+    await Promise.all([first,second]);
+    assert.equal(writes,1);
+    assert.equal(fixture.plugin.revision,4);
+    assert.equal(fixture.unit.value,"celsius");
+    assert.equal(fixture.secret.value,"fixture-unsaved-key");
+    assert.equal(fixture.card.dataset.configConflict,"true");
+    assert.equal(fixture.message.children[0].className,"btn-small plugin-reload");
 });

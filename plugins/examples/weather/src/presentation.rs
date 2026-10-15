@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 /// 归因链接的显示来源名。
 pub fn provider_label(provider: &str) -> &'static str {
     match provider {
-        "qweather" => "QWeather",
+        "qweather" => "和风天气",
         "caiyun" => "彩云天气",
         _ => "Open-Meteo",
     }
@@ -66,6 +66,23 @@ fn wind(value: Option<f64>) -> String {
         .unwrap_or_else(|| "未知".into())
 }
 
+/// Format provider time in its own offset; never reinterpret it in the PC's timezone.
+fn display_time(value: &str) -> String {
+    if let Ok(time) = chrono::DateTime::parse_from_rfc3339(value) {
+        return format!(
+            "{}（UTC{}）",
+            time.format("%Y-%m-%d %H:%M"),
+            time.format("%:z")
+        );
+    }
+    for format in ["%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M"] {
+        if let Ok(time) = chrono::NaiveDateTime::parse_from_str(value, format) {
+            return format!("{}（地点当地时间）", time.format("%Y-%m-%d %H:%M"));
+        }
+    }
+    value.to_owned()
+}
+
 pub fn needs_location(
     candidates: &[crate::model::ResolvedLocation],
     resolver: &str,
@@ -103,6 +120,8 @@ pub fn search_envelope(
 }
 
 pub fn render(snapshot: &WeatherSnapshot, unit: TemperatureUnit) -> (Vec<PluginItem>, Value) {
+    let mut location = snapshot.location.clone();
+    location.display_name = location.display_label();
     let current = snapshot.current.as_ref();
     let temp = current
         .map(|c| temperature(unit, c.temperature_c))
@@ -144,15 +163,12 @@ pub fn render(snapshot: &WeatherSnapshot, unit: TemperatureUnit) -> (Vec<PluginI
             })
         })
         .collect();
-    let mut copy = format!(
-        "{summary}\n{} · 来源：{label}",
-        snapshot.location.display_name
-    );
+    let mut copy = format!("{summary}\n{} · 来源：{label}", location.display_name);
     if !wind_speed.is_empty() {
         copy.push_str(&format!(" · 风速 {wind_speed}"));
     }
     if let Some(time) = current.and_then(|c| c.valid_at.as_deref()) {
-        copy.push_str(&format!("\n当前天气有效时间：{time}"));
+        copy.push_str(&format!("\n当前天气有效时间：{}", display_time(time)));
     }
     for day in &daily {
         copy.push_str(&format!(
@@ -182,7 +198,7 @@ pub fn render(snapshot: &WeatherSnapshot, unit: TemperatureUnit) -> (Vec<PluginI
         "status":snapshot.status(), "summary":summary,
         "city":snapshot.location.name, "temp":temp, "condition":desc,
         "wind_speed":wind_speed, "region":if snapshot.location.administrative_area.is_empty() { &snapshot.location.country } else { &snapshot.location.administrative_area },
-        "daily":daily, "location":snapshot.location, "provider":snapshot.provider,
+        "daily":daily, "location":location, "provider":snapshot.provider,
         "fetched_at":snapshot.fetched_at, "current":snapshot.current,
         "warnings":snapshot.warnings, "attributions":snapshot.attributions,
         "availability":{"current":current.is_some(),"daily_days":snapshot.daily.len()},
@@ -190,12 +206,12 @@ pub fn render(snapshot: &WeatherSnapshot, unit: TemperatureUnit) -> (Vec<PluginI
         "daily_condition_semantics":if day_night_split { "day_night_split" } else if all_day_dominant { "all_day_dominant" } else { "most_severe_of_day" },
         "copy_text":copy,
     }]);
-    let mut subtitle = format!("{} · {label}", snapshot.location.display_name);
+    let mut subtitle = format!("{} · {label}", location.display_name);
     if !wind_speed.is_empty() {
         subtitle.push_str(&format!(" · 风速 {wind_speed}"));
     }
     if let Some(time) = current.and_then(|c| c.valid_at.as_deref()) {
-        subtitle.push_str(&format!(" · {time}"));
+        subtitle.push_str(&format!(" · {}", display_time(time)));
     }
     if !snapshot.warnings.is_empty() {
         subtitle.push_str(&format!(" · {}", snapshot.warnings.join("；")));
@@ -226,6 +242,23 @@ mod tests {
     use super::*;
     use crate::model::{CurrentWeather, DailyWeather, ProviderCondition, ResolvedLocation};
 
+    #[test]
+    fn display_time_preserves_provider_offset_and_handles_local_and_unknown_formats() {
+        assert_eq!(
+            display_time("2026-10-16T11:45:00+08:00"),
+            "2026-10-16 11:45（UTC+08:00）"
+        );
+        assert_eq!(
+            display_time("2026-10-16T11:45:00-04:00"),
+            "2026-10-16 11:45（UTC-04:00）"
+        );
+        assert_eq!(
+            display_time("2026-10-16T11:45"),
+            "2026-10-16 11:45（地点当地时间）"
+        );
+        assert_eq!(display_time("unknown"), "unknown");
+    }
+
     fn location() -> ResolvedLocation {
         ResolvedLocation {
             name: "广州".into(),
@@ -244,6 +277,62 @@ mod tests {
             resolved_at: "2026-10-15T00:00:00Z".into(),
             in_mainland_china: Some(true),
         }
+    }
+
+    #[test]
+    fn domestic_saved_location_uses_country_province_city_district_in_all_weather_outputs() {
+        let mut place = location();
+        place.name = "海珠".into();
+        place.display_name = "海珠 · 广东省 · 广州 · 中国".into();
+        place.administrative_areas = vec!["广东省".into(), "广州".into()];
+        let snapshot = WeatherSnapshot {
+            location: place,
+            provider: "caiyun",
+            fetched_at: "2026-10-16T00:00:00Z".into(),
+            current: None,
+            daily: vec![],
+            warnings: vec![],
+            attributions: vec![],
+        };
+        let (items, data) = render(&snapshot, TemperatureUnit::Celsius);
+        assert_eq!(
+            data[0]["location"]["display_name"],
+            "中国 · 广东省 · 广州 · 海珠"
+        );
+        assert!(
+            items[0]
+                .subtitle
+                .as_deref()
+                .unwrap()
+                .starts_with("中国 · 广东省 · 广州 · 海珠")
+        );
+        assert!(
+            data[0]["copy_text"]
+                .as_str()
+                .unwrap()
+                .contains("中国 · 广东省 · 广州 · 海珠 · 来源：彩云天气")
+        );
+        assert_eq!(
+            snapshot.location.display_name,
+            "海珠 · 广东省 · 广州 · 中国"
+        );
+    }
+
+    #[test]
+    fn location_labels_deduplicate_levels_without_inventing_missing_ones_or_reordering_foreign_labels()
+     {
+        let mut place = location();
+        place.name = "广州市".into();
+        place.administrative_areas = vec!["广东省".into(), "广州市".into()];
+        assert_eq!(place.display_label(), "中国 · 广东省 · 广州市");
+        place.country.clear();
+        place.administrative_areas.clear();
+        place.administrative_area.clear();
+        assert_eq!(place.display_label(), "广州市");
+        place.country = "United States".into();
+        place.country_code = Some("US".into());
+        place.display_name = "Springfield · Illinois · United States".into();
+        assert_eq!(place.display_label(), place.display_name);
     }
 
     #[test]
@@ -334,7 +423,7 @@ mod tests {
         assert_eq!(data[0]["daily"][0]["condition_day"], "小雨");
         assert_eq!(data[0]["daily"][0]["condition_night_code"], "101");
         assert_eq!(data[0]["daily_condition_semantics"], "day_night_split");
-        assert!(items[0].subtitle.as_deref().unwrap().contains("QWeather"));
+        assert!(items[0].subtitle.as_deref().unwrap().contains("和风天气"));
         // 第二项是可打开的来源声明
         assert_eq!(items.len(), 2);
         match &items[1].action {

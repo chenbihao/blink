@@ -78,6 +78,7 @@ struct Flight {
     request_location: Option<ResolvedLocation>,
     hard_deadline: Instant,
     waiters: Vec<Waiter>,
+    fallback: Option<crate::fallback::Plan>,
 }
 
 pub struct WeatherService {
@@ -126,7 +127,7 @@ fn failed(id: String, reply: ReplyKind, error: PluginError) -> PluginToCore {
     }
 }
 
-fn provider_name(provider: Provider) -> &'static str {
+pub(crate) fn provider_name(provider: Provider) -> &'static str {
     match provider {
         Provider::OpenMeteo => "open_meteo",
         Provider::QWeather => "qweather",
@@ -408,6 +409,7 @@ impl WeatherService {
                 request_location,
                 hard_deadline,
                 waiters: vec![waiter],
+                fallback: None,
             },
         );
         Ok(Some(id))
@@ -426,7 +428,7 @@ impl WeatherService {
     ) -> Vec<PluginToCore> {
         let prepared = (|| {
             let epoch = self.observe_settings(settings)?;
-            let mut parameters = settings::parse(query, args, settings)?;
+            let (mut parameters, fallback) = crate::fallback::prepare(query, args, settings)?;
             let mut location_key = None;
             let mut ambiguity = None;
             if let Some(query) = parameters.location_query.as_ref() {
@@ -456,9 +458,9 @@ impl WeatherService {
                 budget_ms,
                 now,
             )?;
-            Ok::<_, PluginError>((epoch, parameters, location_key, waiter, ambiguity))
+            Ok::<_, PluginError>((epoch, parameters, location_key, waiter, ambiguity, fallback))
         })();
-        let (epoch, parameters, location_key, waiter, ambiguity) = match prepared {
+        let (epoch, parameters, location_key, waiter, ambiguity, fallback) = match prepared {
             Ok(p) => p,
             Err(e) => return vec![failed(id, reply, e)],
         };
@@ -485,7 +487,11 @@ impl WeatherService {
                 ])),
             }
         };
-        if let Some((snapshot, stored)) = self.weather.get(&key, now) {
+        if let Some((snapshot, stored)) = self
+            .weather
+            .get(&key, now)
+            .filter(|_| fallback.failures.is_empty())
+        {
             eprintln!(
                 "[weather] weather cache hit: provider={}",
                 snapshot.provider
@@ -504,7 +510,8 @@ impl WeatherService {
         };
         let events = self
             .pipeline
-            .start(producer, reply, Ok(parameters), budget_ms, now);
+            .start(producer.clone(), reply, Ok(parameters), budget_ms, now);
+        self.flights.get_mut(&producer).unwrap().fallback = Some(fallback);
         self.dispatch(events, now)
     }
 
@@ -593,6 +600,49 @@ impl WeatherService {
                     }
                 }
                 PipelineEvent::Complete { id, result } => {
+                    if let Err(error) = &result {
+                        if crate::fallback::retryable(error) {
+                            let flight = self.flights.get_mut(&id);
+                            if let Some(flight) = flight {
+                                if let Some(plan) = &mut flight.fallback {
+                                    if now < flight.hard_deadline && !plan.next.is_empty() {
+                                        plan.record(error);
+                                        let mut parameters = plan.next.pop_front().unwrap();
+                                        plan.active = provider_name(parameters.provider).into();
+                                        if let Some(location) = &flight.request_location {
+                                            parameters.location = Some(location.clone());
+                                            parameters.location_query = None;
+                                        }
+                                        flight.geo_key = None;
+                                        let budget = flight
+                                            .waiters
+                                            .iter()
+                                            .map(|w| w.deadline)
+                                            .max()
+                                            .unwrap()
+                                            .min(flight.hard_deadline)
+                                            .saturating_duration_since(now)
+                                            .as_millis()
+                                            as u64;
+                                        let reply = flight.waiters[0].reply;
+                                        self.pipeline.cancel(&id);
+                                        eprintln!(
+                                            "[weather] provider fallback: provider={}",
+                                            plan.active
+                                        );
+                                        queue.extend(self.pipeline.start(
+                                            id,
+                                            reply,
+                                            Ok(parameters),
+                                            Some(budget),
+                                            now,
+                                        ));
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                    }
                     let Some(flight) = self.remove_flight(&id) else {
                         continue;
                     };
@@ -601,6 +651,10 @@ impl WeatherService {
                             // Never cache partial/errors: a broken credential/permission
                             // must remain visible on the next request.
                             if snapshot.status() == "ok"
+                                && flight
+                                    .fallback
+                                    .as_ref()
+                                    .is_none_or(|plan| plan.failures.is_empty())
                                 && snapshot.current.is_some()
                                 && !snapshot.daily.is_empty()
                             {
@@ -620,10 +674,14 @@ impl WeatherService {
                         }
                     }
                     for waiter in flight.waiters {
-                        output.push(match &result {
+                        let mut message = match &result {
                             Ok(outcome) => render(outcome, &waiter, false, 0),
                             Err(e) => failed(waiter.id, waiter.reply, e.clone()),
-                        });
+                        };
+                        if let Some(plan) = &flight.fallback {
+                            crate::fallback::annotate(&mut message, plan);
+                        }
+                        output.push(message);
                     }
                 }
             }

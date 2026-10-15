@@ -48,6 +48,155 @@ fn raw(message: &PluginToCore) -> &RawToolResult {
     }
 }
 
+fn fallback_request(id: &str, enabled: bool) -> CoreToPlugin {
+    let mut message = request(id, "celsius", 1);
+    if let CoreToPlugin::ToolCall {
+        settings: Some(settings),
+        ..
+    } = &mut message
+    {
+        settings["default_provider"] = json!("qweather");
+        settings["qweather_api_host"] = json!("fixture.qweatherapi.com/");
+        settings["qweather_api_key"] = json!("fixture-key");
+        settings["allow_fallback"] = json!(enabled);
+        settings["fallback_order"] = json!(["caiyun", "open_meteo", "qweather"]);
+    }
+    message
+}
+
+fn reject(id: &str) -> CoreToPlugin {
+    CoreToPlugin::HttpResponse {
+        id: id.into(),
+        status: 404,
+        body: None,
+        error: None,
+    }
+}
+
+#[test]
+fn fallback_skips_missing_credentials_shares_budget_and_reports_source_without_caching() {
+    let mut service = WeatherService::default();
+    let now = Instant::now();
+    let first = ids(&service.handle(fallback_request("first", true), now));
+    assert_eq!(first.len(), 2);
+    assert!(
+        service
+            .handle(fallback_request("second", true), now)
+            .is_empty()
+    );
+    assert!(
+        service
+            .handle(reject(&first[0]), now + Duration::from_secs(1))
+            .is_empty()
+    );
+    let fallback = service.handle(reject(&first[1]), now + Duration::from_secs(2));
+    let PluginToCore::HttpRequest(http) = &fallback[0] else {
+        panic!("expected fallback HTTP")
+    };
+    assert!(http.url.starts_with("https://api.open-meteo.com/"));
+    assert_eq!(http.timeout_ms, 8000);
+    let result = service.handle(response(&http.id), now + Duration::from_secs(3));
+    assert_eq!(result.len(), 2);
+    for message in &result {
+        let data = &raw(message).data[0];
+        assert_eq!(data["provider"], "open_meteo");
+        assert_eq!(data["status"], "ok");
+        assert_eq!(data["fallback"]["requested_provider"], "qweather");
+        assert_eq!(data["fallback"]["actual_provider"], "open_meteo");
+        assert!(data["copy_text"].as_str().unwrap().contains("已降级"));
+        assert!(!data.to_string().contains("fixture-key"));
+    }
+    assert_eq!(
+        ids(&service.handle(
+            fallback_request("again", true),
+            now + Duration::from_secs(4)
+        ))
+        .len(),
+        2
+    );
+}
+
+#[test]
+fn fallback_is_opt_in_and_partial_weather_does_not_switch_provider() {
+    let mut service = WeatherService::default();
+    let now = Instant::now();
+    let first = ids(&service.handle(fallback_request("disabled", false), now));
+    service.handle(reject(&first[0]), now);
+    let result = service.handle(reject(&first[1]), now);
+    assert_eq!(
+        raw(&result[0]).error.as_ref().unwrap().code,
+        "invalid_response"
+    );
+    let first = ids(&service.handle(fallback_request("partial", true), now));
+    service.handle(
+        geo(
+            &first[0],
+            r#"{"temperature":{"value":25,"unit":"°C"},"condition":{"text":"晴","code":"100"}}"#,
+        ),
+        now,
+    );
+    let result = service.handle(reject(&first[1]), now);
+    assert!(ids(&result).is_empty());
+    assert_eq!(raw(&result[0]).data[0]["status"], "partial");
+    assert_eq!(raw(&result[0]).data[0]["provider"], "qweather");
+    assert!(raw(&result[0]).data[0].get("fallback").is_none());
+}
+
+#[test]
+fn fallback_cancel_and_expiry_release_requests_without_late_continuation() {
+    let mut service = WeatherService::default();
+    let now = Instant::now();
+    let first = ids(&service.handle(fallback_request("cancel", true), now));
+    service.handle(reject(&first[0]), now);
+    let next = ids(&service.handle(reject(&first[1]), now));
+    service.handle(
+        CoreToPlugin::Cancel {
+            id: "cancel".into(),
+        },
+        now,
+    );
+    assert!(service.handle(response(&next[0]), now).is_empty());
+    assert!(service.flights.is_empty() && service.pipeline.http.is_empty());
+    let first = ids(&service.handle(fallback_request("expire", true), now));
+    service.handle(reject(&first[0]), now);
+    let expired = service.handle(reject(&first[1]), now + Duration::from_secs(10));
+    assert!(ids(&expired).is_empty());
+    assert_eq!(raw(&expired[0]).error.as_ref().unwrap().code, "timeout");
+    assert!(service.flights.is_empty() && service.pipeline.http.is_empty());
+}
+
+#[test]
+fn missing_primary_can_fall_back_but_invalid_user_location_cannot() {
+    let mut service = WeatherService::default();
+    let now = Instant::now();
+    let mut message = fallback_request("missing", true);
+    if let CoreToPlugin::ToolCall {
+        settings: Some(settings),
+        ..
+    } = &mut message
+    {
+        settings["qweather_api_key"] = json!("");
+    }
+    let http = ids(&service.handle(message, now));
+    assert_eq!(http.len(), 1);
+    let result = service.handle(response(&http[0]), now);
+    assert_eq!(
+        raw(&result[0]).data[0]["fallback"]["attempts"][0]["code"],
+        "provider_not_configured"
+    );
+    let mut invalid = fallback_request("invalid", true);
+    if let CoreToPlugin::ToolCall { arguments, .. } = &mut invalid {
+        *arguments =
+            json!({"location":{"latitude":1000,"longitude":0,"coordinate_system":"wgs84"}});
+    }
+    let result = service.handle(invalid, now);
+    assert!(ids(&result).is_empty());
+    assert_eq!(
+        raw(&result[0]).error.as_ref().unwrap().code,
+        "invalid_arguments"
+    );
+}
+
 #[test]
 fn same_weather_shares_upstream_and_converts_each_waiter_unit() {
     let mut s = WeatherService::default();

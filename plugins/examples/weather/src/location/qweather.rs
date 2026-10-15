@@ -212,8 +212,10 @@ fn convert_candidate(raw: LookupCandidate) -> Option<ResolvedLocation> {
         }
     }
     let display_name = display_parts.join(" · ");
+    let in_mainland_china =
+        super::coordinates::mainland_from_qweather_admin(&country, &administrative_area);
 
-    Some(ResolvedLocation {
+    let mut location = ResolvedLocation {
         name,
         display_name,
         latitude,
@@ -223,8 +225,8 @@ fn convert_candidate(raw: LookupCandidate) -> Option<ResolvedLocation> {
         country,
         // 和风不提供国家代码；宁缺勿伪造，不从国家名或时区反推。
         country_code: None,
-        // 同上：国家名文本不能当彩云"是否大陆"的行政证据，留待用户确认。
-        in_mainland_china: None,
+        // 国家名与明确省级行政区共同判定；信息不足仍待用户确认。
+        in_mainland_china,
         administrative_areas,
         timezone,
         kind,
@@ -234,7 +236,9 @@ fn convert_candidate(raw: LookupCandidate) -> Option<ResolvedLocation> {
             .filter(|id| !id.trim().is_empty())
             .map(|id| format!("qweather:{id}")),
         resolved_at: chrono::Utc::now().to_rfc3339(),
-    })
+    };
+    location.display_name = location.display_label();
+    Some(location)
 }
 
 fn kind_for_type(location_type: &str) -> Option<&'static str> {

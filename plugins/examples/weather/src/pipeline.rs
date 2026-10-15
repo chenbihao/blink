@@ -75,7 +75,9 @@ fn error(code: &str, message: &str) -> PluginError {
 }
 
 fn failed(id: String, _reply: ReplyKind, error: PluginError) -> PipelineEvent {
-    eprintln!("[weather][warn] request failed: code={}", error.code);
+    // Intermediate provider failures may be handled by explicit fallback; the
+    // service logs a warning only when the caller ultimately receives an error.
+    eprintln!("[weather] request failed: code={}", error.code);
     PipelineEvent::Complete {
         id,
         result: Err(error),

@@ -46,6 +46,27 @@ async function setup(initialRefs, overrides = {}) {
     };
 }
 
+test('错误行与悬浮全文的右键菜单复制完整快照，列表刷新不改变复制内容', async () => {
+    const copied = [];
+    const h = await setup([], {copyToClipboard:async text => copied.push(text)});
+    const text = '插件返回错误 (invalid_arguments): ' + '很长的错误内容\n'.repeat(80);
+    for (const popup of [false,true]) {
+        const li = {dataset:{isError:'true',errorText:text,actions:'[]'},querySelector:()=>null};
+        const preview = {dataset:{errorText:text}};
+        const target = {closest:selector => selector === 'li' && !popup ? li
+            : selector === '.clipboard-text-preview' && popup ? preview : null};
+        h.events.get('contextmenu')({target,preventDefault() {}});
+        const menu = JSON.parse(h.ipc.filter(call => call.command === 'show_context_menu').at(-1).args.items);
+        assert.equal(menu.length,1);
+        assert.equal(menu[0].label,'menu.copyError');
+        li.dataset.errorText = 'new error';
+        preview.dataset.errorText = '';
+        h.events.get('action')({payload:{actionId:0,menuId:menu[0].menuId}});
+        await Promise.resolve();
+        assert.equal(copied.at(-1),text);
+    }
+});
+
 test('旧菜单回调不会按新菜单的相同数组下标执行', async () => {
     const h = await setup([{kind: 'text', id: 'a'}, {kind: 'image', id: 'b'}]);
     const old = h.open();

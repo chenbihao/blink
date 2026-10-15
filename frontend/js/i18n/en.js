@@ -1,6 +1,21 @@
 /** English dictionary. Flat dotted keys, must align with zh.js. */
 export const en = {
-    "weather.save_conflict": "Save was not applied: settings changed. The latest settings are loaded; confirm your changes and save again.",
+    "weather.region_auto": "Automatic (QWeather administrative data)",
+
+    "menu.copyError": "Copy error message",
+    "weather.region_provider_auto": "Determine from QWeather administrative data",
+
+    "plugin.reload_settings": "Reload settings",
+
+    "clipboard.preview_loading": "Loading full text…",
+    "clipboard.preview_missing": "This entry was removed or could not be loaded",
+
+    "plugin.group_empty": "Not configured",
+    "plugin.group_partial": "Incomplete",
+    "plugin.group_ready": "Configured",
+    "common.saved": "Saved",
+
+    "weather.save_conflict": "Save was not applied: settings changed elsewhere. Your draft is still visible. Review it, then use Reload settings to read the latest values (discarding unsaved drafts).",
     "weather.config_changed": "Weather settings changed elsewhere. Your draft remains here; a save conflict reloads the latest settings for confirmation.",
     "config.auto_start.pending": "Saving startup preference…",
     "config.auto_start.debug": "Development builds save this preference without registering system startup. Release builds apply it.",

@@ -1,0 +1,19 @@
+.clipboard-text-preview {
+    position: fixed;
+    z-index: 100;
+    box-sizing: border-box;
+    overflow: auto;
+    padding: 10px 12px;
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-lg);
+    background: var(--bg);
+    color: var(--text);
+    box-shadow: var(--shadow-modal);
+    font-size: var(--text-md);
+    font-style: normal;
+    line-height: var(--leading-normal);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    user-select: text;
+    -webkit-app-region: no-drag;
+}

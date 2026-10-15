@@ -33,6 +33,7 @@ function setup() {
         ...clipboardEntry,
         resultsEl,
         resetMaxHeight: () => {}, syncWindowSize: () => {},
+        bindClipboardPreview: () => {}, bindErrorPreview: () => {}, hideClipboardPreview: () => {},
         activateItem: () => {}, statusbar: {update: (a, p) => statusCalls.push({a, p})},
         invoke: async () => ({}),
         renderIcon: () => mkEl(),

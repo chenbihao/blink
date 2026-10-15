@@ -1575,10 +1575,29 @@ details.plugin-group[open] summary.plugin-group-title::before {
 
 /* 分组描述（浅色链接样式） */
 .plugin-group-desc {
+    display: block;
     font-size: var(--text-sm);
     font-weight: var(--weight-normal);
     color: var(--text-sub);
-    margin-left: 4px;
+    margin: 8px 0;
+}
+
+.plugin-group-status {
+    margin-left: auto;
+    font-size: var(--text-sm);
+    font-weight: var(--weight-normal);
+    color: var(--text-sub);
+}
+
+.plugin-field-control {
+    flex: 1;
+    min-width: 0;
+}
+
+.plugin-field-input {
+    display: flex;
+    align-items: center;
+    gap: 8px;
 }
 
 .plugin-group-desc a {
@@ -1805,12 +1824,17 @@ details.plugin-group .plugin-group-body {
     min-height: 16px;
 }
 
+.plugin-reload {
+    margin-left: 8px;
+}
+
 /* no_space 字段（密钥类）的空格提示：红字 + 一键移除按钮（plugins.js 动态显隐） */
 .plugin-field-warn {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 8px;
-    margin-top: 4px;
+    margin-top: 6px;
     font-size: var(--text-base);
 }
 

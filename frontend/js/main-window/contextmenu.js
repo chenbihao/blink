@@ -134,8 +134,11 @@ export function init() {
 
         let items = [];
         const li = closestLi(target);
+        const previewError = target.closest?.(".clipboard-text-preview")?.dataset.errorText;
         clipboardMode.prepareContextMenu(li);
-        if (li) {
+        if (previewError) {
+            items = errorMenu(previewError);
+        } else if (li) {
             items = itemMenu(li);
         } else {
             items = unifiedMenu();
@@ -144,7 +147,7 @@ export function init() {
         // 0.25.27: 多选时批量组完整接管——右键列表项只显示批量操作（单项操作
         // 与批量指向混杂会产生「复制的是哪条」歧义）；右键空白处保留通用菜单
         // （粘贴/设置等与选择集无指向冲突），批量组置顶插入。
-        if (clipboardMode.isActive() && clipboardMode.hasSelection()) {
+        if (!previewError && li?.dataset.isError !== "true" && clipboardMode.isActive() && clipboardMode.hasSelection()) {
             const task = clipboardMode.getSelectionSnapshot();
             const selectionItems = li && task.refs.length === 1 && items.length ? items : buildSelectionMenu(task);
             items = li
@@ -406,6 +409,7 @@ const KIND_LABELS = {
  */
 function itemMenu(li) {
     const data = readData(li);
+    if (data.isError) return errorMenu(li.dataset.errorText || li.querySelector(".item-name")?.textContent || "");
     const inClipboard = clipboardMode.isActive();
     const source = li.dataset.source || "";
     const lnkPath = li.dataset.lnkPath || "";
@@ -551,6 +555,11 @@ function itemMenu(li) {
     }
 
     return items;
+}
+
+function errorMenu(text) {
+    const snapshot = String(text);
+    return snapshot ? [{label: t("menu.copyError"), run: () => copyText(snapshot)}] : [];
 }
 
 async function copyText(text) {

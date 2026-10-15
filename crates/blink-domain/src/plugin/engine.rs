@@ -101,9 +101,9 @@ impl PluginEngine {
                         // 添加 group 信息（支持对象格式，包含 title 和可选 description）
                         if let Some(ref group) = f.group {
                             field["group"] = if let Some(ref desc) = group.description {
-                                serde_json::json!({ "title": group.title, "description": desc })
+                                serde_json::json!({ "title": group.title.resolve(lang), "description": desc.resolve(lang) })
                             } else {
-                                serde_json::json!(group.title)
+                                serde_json::json!(group.title.resolve(lang))
                             };
                         }
                         // no_space 透传给设置页做空格检测（密钥类字段），默认 false 不输出

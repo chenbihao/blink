@@ -1,8 +1,8 @@
 //! 彩云请求坐标派生：原始地点保持 WGS84 不动，请求前按区域证据派生目标坐标系。
 //!
 //! 彩云 v2.x 规则（官方 FAQ）：中国大陆请求 GCJ-02，大陆以外（含港澳台）WGS84。
-//! 区域判断只接受两类证据——解析器行政元信息（Open-Meteo 候选的 ISO 国家码：
-//! CN=大陆，HK/MO/TW=非大陆）或用户明确声明（`in_mainland_china`）；中文名、
+//! 区域判断只接受解析器行政元信息（ISO 国家码或和风国家+明确省级行政区）
+//! 或用户明确声明（`in_mainland_china`）；地点名称、
 //! 时区、系统语言、IP、粗略经纬度矩形都不能当国界，证据不足时拒绝猜测。
 //! WGS84→GCJ-02 使用公开偏移算法（eviltransform 系实现的通用公式），测试对
 //! 该项目发布的上海/深圳/北京基准向量以 5 位小数精度断言。
@@ -32,11 +32,96 @@ pub fn mainland_from_country_code(country_code: Option<&str>) -> Option<bool> {
     Some(code == "CN")
 }
 
+/// 和风 GeoAPI 的 country + adm1 是行政层级证据，不能只凭 country="中国"
+/// 判为大陆。仅接受完整省级白名单，港澳台单独处理；模糊/缺失数据保持待确认。
+pub fn mainland_from_qweather_admin(country: &str, province: &str) -> Option<bool> {
+    if !matches!(country.trim(), "中国" | "中华人民共和国")
+        && !country.trim().eq_ignore_ascii_case("China")
+    {
+        return None;
+    }
+    match province.trim() {
+        "香港" | "香港特别行政区" | "澳门" | "澳门特别行政区" | "台湾" | "台湾省" => {
+            Some(false)
+        }
+        "北京"
+        | "北京市"
+        | "天津"
+        | "天津市"
+        | "上海"
+        | "上海市"
+        | "重庆"
+        | "重庆市"
+        | "河北"
+        | "河北省"
+        | "山西"
+        | "山西省"
+        | "辽宁"
+        | "辽宁省"
+        | "吉林"
+        | "吉林省"
+        | "黑龙江"
+        | "黑龙江省"
+        | "江苏"
+        | "江苏省"
+        | "浙江"
+        | "浙江省"
+        | "安徽"
+        | "安徽省"
+        | "福建"
+        | "福建省"
+        | "江西"
+        | "江西省"
+        | "山东"
+        | "山东省"
+        | "河南"
+        | "河南省"
+        | "湖北"
+        | "湖北省"
+        | "湖南"
+        | "湖南省"
+        | "广东"
+        | "广东省"
+        | "海南"
+        | "海南省"
+        | "四川"
+        | "四川省"
+        | "贵州"
+        | "贵州省"
+        | "云南"
+        | "云南省"
+        | "陕西"
+        | "陕西省"
+        | "甘肃"
+        | "甘肃省"
+        | "青海"
+        | "青海省"
+        | "内蒙古"
+        | "内蒙古自治区"
+        | "广西"
+        | "广西壮族自治区"
+        | "西藏"
+        | "西藏自治区"
+        | "宁夏"
+        | "宁夏回族自治区"
+        | "新疆"
+        | "新疆维吾尔自治区" => Some(true),
+        _ => None,
+    }
+}
+
 /// 彩云请求坐标：大陆声明 → WGS84 派生 GCJ-02；非大陆 → 原值直传；
 /// 未确认 → 报错并给出可操作入口（提示与该地点绑定，不做全局假设）。
 /// 派生只读取原始地点，不修改、不累积转换误差；重复调用结果一致。
-pub fn caiyun_request_coordinates(location: &ResolvedLocation) -> Result<RequestCoordinates, PluginError> {
-    match location.in_mainland_china {
+pub fn caiyun_request_coordinates(
+    location: &ResolvedLocation,
+) -> Result<RequestCoordinates, PluginError> {
+    let region = location.in_mainland_china.or_else(|| {
+        (location.source == "qweather")
+            .then(|| mainland_from_qweather_admin(&location.country, &location.administrative_area))
+            .flatten()
+    });
+    match region {
         Some(false) => Ok(RequestCoordinates {
             latitude: location.latitude,
             longitude: location.longitude,
@@ -52,7 +137,7 @@ pub fn caiyun_request_coordinates(location: &ResolvedLocation) -> Result<Request
         }
         None => Err(PluginError {
             code: "invalid_arguments".into(),
-            message: "该地点尚未确认是否位于中国大陆；彩云天气按大陆（GCJ-02）与大陆以外（WGS84）使用不同坐标系。请在 设置 → 插件 → 天气 → 编辑地点 中确认区域后在保存，或在 location 中携带 in_mainland_china 声明".into(),
+            message: "该地点的坐标区域无法自动确定。请在 设置 → 插件 → 天气 → 更换地点 中选择“中国大陆”或“中国大陆以外”，然后点击“保存地点”；或在 location 中提供 in_mainland_china 声明。".into(),
         }),
     }
 }
@@ -74,10 +159,14 @@ pub fn wgs84_to_gcj02(wgs_latitude: f64, wgs_longitude: f64) -> (f64, f64) {
     magic = 1.0 - ECCENTRICITY_SQUARED * magic * magic;
     let sqrt_magic = magic.sqrt();
     let latitude_delta = (transformed_latitude * 180.0)
-        / ((SEMI_MAJOR_AXIS * (1.0 - ECCENTRICITY_SQUARED)) / (magic * sqrt_magic) * std::f64::consts::PI);
+        / ((SEMI_MAJOR_AXIS * (1.0 - ECCENTRICITY_SQUARED)) / (magic * sqrt_magic)
+            * std::f64::consts::PI);
     let longitude_delta = (transformed_longitude * 180.0)
         / (SEMI_MAJOR_AXIS / sqrt_magic * radian_latitude.cos() * std::f64::consts::PI);
-    (wgs_latitude + latitude_delta, wgs_longitude + longitude_delta)
+    (
+        wgs_latitude + latitude_delta,
+        wgs_longitude + longitude_delta,
+    )
 }
 
 /// 算法适用域（大陆及其近海），与 eviltransform 系实现一致；不是国界。
@@ -87,22 +176,13 @@ fn out_of_china_bounds(latitude: f64, longitude: f64) -> bool {
 
 fn transform(x: f64, y: f64) -> (f64, f64) {
     let pi = std::f64::consts::PI;
-    let mut latitude = -100.0
-        + 2.0 * x
-        + 3.0 * y
-        + 0.2 * y * y
-        + 0.1 * x * y
-        + 0.2 * x.abs().sqrt();
+    let mut latitude =
+        -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * x.abs().sqrt();
     latitude += (20.0 * (6.0 * x * pi).sin() + 20.0 * (2.0 * x * pi).sin()) * 2.0 / 3.0;
     latitude += (20.0 * (y * pi).sin() + 40.0 * (y / 3.0 * pi).sin()) * 2.0 / 3.0;
     latitude += (160.0 * (y / 12.0 * pi).sin() + 320.0 * (y * pi / 30.0).sin()) * 2.0 / 3.0;
 
-    let mut longitude = 300.0
-        + x
-        + 2.0 * y
-        + 0.1 * x * x
-        + 0.1 * x * y
-        + 0.1 * x.abs().sqrt();
+    let mut longitude = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * x.abs().sqrt();
     longitude += (20.0 * (6.0 * x * pi).sin() + 20.0 * (2.0 * x * pi).sin()) * 2.0 / 3.0;
     longitude += (20.0 * (x * pi).sin() + 40.0 * (x / 3.0 * pi).sin()) * 2.0 / 3.0;
     longitude += (150.0 * (x / 12.0 * pi).sin() + 300.0 * (x / 30.0 * pi).sin()) * 2.0 / 3.0;
@@ -113,7 +193,11 @@ fn transform(x: f64, y: f64) -> (f64, f64) {
 mod tests {
     use super::*;
 
-    fn location(in_mainland_china: Option<bool>, latitude: f64, longitude: f64) -> ResolvedLocation {
+    fn location(
+        in_mainland_china: Option<bool>,
+        latitude: f64,
+        longitude: f64,
+    ) -> ResolvedLocation {
         ResolvedLocation {
             name: "测试".into(),
             display_name: "测试".into(),
@@ -139,9 +223,9 @@ mod tests {
     fn conversion_matches_published_reference_vectors() {
         // (wgs_lat, wgs_lng, expected_gcj_lat, expected_gcj_lng)
         let vectors = [
-            (31.1774276, 121.5272106, 31.17530398364597, 121.531541859215),   // 上海
-            (22.543847, 113.912316, 22.540796131694766, 113.9171764808363),   // 深圳
-            (39.911954, 116.377817, 39.91334545536069, 116.38404722455657),   // 北京
+            (31.1774276, 121.5272106, 31.17530398364597, 121.531541859215), // 上海
+            (22.543847, 113.912316, 22.540796131694766, 113.9171764808363), // 深圳
+            (39.911954, 116.377817, 39.91334545536069, 116.38404722455657), // 北京
         ];
         for (wgs_lat, wgs_lng, gcj_lat, gcj_lng) in vectors {
             let (lat, lng) = wgs84_to_gcj02(wgs_lat, wgs_lng);
@@ -207,6 +291,52 @@ mod tests {
         assert_eq!(mainland_from_country_code(Some("CHN")), None);
         assert_eq!(mainland_from_country_code(Some("")), None);
         assert_eq!(mainland_from_country_code(Some("C1")), None);
+    }
+
+    #[test]
+    fn qweather_region_uses_country_and_exact_provincial_metadata() {
+        assert_eq!(mainland_from_qweather_admin("中国", "广东省"), Some(true));
+        assert_eq!(mainland_from_qweather_admin("China", "北京市"), Some(true));
+        for province in ["香港特别行政区", "澳门", "台湾省"] {
+            assert_eq!(mainland_from_qweather_admin("中国", province), Some(false));
+        }
+        for (country, province) in [
+            ("中国", ""),
+            ("中国", "广州"),
+            ("中国", "广东附近"),
+            ("", "广东省"),
+            ("日本", "广东省"),
+        ] {
+            assert_eq!(mainland_from_qweather_admin(country, province), None);
+        }
+        let mut saved = location(None, 23.13, 113.26);
+        saved.source = "qweather";
+        saved.country = "中国".into();
+        saved.administrative_area = "广东省".into();
+        assert_eq!(
+            caiyun_request_coordinates(&saved)
+                .unwrap()
+                .coordinate_system,
+            "gcj02"
+        );
+        assert_eq!(
+            saved.in_mainland_china, None,
+            "read-only recovery never rewrites stored metadata"
+        );
+        saved.in_mainland_china = Some(false);
+        assert_eq!(
+            caiyun_request_coordinates(&saved)
+                .unwrap()
+                .coordinate_system,
+            "wgs84",
+            "explicit choice takes priority"
+        );
+        saved.in_mainland_china = None;
+        saved.source = "user";
+        assert!(
+            caiyun_request_coordinates(&saved).is_err(),
+            "manual metadata cannot impersonate a resolver"
+        );
     }
 
     #[test]

@@ -18,8 +18,9 @@
 6. [Sticky notes and content editor](#6-sticky-notes-and-content-editor)
 7. [AI chat](#7-ai-chat)
 8. [Voice input](#8-voice-input)
-9. [Hidden gems at a glance](#9-hidden-gems-at-a-glance)
-10. [Keyboard shortcuts reference](#10-keyboard-shortcuts-reference)
+9. [Using plugins](#9-using-plugins)
+10. [Hidden gems at a glance](#10-hidden-gems-at-a-glance)
+11. [Keyboard shortcuts reference](#11-keyboard-shortcuts-reference)
 
 ---
 
@@ -64,35 +65,6 @@ Every Chord action can be remapped in Settings and promoted to a **global hotkey
 | Result item menu | Right-click a result entry | Open containing folder, copy path / file name, open shortcut target, reset that entry's launch-frequency stats, and more |
 | Drag the main window | Drag the card's blank area | Moves the main window (no visual hint, but the blank area really is draggable) |
 
-### Weather
-
-#### Configure a location
-
-- Go to **Settings → Plugins → Weather configuration** and choose “Change location” on the existing location card to search in that card's panel. Narrow the search with a two-letter country code or a parent administrative area. Select a complete location candidate and save the card. The temperature unit is saved explicitly as well.
-- The “Search source” selector in the panel chooses the geocoding service: Auto (QWeather first when configured, otherwise Open-Meteo), Open-Meteo, or QWeather. Switching the source invalidates previous candidates immediately; a chosen candidate only takes effect after saving. The QWeather source requires its API Host and API Key first — selecting it without configuration reports a clear error instead of silently falling back.
-- For advanced use, enter WGS84 latitude and longitude manually. If the display name is blank, the location is shown by its coordinates.
-- Canceling an edit does not save it. Clearing the default location also clears the legacy city so it cannot remain as a fallback.
-- You can edit the location card and its configuration manually while the Weather plugin is disabled; network search requires the plugin to be enabled. The legacy `default_city` remains usable by queries but is shown as unconfirmed, and queries do not rewrite it automatically. If settings change while you are editing, the panel loads the latest saved configuration; review and confirm your draft again.
-
-#### Switch the weather provider (QWeather / Caiyun)
-
-- Under **Settings → Plugins → Weather configuration**, choose the “Weather provider”: Open-Meteo (free, no configuration), QWeather, or Caiyun. Switching keeps the saved default location and temperature unit.
-- QWeather requires an API Key from a project on the [QWeather console](https://console.qweather.com/), plus the account-specific API Host copied from “Console Settings.” Fill the plugin's “QWeather API Host” (a root address like `https://abc123.re.qweatherapi.com`) and “QWeather API Key.” The key is stored in Windows Credential Manager; leaving the field empty keeps the saved one, and the side button clears it.
-- Caiyun requires an application on the [Caiyun open platform](https://platform.caiyunapp.com/). Fill the plugin's “Caiyun App Key” (the token) and “Caiyun App Secret” (the API Secret). Both are stored as credentials in Windows Credential Manager; leaving a field empty keeps the saved value, and the side button clears it. The App Key may only contain letters, digits and `.` `_` `~` `-`.
-- A provider's credentials only take effect while it is selected; selecting QWeather or Caiyun without complete credentials returns an explicit “configure first” error. The next query after changing credentials uses the new configuration immediately, and authentication failures are reported clearly instead of falling back to Open-Meteo.
-- Caiyun uses GCJ-02 coordinates for mainland China and WGS84 elsewhere (including Hong Kong, Macau and Taiwan). Locations found via Open-Meteo search are derived from the country code automatically; manual coordinates and QWeather candidates need confirmation — pick “Mainland China” or “Outside mainland China” in the “Coordinate region” selector of the location editor and save. A location with an unconfirmed region is rejected by Caiyun queries with instructions instead of a rough coordinate guess.
-- Free quota, 7-day daily permission and validity follow what the Caiyun console actually shows. When fewer than 7 days are returned, the result reports the actual number of available days instead of fabricating data.
-- QWeather requests current conditions and the 7-day forecast in parallel; Caiyun uses a single comprehensive endpoint returning both. When a block is unavailable, partial results return with the missing parts explained. Results show their data source, and Enter opens the attribution page.
-
-#### Queries and results
-
-- Complete successful weather results may be reused for up to 5 minutes, and location candidates for up to 6 hours. Reused results keep their original fetch time. Partial results and errors are not cached, and expired data is not used as a fallback. Changing the provider, credentials, or other plugin settings makes the next query use the new configuration. Restarting clears temporary caches while keeping the saved default location.
-- Identical queries can share a network request. Cancelling one caller keeps other waiters active; callers with incompatible time budgets use separate requests. Cached data does not bypass plugin enablement or outlet authorization.
-- A query without a location uses the saved default coordinates. An explicit `city` or `location` passed to the weather tool overrides the default; do not pass both. `search_locations` only searches and returns candidates (a `resolver` argument selects the geocoding source); it does not save a location.
-- Ambiguous names prompt you for a parent administrative area or a fuller place name, such as “辽宁/朝阳” or “广州/天河区.” The first candidate is never selected automatically. Open-Meteo may not find a Chinese name; try the full district or county name, an English name, or enter coordinates manually. A same-name place is not guaranteed to be uniquely identifiable automatically.
-- If a tool call explicitly specifies a temperature unit, it takes priority over the saved preference. Current conditions and daily forecasts use the same unit. Copying a weather result copies the complete weather summary.
-- Missing fields appear as “Unknown,” while other available information remains visible. Open-Meteo daily descriptions show the most severe condition expected that day; QWeather daily descriptions are split into daytime and nighttime segments; Caiyun daily descriptions show the day's dominant condition. None of them means the condition lasts all day.
-
 ### Silky tricks
 
 | Trick | Trigger | Notes |
@@ -105,6 +77,8 @@ Every Chord action can be remapped in Settings and promoted to a **global hotkey
 ---
 
 ## 3. Clipboard history
+
+Hover over a text entry briefly to preview its full content with line breaks. Long text scrolls inside the preview; moving into it keeps it open. Text is loaded on demand, and paging or closing the window dismisses the preview.
 
 Open with: `Alt+C` in the main window (or type `剪贴板` / `clip`). Text and images you copy are recorded in the background.
 
@@ -267,7 +241,59 @@ Summon: `Alt+Q` (text in the main window's input is carried over automatically �
 
 ---
 
-## 9. Hidden gems at a glance
+## 9. Using plugins
+
+### Common operations
+
+- Enable a plugin and expand its configuration under **Settings → Plugins**, then type its trigger in the main window. Translate is disabled by default; enable it and configure engine credentials first.
+- Ordinary settings save automatically. Weather's “Save location” button commits only the location draft, so click it after choosing a place.
+- Weather and Translate credential groups start collapsed each time you open settings. Their headings show Not configured, Incomplete or Configured; expand a group for its registration link. Configured means all fields are present; an actual query checks whether they work. Use “Remove spaces” below an input if it contains whitespace. Password fields are stored in Windows Credential Manager: leaving them blank keeps the saved value; use the side button to clear it.
+- Hover over a query error to read its full message. Right-click the entry or preview and choose “Copy error message” when reporting a problem.
+
+### Weather
+
+| How to call | Action |
+|---|---|
+| `天气` / `weather` | Query the saved default location |
+| `天气 广州` / `weather Guangzhou` | Query another place without changing the default |
+| `天气 辽宁/朝阳` / `天气 广州/天河区` | Add a parent region to distinguish places with the same name |
+
+**Common operations**:
+
+- In Weather configuration, click “Change location,” search and select a complete candidate, then click “Save location.” You can also enter latitude and longitude manually; canceling discards the location draft.
+- Choose Open-Meteo (free, no key required), QWeather or Caiyun as the “Weather provider”; adjust the temperature unit separately. “Search source” in the location panel only chooses the service used to find places.
+- QWeather: obtain an API Key from the [QWeather console](https://console.qweather.com/) and copy your account-specific API Host from console settings. Paste a bare hostname or an `https://` root URL, without an API path.
+- Caiyun: obtain an App Key and App Secret from the [Caiyun open platform](https://platform.caiyunapp.com/). App Key is visible text that you can edit or clear; App Secret is stored as a password field. If a query asks you to confirm the location region, choose “Mainland China” or “Outside mainland China” under “Change location,” then save.
+- “Allow fallback to other providers” is off by default. Enable it and drag “Fallback order” to try configured providers after the primary fails; results identify the actual source. Partial weather results explain which data is missing.
+
+**Tips**:
+
+- If a Chinese place name returns no matches, try the full district or county name, add a parent region, use an English name, or enter coordinates directly.
+- Select a weather result and press `Enter` to copy the complete summary. Select the attribution entry and press `Enter` to open the source and usage information.
+- Forecast length depends on the service's actual response. A daily description summarizes the day; it does not mean the condition lasts all day.
+
+### Translate
+
+| How to call | Action |
+|---|---|
+| `翻译 hello` / `translate hello` | Translate text into the configured target language |
+| Select the translated result and press `Enter` | Copy the translation |
+
+**Common operations**: Choose “Default engine” and “Target language” in Translate configuration, then expand the engine's credential group to register and enter credentials. Alibaba, Baidu, Tencent, Youdao and DeepL are supported. To switch engines automatically after a failure, enable “Allow fallback to other engines” and drag to reorder them; fallback is off by default.
+
+**Tips**: Set the target language to “Auto-detect” for quick Chinese–English translation: Chinese input becomes English, and other languages become Chinese. Variable names such as `helloWorld` and `hello_world` are split into words before translation.
+
+### IP lookup
+
+**How to call**: Type `ip` in the main window to view local addresses, your public IP and its location. Select an address result and press `Enter` to copy it.
+
+**Common operations**: Enable “Query IPv6 address” in IP configuration to include local IPv6 addresses. Set “Geolocation” to “No geolocation” to query local addresses only.
+
+**Tips**: Copy the local IP when sharing a LAN address with a colleague; check the public IP when investigating your network's exit address. IPv6 results depend on your network's IPv6 support.
+
+---
+
+## 10. Hidden gems at a glance
 
 Things you would almost never discover without this list:
 
@@ -291,7 +317,7 @@ Things you would almost never discover without this list:
 
 ---
 
-## 10. Keyboard shortcuts reference
+## 11. Keyboard shortcuts reference
 
 ### Global (remappable in Settings)
 

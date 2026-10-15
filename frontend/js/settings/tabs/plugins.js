@@ -12,6 +12,7 @@ import {iconHTML} from "../../shared/icon.js";
 import {saveConfig} from "../../shared/config-keys.js";
 import {navigateSettings} from "../navigation.js";
 import {renderWeatherSettings, mountWeatherSettings, WEATHER_EDITOR_CLOSED} from "./weather-settings.js";
+import {bindCredentialFields, refreshCredentialGroups} from "./plugin-credentials.js";
 import {EVENTS} from "../../shared/event-names.js";
 let pluginsLoadRevision = 0;
 let pluginWrites = 0;
@@ -38,11 +39,16 @@ let _langChangeRegistered = false;
  * 初始化插件 Tab
  */
 export function initPluginsTab() {
-    loadPlugins();
+    loadPlugins(true);
     initNumberSpinner();
     initExternalLinkDelegate();
     if (!pluginConfigListener) {
         pluginConfigListener = true;
+        // Settings windows are reused after hiding; reset only credential disclosure,
+        // keeping the card, saved values and any editor draft in place.
+        window.addEventListener("blur", () => {
+            document.querySelectorAll("#plugins-container .plugin-group[open]").forEach(group => { group.open = false; });
+        });
         listen(EVENTS.CONFIG_CHANGED, ({payload}) => {
             if (!payload?.key || payload.key === "plugin_config" || payload.key.startsWith("plugin:")) loadPlugins();
         });
@@ -88,6 +94,20 @@ async function loadPlugins(force = false) {
         return;
     }
     if (!Array.isArray(plugins)) plugins = [];
+    if (!force && renderedPlugins.size === plugins.length && plugins.every(plugin =>
+        renderedPlugins.get(plugin.id)?.revision === plugin.revision)) {
+        pendingPluginReload = false;
+        return;
+    }
+    if (!force && container.querySelector('[data-config-conflict="true"]')) {
+        pendingPluginReload = true;
+        return;
+    }
+    if (!force && renderedPlugins.size && container.contains?.(document.activeElement)) {
+        pendingPluginReload = true;
+        return;
+    }
+
     if (!force && container.querySelector('[data-weather-editor][aria-hidden="false"]')) {
         pendingPluginReload = true;
         const current = renderedPlugins.get("builtin.weather");
@@ -126,7 +146,7 @@ function renderPluginCard(plugin) {
     const triggersTags = renderTriggersTags(plugin);
 
     const configSection = hasFields
-        ? renderConfigSection(t("plugin.section"), schema, settings, {collapsible: true, collapsed: true, extraHtml: plugin.id === "builtin.weather" ? renderWeatherSettings(plugin) : "", saveLabel: plugin.id === "builtin.weather" ? t("weather.save") : ""})
+        ? renderConfigSection(t("plugin.section"), schema, settings, {collapsible: true, collapsed: true, extraHtml: plugin.id === "builtin.weather" ? renderWeatherSettings(plugin) : "", saveLabel: ""})
         : `<div class="plugin-no-config">${t("plugin.no_config")}</div>`;
 
     const headerRight = `<div class="plugin-master-toggle">
@@ -262,9 +282,8 @@ function renderSettingField(field, value, useSettingRow = false) {
     <div class="plugin-field-row" data-key="${escapeAttr(field.key)}">
       <div class="field-head">
         <span class="field-title">${escapeHtml(field.title)}${descIcon}</span>
-        ${control}
+        <div class="plugin-field-control"><div class="plugin-field-input">${control}</div>${spaceWarn}</div>
       </div>
-      ${spaceWarn}
     </div>`;
 }
 
@@ -457,12 +476,12 @@ function renderConfigSection(title, schema, values, opts = {}) {
         const descHtml = group.description
             ? `<span class="plugin-group-desc">${linkify(group.description)}</span>`
             : "";
-        return `<details class="plugin-group" open>
+        return `<details class="plugin-group" data-group="${escapeAttr(group.title)}">
       <summary class="plugin-group-title">
         <span>${escapeHtml(group.title)}</span>
-        ${descHtml}
+        <span class="plugin-group-status">${t("plugin.group_empty")}</span>
       </summary>
-      <div class="plugin-group-body">${fieldsHtml}</div>
+      <div class="plugin-group-body">${descHtml}${fieldsHtml}</div>
     </details>`;
     }).join("");
 
@@ -569,102 +588,99 @@ export function bindPluginCardEvents(plugin) {
         weatherEditors.set(id,weatherEditor);
         card.addEventListener(WEATHER_EDITOR_CLOSED,()=> {if(pendingPluginReload) loadPlugins();});
     }
-    let saving = false;
-    // 触发词与设置共用一次写入门禁；只接收本次提交的版本，不重绘或覆盖草稿。
-    const mutateTriggers = async (command, args) => {
-        if (saving) return false;
-        saving = true;
+    let writeQueue = Promise.resolve();
+    let configConflict = false;
+    const enqueue = (operation) => {
         pluginWrites++;
-        try {
-            const revision = await invoke(command, {
-                pluginId: id, ...args, expectedRevision: plugin.revision ?? 0,
-            });
-            if (!Number.isSafeInteger(revision) || revision <= (plugin.revision ?? 0)) {
-                throw new Error("invalid plugin revision");
-            }
-            plugin.revision = revision;
-            return true;
-        } catch (error) {
-            console.error(`${command} failed:`, error);
-            flash(card, t("common.save_failed_msg", {err: error?.message || String(error)}), true, 6000);
-            return false;
-        } finally {
-            saving = false;
-            pluginWrites--;
-        }
-    };
-    const save = async (enabledOverride) => {
-        if (saving) return false;
-        saving = true;
-        pluginWrites++;
-        const settings = enabledOverride !== undefined && weatherEditor
-            ? {...(plugin.settings || {})}
-            : {...collectSettings(card,schema,plugin.settings),...(weatherEditor?.collect() || {})};
-        const enabled = enabledOverride !== undefined ? enabledOverride : card.querySelector(".plugin-enabled").checked;
-        try {
-            await saveConfig("plugin_config", {pluginId:id,enabled,settings,expectedRevision:plugin.revision ?? 0});
-            // 提交已经成功；之后的刷新失败不能报告为保存失败。
-            plugin.revision=(plugin.revision ?? 0)+1;
-            plugin.settings={...settings};
-            for(const f of schema) if(f.secret) plugin.settings[f.key]="";
-            plugin.enabled=enabled;
+        const task = writeQueue.then(async () => {
             try {
-                const latest=(await invoke("get_plugins")).find(p=>p.id===id);
-                if(latest?.revision === plugin.revision) {plugin.settings=latest.settings;plugin.enabled=latest.enabled;}
-                else if(latest) {pendingPluginReload=true;flash(card,t("weather.config_changed"),true,6000);}
-            } catch(error) {flash(card,t("config.load_failed",{err:error?.message || String(error)}),true,6000);}
-            card.querySelectorAll(".plugin-field.plugin-secret-field").forEach(el=> {
-                if (el.value !== "") { el.value=""; el._refreshHint?.(); }
-            });
-            return true;
-        } catch (err) {
-            flash(card,t("common.save_failed_msg",{err:err?.message || String(err)}),true,6000);
-            if (err?.code === "config_conflict" || String(err?.message || err).includes("config_conflict")) {
-                await loadPlugins(true);
-                const refreshed=document.querySelector(`.extension-card[data-plugin-id="${id}"]`);
-                if(refreshed) {
-                    const section=refreshed.querySelector("details.plugin-config-section");
-                    if(section) section.open=true;
-                    flash(refreshed,t("weather.save_conflict"),true,8000);
+                if (configConflict) return false;
+                await operation();
+                return true;
+            } catch (error) {
+                console.error("plugin config write failed:", error);
+                flash(card, t("common.save_failed_msg", {err: error?.message || String(error)}), true, 6000);
+                // Keep drafts visible on a revision conflict. Never overwrite them with a reload.
+                if (error?.code === "config_conflict" || String(error?.message || error).includes("config_conflict")) {
+                    configConflict = true;
+                    card.dataset.configConflict = "true";
+                    flash(card, t("weather.save_conflict"), true, 0);
+                    const reload = document.createElement("button");
+                    reload.type = "button";
+                    reload.className = "btn-small plugin-reload";
+                    reload.textContent = t("plugin.reload_settings");
+                    reload.addEventListener("click", async () => {
+                        await loadPlugins(true);
+                        const section = document.querySelector(`.extension-card[data-plugin-id="${id}"] details.plugin-config-section`);
+                        if (section) section.open = true;
+                    });
+                    card.querySelector(".plugin-save-msg")?.appendChild(reload);
                 }
+                return false;
+            } finally {
+                pluginWrites--;
+                if (!pluginWrites && pendingPluginReload) void loadPlugins();
             }
-            return false;
-        } finally { saving=false; pluginWrites--; }
+        });
+        writeQueue = task;
+        return task;
     };
-    card.querySelectorAll(".weather-save, .plugin-save").forEach(button=>button.addEventListener("click",async()=> {
-        button.disabled=true;
-        const ok=await save();
-        if (ok) await loadPlugins(true);
-        else if (button.isConnected) button.disabled=false;
+    const mutateTriggers = (command, args) => enqueue(async () => {
+        const revision = await invoke(command, {pluginId: id, ...args, expectedRevision: plugin.revision ?? 0});
+        if (!Number.isSafeInteger(revision) || revision <= (plugin.revision ?? 0)) throw new Error("invalid plugin revision");
+        plugin.revision = revision;
+    });
+    const save = (patch, enabledOverride) => enqueue(async () => {
+        const enabled = enabledOverride ?? plugin.enabled ?? true;
+        await saveConfig("plugin_config", {pluginId: id, enabled, settings: patch, expectedRevision: plugin.revision ?? 0});
+        plugin.revision = (plugin.revision ?? 0) + 1;
+        plugin.settings = {...plugin.settings, ...patch};
+        plugin.enabled = enabled;
+        for (const field of schema) {
+            if (!field.secret || !Object.hasOwn(patch, field.key)) continue;
+            plugin.settings[field.key] = "";
+            const input = card.querySelector(`.plugin-field[data-key="${field.key}"]`);
+            if (input?.value === patch[field.key]) input.value = "";
+            await input?._refreshHint?.();
+            input?._refreshSpaceHint?.();
+        }
+        refreshCredentialGroups(card, schema, plugin.settings);
+        flash(card, t("common.saved"), false);
+    });
+    card.querySelectorAll(".weather-save, .plugin-save").forEach(button => button.addEventListener("click", async () => {
+        button.disabled = true;
+        const patch = weatherEditor?.collect() || collectSettings(card, schema, {});
+        const ok = await save(patch);
+        if (ok) weatherEditor?.commit(patch);
+        if (button.isConnected) button.disabled = false;
     }));
-    card.querySelector(".plugin-enabled")?.addEventListener("change", async (e) => {
-        const ok = await save(e.target.checked);
-        if (!ok) e.target.checked = !e.target.checked;
-        // 0.25.20：启用态即时反映到卡片视觉（is-disabled 原本只在渲染时
-        // 决定，默认禁用的插件启用后卡片一直灰显）
-        if (ok) { card.classList.toggle("is-disabled", !e.target.checked); weatherEditor?.setEnabled(e.target.checked); }
-        // 0.25.20：启用脚本插件且托管运行时未安装 → 显式确认后引导安装
-        // （不做静默后台下载——失败不可见、流量不可控）
-        if (ok && e.target.checked) {
-            guideScriptRuntimeInstall(plugin.runtime_type);
+    card.querySelector(".plugin-enabled")?.addEventListener("change", async (event) => {
+        const enabled = event.target.checked;
+        const ok = await save({}, enabled);
+        if (!ok) event.target.checked = plugin.enabled !== false;
+        if (ok) {
+            card.classList.toggle("is-disabled", !enabled);
+            weatherEditor?.setEnabled(enabled);
+            if (enabled) guideScriptRuntimeInstall(plugin.runtime_type);
         }
     });
-
-    // 字段变更 → 自动保存 + 重算条件显隐
-    card.querySelectorAll(".plugin-field").forEach((el) => {
-        el.addEventListener("change", async () => {
+    card.querySelectorAll(".plugin-field").forEach(input => {
+        input.addEventListener("change", async () => {
             applyFieldVisibility(card, schema);
-            if (!weatherEditor) await save();
+            const field = schema.find(field => field.key === input.dataset.key);
+            if (!field) return;
+            const patch = collectSettings(card, [field], {});
+            if (field.key === "qweather_api_host" && patch[field.key]) {
+                const value = patch[field.key].trim();
+                patch[field.key] = (value.includes("://") ? value : `https://${value}`).replace(/\/$/, "");
+                input.value = patch[field.key];
+                input.setSelectionRange?.(input.value.length, input.value.length);
+                input.scrollLeft = input.scrollWidth;
+            }
+            if (Object.keys(patch).length) await save(patch);
         });
     });
-
-    // 密钥类字段（no_space）空格提示：红字 + 一键移除按钮，不自动改写输入
-    bindNoSpaceHints(card, schema);
-
-    // 密钥字段（secret）：掩码 hint 回填 placeholder + 清除按钮（0.25.16）
-    bindSecretFields(card, id, schema, () => plugin.revision ?? 0);
-
-    // 条件显隐初算（如"降级顺序"仅在"允许降级"开启时显示）
+    bindCredentialFields(card, plugin, schema, enqueue, flash);
     applyFieldVisibility(card, schema);
 
     // 默认触发词的 ban/恢复按钮
@@ -814,84 +830,6 @@ function collectSettings(card, schema, baseline = {}) {
 }
 
 /**
- * 密钥字段绑定（0.25.16）：掩码 hint 回填 placeholder + 清除按钮。
- *
- * 真实密钥在系统凭据管理器，前端只拿 format_hint 掩码（如 sk-a••••cdef）。
- * 清除走专门 invoke（不走 settings 保存——settings 里的空串语义是"未修改"）。
- */
-function bindSecretFields(card, pluginId, schema, revision) {
-    for (const f of schema) {
-        if (f.type !== "string" || !f.secret) continue;
-        const input = card.querySelector(`.plugin-field.plugin-secret-field[data-key="${f.key}"]`);
-        if (!input) continue;
-        const refreshHint = async () => {
-            try {
-                const hint = await invoke("get_plugin_secret_hint", {pluginId, fieldKey: f.key});
-                input.placeholder = hint
-                    ? `${hint} — ${t("plugin.secret_keep_hint")}`
-                    : t("plugin.secret_placeholder");
-            } catch (err) {
-                console.error("get_plugin_secret_hint failed:", err);
-            }
-        };
-        input._refreshHint = refreshHint; // save() 转存 CM 后回填掩码用
-        refreshHint();
-
-        const clearBtn = card.querySelector(`.plugin-secret-clear[data-key="${f.key}"]`);
-        clearBtn?.addEventListener("click", async () => {
-            clearBtn.disabled = true;
-            try {
-                await invoke("clear_plugin_secret", {pluginId, fieldKey:f.key, expectedRevision:revision()});
-                await loadPlugins(true);
-                input.value = "";
-                await refreshHint();
-                flash(card, t("plugin.secret_cleared"), false, 1500);
-            } catch (err) {
-                console.error("clear_plugin_secret failed:", err);
-                flash(card, t("common.save_failed_msg", {err}), true, 5000);
-            } finally {
-                clearBtn.disabled = false;
-            }
-        });
-    }
-}
-
-/**
- * 对 schema 声明 no_space 的字符串字段绑定空格提示（密钥/凭据类）。
- *
- * 空格来源:多行文本粘贴进单行输入框时换行被浏览器转成空格(密钥中段插入空格),
- * 或复制时带入首尾空白——密钥类值绝不含空格,混入即认证失败(如阿里 404=AccessKey 不存在)。
- *
- * 行为:输入含空格 → 该字段下方显示红字提示 + "移除空格"按钮(用户主动点击才修改,
- * 想保留空格也可直接无视);移除后触发 change 走自动保存。
- */
-function bindNoSpaceHints(card, schema) {
-    for (const f of schema) {
-        if (f.type !== "string" || !f.no_space) continue;
-        const el = card.querySelector(`.plugin-field[data-key="${f.key}"]`);
-        const warnBox = card.querySelector(`.plugin-field-warn[data-warn-key="${f.key}"]`);
-        const warnText = warnBox?.querySelector(".plugin-field-warn-text");
-        const fixBtn = warnBox?.querySelector(".plugin-field-warn-fix");
-        if (!el || !warnBox || !warnText) continue;
-
-        const refresh = () => {
-            const dirty = /\s/.test(el.value ?? "");
-            warnBox.classList.toggle("hidden", !dirty);
-            if (dirty) {
-                warnText.textContent = t("plugin.field_space_hint");
-            }
-        };
-        el.addEventListener("input", refresh);
-        refresh();
-        fixBtn?.addEventListener("click", () => {
-            el.value = (el.value ?? "").replace(/\s+/g, "");
-            refresh();
-            el.dispatchEvent(new Event("change", {bubbles: true}));
-        });
-    }
-}
-
-/**
  * 应用 schema 的条件显隐（visible_when）：引用字段值等于条件值时才显示该行。
  * 例:翻译插件"降级顺序"仅在"允许降级"开关开启时显示。
  */
@@ -999,6 +937,7 @@ function flash(card, msg, isError, duration = 2000) {
     el.textContent = msg;
     el.className = `plugin-save-msg ${isError ? "msg-error" : "msg-success"}`;
     clearTimeout(el._t);
+    if (duration === 0) return;
     el._t = setTimeout(() => {
         el.textContent = "";
         el.className = "plugin-save-msg";

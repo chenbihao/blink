@@ -130,11 +130,17 @@ pub fn qweather_credentials(
         (Some(host), Some(key)) => {
             if !valid_qweather_host(host) {
                 return Err(invalid_arguments(
-                    "和风 API Host 必须是 https 服务根地址（如 https://abc123.re.qweatherapi.com）",
+                    "和风 API Host 请填写域名或 HTTPS 根地址（如 abc123.re.qweatherapi.com）",
                 ));
             }
             Ok(Some(QWeatherCredentials {
-                host: host.to_owned(),
+                host: format!(
+                    "https://{}",
+                    host.trim()
+                        .strip_prefix("https://")
+                        .unwrap_or(host.trim())
+                        .trim_end_matches('/')
+                ),
                 key: key.to_owned(),
             }))
         }
@@ -144,9 +150,9 @@ pub fn qweather_credentials(
 /// 与宿主 `weather_config.rs` 同一规则：HTTPS 域名根地址，无路径/查询/碎片/
 /// 用户信息/端口，至少两段且末段为字母（排除 IP 字面量）。
 pub fn valid_qweather_host(value: &str) -> bool {
-    let Some(rest) = value.strip_prefix("https://") else {
-        return false;
-    };
+    let value = value.trim();
+    let rest = value.strip_prefix("https://").unwrap_or(value);
+    let rest = rest.strip_suffix('/').unwrap_or(rest);
     if rest.is_empty() || rest.len() > 253 || rest.contains(['/', '?', '#', '@', ':', '\\']) {
         return false;
     }
@@ -392,7 +398,17 @@ pub fn parse_location(
         None | Some(Value::Null) => None,
         Some(Value::Bool(value)) => Some(*value),
         Some(_) => return Err(invalid_arguments("in_mainland_china 必须是布尔值")),
-    };
+    }
+    .or_else(|| {
+        if trusted && source == "qweather" {
+            crate::location::coordinates::mainland_from_qweather_admin(
+                &country,
+                &administrative_area,
+            )
+        } else {
+            None
+        }
+    });
     Ok(crate::model::ResolvedLocation {
         name,
         display_name,
@@ -491,8 +507,8 @@ fn invalid_arguments(message: impl Into<String>) -> crate::protocol::PluginError
 mod tests {
     use super::TemperatureUnit;
     use super::{
-        Provider, Resolver, caiyun_credentials, parse, parse_resolver, parse_search,
-        valid_caiyun_app_key, valid_qweather_host,
+        Provider, Resolver, caiyun_credentials, parse, parse_location, parse_resolver,
+        parse_search, valid_caiyun_app_key, valid_qweather_host,
     };
     use crate::protocol::PluginError;
     use serde_json::{Value, json};
@@ -807,10 +823,7 @@ mod tests {
             "key with space",
             "密钥",
         ] {
-            assert!(
-                !valid_caiyun_app_key(key),
-                "应拒绝 App Key: {key}"
-            );
+            assert!(!valid_caiyun_app_key(key), "应拒绝 App Key: {key}");
             assert_eq!(
                 error_code(parse(
                     None,
@@ -877,7 +890,12 @@ mod tests {
     fn location_region_declaration_round_trips_for_saved_and_explicit_locations() {
         // 保存地点：解析器证据随地点保留
         let saved = json!({"latitude":39.9,"longitude":116.4,"coordinate_system":"wgs84","name":"北京","in_mainland_china":true});
-        let defaults = parse(None, Some(&json!({})), Some(&json!({"default_location":saved}))).unwrap();
+        let defaults = parse(
+            None,
+            Some(&json!({})),
+            Some(&json!({"default_location":saved})),
+        )
+        .unwrap();
         assert_eq!(defaults.location.unwrap().in_mainland_china, Some(true));
         // 显式 location：用户声明同样保留（香港=非大陆）
         let explicit = json!({"latitude":22.32,"longitude":114.17,"coordinate_system":"wgs84","in_mainland_china":false});
@@ -890,10 +908,34 @@ mod tests {
         assert_eq!(
             error_code(parse(
                 None,
-                Some(&json!({"location":{"latitude":0,"longitude":0,"coordinate_system":"wgs84","in_mainland_china":"yes"}})),
+                Some(
+                    &json!({"location":{"latitude":0,"longitude":0,"coordinate_system":"wgs84","in_mainland_china":"yes"}})
+                ),
                 None
             )),
             "invalid_arguments"
+        );
+    }
+
+    #[test]
+    fn saved_qweather_province_recovers_missing_region_but_explicit_location_requires_a_declaration()
+     {
+        let saved = json!({"latitude":23.13,"longitude":113.26,"coordinate_system":"wgs84",
+            "name":"海珠","country":"中国","source":"qweather","administrative_area":"广东省",
+            "administrative_areas":["广东省","广州"],"in_mainland_china":null});
+        let resolved = parse_location(&saved, true).unwrap();
+        assert_eq!(resolved.in_mainland_china, Some(true));
+        assert_eq!(
+            parse_location(&saved, false).unwrap().in_mainland_china,
+            None
+        );
+        let mut manual_override = saved.clone();
+        manual_override["in_mainland_china"] = json!(false);
+        assert_eq!(
+            parse_location(&manual_override, true)
+                .unwrap()
+                .in_mainland_china,
+            Some(false)
         );
     }
 
@@ -919,7 +961,8 @@ mod tests {
             );
         }
         assert!(valid_qweather_host("https://abc123.re.qweatherapi.com"));
-        assert!(!valid_qweather_host("abc123.re.qweatherapi.com"));
+        assert!(valid_qweather_host("abc123.re.qweatherapi.com"));
+        assert!(valid_qweather_host("https://abc123.re.qweatherapi.com/"));
     }
 
     #[test]

@@ -590,7 +590,7 @@ dependencies = [
 
 [[package]]
 name = "blink"
-version = "0.26.4"
+version = "0.26.5"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -826,7 +826,7 @@ dependencies = [
 
 [[package]]
 name = "blink-plugin-weather"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "base64 0.22.1",
  "chrono",

@@ -1,0 +1,72 @@
+import assert from "node:assert/strict";
+import {test} from "node:test";
+import {TestElement} from "../settings/tabs/weather-settings-test-helpers.mjs";
+
+globalThis.window ??= {};
+const {bindClipboardPreview, bindErrorPreview, hideClipboardPreview} = await import("./clipboard-preview.js");
+
+test("clipboard hover lazily shows full text and rejects stale entry responses", async (t) => {
+    t.mock.timers.enable({apis:["setTimeout"]});
+    const oldDocument = globalThis.document;
+    const oldTauri = window.__TAURI__;
+    const oldAddListener = window.addEventListener;
+    const body = new TestElement();
+    const element = () => {
+        const view = new TestElement();
+        view.style = {};
+        view.getBoundingClientRect = () => ({left:10,top:10,bottom:35,height:80});
+        return view;
+    };
+    globalThis.document = {body,createElement:element,addEventListener() {}};
+    window.addEventListener = () => {};
+    window.innerWidth = 600;
+    window.innerHeight = 400;
+    const pending = new Map();
+    window.__TAURI__ = {core:{invoke:async (command,{id}) => {
+        assert.equal(command,"get_clipboard_text");
+        return new Promise(resolve => pending.set(id,resolve));
+    }}};
+    t.after(() => {
+        hideClipboardPreview();
+        globalThis.document = oldDocument;
+        window.__TAURI__ = oldTauri;
+        window.addEventListener = oldAddListener;
+    });
+    const first = element();
+    const second = element();
+    bindClipboardPreview(first,{kind:"text",id:"first"});
+    bindClipboardPreview(second,{kind:"text",id:"second"});
+    await first.fire("pointerenter");
+    t.mock.timers.tick(349);
+    assert.equal(pending.size,0,"no full text read in the search or initial hover path");
+    t.mock.timers.tick(1);
+    assert.ok(pending.has("first"));
+    await second.fire("pointerenter");
+    t.mock.timers.tick(350);
+    const full = "line one\n" + "完整文本 ".repeat(120);
+    pending.get("second")(full);
+    for (let i=0;i<5;i++) await Promise.resolve();
+    const panel = body.children[0];
+    assert.equal(panel.textContent,full,"preserves newlines and all text beyond the row summary");
+    pending.get("first")("stale text");
+    for (let i=0;i<5;i++) await Promise.resolve();
+    assert.equal(panel.textContent,full);
+    await second.fire("pointerleave");
+    t.mock.timers.tick(100);
+    await panel.fire("pointerenter");
+    t.mock.timers.tick(100);
+    assert.equal(panel.classList.contains("hidden"),false,"moving into the preview preserves it");
+    hideClipboardPreview();
+    assert.equal(panel.textContent,"");
+    assert.equal(panel.classList.contains("hidden"),true);
+    const errorRow = element();
+    const error = "插件返回错误 (invalid_arguments): " + "完整错误信息\n".repeat(80);
+    bindErrorPreview(errorRow,error);
+    await errorRow.fire("pointerenter");
+    t.mock.timers.tick(350);
+    for (let i=0;i<5;i++) await Promise.resolve();
+    assert.equal(panel.textContent,error);
+    assert.equal(panel.dataset.errorText,error,"right click can target the same full error snapshot");
+    hideClipboardPreview();
+    assert.equal(panel.dataset.errorText,undefined);
+});

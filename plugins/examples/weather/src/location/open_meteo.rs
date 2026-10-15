@@ -207,7 +207,7 @@ fn convert_candidate(raw: GeocodingCandidate) -> Option<ResolvedLocation> {
     }
     let display_name = display_parts.join(" · ");
 
-    Some(ResolvedLocation {
+    let mut location = ResolvedLocation {
         name,
         display_name,
         latitude,
@@ -218,16 +218,16 @@ fn convert_candidate(raw: GeocodingCandidate) -> Option<ResolvedLocation> {
         country_code: country_code.clone(),
         // "是否中国大陆"的行政证据来自解析器返回的 ISO 国家码（CN=大陆，
         // HK/MO/TW/其他=非大陆）；缺失即证据不足，交给用户确认。
-        in_mainland_china: super::coordinates::mainland_from_country_code(
-            country_code.as_deref(),
-        ),
+        in_mainland_china: super::coordinates::mainland_from_country_code(country_code.as_deref()),
         administrative_areas,
         timezone,
         kind,
         source: "open_meteo",
         source_id: raw.id.map(|id| format!("open_meteo:{id}")),
         resolved_at: chrono::Utc::now().to_rfc3339(),
-    })
+    };
+    location.display_name = location.display_label();
+    Some(location)
 }
 
 fn kind_for_feature(feature_code: &str) -> Option<&'static str> {
@@ -328,7 +328,7 @@ mod tests {
         assert_eq!(candidates.len(), 2);
         let city = &candidates[0];
         assert_eq!(city.name, "朝阳");
-        assert_eq!(city.display_name, "朝阳 · 辽宁 · 朝阳市 · 中国");
+        assert_eq!(city.display_name, "中国 · 辽宁 · 朝阳市");
         assert_eq!(city.country_code.as_deref(), Some("CN"));
         assert_eq!(
             city.administrative_areas,

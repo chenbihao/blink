@@ -31,6 +31,45 @@ pub struct ResolvedLocation {
     pub in_mainland_china: Option<bool>,
 }
 
+impl ResolvedLocation {
+    /// 国内按国家 → 省 → 市 → 区县排列；保留供应商原文，不猜测缺失层级。
+    /// 从结构化字段生成，兼容已经保存的旧 display_name。
+    pub fn display_label(&self) -> String {
+        let domestic = self
+            .country_code
+            .as_deref()
+            .is_some_and(|code| code.eq_ignore_ascii_case("CN"))
+            || matches!(self.country.trim(), "中国" | "中华人民共和国")
+            || self.country.trim().eq_ignore_ascii_case("China");
+        if !domestic {
+            return self.display_name.clone();
+        }
+        let areas: Vec<&str> = if self.administrative_areas.is_empty() {
+            vec![self.administrative_area.as_str()]
+        } else {
+            self.administrative_areas
+                .iter()
+                .map(String::as_str)
+                .collect()
+        };
+        let mut parts: Vec<&str> = Vec::new();
+        for part in std::iter::once(self.country.as_str())
+            .chain(areas)
+            .chain(std::iter::once(self.name.as_str()))
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+        {
+            if !parts
+                .iter()
+                .any(|existing| crate::location::same_place_name(existing, part))
+            {
+                parts.push(part);
+            }
+        }
+        parts.join(" · ")
+    }
+}
+
 /// 供应商原始天气条件（和风）；Open-Meteo 走 WMO 数值代码，两者不混用。
 #[derive(Debug, Clone, Serialize)]
 pub struct ProviderCondition {
