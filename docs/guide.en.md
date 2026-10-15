@@ -64,6 +64,12 @@ Every Chord action can be remapped in Settings and promoted to a **global hotkey
 | Result item menu | Right-click a result entry | Open containing folder, copy path / file name, open shortcut target, reset that entry's launch-frequency stats, and more |
 | Drag the main window | Drag the card's blank area | Moves the main window (no visual hint, but the blank area really is draggable) |
 
+### Weather results
+
+- A configured default city remains the fallback when a query omits a city.
+- If a tool call explicitly specifies a temperature unit, it takes priority over the saved preference. Current conditions and daily forecasts use the same unit. Copying a weather result copies the complete weather summary.
+- Missing fields appear as “Unknown,” while other available information remains visible. Each daily description shows the most severe condition expected that day; it does not mean that condition lasts all day.
+
 ### Silky tricks
 
 | Trick | Trigger | Notes |

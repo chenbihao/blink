@@ -31,6 +31,9 @@ pub enum PluginRequest {
         /// 采用 query 内联:每次查询携带,天然热更新。老插件忽略此字段;无配置时为 None。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         settings: Option<serde_json::Value>,
+        /// 从宿主总 deadline 扣除准备/排队时间后的剩余预算；旧插件可忽略。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        budget_ms: Option<u64>,
     },
     /// 取消(core→插件,best-effort:查询超时发送,插件可忽略)。
     #[serde(rename = "cancel")]
@@ -60,6 +63,8 @@ pub enum PluginRequest {
         /// 该插件的 PluginConfig.settings（与 Query 同规则透传）
         #[serde(default, skip_serializing_if = "Option::is_none")]
         settings: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        budget_ms: Option<u64>,
     },
 }
 
@@ -72,6 +77,7 @@ impl PluginRequest {
             query: query.into(),
             context: PluginQueryContext::default(),
             settings: None,
+            budget_ms: None,
         }
     }
 }
@@ -368,10 +374,12 @@ mod tests {
             query: "ip".into(),
             context: PluginQueryContext::default(),
             settings: Some(settings),
+            budget_ms: Some(800),
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"settings\""));
         assert!(json.contains("\"use_ipv6\""));
+        assert!(json.contains("\"budget_ms\":800"));
     }
 
     #[test]
@@ -447,6 +455,7 @@ mod tests {
             tool_name: "translate".into(),
             arguments: serde_json::json!({ "text": "hello", "target_lang": "zh" }),
             settings: None,
+            budget_ms: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"type\":\"tool_call\""));
@@ -463,6 +472,7 @@ mod tests {
             tool_name: "translate".into(),
             arguments: serde_json::json!({ "text": "hi" }),
             settings: Some(serde_json::json!({ "engine": "deepl" })),
+            budget_ms: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"settings\""));
@@ -479,11 +489,13 @@ mod tests {
                 tool_name,
                 arguments,
                 settings,
+                budget_ms,
             } => {
                 assert_eq!(id, "tc_1");
                 assert_eq!(tool_name, "translate");
                 assert_eq!(arguments["text"], "hello");
                 assert!(settings.is_none());
+                assert!(budget_ms.is_none());
             }
             _ => panic!("应是 ToolCall"),
         }

@@ -10,67 +10,135 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{Mutex, Semaphore, mpsc, oneshot};
 
 use super::manifest::{PluginManifest, RuntimeType};
 use super::protocol::{
-    PluginAction, PluginItem, PluginRequest, PluginResponse, PluginUpstreamMessage, RawToolResult,
+    PluginAction, PluginErrorPayload, PluginItem, PluginRequest, PluginResponse,
+    PluginUpstreamMessage, RawToolResult,
 };
 
 /// 查询错误。
-#[derive(Debug)]
-#[allow(dead_code)] // 错误处理骨架，0.3+ 完整实现
+#[derive(Debug, thiserror::Error)]
 pub enum PluginError {
     /// 进程拉起失败。
+    #[error("spawn 失败: {0}")]
     Spawn(String),
     /// 托管脚本运行时未安装（0.25.20：Python/Node 解释器改 Blink 托管分发，
     /// 不再探测系统 PATH——缺失时引导用户到设置页安装）。
+    #[error("脚本运行时（{kind}）未安装")]
     InterpreterNotInstalled { kind: &'static str },
     /// 进程已关闭(stdout EOF / 写 stdin 失败)。
+    #[error("进程已关闭")]
     ProcessClosed,
     /// 查询超时。
+    #[error("查询超时")]
     Timeout,
     /// 插件返回 error。
-    PluginReturned(String),
+    #[error("插件返回错误 ({code}): {message}", code = .0.code, message = .0.message)]
+    PluginReturned(PluginErrorPayload),
+    #[error("插件忙，请稍后重试")]
+    Busy,
     /// 协议/IO 错误。
+    #[error("IO 错误: {0}")]
     Io(String),
 }
 
-impl std::fmt::Display for PluginError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PluginError::Spawn(e) => write!(f, "spawn 失败: {e}"),
-            PluginError::InterpreterNotInstalled { kind } => {
-                write!(f, "脚本运行时（{kind}）未安装")
-            }
-            PluginError::ProcessClosed => write!(f, "进程已关闭"),
-            PluginError::Timeout => write!(f, "查询超时"),
-            PluginError::PluginReturned(e) => write!(f, "插件返回错误: {e}"),
-            PluginError::Io(e) => write!(f, "IO 错误: {e}"),
+type RequestMap<T> = Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<T>>>>;
+type PendingMap = RequestMap<PluginResponse>;
+/// 轨道 A 纯数据 tool-call 的 pending map（0.14.3）。
+type PendingRawToolMap = RequestMap<RawToolResult>;
+
+struct PluginStdin {
+    pipe: Mutex<ChildStdin>,
+    valid: AtomicBool,
+}
+
+/// stdin 写到半行时被 deadline/drop 打断，后续 JSONL 不能接在残帧之后。
+/// 标记此进程不可复用；下一次调用重新拉起，旧代次等待者仍由各自 deadline 兜底。
+struct FrameGuard<'a> {
+    valid: &'a AtomicBool,
+    completed: bool,
+}
+impl Drop for FrameGuard<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.valid.store(false, Ordering::Release);
         }
     }
 }
 
-type PendingMap = Arc<Mutex<HashMap<String, oneshot::Sender<PluginResponse>>>>;
-/// 轨道 A 纯数据 tool-call 的 pending map（0.14.3）。
-type PendingRawToolMap = Arc<Mutex<HashMap<String, oneshot::Sender<RawToolResult>>>>;
+async fn write_frame<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    valid: &AtomicBool,
+    line: String,
+) -> Result<(), PluginError> {
+    if !valid.load(Ordering::Acquire) {
+        return Err(PluginError::ProcessClosed);
+    }
+    let mut frame = FrameGuard {
+        valid,
+        completed: false,
+    };
+    writer
+        .write_all((line + "\n").as_bytes())
+        .await
+        .map_err(|_| PluginError::ProcessClosed)?;
+    writer
+        .flush()
+        .await
+        .map_err(|_| PluginError::ProcessClosed)?;
+    frame.completed = true;
+    Ok(())
+}
+
+/// Drop 同步清理自身 pending（包含调用方取消 future），取消消息经有界队列尽力写入。
+/// map 与队列均属于原进程实例，旧请求不会误清重启后的新实例。
+struct PendingGuard<T> {
+    requests: RequestMap<T>,
+    id: String,
+    cancel: mpsc::Sender<String>,
+}
+
+impl<T> Drop for PendingGuard<T> {
+    fn drop(&mut self) {
+        if self.requests.lock().unwrap().remove(&self.id).is_some() {
+            let _ = self.cancel.try_send(self.id.clone());
+        }
+    }
+}
+
+fn remaining_budget(deadline: tokio::time::Instant) -> Result<u64, PluginError> {
+    let ms = deadline
+        .saturating_duration_since(tokio::time::Instant::now())
+        .as_millis() as u64;
+    if ms == 0 {
+        Err(PluginError::Timeout)
+    } else {
+        Ok(ms)
+    }
+}
 
 /// 已拉起的插件进程。
 struct PluginProcess {
     /// `Mutex<Child>` 使存活检测可 `&self`(try_wait 需 `&mut`),从而 query 能在
     /// process 锁外并发执行——多个 in-flight query 各持一份 `Arc<PluginProcess>`。
     child: Mutex<Child>,
-    stdin: Arc<Mutex<ChildStdin>>,
+    stdin: Arc<PluginStdin>,
     pending: PendingMap,
     /// 轨道 A 纯数据 tool-call 的 pending map（0.14.3）。
     pending_raw_tools: PendingRawToolMap,
     /// 单调递增的请求 id 计数。
     next_id: std::sync::atomic::AtomicU64,
+    cancel: mpsc::Sender<String>,
 }
 
 /// 解析托管脚本解释器 exe 路径（0.25.20 取代 PATH 探测）。
@@ -85,9 +153,8 @@ fn managed_interpreter(
         blink_infra::script_interpreter::ScriptInterpreterKind::Python => "Python",
         blink_infra::script_interpreter::ScriptInterpreterKind::Node => "Node.js",
     };
-    blink_infra::script_interpreter::resolve(kind).ok_or(PluginError::InterpreterNotInstalled {
-        kind: kind_name,
-    })
+    blink_infra::script_interpreter::resolve(kind)
+        .ok_or(PluginError::InterpreterNotInstalled { kind: kind_name })
 }
 
 impl PluginProcess {
@@ -115,8 +182,9 @@ impl PluginProcess {
                 c
             }
             RuntimeType::Node => {
-                let interpreter =
-                    managed_interpreter(blink_infra::script_interpreter::ScriptInterpreterKind::Node)?;
+                let interpreter = managed_interpreter(
+                    blink_infra::script_interpreter::ScriptInterpreterKind::Node,
+                )?;
                 let mut c = tokio::process::Command::new(interpreter);
                 c.current_dir(work_dir).arg(exec_path);
                 c
@@ -152,9 +220,21 @@ impl PluginProcess {
         let stdout = child.stdout.take().ok_or(PluginError::ProcessClosed)?;
         let stderr = child.stderr.take().ok_or(PluginError::ProcessClosed)?;
 
-        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
-        let pending_raw_tools: PendingRawToolMap = Arc::new(Mutex::new(HashMap::new()));
-        let stdin = Arc::new(Mutex::new(stdin));
+        let pending: PendingMap = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let pending_raw_tools: PendingRawToolMap = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let stdin = Arc::new(PluginStdin {
+            pipe: Mutex::new(stdin),
+            valid: AtomicBool::new(true),
+        });
+        let (cancel, mut cancellations) = mpsc::channel::<String>(64);
+        {
+            let stdin = Arc::clone(&stdin);
+            tokio::spawn(async move {
+                while let Some(id) = cancellations.recv().await {
+                    write_message(&stdin, &PluginRequest::Cancel { id }).await;
+                }
+            });
+        }
 
         // stdout reader:区分普通查询响应、HTTP 请求、tool-call 结果。
         {
@@ -162,6 +242,8 @@ impl PluginProcess {
             let pending_raw_tools = Arc::clone(&pending_raw_tools);
             let stdin = Arc::clone(&stdin);
             let id = plugin_id.to_string();
+            // 每进程的网络请求及回写任务均有界；超额立即回 busy，不创建等待队列。
+            let http_slots = Arc::new(Semaphore::new(8));
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stdout).lines();
                 loop {
@@ -173,7 +255,7 @@ impl PluginProcess {
                             // 先尝试新协议格式（PluginUpstreamMessage enum）
                             match serde_json::from_str::<PluginUpstreamMessage>(&line) {
                                 Ok(PluginUpstreamMessage::Response(resp)) => {
-                                    if let Some(tx) = pending.lock().await.remove(&resp.id) {
+                                    if let Some(tx) = pending.lock().unwrap().remove(&resp.id) {
                                         let _ = tx.send(resp);
                                     } else {
                                         tracing::debug!(plugin = %id, id = %resp.id, "孤儿响应(无 pending)");
@@ -181,9 +263,27 @@ impl PluginProcess {
                                 }
                                 Ok(PluginUpstreamMessage::HttpRequest(req)) => {
                                     // 插件发起 HTTP 请求 → core 代为执行
-                                    tracing::debug!(plugin = %id, url = %req.url.chars().take(80).collect::<String>(), "插件发起 HTTP 请求");
+                                    tracing::debug!(plugin = %id, id = %req.id, "插件发起 HTTP 请求");
+                                    let permit = match Arc::clone(&http_slots).try_acquire_owned() {
+                                        Ok(permit) => permit,
+                                        Err(_) => {
+                                            write_message(
+                                                &stdin,
+                                                &PluginRequest::HttpResponse {
+                                                    id: req.id,
+                                                    status: 429,
+                                                    body: None,
+                                                    error: Some("busy: 宿主 HTTP 并发已满".into()),
+                                                },
+                                            )
+                                            .await;
+                                            continue;
+                                        }
+                                    };
                                     let stdin = Arc::clone(&stdin);
                                     tokio::spawn(async move {
+                                        let _permit = permit;
+                                        let started = std::time::Instant::now();
                                         let (status, body, error) = execute_http_request(
                                             &req.method,
                                             &req.url,
@@ -192,6 +292,7 @@ impl PluginProcess {
                                             &req.headers,
                                         )
                                         .await;
+                                        tracing::debug!(id = %req.id, status, elapsed_ms = started.elapsed().as_millis(), "插件 HTTP 完成");
                                         // 构造 http_response 消息写回插件
                                         let resp = PluginRequest::HttpResponse {
                                             id: req.id,
@@ -199,17 +300,13 @@ impl PluginProcess {
                                             body,
                                             error,
                                         };
-                                        if let Ok(line) = serde_json::to_string(&resp) {
-                                            let mut stdin = stdin.lock().await;
-                                            let _ = stdin.write_all((line + "\n").as_bytes()).await;
-                                            let _ = stdin.flush().await;
-                                        }
+                                        write_message(&stdin, &resp).await;
                                     });
                                 }
                                 Ok(PluginUpstreamMessage::RawResult(payload)) => {
                                     // 0.14.3:轨道 A 纯数据结果路由到 pending_raw_tools
                                     if let Some(tx) =
-                                        pending_raw_tools.lock().await.remove(&payload.id)
+                                        pending_raw_tools.lock().unwrap().remove(&payload.id)
                                     {
                                         let _ = tx.send(payload);
                                     } else {
@@ -220,15 +317,16 @@ impl PluginProcess {
                                     // 向后兼容：尝试旧格式（直接 PluginResponse struct）
                                     match serde_json::from_str::<PluginResponse>(&line) {
                                         Ok(resp) => {
-                                            if let Some(tx) = pending.lock().await.remove(&resp.id)
+                                            if let Some(tx) =
+                                                pending.lock().unwrap().remove(&resp.id)
                                             {
                                                 let _ = tx.send(resp);
                                             } else {
                                                 tracing::debug!(plugin = %id, id = %resp.id, "孤儿响应(无 pending)");
                                             }
                                         }
-                                        Err(e) => {
-                                            tracing::warn!(plugin = %id, error = %e, %line, "无效 stdout JSONL");
+                                        Err(_) => {
+                                            tracing::warn!(plugin = %id, "无效 stdout JSONL");
                                         }
                                     }
                                 }
@@ -244,6 +342,9 @@ impl PluginProcess {
                         }
                     }
                 }
+                // EOF/读失败立即唤醒此代次的所有等待者，不等总期限耗尽。
+                pending.lock().unwrap().clear();
+                pending_raw_tools.lock().unwrap().clear();
             });
         }
 
@@ -277,180 +378,117 @@ impl PluginProcess {
             pending,
             pending_raw_tools,
             next_id: std::sync::atomic::AtomicU64::new(1),
+            cancel,
         })
     }
 
     /// 是否仍存活(尝试非阻塞回收退出码)。
     async fn is_alive(&self) -> bool {
-        !matches!(self.child.lock().await.try_wait(), Ok(Some(_)))
+        self.stdin.valid.load(Ordering::Acquire)
+            && matches!(self.child.lock().await.try_wait(), Ok(None))
     }
 
-    /// 发送 query 并等待 response(带超时)。
-    ///
-    /// 统一错误处理：所有错误（超时、IO、进程崩溃、协议错误）都转化为
-    /// 负分的 PluginItem 错误项返回，前端显示友好错误信息。
-    /// 这确保用户永远不会看到「一直转圈」的占位符。
+    /// 写入与接收均被 PluginHandle 的总 deadline 约束。
     async fn query(
         &self,
         query: &str,
         context: &super::protocol::PluginQueryContext,
         settings: Option<&serde_json::Value>,
-        timeout_ms: u64,
+        deadline: tokio::time::Instant,
     ) -> Result<Vec<PluginItem>, PluginError> {
         let seq = self
             .next_id
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let req_id = format!("req_{seq}");
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(req_id.clone(), tx);
-
-        let req = PluginRequest::Query {
+        self.pending.lock().unwrap().insert(req_id.clone(), tx);
+        let _pending = PendingGuard {
+            requests: Arc::clone(&self.pending),
             id: req_id.clone(),
+            cancel: self.cancel.clone(),
+        };
+        let mut stdin = self.stdin.pipe.lock().await;
+        let req = PluginRequest::Query {
+            id: req_id,
             query: query.to_string(),
             context: context.clone(),
             settings: settings.cloned(),
+            budget_ms: Some(remaining_budget(deadline)?),
         };
-        let line = match serde_json::to_string(&req) {
-            Ok(s) => s + "\n",
-            Err(e) => {
-                self.pending.lock().await.remove(&req_id);
-                return Ok(Self::error_item(&format!("请求序列化失败：{e}")));
-            }
-        };
-
-        {
-            let mut stdin = self.stdin.lock().await;
-            if stdin.write_all(line.as_bytes()).await.is_err() || stdin.flush().await.is_err() {
-                self.pending.lock().await.remove(&req_id);
-                return Ok(Self::error_item("插件进程已关闭"));
-            }
+        let line =
+            serde_json::to_string(&req).map_err(|_| PluginError::Io("请求序列化失败".into()))?;
+        write_frame(&mut *stdin, &self.stdin.valid, line).await?;
+        drop(stdin);
+        let resp = rx.await.map_err(|_| PluginError::ProcessClosed)?;
+        if let Some(err) = resp.error {
+            return Err(PluginError::PluginReturned(err));
         }
-
-        match tokio::time::timeout(Duration::from_millis(timeout_ms), rx).await {
-            Ok(Ok(resp)) => {
-                // 插件返回 error 时，转成特殊的 PluginItem 让前端显示错误信息
-                if let Some(err) = resp.error {
-                    tracing::warn!(id = %req_id, error = %err.message, "插件返回错误信息");
-                    return Ok(vec![PluginItem {
-                        title: err.message,
-                        subtitle: None,
-                        score: -1.0,                // 负分，排序到最后
-                        action: PluginAction::None, // 纯展示，无操作
-                        ..Default::default()
-                    }]);
-                }
-                Ok(resp.items)
-            }
-            Ok(Err(_)) => {
-                // sender 被 drop = reader 退出 = 进程崩溃
-                Ok(Self::error_item("插件进程意外退出"))
-            }
-            Err(_) => {
-                self.pending.lock().await.remove(&req_id);
-                // best-effort 通知插件取消(限时,插件 stdin 堵塞则放弃)。
-                self.send_cancel(&req_id).await;
-                Ok(Self::error_item("查询超时，请稍后重试"))
-            }
-        }
+        Ok(resp.items)
     }
 
-    /// 构造错误信息项（score=-1，排序到最后，纯展示不执行动作）。
-    /// 所有插件系统错误统一走这个方法转化，确保前端占位符能被替换为友好错误。
+    /// 搜索出口的系统失败项；不带可执行动作。
     fn error_item(message: &str) -> Vec<PluginItem> {
         vec![PluginItem {
             title: message.to_string(),
-            subtitle: None,
             score: -1.0,
-            action: PluginAction::Open {
-                path: String::new(),
-            },
+            action: PluginAction::None,
             ..Default::default()
         }]
     }
 
-    /// 轨道 A 纯数据 tool-call（0.14.3）——发 ToolCall 请求 → 等 RawResult 响应。
-    ///
-    /// 与 `query()` 同模式:oneshot channel + timeout + 错误转 PluginError。
-    /// 返回 `RawToolResult`（纯 data），调用方（`PluginCapabilityAdapter`）用
-    /// `ProjectionRule` 投影成 `CapabilityResult`。
-    ///
-    /// req_id 格式 `"tc_{seq}"` 与 query 的 `"{seq}"` 共用 `next_id` 计数器,
-    /// 前缀保证不冲突;pending map 也分开(`pending` vs `pending_raw_tools`)。
     async fn execute_tool_raw(
         &self,
         tool_name: &str,
         arguments: &serde_json::Value,
         settings: Option<&serde_json::Value>,
-        timeout_ms: u64,
+        deadline: tokio::time::Instant,
     ) -> Result<RawToolResult, PluginError> {
         let seq = self
             .next_id
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let req_id = format!("tc_{seq}");
         let (tx, rx) = oneshot::channel();
         self.pending_raw_tools
             .lock()
-            .await
+            .unwrap()
             .insert(req_id.clone(), tx);
-
-        let req = PluginRequest::ToolCall {
+        let _pending = PendingGuard {
+            requests: Arc::clone(&self.pending_raw_tools),
             id: req_id.clone(),
+            cancel: self.cancel.clone(),
+        };
+        let mut stdin = self.stdin.pipe.lock().await;
+        let req = PluginRequest::ToolCall {
+            id: req_id,
             tool_name: tool_name.to_string(),
             arguments: arguments.clone(),
             settings: settings.cloned(),
+            budget_ms: Some(remaining_budget(deadline)?),
         };
-        let line = serde_json::to_string(&req)
-            .map_err(|e| PluginError::Io(format!("请求序列化失败: {e}")))?;
-
-        {
-            let mut stdin = self.stdin.lock().await;
-            stdin
-                .write_all((line + "\n").as_bytes())
-                .await
-                .map_err(|_| PluginError::ProcessClosed)?;
-            stdin
-                .flush()
-                .await
-                .map_err(|_| PluginError::ProcessClosed)?;
+        let line =
+            serde_json::to_string(&req).map_err(|_| PluginError::Io("请求序列化失败".into()))?;
+        write_frame(&mut *stdin, &self.stdin.valid, line).await?;
+        drop(stdin);
+        let payload = rx.await.map_err(|_| PluginError::ProcessClosed)?;
+        if let Some(err) = payload.error {
+            Err(PluginError::PluginReturned(err))
+        } else {
+            Ok(payload)
         }
-
-        match tokio::time::timeout(Duration::from_millis(timeout_ms), rx).await {
-            Ok(Ok(payload)) => {
-                if let Some(err) = payload.error {
-                    Err(PluginError::PluginReturned(err.message))
-                } else {
-                    Ok(payload)
-                }
-            }
-            Ok(Err(_)) => Err(PluginError::ProcessClosed),
-            Err(_) => {
-                self.pending_raw_tools.lock().await.remove(&req_id);
-                self.send_cancel(&req_id).await;
-                Err(PluginError::Timeout)
-            }
-        }
-    }
-
-    /// 发送 cancel 通知(best-effort):让支持取消的插件停止那次 query。
-    /// 插件可忽略;整体限时 200ms——插件若不读 stdin(stdin 管道堵塞)则放弃,
-    /// 避免独占 stdin 锁把单次超时拖垮成「插件永久不可用」。
-    async fn send_cancel(&self, req_id: &str) {
-        let req = PluginRequest::Cancel {
-            id: req_id.to_string(),
-        };
-        let Ok(line) = serde_json::to_string(&req) else {
-            return;
-        };
-        let write = async {
-            let mut stdin = self.stdin.lock().await;
-            stdin.write_all((line + "\n").as_bytes()).await?;
-            stdin.flush().await?;
-            Ok::<(), std::io::Error>(())
-        };
-        let _ = tokio::time::timeout(Duration::from_millis(200), write).await;
     }
 }
 
+/// HTTP 回写和 best-effort cancel 不得长期占用 stdin 锁。
+async fn write_message(stdin: &PluginStdin, message: &PluginRequest) {
+    let Ok(line) = serde_json::to_string(message) else {
+        return;
+    };
+    let write = async {
+        let mut pipe = stdin.pipe.lock().await;
+        write_frame(&mut *pipe, &stdin.valid, line).await
+    };
+    let _ = tokio::time::timeout(Duration::from_millis(200), write).await;
+}
 /// 一个插件:manifest + 懒启动的进程句柄。
 pub struct PluginHandle {
     manifest: Arc<PluginManifest>,
@@ -459,6 +497,7 @@ pub struct PluginHandle {
     process: Mutex<Option<Arc<PluginProcess>>>,
     /// 全局代理配置(进程启动时 env 注入),ureq/reqwest 原生读取。运行时可更新。
     proxy: std::sync::Mutex<Option<(String, String)>>,
+    query_slots: Arc<Semaphore>,
 }
 
 impl PluginHandle {
@@ -467,11 +506,13 @@ impl PluginHandle {
         dir: PathBuf,
         proxy: Option<(String, String)>,
     ) -> Self {
+        let concurrency = manifest.runtime.concurrency.unwrap_or(4).clamp(1, 64) as usize;
         PluginHandle {
             manifest,
             dir,
             process: Mutex::new(None),
             proxy: std::sync::Mutex::new(proxy),
+            query_slots: Arc::new(Semaphore::new(concurrency)),
         }
     }
 
@@ -498,144 +539,105 @@ impl PluginHandle {
         }
     }
 
-    /// 查询插件:懒启动(或复用)进程 → 发 query(带上下文) → 收 items。
-    /// 进程已死则重启一次。
-    ///
-    /// 统一错误处理:所有失败(解释器未找到、进程拉起失败、超时、IO 错误)都转化为
-    /// 负分的 PluginItem 错误项返回,前端显示友好错误。
-    /// 只有 `ProcessClosed` 这类「可恢复」错误会清理句柄以便下次重启。
-    ///
-    /// 并发:process 锁只覆盖「确保进程存在」(spawn 判定),拿到 Arc 后立即释放,
-    /// query 在锁外 await——同插件的多次 query 可并发 in-flight(stdin/pending 各自
-    /// 互斥、按 id 路由,天然安全)。`manifest.concurrency` 信号量(§3.7 B3)留后续。
+    /// 懒启动/复用；排队、准备进程、stdin 和结果共用同一总期限。
+    async fn ensure_process(&self) -> Result<Arc<PluginProcess>, PluginError> {
+        let mut guard = self.process.lock().await;
+        let need_spawn = match guard.as_ref() {
+            None => true,
+            Some(p) => !p.is_alive().await,
+        };
+        if need_spawn {
+            let exec = self.manifest.exec_path(&self.dir);
+            let runtime_type = self.manifest.runtime.r#type;
+            tracing::info!(plugin = %self.manifest.id, ?runtime_type, "拉起插件进程");
+            let proxy = self.proxy.lock().unwrap().clone();
+            let process =
+                PluginProcess::spawn(&exec, &self.dir, &self.manifest.id, runtime_type, proxy)?;
+            *guard = Some(Arc::new(process));
+        }
+        Ok(Arc::clone(guard.as_ref().unwrap()))
+    }
+
+    async fn clear_closed_process(&self, proc: &Arc<PluginProcess>) {
+        let mut guard = self.process.lock().await;
+        if guard.as_ref().is_some_and(|p| Arc::ptr_eq(p, proc)) {
+            *guard = None;
+        }
+    }
+
+    fn deadline(&self, caller: Option<std::time::Instant>) -> tokio::time::Instant {
+        let manifest =
+            tokio::time::Instant::now() + Duration::from_millis(self.manifest.timeout_ms());
+        caller
+            .map(tokio::time::Instant::from_std)
+            .map_or(manifest, |d| d.min(manifest))
+    }
+
     pub async fn query(
         &self,
         query: &str,
         context: &super::protocol::PluginQueryContext,
         settings: Option<&serde_json::Value>,
     ) -> Result<Vec<PluginItem>, PluginError> {
-        let timeout_ms = self.manifest.timeout_ms();
-
-        // 短暂持锁:确保进程存在,clone Arc 后释放。
-        let proc = {
-            let mut guard = self.process.lock().await;
-            let need_spawn = match guard.as_ref() {
-                None => true,
-                Some(p) => !p.is_alive().await,
-            };
-            if need_spawn {
-                let exec = self.manifest.exec_path(&self.dir);
-                let runtime_type = self.manifest.runtime.r#type;
-                tracing::info!(plugin = %self.manifest.id, ?runtime_type, exec = %exec.display(), "拉起插件进程");
-                let proxy = self.proxy.lock().unwrap().clone();
-                match PluginProcess::spawn(&exec, &self.dir, &self.manifest.id, runtime_type, proxy)
-                {
-                    Ok(proc) => *guard = Some(Arc::new(proc)),
-                    Err(e) => {
-                        // 进程拉起失败 → 返回友好错误项,用户知道发生了什么
-                        let msg = match e {
-                            PluginError::InterpreterNotInstalled { kind } => {
-                                format!("脚本运行时（{kind}）未安装，请在 设置 → 引擎 → 脚本运行时 安装")
-                            }
-                            PluginError::Spawn(e) => format!("进程启动失败：{e}"),
-                            _ => e.to_string(),
-                        };
-                        tracing::warn!(plugin = %self.manifest.id, error = %msg, "插件拉起失败");
-                        return Ok(PluginProcess::error_item(&msg));
-                    }
-                }
+        let deadline = self.deadline(None);
+        let call = async {
+            let _permit = Arc::clone(&self.query_slots)
+                .try_acquire_owned()
+                .map_err(|_| PluginError::Busy)?;
+            remaining_budget(deadline)?;
+            let proc = self.ensure_process().await?;
+            let result = proc.query(query, context, settings, deadline).await;
+            if matches!(result, Err(PluginError::ProcessClosed)) {
+                self.clear_closed_process(&proc).await;
             }
-            Arc::clone(guard.as_ref().unwrap())
+            result
         };
-
-        let result = proc.query(query, context, settings, timeout_ms).await;
-
-        // 进程关闭类错误:清理句柄,下次重启。
-        // 守护竞态:并发 query 可能在 A 失败期间已重建新进程——只清「我这个已死的」,
-        // 用 Arc::ptr_eq 判定身份,勿误清他人的新进程。
-        if matches!(result, Err(PluginError::ProcessClosed)) {
-            let mut guard = self.process.lock().await;
-            if guard
-                .as_ref()
-                .map(|p| Arc::ptr_eq(p, &proc))
-                .unwrap_or(false)
-            {
-                *guard = None;
-            }
-        }
-
-        // 所有其他错误也转化为错误项返回(目前 query() 内部已转化,这里兜底)
+        let result = tokio::time::timeout_at(deadline, call)
+            .await
+            .unwrap_or(Err(PluginError::Timeout));
         match result {
             Ok(items) => Ok(items),
             Err(e) => {
-                tracing::warn!(plugin = %self.manifest.id, error = %e, "插件查询失败");
-                Ok(PluginProcess::error_item(&e.to_string()))
+                tracing::warn!(plugin = %self.manifest.id, "插件查询失败");
+                let message = match &e {
+                    PluginError::InterpreterNotInstalled { kind } => {
+                        format!("脚本运行时（{kind}）未安装，请在 设置 → 引擎 → 脚本运行时 安装")
+                    }
+                    _ => e.to_string(),
+                };
+                Ok(PluginProcess::error_item(&message))
             }
         }
     }
 
-    /// 轨道 A 纯数据 tool-call（0.14.3）——与 `query()` 相同的进程管理逻辑，
-    /// 但调 `execute_tool_raw()` 返回 `RawToolResult`（纯 data）。
-    ///
-    /// 调用方（`PluginCapabilityAdapter`）在 manifest 配了 `projection` 时走此路径。
+    /// Tool-call 使用 manifest 与调用方剩余预算中更小的值。
     pub async fn execute_tool_raw(
         &self,
         tool_name: &str,
         arguments: &serde_json::Value,
         settings: Option<&serde_json::Value>,
+        caller_deadline: Option<std::time::Instant>,
     ) -> Result<RawToolResult, PluginError> {
-        let timeout_ms = self.manifest.timeout_ms();
-
-        let proc = {
-            let mut guard = self.process.lock().await;
-            let need_spawn = match guard.as_ref() {
-                None => true,
-                Some(p) => !p.is_alive().await,
-            };
-            if need_spawn {
-                let exec = self.manifest.exec_path(&self.dir);
-                let runtime_type = self.manifest.runtime.r#type;
-                tracing::info!(plugin = %self.manifest.id, ?runtime_type, exec = %exec.display(), "拉起插件进程(raw tool-call)");
-                let proxy = self.proxy.lock().unwrap().clone();
-                match PluginProcess::spawn(&exec, &self.dir, &self.manifest.id, runtime_type, proxy)
-                {
-                    Ok(proc) => *guard = Some(Arc::new(proc)),
-                    Err(e) => {
-                        let msg = match e {
-                            PluginError::InterpreterNotInstalled { kind } => {
-                                format!("脚本运行时（{kind}）未安装，请在 设置 → 引擎 → 脚本运行时 安装")
-                            }
-                            PluginError::Spawn(e) => format!("进程启动失败：{e}"),
-                            _ => e.to_string(),
-                        };
-                        tracing::warn!(plugin = %self.manifest.id, error = %msg, "插件拉起失败(raw tool-call)");
-                        return Err(PluginError::Spawn(msg));
-                    }
-                }
+        let deadline = self.deadline(caller_deadline);
+        let call = async {
+            let _permit = Arc::clone(&self.query_slots)
+                .try_acquire_owned()
+                .map_err(|_| PluginError::Busy)?;
+            remaining_budget(deadline)?;
+            let proc = self.ensure_process().await?;
+            let result = proc
+                .execute_tool_raw(tool_name, arguments, settings, deadline)
+                .await;
+            if matches!(result, Err(PluginError::ProcessClosed)) {
+                self.clear_closed_process(&proc).await;
             }
-            Arc::clone(guard.as_ref().unwrap())
+            result
         };
-
-        let result = proc
-            .execute_tool_raw(tool_name, arguments, settings, timeout_ms)
-            .await;
-
-        // 进程关闭类错误:清理句柄,下次重启。
-        if matches!(result, Err(PluginError::ProcessClosed)) {
-            let mut guard = self.process.lock().await;
-            if guard
-                .as_ref()
-                .map(|p| Arc::ptr_eq(p, &proc))
-                .unwrap_or(false)
-            {
-                *guard = None;
-            }
-        }
-
-        result
+        tokio::time::timeout_at(deadline, call)
+            .await
+            .unwrap_or(Err(PluginError::Timeout))
     }
 }
-
 /// 执行 HTTP 请求（插件代理请求用）。使用 reqwest 并遵循全局代理配置。
 /// 返回 (status_code, body, error)。
 async fn execute_http_request(
@@ -648,11 +650,13 @@ async fn execute_http_request(
     use reqwest::Client;
 
     let client = match Client::builder()
-        .timeout(std::time::Duration::from_millis(timeout_ms))
+        .timeout(std::time::Duration::from_millis(
+            timeout_ms.clamp(1, 60_000),
+        ))
         .build()
     {
         Ok(c) => c,
-        Err(e) => return (0, None, Some(format!("创建 HTTP 客户端失败：{e}"))),
+        Err(_) => return (0, None, Some("创建 HTTP 客户端失败".into())),
     };
 
     let method = match method.to_uppercase().as_str() {
@@ -663,7 +667,7 @@ async fn execute_http_request(
         "PATCH" => reqwest::Method::PATCH,
         "HEAD" => reqwest::Method::HEAD,
         "OPTIONS" => reqwest::Method::OPTIONS,
-        m => return (0, None, Some(format!("不支持的 HTTP 方法：{m}"))),
+        _ => return (0, None, Some("不支持的 HTTP 方法".into())),
     };
 
     let mut req = client.request(method, url);
@@ -687,10 +691,33 @@ async fn execute_http_request(
             let status = resp.status().as_u16();
             match resp.text().await {
                 Ok(text) => (status, Some(text), None),
-                Err(e) => (status, None, Some(format!("读取响应失败：{e}"))),
+                Err(e) => (
+                    status,
+                    None,
+                    Some(
+                        if e.is_timeout() {
+                            "timeout: HTTP 响应读取超时"
+                        } else {
+                            "读取 HTTP 响应失败"
+                        }
+                        .into(),
+                    ),
+                ),
             }
         }
-        Err(e) => (0, None, Some(e.to_string())),
+        // 网络库错误通常包含完整 URL（彩云 Key 在路径，其他凭据可能在查询串）。
+        Err(e) => (
+            0,
+            None,
+            Some(
+                if e.is_timeout() {
+                    "timeout: HTTP 请求超时"
+                } else {
+                    "HTTP 请求失败"
+                }
+                .into(),
+            ),
+        ),
     }
 }
 
@@ -713,7 +740,194 @@ fn stderr_line_level(line: &str) -> tracing::Level {
 
 #[cfg(test)]
 mod tests {
-    use super::stderr_line_level;
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn interrupted_stdin_frame_cannot_be_reused_as_valid_jsonl() {
+        let (mut writer, _reader) = tokio::io::duplex(1);
+        let valid = AtomicBool::new(true);
+        let result = tokio::time::timeout(
+            Duration::from_millis(10),
+            write_frame(&mut writer, &valid, "{\"id\":\"large-frame\"}".into()),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(!valid.load(Ordering::Acquire));
+        assert!(matches!(
+            write_frame(&mut writer, &valid, "{}".into()).await,
+            Err(PluginError::ProcessClosed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn http_error_does_not_echo_credentials_from_invalid_url() {
+        let (_, body, error) = execute_http_request(
+            "GET",
+            "://private-api-key/path?secret=private-secret",
+            None,
+            10,
+            &[],
+        )
+        .await;
+        assert!(body.is_none());
+        let error = error.unwrap();
+        assert!(!error.contains("private-api-key"));
+        assert!(!error.contains("private-secret"));
+    }
+
+    /// 显式运行：先 cargo build -p blink-plugin-weather，再指定此 ignored test。
+    /// 无用户配置/密钥写入；真实宿主进程、HTTP 代理与两个 JSONL 出口。
+    #[tokio::test]
+    #[ignore = "manual: requires built weather executable and live Open-Meteo network"]
+    async fn smoke_weather_open_meteo() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        let mut value: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../plugins/builtin/weather/manifest.json"
+        ))
+        .unwrap();
+        value["runtime"]["exec"] =
+            serde_json::json!(root.join("target/debug/blink-plugin-weather.exe"));
+        let manifest: PluginManifest = serde_json::from_value(value).unwrap();
+        let handle = PluginHandle::new(Arc::new(manifest), root, None);
+        let settings = serde_json::json!({"default_city":"Guangzhou","temperature_unit":"celsius"});
+        let start = std::time::Instant::now();
+        let raw = handle
+            .execute_tool_raw(
+                "get_weather",
+                &serde_json::json!({"unit":"fahrenheit"}),
+                Some(&settings),
+                None,
+            )
+            .await
+            .unwrap();
+        let row = &raw.data[0];
+        assert!(matches!(row["status"].as_str(), Some("ok" | "partial")));
+        assert_eq!(row["provider"], "open_meteo");
+        assert!(row["temp"].as_str().unwrap().ends_with("°F"));
+        assert_eq!(row["daily"].as_array().unwrap().len(), 7);
+        assert!(
+            row["daily"][0]["temp_max"]
+                .as_str()
+                .unwrap()
+                .ends_with("°F")
+        );
+        assert!(row["current"]["valid_at"].as_str().is_some());
+        println!(
+            "live tool: {} status={} days=7 elapsed_ms={}",
+            row["summary"],
+            row["status"],
+            start.elapsed().as_millis()
+        );
+        let items = handle
+            .query("", &Default::default(), Some(&settings))
+            .await
+            .unwrap();
+        assert_eq!(items.len(), 1);
+        assert!(items[0].title.contains("°C"), "{}", items[0].title);
+        match &items[0].action {
+            PluginAction::Copy { text } => {
+                assert!(text.contains("来源：Open-Meteo"));
+                assert!(text.contains("当前天气有效时间"));
+                assert!(text.contains("不代表全天持续"));
+                assert!(text.lines().count() >= 10);
+            }
+            _ => panic!("weather query must copy the summary"),
+        }
+        println!("live query: {}", items[0].title);
+    }
+
+    #[tokio::test]
+    async fn dropping_request_cleans_only_its_pending_and_sends_cancel() {
+        let requests: RequestMap<u8> = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let (cancel, mut cancellations) = mpsc::channel(2);
+        let (tx_a, rx_a) = oneshot::channel();
+        let (tx_b, rx_b) = oneshot::channel();
+        requests.lock().unwrap().insert("a".into(), tx_a);
+        requests.lock().unwrap().insert("b".into(), tx_b);
+        let guard = PendingGuard {
+            requests: Arc::clone(&requests),
+            id: "a".into(),
+            cancel,
+        };
+        drop(guard);
+        assert!(rx_a.await.is_err());
+        assert_eq!(cancellations.recv().await.as_deref(), Some("a"));
+        requests
+            .lock()
+            .unwrap()
+            .remove("b")
+            .unwrap()
+            .send(7)
+            .unwrap();
+        assert_eq!(rx_b.await.unwrap(), 7);
+    }
+
+    #[tokio::test]
+    async fn successful_response_does_not_cancel_and_old_generation_is_isolated() {
+        let old: RequestMap<u8> = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let new: RequestMap<u8> = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let (cancel, mut cancellations) = mpsc::channel(2);
+        let (tx, rx) = oneshot::channel();
+        old.lock().unwrap().insert("req_1".into(), tx);
+        let guard = PendingGuard {
+            requests: Arc::clone(&old),
+            id: "req_1".into(),
+            cancel,
+        };
+        old.lock()
+            .unwrap()
+            .remove("req_1")
+            .unwrap()
+            .send(1)
+            .unwrap();
+        assert_eq!(rx.await.unwrap(), 1);
+        let (tx_new, _rx_new) = oneshot::channel();
+        new.lock().unwrap().insert("req_1".into(), tx_new);
+        drop(guard);
+        assert!(cancellations.try_recv().is_err());
+        assert_eq!(new.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn caller_deadline_covers_process_lock_and_capacity_releases_after_timeout() {
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"id":"test.weather","name":"test","version":"1",
+            "runtime":{"exec":"never-start.exe","timeout_ms":1000,"concurrency":1},
+            "triggers":[],"capabilities":[]
+        }))
+        .unwrap();
+        let handle = PluginHandle::new(Arc::new(manifest), PathBuf::new(), None);
+        let _locked = handle.process.lock().await;
+        let result = handle
+            .execute_tool_raw(
+                "get_weather",
+                &serde_json::json!({}),
+                None,
+                Some((tokio::time::Instant::now() + Duration::from_millis(10)).into_std()),
+            )
+            .await;
+        assert!(matches!(result, Err(PluginError::Timeout)));
+        assert_eq!(handle.query_slots.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn excess_work_returns_busy_without_starting_a_process() {
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"id":"test.weather","name":"test","version":"1",
+            "runtime":{"exec":"never-start.exe","concurrency":1},"triggers":[],"capabilities":[]
+        }))
+        .unwrap();
+        let handle = PluginHandle::new(Arc::new(manifest), PathBuf::new(), None);
+        let _permit = handle.query_slots.acquire().await.unwrap();
+        let result = handle
+            .execute_tool_raw("get_weather", &serde_json::json!({}), None, None)
+            .await;
+        assert!(matches!(result, Err(PluginError::Busy)));
+        assert!(handle.process.lock().await.is_none());
+    }
 
     #[test]
     fn stderr_level_markers_map_to_levels() {

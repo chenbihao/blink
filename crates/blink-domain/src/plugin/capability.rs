@@ -25,7 +25,7 @@ use crate::capability::{
 };
 use crate::plugin::manifest::{DangerClassDef, ToolDef};
 
-use super::process::PluginHandle;
+use super::process::{PluginError, PluginHandle};
 
 /// 构造插件 tool 的全局唯一 id。
 ///
@@ -141,7 +141,6 @@ impl Capability for PluginCapabilityAdapter {
         tracing::debug!(
             plugin = %plugin_id,
             tool = %self.tool_name,
-            args = %args,
             "插件 tool-call 执行（Capability 路径）"
         );
 
@@ -163,11 +162,9 @@ impl Capability for PluginCapabilityAdapter {
 
         let raw = self
             .plugin
-            .execute_tool_raw(&self.tool_name, &args, settings.as_ref())
+            .execute_tool_raw(&self.tool_name, &args, settings.as_ref(), ctx.deadline)
             .await
-            .map_err(|e| CapabilityError::Internal {
-                detail: format!("插件 tool 执行失败: {e}"),
-            })?;
+            .map_err(plugin_capability_error)?;
 
         tracing::info!(
             plugin = %plugin_id,
@@ -181,6 +178,33 @@ impl Capability for PluginCapabilityAdapter {
             apply_result_desc(&mut result, desc);
         }
         Ok(result)
+    }
+}
+
+/// 使用既有 Backend 分类通道，保留插件稳定 code，未知 code 同样可诊断。
+fn plugin_capability_error(error: PluginError) -> CapabilityError {
+    match error {
+        PluginError::Timeout => CapabilityError::Timeout {
+            detail: "插件查询超时".into(),
+        },
+        PluginError::PluginReturned(payload) => CapabilityError::Backend {
+            retryable: matches!(
+                payload.code.as_str(),
+                "busy" | "rate_limited" | "network_failed" | "timeout"
+            ),
+            category: payload.code,
+            message: payload.message,
+            detail: None,
+        },
+        PluginError::Busy => CapabilityError::Backend {
+            category: "busy".into(),
+            message: "插件忙，请稍后重试".into(),
+            detail: None,
+            retryable: true,
+        },
+        other => CapabilityError::Internal {
+            detail: other.to_string(),
+        },
     }
 }
 
@@ -203,6 +227,31 @@ fn apply_result_desc(result: &mut CapabilityResult, desc: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn plugin_error_code_and_message_survive_capability_mapping() {
+        for (code, retryable) in [
+            ("authentication_failed", false),
+            ("rate_limited", true),
+            ("location_not_configured", false),
+            ("network_failed", true),
+            ("custom_provider_error", false),
+        ] {
+            let error = plugin_capability_error(PluginError::PluginReturned(
+                super::super::protocol::PluginErrorPayload {
+                    code: code.into(),
+                    message: "服务失败".into(),
+                },
+            ));
+            let value = serde_json::to_value(error).unwrap();
+            assert_eq!(value["category"], code);
+            assert_eq!(value["message"], "服务失败");
+            assert_eq!(value["retryable"], retryable);
+        }
+        assert!(matches!(
+            plugin_capability_error(PluginError::Timeout),
+            CapabilityError::Timeout { .. }
+        ));
+    }
     use crate::plugin::manifest::ToolDef;
 
     #[test]
@@ -259,7 +308,7 @@ mod tests {
 
     #[test]
     fn apply_result_desc_injects_text_and_items() {
-        use crate::capability::{normalize, ProjectionRule, ResultShape};
+        use crate::capability::{ProjectionRule, ResultShape, normalize};
 
         // Text 形态：desc 写入 Text.desc
         let rule = ProjectionRule {

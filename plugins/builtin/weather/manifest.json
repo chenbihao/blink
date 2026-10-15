@@ -2,17 +2,17 @@
   "schema_version": 1,
   "id": "builtin.weather",
   "name": { "zh": "天气", "en": "Weather" },
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": { "zh": "查询城市天气（open-meteo，免费无需 key）", "en": "City weather (open-meteo, free, no key needed)" },
   "builtin": true,
   "runtime": {
     "type": "process",
     "protocol": "jsonl",
     "exec": "./bin/blink-plugin-weather.exe",
-    "timeout_ms": 5000,
+    "timeout_ms": 10000,
     "min_arg_length": 2,
     "debounce_ms": 500,
-    "concurrency": 1
+    "concurrency": 4
   },
   "triggers": [
     { "type": "keyword", "keyword": "天气", "exclusive": true },
@@ -40,7 +40,7 @@
       },
       "danger_class": "Safe",
       "result_type": "items",
-      "hint": "返回城市名、温度、天气状况、风速及未来 7 天预报，AI 可据此总结提醒（如带伞）",
+      "hint": "读取 status/warnings 判断数据完整度；部分可用时明确说明缺失项。逐日天气是当天最严重现象，不代表全天持续。返回来源、地点、有效时间和实际可用预报。",
       "progress_hint": "查询天气",
       "setting_bindings": {
         "city": "default_city",
@@ -49,8 +49,8 @@
       "projection": {
         "result_shape": "items",
         "items_pointer": "$",
-        "item_pointer": "$.temp",
-        "item_desc_pointer": "$.city"
+        "item_pointer": "$.summary",
+        "item_desc_pointer": "$.location.display_name"
       }
     }
   ],
