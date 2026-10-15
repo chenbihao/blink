@@ -50,6 +50,7 @@ pub async fn clear_plugin_secret(
 }
 
 /// 设置页的受限地点搜索桥接；不接受任意 tool ID，不绕过 Capability 门禁。
+/// `resolver` 只选择内建解析来源（auto/open_meteo/qweather），不接受临时 Host/Key。
 #[tauri::command]
 pub async fn search_weather_locations(
     app: tauri::AppHandle,
@@ -57,6 +58,7 @@ pub async fn search_weather_locations(
     country_code: Option<String>,
     admin: Option<String>,
     limit: Option<u64>,
+    resolver: Option<String>,
 ) -> Result<serde_json::Value, crate::app::command_error::CommandError> {
     use crate::domain::capability::{
         CapabilityRegistry, CapabilityResult, InvocationOrigin, InvokeContext, RuntimeCapabilities,
@@ -82,6 +84,16 @@ pub async fn search_weather_locations(
     }
     if let Some(admin) = admin.filter(|s| !s.trim().is_empty()) {
         args["admin"] = serde_json::json!(admin);
+    }
+    if let Some(resolver) = resolver.filter(|s| !s.trim().is_empty()) {
+        if !matches!(resolver.as_str(), "auto" | "open_meteo" | "qweather") {
+            return Err(crate::app::command_error::CommandError::new(
+                "invalid_arguments",
+                "解析来源必须是 auto、open_meteo 或 qweather",
+                true,
+            ));
+        }
+        args["resolver"] = serde_json::json!(resolver);
     }
     let result = registry
         .invoke("builtin_weather_search_locations", args, &ctx)

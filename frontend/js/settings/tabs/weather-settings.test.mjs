@@ -29,15 +29,14 @@ test("weather location patch distinguishes a selected place from an explicit cle
         resolved_at: "2026-10-15T00:00:00Z",
     };
 
+    // 0.26.2 起 default_provider 由通用设置控件管理，地点 patch 不再写死来源。
     assert.deepEqual(buildWeatherSettingsPatch(location), {
         settings_version: 1,
-        default_provider: "open_meteo",
         default_location: location,
         default_city: "",
     });
     assert.deepEqual(buildWeatherSettingsPatch(null), {
         settings_version: 1,
-        default_provider: "open_meteo",
         default_location: null,
         default_city: "",
     });

@@ -101,6 +101,10 @@ pub enum PluginAction {
     Copy {
         text: String,
     },
+    /// 在系统浏览器/资源管理器打开 URL 或路径（与宿主 PluginAction::Open 同形）。
+    Open {
+        path: String,
+    },
 }
 
 #[cfg(test)]

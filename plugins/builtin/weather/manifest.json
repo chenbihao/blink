@@ -5,10 +5,10 @@
     "zh": "天气",
     "en": "Weather"
   },
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": {
-    "zh": "查询城市天气（open-meteo，免费无需 key）",
-    "en": "City weather (open-meteo, free, no key needed)"
+    "zh": "查询城市天气（默认 Open-Meteo 免费；可配置和风天气）",
+    "en": "City weather (Open-Meteo by default; QWeather configurable)"
   },
   "builtin": true,
   "runtime": {
@@ -135,6 +135,15 @@
           "query": {
             "type": "string",
             "description": "完整城市或区县名称，可用辽宁/朝阳格式"
+          },
+          "resolver": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "open_meteo",
+              "qweather"
+            ],
+            "description": "解析来源；省略时已配置和风优先，否则 Open-Meteo。只选择内建解析器"
           }
         },
         "required": [
@@ -169,6 +178,62 @@
           }
         }
       ]
+    },
+    {
+      "key": "default_provider",
+      "type": "enum",
+      "title": {
+        "zh": "天气来源",
+        "en": "Weather provider"
+      },
+      "default": "open_meteo",
+      "description": {
+        "zh": "切换天气数据来源；已保存的默认地点与单位保持不变。和风需要先配置 API Host 与 API Key",
+        "en": "Switch the weather data source; the saved location and unit stay unchanged. QWeather requires its API Host and API Key"
+      },
+      "options": [
+        {
+          "value": "open_meteo",
+          "label": {
+            "zh": "Open-Meteo（免费）",
+            "en": "Open-Meteo (free)"
+          }
+        },
+        {
+          "value": "qweather",
+          "label": {
+            "zh": "和风天气（需 API Key）",
+            "en": "QWeather (API key required)"
+          }
+        }
+      ]
+    },
+    {
+      "key": "qweather_api_host",
+      "type": "string",
+      "title": {
+        "zh": "和风 API Host",
+        "en": "QWeather API Host"
+      },
+      "default": "",
+      "description": {
+        "zh": "和风控制台分配的 API Host，如 https://abc123.re.qweatherapi.com；只填服务根地址",
+        "en": "The API Host from the QWeather console, e.g. https://abc123.re.qweatherapi.com; root address only"
+      }
+    },
+    {
+      "key": "qweather_api_key",
+      "type": "string",
+      "secret": true,
+      "title": {
+        "zh": "和风 API Key",
+        "en": "QWeather API Key"
+      },
+      "default": "",
+      "description": {
+        "zh": "和风控制台创建的 API Key；留空表示未修改，可点右侧按钮清除",
+        "en": "The API Key created in the QWeather console; leave empty to keep the saved one, use the button to clear"
+      }
     }
   ]
 }

@@ -1,4 +1,9 @@
 //! 供应商无关的天气数值模型；格式化仅在出口发生。
+//!
+//! 条件字段的双轨约定：
+//! - `condition_code` 是 WMO 数值代码（Open-Meteo 返回），展示经 `conditions::wmo_description`。
+//! - `condition_text` / `condition_provider_code` 保留供应商原始文本与代码（和风返回
+//!   本地化 text + 字符串代码，不能套 WMO 表）；两轨缺失即未知，不互相伪造。
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
@@ -19,10 +24,19 @@ pub struct ResolvedLocation {
     pub resolved_at: String,
 }
 
+/// 供应商原始天气条件（和风）；Open-Meteo 走 WMO 数值代码，两者不混用。
+#[derive(Debug, Clone, Serialize)]
+pub struct ProviderCondition {
+    pub text: String,
+    pub code: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct CurrentWeather {
     pub temperature_c: Option<f64>,
     pub condition_code: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub condition: Option<ProviderCondition>,
     pub wind_speed_kmh: Option<f64>,
     pub valid_at: Option<String>,
 }
@@ -31,6 +45,10 @@ pub struct CurrentWeather {
 pub struct DailyWeather {
     pub date: String,
     pub condition_code: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub day_condition: Option<ProviderCondition>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub night_condition: Option<ProviderCondition>,
     pub temperature_max_c: Option<f64>,
     pub temperature_min_c: Option<f64>,
     pub precipitation_probability_percent: Option<f64>,
@@ -45,7 +63,7 @@ pub struct WeatherSnapshot {
     pub current: Option<CurrentWeather>,
     pub daily: Vec<DailyWeather>,
     pub warnings: Vec<String>,
-    pub attributions: Vec<&'static str>,
+    pub attributions: Vec<String>,
 }
 
 impl WeatherSnapshot {

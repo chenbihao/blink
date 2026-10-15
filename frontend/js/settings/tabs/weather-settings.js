@@ -29,12 +29,12 @@ function getSettings(plugin) {
     return plugin?.settings && typeof plugin.settings === "object" ? plugin.settings : {};
 }
 
-/** 只把已明确暂存的地点写入配置；null 表示明确清除。 */
+/** 只把已明确暂存的地点写入配置；null 表示明确清除。
+ *  天气来源（default_provider）由通用设置控件管理，此处不写死。 */
 export function buildWeatherSettingsPatch(location, hasDraft = true) {
     if (!hasDraft) return {};
     return {
         settings_version: 1,
-        default_provider: "open_meteo",
         default_location: location,
         default_city: "",
     };
@@ -64,6 +64,7 @@ function locationKindLabel(kind) {
     const keys = {
         city_center: "weather.kind_city",
         district_center: "weather.kind_district",
+        county_center: "weather.kind_county",
         manual: "weather.kind_manual",
     };
     return keys[kind] ? t(keys[kind]) : String(kind || t("weather.kind_unknown"));
@@ -71,6 +72,7 @@ function locationKindLabel(kind) {
 
 function locationSourceLabel(source) {
     if (source === "open_meteo") return t("weather.source_open_meteo");
+    if (source === "qweather") return t("weather.source_qweather");
     if (source === "user") return t("weather.source_user");
     return String(source || t("weather.source_unknown"));
 }
@@ -158,6 +160,14 @@ export function renderWeatherSettings(plugin) {
               <input class="weather-admin" type="text" autocomplete="off" placeholder="${escapeHtml(t("weather.admin_placeholder"))}"${searchDisabled} />
             </label>
           </div>
+          <label class="weather-field weather-resolver-field">
+            <span>${escapeHtml(t("weather.resolver_label"))}</span>
+            <select class="weather-resolver"${searchDisabled}>
+              <option value="auto">${escapeHtml(t("weather.resolver_auto"))}</option>
+              <option value="open_meteo">${escapeHtml(t("weather.source_open_meteo"))}</option>
+              <option value="qweather">${escapeHtml(t("weather.source_qweather"))}</option>
+            </select>
+          </label>
           <p class="weather-search-status" data-weather-search-status aria-live="polite">${escapeHtml(enabled ? t("weather.search_idle") : t("weather.search_disabled"))}</p>
           <div class="weather-candidates" data-weather-candidates role="listbox" aria-label="${escapeHtml(t("weather.candidates_label"))}"></div>
         </div>
@@ -201,11 +211,16 @@ function normalizeCandidate(candidate) {
     const longitude = candidate.longitude;
     const name = typeof candidate.name === "string" ? candidate.name.trim() : "";
     const displayName = typeof candidate.display_name === "string" ? candidate.display_name.trim() : "";
-    const allowedKind = candidate.kind === "city_center" || candidate.kind === "district_center";
+    const allowedKind = candidate.kind === "city_center"
+        || candidate.kind === "district_center"
+        || candidate.kind === "county_center";
+    const source = candidate.source === "open_meteo" || candidate.source === "qweather"
+        ? candidate.source
+        : null;
     if (!name || !displayName || typeof latitude !== "number" || typeof longitude !== "number"
         || !Number.isFinite(latitude) || !Number.isFinite(longitude)
         || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180
-        || candidate.coordinate_system !== "wgs84" || candidate.source !== "open_meteo"
+        || candidate.coordinate_system !== "wgs84" || !source
         || !allowedKind || typeof candidate.resolved_at !== "string" || !candidate.resolved_at) {
         return null;
     }
@@ -224,7 +239,7 @@ function normalizeCandidate(candidate) {
             : [],
         timezone: typeof candidate.timezone === "string" ? candidate.timezone : null,
         kind: candidate.kind,
-        source: "open_meteo",
+        source,
         source_id: typeof candidate.source_id === "string" ? candidate.source_id : null,
         resolved_at: candidate.resolved_at,
     };
@@ -268,6 +283,7 @@ export function mountWeatherSettings(card, plugin) {
     const queryInput = root.querySelector(".weather-query");
     const countryInput = root.querySelector(".weather-country-code");
     const adminInput = root.querySelector(".weather-admin");
+    const resolverSelect = root.querySelector(".weather-resolver");
     const latitudeInput = root.querySelector(".weather-latitude");
     const longitudeInput = root.querySelector(".weather-longitude");
     const manualNameInput = root.querySelector(".weather-manual-name");
@@ -374,6 +390,7 @@ export function mountWeatherSettings(card, plugin) {
         if (queryInput) queryInput.value = "";
         if (countryInput) countryInput.value = "";
         if (adminInput) adminInput.value = "";
+        if (resolverSelect) resolverSelect.value = "auto";
         clearManualInputs();
         setSearchStatus(enabled ? "weather.search_idle" : "weather.search_disabled");
         const CustomEventType = root.ownerDocument?.defaultView?.CustomEvent ?? globalThis.CustomEvent;
@@ -398,15 +415,18 @@ export function mountWeatherSettings(card, plugin) {
 
         const countryCode = countryInput?.value.trim().toUpperCase() || "";
         const admin = adminInput?.value.trim() || "";
+        const resolver = resolverSelect?.value || "auto";
         try {
             const result = await invoke("search_weather_locations", {
                 query,
                 countryCode: countryCode || null,
                 admin: admin || null,
                 limit: SEARCH_LIMIT,
+                resolver,
             });
             if (!isCurrentSearch(revision)) return;
-            if (result?.resolver !== "open_meteo") {
+            // 后端返回实际使用的解析来源；auto 会落到其中之一。
+            if (result?.resolver !== "open_meteo" && result?.resolver !== "qweather") {
                 setSearchStatus("weather.search_unsupported", {}, "error");
                 return;
             }
@@ -515,6 +535,17 @@ export function mountWeatherSettings(card, plugin) {
         }
     }
 
+    /** 切换解析来源立即使旧候选与在途请求失效，不回流旧来源的结果。 */
+    function handleResolverChange() {
+        invalidateSearch();
+        if (!editorOpen) return;
+        if (!queryInput?.value.trim()) {
+            setSearchStatus(enabled ? "weather.search_idle" : "weather.search_disabled");
+            return;
+        }
+        scheduleSearch();
+    }
+
     function handleCompositionStart(event) {
         if (!event.target.matches(".weather-query, .weather-country-code, .weather-admin")) return;
         composing = true;
@@ -560,6 +591,9 @@ export function mountWeatherSettings(card, plugin) {
 
     root.addEventListener("click", handleClick);
     root.addEventListener("input", handleInput);
+    root.addEventListener("change", (event) => {
+        if (event.target.matches(".weather-resolver")) handleResolverChange();
+    });
     root.addEventListener("compositionstart", handleCompositionStart);
     root.addEventListener("compositionend", handleCompositionEnd);
     root.addEventListener("keydown", handleKeydown);
@@ -576,6 +610,7 @@ export function mountWeatherSettings(card, plugin) {
         searchFields.forEach((field) => {
             if (field) field.disabled = !enabled;
         });
+        if (resolverSelect) resolverSelect.disabled = !enabled;
         invalidateSearch();
         if (editorOpen) setSearchStatus(enabled ? "weather.search_idle" : "weather.search_disabled");
     }

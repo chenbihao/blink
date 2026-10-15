@@ -69,16 +69,24 @@ Every Chord action can be remapped in Settings and promoted to a **global hotkey
 #### Configure a location
 
 - Go to **Settings → Plugins → Weather configuration** and choose “Change location” on the existing location card to search in that card's panel. Narrow the search with a two-letter country code or a parent administrative area. Select a complete location candidate and save the card. The temperature unit is saved explicitly as well.
+- The “Search source” selector in the panel chooses the geocoding service: Auto (QWeather first when configured, otherwise Open-Meteo), Open-Meteo, or QWeather. Switching the source invalidates previous candidates immediately; a chosen candidate only takes effect after saving. The QWeather source requires its API Host and API Key first — selecting it without configuration reports a clear error instead of silently falling back.
 - For advanced use, enter WGS84 latitude and longitude manually. If the display name is blank, the location is shown by its coordinates.
 - Canceling an edit does not save it. Clearing the default location also clears the legacy city so it cannot remain as a fallback.
-- You can edit the location card manually while the Weather plugin is disabled; network search requires the plugin to be enabled. The legacy `default_city` remains usable by queries but is shown as unconfirmed, and queries do not rewrite it automatically. If settings change while you are editing, the panel loads the latest saved configuration; review and confirm your draft again.
+- You can edit the location card and its configuration manually while the Weather plugin is disabled; network search requires the plugin to be enabled. The legacy `default_city` remains usable by queries but is shown as unconfirmed, and queries do not rewrite it automatically. If settings change while you are editing, the panel loads the latest saved configuration; review and confirm your draft again.
+
+#### Switch the weather provider (QWeather)
+
+- Under **Settings → Plugins → Weather configuration**, choose the “Weather provider”: Open-Meteo (free, no configuration) or QWeather. Switching keeps the saved default location and temperature unit.
+- QWeather requires an API Key from a project on the [QWeather console](https://console.qweather.com/), plus the account-specific API Host copied from “Console Settings.” Fill the plugin's “QWeather API Host” (a root address like `https://abc123.re.qweatherapi.com`) and “QWeather API Key.” The key is stored in Windows Credential Manager; leaving the field empty keeps the saved one, and the side button clears it.
+- QWeather credentials only take effect when QWeather is the selected provider; selecting it without complete configuration returns an explicit “configure first” error. The next query after changing the Host or Key uses the new configuration immediately, and authentication failures are reported clearly instead of falling back to Open-Meteo.
+- Current conditions and the 7-day forecast are requested in parallel; when one side fails, partial results return with the missing parts explained. Results show their data source, and Enter opens the attribution page.
 
 #### Queries and results
 
-- A query without a location uses the saved default coordinates. An explicit `city` or `location` passed to the weather tool overrides the default; do not pass both. `search_locations` only searches and returns candidates; it does not save a location.
+- A query without a location uses the saved default coordinates. An explicit `city` or `location` passed to the weather tool overrides the default; do not pass both. `search_locations` only searches and returns candidates (a `resolver` argument selects the geocoding source); it does not save a location.
 - Ambiguous names prompt you for a parent administrative area or a fuller place name, such as “辽宁/朝阳” or “广州/天河区.” The first candidate is never selected automatically. Open-Meteo may not find a Chinese name; try the full district or county name, an English name, or enter coordinates manually. A same-name place is not guaranteed to be uniquely identifiable automatically.
 - If a tool call explicitly specifies a temperature unit, it takes priority over the saved preference. Current conditions and daily forecasts use the same unit. Copying a weather result copies the complete weather summary.
-- Missing fields appear as “Unknown,” while other available information remains visible. Each daily description shows the most severe condition expected that day; it does not mean that condition lasts all day.
+- Missing fields appear as “Unknown,” while other available information remains visible. Open-Meteo daily descriptions show the most severe condition expected that day; QWeather daily descriptions are split into daytime and nighttime segments.
 
 ### Silky tricks
 

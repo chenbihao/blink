@@ -1,8 +1,13 @@
 //! 单线程查询状态机；输入/HTTP/取消按请求 ID 隔离。
-use crate::model::ResolvedLocation;
+//!
+//! 0.26.2 起区分"逻辑查询"与"HTTP 子请求"：一条用户查询（queries，按 query_id）
+//! 可同时挂多个在途 HTTP 子请求（http，按 http_id → (query_id, 槽位) 关联）——
+//! 和风实况与逐日并行共用同一条查询的总预算，两个子请求都完成前不移除该查询。
+//! 查询容量（4 槽）按逻辑查询计，不按 HTTP 计。
+use crate::model::{CurrentWeather, DailyWeather, ResolvedLocation, WeatherSnapshot};
 use crate::protocol::*;
-use crate::providers::open_meteo;
-use crate::settings::{self, RequestParameters};
+use crate::providers::{open_meteo, qweather};
+use crate::settings::{self, Provider, RequestParameters, Resolver, TemperatureUnit};
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 use std::time::{Duration, Instant};
@@ -17,26 +22,45 @@ enum ReplyKind {
     Tool,
 }
 
+/// 并行子请求的槽位；单请求阶段固定 Only。
+#[derive(Clone, Copy)]
+enum HttpSlot {
+    Only,
+    QCurrent,
+    QDaily,
+}
+
 enum Stage {
+    /// 名称解析进行中；resolver 标记实际使用的解析来源。
     Geocoding {
         query: crate::location::LocationQuery,
+        resolver: &'static str,
         search_only: bool,
         unqualified: bool,
     },
-    Weather(ResolvedLocation),
+    WeatherOpenMeteo(ResolvedLocation),
+    /// 和风实况/逐日并行；槽位在子请求完成时填充，两侧齐后聚合。
+    WeatherQWeather {
+        location: ResolvedLocation,
+        current: Option<Result<(CurrentWeather, Vec<String>), PluginError>>,
+        daily: Option<Result<(Vec<DailyWeather>, Vec<String>), PluginError>>,
+    },
 }
 
 struct Pending {
-    query_id: String,
     reply: ReplyKind,
-    unit: crate::settings::TemperatureUnit,
+    unit: TemperatureUnit,
     deadline: Instant,
+    provider: Provider,
+    qweather: Option<settings::QWeatherCredentials>,
     stage: Stage,
+    inflight: usize,
 }
 
 #[derive(Default)]
 pub struct WeatherService {
-    pending: HashMap<String, Pending>,
+    queries: HashMap<String, Pending>,
+    http: HashMap<String, (String, HttpSlot)>,
     next_http_id: u64,
 }
 
@@ -75,26 +99,30 @@ impl WeatherService {
         // 用户主动取消不生成超时/错误回复，也不能续发下一阶段。
         if let CoreToPlugin::Cancel { id } = &message {
             eprintln!("[weather] request cancelled");
-            self.pending.retain(|_, pending| pending.query_id != *id);
+            self.cancel(id);
             return vec![];
         }
         // 清理所有过期请求，防旧宿主不发 cancel 时永久占槽。
         let mut responses = Vec::new();
-        self.pending.retain(|_, pending| {
-            if remaining_ms(pending.deadline, now) == 0 {
+        let expired: Vec<String> = self
+            .queries
+            .iter()
+            .filter(|(_, pending)| remaining_ms(pending.deadline, now) == 0)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in expired {
+            if let Some(pending) = self.queries.remove(&id) {
+                self.http.retain(|_, (owner, _)| owner != &id);
                 responses.push(failed(
-                    pending.query_id.clone(),
+                    id.clone(),
                     pending.reply,
                     error("timeout", "天气查询超时，请稍后重试"),
                 ));
-                false
-            } else {
-                true
             }
-        });
-        let response = match message {
+        }
+        let mut incoming = match message {
             CoreToPlugin::Cancel { id } => {
-                self.pending.retain(|_, pending| pending.query_id != id);
+                self.cancel(&id);
                 None
             }
             CoreToPlugin::Query {
@@ -115,15 +143,27 @@ impl WeatherService {
             } => {
                 if tool_name == "search_locations" {
                     Some(match settings::parse_search(&arguments) {
-                        Ok(query) => self.start_search(id, query, budget_ms, now),
-                        Err(e) => failed(id, ReplyKind::Tool, e),
+                        Ok(search) => {
+                            match Self::resolve_resolver(search.resolver, settings.as_ref()) {
+                                Ok(resolver) => self.start_search(
+                                    id,
+                                    search.query,
+                                    resolver,
+                                    settings.as_ref(),
+                                    budget_ms,
+                                    now,
+                                ),
+                                Err(e) => vec![failed(id, ReplyKind::Tool, e)],
+                            }
+                        }
+                        Err(e) => vec![failed(id, ReplyKind::Tool, e)],
                     })
                 } else if tool_name != "get_weather" {
-                    Some(failed(
+                    Some(vec![failed(
                         id,
                         ReplyKind::Tool,
                         error("invalid_arguments", "未知天气工具"),
-                    ))
+                    )])
                 } else {
                     let parameters = settings::parse(None, Some(&arguments), settings.as_ref());
                     Some(self.start(id, ReplyKind::Tool, parameters, budget_ms, now))
@@ -134,12 +174,46 @@ impl WeatherService {
                 status,
                 body,
                 error: network_error,
-            } => self.http_response(&id, status, body.as_deref(), network_error.as_deref(), now),
+            } => self
+                .http_response(&id, status, body.as_deref(), network_error.as_deref(), now)
+                .map(|message| vec![message]),
         };
-        if let Some(response) = response {
-            responses.push(response);
+        if let Some(mut incoming) = incoming.take() {
+            responses.append(&mut incoming);
         }
         responses
+    }
+
+    fn cancel(&mut self, id: &str) {
+        self.queries.remove(id);
+        self.http.retain(|_, (owner, _)| owner != id);
+    }
+
+    /// resolver 参数 + settings → 实际解析来源。显式和风缺配置明确报错，
+    /// 不静默换源；auto 只在和风已配置时优先和风。
+    fn resolve_resolver(
+        requested: Resolver,
+        settings: Option<&serde_json::Value>,
+    ) -> Result<&'static str, PluginError> {
+        let qweather_ready =
+            settings::qweather_credentials(settings.and_then(serde_json::Value::as_object))?;
+        match requested {
+            Resolver::QWeather => {
+                if qweather_ready.is_none() {
+                    return Err(error(
+                        "provider_not_configured",
+                        "和风地点搜索需要先在设置中配置 API Host 与 API Key",
+                    ));
+                }
+                Ok("qweather")
+            }
+            Resolver::OpenMeteo => Ok("open_meteo"),
+            Resolver::Auto => Ok(if qweather_ready.is_some() {
+                "qweather"
+            } else {
+                "open_meteo"
+            }),
+        }
     }
 
     fn start(
@@ -149,248 +223,577 @@ impl WeatherService {
         parameters: Result<RequestParameters, PluginError>,
         budget_ms: Option<u64>,
         now: Instant,
-    ) -> PluginToCore {
+    ) -> Vec<PluginToCore> {
         let parameters = match parameters {
             Ok(p) => p,
-            Err(e) => return failed(id, reply, e),
+            Err(e) => return vec![failed(id, reply, e)],
         };
-        if self.pending.len() >= MAX_PENDING_QUERIES
-            || self.pending.values().any(|p| p.query_id == id)
-        {
-            return failed(id, reply, error("busy", "天气查询繁忙，请稍后重试"));
+        if self.queries.len() >= MAX_PENDING_QUERIES || self.queries.contains_key(&id) {
+            return vec![failed(id, reply, error("busy", "天气查询繁忙，请稍后重试"))];
         }
         let budget = budget_ms.unwrap_or(DEFAULT_BUDGET_MS).min(MAX_BUDGET_MS);
         if budget == 0 {
-            return failed(id, reply, error("timeout", "天气查询时间预算已用尽"));
+            return vec![failed(
+                id,
+                reply,
+                error("timeout", "天气查询时间预算已用尽"),
+            )];
         }
-        let (stage, url) = if let Some(location) = parameters.location {
-            let url = open_meteo::weather_url(&location);
-            (Stage::Weather(location), url)
+        let mut requests: Vec<(String, Vec<(String, String)>, HttpSlot)> = Vec::new();
+        let stage = if let Some(location) = parameters.location {
+            match parameters.provider {
+                Provider::OpenMeteo => {
+                    requests.push((open_meteo::weather_url(&location), vec![], HttpSlot::Only));
+                    Stage::WeatherOpenMeteo(location)
+                }
+                Provider::QWeather => {
+                    let credentials = parameters.qweather.as_ref().expect("validated");
+                    requests.push((
+                        qweather::current_url(credentials, &location),
+                        credentials.headers(),
+                        HttpSlot::QCurrent,
+                    ));
+                    requests.push((
+                        qweather::daily_url(credentials, &location),
+                        credentials.headers(),
+                        HttpSlot::QDaily,
+                    ));
+                    Stage::WeatherQWeather {
+                        location,
+                        current: None,
+                        daily: None,
+                    }
+                }
+            }
         } else {
+            // 名称解析来源独立于天气来源：已配置和风时优先和风，否则 Open-Meteo。
+            let resolver = if parameters.qweather.is_some() {
+                "qweather"
+            } else {
+                "open_meteo"
+            };
             let query = parameters.location_query.expect("name query was validated");
-            let url = crate::location::open_meteo::search_url(&query);
-            (
-                Stage::Geocoding {
-                    query,
-                    search_only: false,
-                    unqualified: false,
-                },
-                url,
-            )
+            match resolver {
+                "qweather" => {
+                    let credentials = parameters.qweather.as_ref().expect("checked above");
+                    requests.push((
+                        crate::location::qweather::search_url(&query, &credentials.host),
+                        credentials.headers(),
+                        HttpSlot::Only,
+                    ));
+                }
+                _ => requests.push((
+                    crate::location::open_meteo::search_url(&query),
+                    vec![],
+                    HttpSlot::Only,
+                )),
+            }
+            Stage::Geocoding {
+                query,
+                resolver,
+                search_only: false,
+                unqualified: false,
+            }
         };
-        self.issue(
+        let inflight = requests.len();
+        self.queries.insert(
+            id.clone(),
             Pending {
-                query_id: id,
                 reply,
                 unit: parameters.unit,
                 deadline: now + Duration::from_millis(budget),
+                provider: parameters.provider,
+                qweather: parameters.qweather.clone(),
                 stage,
+                inflight,
             },
-            url,
-            now,
-        )
+        );
+        self.flush_http(&id, requests, now, reply)
     }
 
     fn start_search(
         &mut self,
         id: String,
         query: crate::location::LocationQuery,
+        resolver: &'static str,
+        settings: Option<&serde_json::Value>,
         budget_ms: Option<u64>,
         now: Instant,
-    ) -> PluginToCore {
-        if self.pending.len() >= MAX_PENDING_QUERIES
-            || self.pending.values().any(|p| p.query_id == id)
-        {
-            return failed(
+    ) -> Vec<PluginToCore> {
+        if self.queries.len() >= MAX_PENDING_QUERIES || self.queries.contains_key(&id) {
+            return vec![failed(
                 id,
                 ReplyKind::Tool,
                 error("busy", "地点搜索繁忙，请稍后重试"),
-            );
+            )];
         }
         let budget = budget_ms.unwrap_or(DEFAULT_BUDGET_MS).min(MAX_BUDGET_MS);
         if budget == 0 {
-            return failed(id, ReplyKind::Tool, error("timeout", "地点搜索预算已用尽"));
+            return vec![failed(
+                id,
+                ReplyKind::Tool,
+                error("timeout", "地点搜索预算已用尽"),
+            )];
         }
-        let url = crate::location::open_meteo::search_url(&query);
-        self.issue(
+        let (url, headers) = if resolver == "qweather" {
+            let credentials =
+                settings::qweather_credentials(settings.and_then(serde_json::Value::as_object))
+                    .ok()
+                    .flatten()
+                    .expect("qweather resolver implies configured credentials");
+            (
+                crate::location::qweather::search_url(&query, &credentials.host),
+                credentials.headers(),
+            )
+        } else {
+            (crate::location::open_meteo::search_url(&query), vec![])
+        };
+        self.queries.insert(
+            id.clone(),
             Pending {
-                query_id: id,
                 reply: ReplyKind::Tool,
-                unit: crate::settings::TemperatureUnit::Celsius,
+                unit: TemperatureUnit::Celsius,
                 deadline: now + Duration::from_millis(budget),
+                provider: Provider::OpenMeteo,
+                qweather: None,
                 stage: Stage::Geocoding {
                     query,
+                    resolver,
                     search_only: true,
                     unqualified: false,
                 },
+                inflight: 1,
             },
-            url,
+        );
+        self.flush_http(
+            &id,
+            vec![(url, headers, HttpSlot::Only)],
             now,
+            ReplyKind::Tool,
         )
     }
-    fn issue(&mut self, pending: Pending, url: String, now: Instant) -> PluginToCore {
-        let timeout_ms = remaining_ms(pending.deadline, now);
+
+    /// 发出已排队的子请求；任何一个发不出（预算耗尽）即终止整条查询。
+    fn flush_http(
+        &mut self,
+        query_id: &str,
+        requests: Vec<(String, Vec<(String, String)>, HttpSlot)>,
+        now: Instant,
+        reply: ReplyKind,
+    ) -> Vec<PluginToCore> {
+        let mut messages = Vec::new();
+        for (url, headers, slot) in requests {
+            match self.issue(query_id, url, headers, slot, now) {
+                Ok(message) => messages.push(message),
+                Err(e) => {
+                    self.queries.remove(query_id);
+                    self.http.retain(|_, (owner, _)| owner != query_id);
+                    return vec![failed(query_id.to_owned(), reply, e)];
+                }
+            }
+        }
+        messages
+    }
+
+    fn issue(
+        &mut self,
+        query_id: &str,
+        url: String,
+        headers: Vec<(String, String)>,
+        slot: HttpSlot,
+        now: Instant,
+    ) -> Result<PluginToCore, PluginError> {
+        let deadline = self
+            .queries
+            .get(query_id)
+            .map(|pending| pending.deadline)
+            .ok_or_else(|| error("busy", "天气查询繁忙，请稍后重试"))?;
+        let timeout_ms = remaining_ms(deadline, now);
         if timeout_ms == 0 {
-            return failed(
-                pending.query_id,
-                pending.reply,
-                error("timeout", "天气查询超时，请稍后重试"),
-            );
+            return Err(error("timeout", "天气查询超时，请稍后重试"));
         }
         self.next_http_id += 1;
-        let id = format!("weather_http_{}", self.next_http_id);
-        self.pending.insert(id.clone(), pending);
-        PluginToCore::HttpRequest(HttpRequest {
-            id,
+        let http_id = format!("weather_http_{}", self.next_http_id);
+        self.http
+            .insert(http_id.clone(), (query_id.to_owned(), slot));
+        Ok(PluginToCore::HttpRequest(HttpRequest {
+            id: http_id,
             method: "GET".into(),
             url,
             body: None,
             timeout_ms,
-            headers: vec![],
-        })
+            headers,
+        }))
     }
 
     fn http_response(
         &mut self,
-        id: &str,
+        http_id: &str,
         status: u16,
         body: Option<&str>,
         network_error: Option<&str>,
         now: Instant,
     ) -> Option<PluginToCore> {
-        let pending = self.pending.remove(id)?;
-        let stage = match &pending.stage {
-            Stage::Geocoding { .. } => "geocoding",
-            Stage::Weather(_) => "weather",
+        let (query_id, slot) = self.http.remove(http_id)?;
+        let pending = self.queries.get_mut(&query_id)?;
+        pending.inflight -= 1;
+        let stage_label = match &pending.stage {
+            Stage::Geocoding { resolver, .. } => format!("geocoding:{resolver}"),
+            Stage::WeatherOpenMeteo(_) => "weather:open_meteo".to_owned(),
+            Stage::WeatherQWeather { .. } => "weather:qweather".to_owned(),
         };
         eprintln!(
-            "[weather] HTTP completed: provider=open_meteo stage={stage} http_id={id} status={status}"
+            "[weather] HTTP completed: stage={stage_label} http_id={http_id} status={status}"
         );
-        let result = if network_error.is_some() || status != 200 {
-            if network_error.is_some_and(|e| e.starts_with("busy:")) {
-                return Some(failed(
-                    pending.query_id,
-                    pending.reply,
-                    error("busy", "宿主天气请求繁忙，请稍后重试"),
-                ));
+
+        // 和风双请求：先把子结果放入槽位；两侧都到齐才聚合回复。
+        if let Stage::WeatherQWeather { current, daily, .. } = &mut pending.stage {
+            match slot {
+                HttpSlot::QCurrent => {
+                    *current = Some(parse_qweather_current(status, body, network_error))
+                }
+                HttpSlot::QDaily => {
+                    *daily = Some(parse_qweather_daily(status, body, network_error))
+                }
+                HttpSlot::Only => unreachable!("qweather stage never issues single requests"),
             }
-            if network_error.is_some_and(|e| e.starts_with("timeout:")) {
-                return Some(failed(
-                    pending.query_id,
-                    pending.reply,
-                    error("timeout", "天气服务请求超时，请稍后重试"),
-                ));
+            if pending.inflight > 0 {
+                return None;
             }
-            Err(match status {
-                401 | 403 => error("authentication_failed", "天气服务拒绝请求，请检查服务配置"),
-                429 => error("rate_limited", "天气服务请求过于频繁，请稍后重试"),
-                400 => error(
-                    "invalid_arguments",
-                    "天气服务无法处理该查询，请检查城市名称",
-                ),
-                _ => error("network_failed", "天气服务连接失败，请检查网络后重试"),
-            })
-        } else {
-            body.ok_or_else(|| error("invalid_response", "天气服务没有返回数据"))
-        };
-        let body = match result {
+            let pending = self.queries.remove(&query_id)?;
+            return Some(self.finish_qweather(query_id, pending));
+        }
+
+        let pending = self.queries.remove(&query_id)?;
+        let body = match classify_http(status, body, network_error) {
             Ok(body) => body,
-            Err(e) => return Some(failed(pending.query_id, pending.reply, e)),
+            Err(e) => return Some(failed(query_id, pending.reply, e)),
         };
-        match pending.stage {
+        let Pending {
+            reply,
+            unit,
+            deadline,
+            provider,
+            qweather,
+            stage,
+            ..
+        } = pending;
+        match stage {
             Stage::Geocoding {
                 query,
+                resolver,
                 search_only,
                 unqualified,
-            } => match crate::location::open_meteo::parse_candidates(body, &query) {
-                Ok(candidates)
-                    if candidates.is_empty() && query.admin.is_some() && !unqualified =>
-                {
-                    let url = crate::location::open_meteo::unqualified_search_url(&query);
-                    Some(self.issue(
-                        Pending {
-                            stage: Stage::Geocoding {
-                                query,
-                                search_only,
-                                unqualified: true,
-                            },
-                            ..pending
-                        },
-                        url,
-                        now,
-                    ))
-                }
-                Ok(candidates) if search_only => Some(PluginToCore::RawResult(RawToolResult {
-                    id: pending.query_id,
-                    data: serde_json::json!([{"resolver":"open_meteo","summary":format!("找到 {} 个地点候选",candidates.len()),"count":candidates.len(),"truncated":candidates.len()>=query.limit || crate::location::open_meteo::possibly_truncated(body),"candidates":candidates}]),
-                    error: None,
-                })),
-                Ok(candidates) if candidates.is_empty() => Some(failed(
-                    pending.query_id,
-                    pending.reply,
-                    error(
-                        "location_not_found",
-                        "未找到符合名称与限定的地点，请尝试更完整名称",
-                    ),
-                )),
-                Ok(mut candidates)
-                    if crate::location::can_auto_resolve(&query, &candidates)
-                        && !crate::location::open_meteo::possibly_truncated(body) =>
-                {
-                    let location = candidates.remove(0);
-                    let url = open_meteo::weather_url(&location);
-                    Some(self.issue(
-                        Pending {
-                            stage: Stage::Weather(location),
-                            ..pending
-                        },
-                        url,
-                        now,
-                    ))
-                }
-                Ok(candidates) => {
-                    let (items, data) = crate::presentation::needs_location(&candidates);
-                    Some(match pending.reply {
-                        ReplyKind::Query => PluginToCore::Response(PluginResponse {
-                            id: pending.query_id,
-                            items,
-                            error: None,
-                        }),
-                        ReplyKind::Tool => PluginToCore::RawResult(RawToolResult {
-                            id: pending.query_id,
-                            data,
-                            error: None,
-                        }),
-                    })
-                }
-                Err(e) => Some(failed(pending.query_id, pending.reply, e)),
+            } => self.finish_geocoding(
+                query_id,
+                reply,
+                unit,
+                deadline,
+                provider,
+                qweather,
+                body,
+                query,
+                resolver,
+                search_only,
+                unqualified,
+                now,
+            ),
+            Stage::WeatherOpenMeteo(location) => match open_meteo::parse_weather(&body, location) {
+                Ok(snapshot) => Some(self.complete(query_id, reply, &snapshot, unit)),
+                Err(e) => Some(failed(query_id, reply, e)),
             },
-            Stage::Weather(location) => match open_meteo::parse_weather(body, location) {
-                Ok(snapshot) => {
-                    eprintln!(
-                        "[weather] completed: provider={} status={} daily_days={}",
-                        snapshot.provider,
-                        snapshot.status(),
-                        snapshot.daily.len()
-                    );
-                    let (items, data) = crate::presentation::render(&snapshot, pending.unit);
-                    Some(match pending.reply {
-                        ReplyKind::Query => PluginToCore::Response(PluginResponse {
-                            id: pending.query_id,
-                            items,
-                            error: None,
-                        }),
-                        ReplyKind::Tool => PluginToCore::RawResult(RawToolResult {
-                            id: pending.query_id,
-                            data,
-                            error: None,
-                        }),
-                    })
-                }
-                Err(e) => Some(failed(pending.query_id, pending.reply, e)),
-            },
+            Stage::WeatherQWeather { .. } => None,
         }
     }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_geocoding(
+        &mut self,
+        query_id: String,
+        reply: ReplyKind,
+        unit: TemperatureUnit,
+        deadline: Instant,
+        provider: Provider,
+        qweather: Option<settings::QWeatherCredentials>,
+        body: String,
+        query: crate::location::LocationQuery,
+        resolver: &'static str,
+        search_only: bool,
+        unqualified: bool,
+        now: Instant,
+    ) -> Option<PluginToCore> {
+        let parsed = if resolver == "qweather" {
+            crate::location::qweather::parse_candidates(&body, &query).map(|candidates| {
+                (
+                    candidates,
+                    crate::location::qweather::possibly_truncated(&body, &query),
+                    crate::location::qweather::parse_attributions(&body),
+                )
+            })
+        } else {
+            crate::location::open_meteo::parse_candidates(&body, &query).map(|candidates| {
+                (
+                    candidates,
+                    crate::location::open_meteo::possibly_truncated(&body),
+                    Vec::new(),
+                )
+            })
+        };
+        let (candidates, truncated, attributions) = match parsed {
+            Ok(value) => value,
+            Err(e) => return Some(failed(query_id, reply, e)),
+        };
+        // Open-Meteo 的 admin 限定搜索无结果时，去限定重试一次再本地过滤（共用总预算）。
+        if resolver == "open_meteo"
+            && candidates.is_empty()
+            && query.admin.is_some()
+            && !unqualified
+        {
+            let url = crate::location::open_meteo::unqualified_search_url(&query);
+            self.queries.insert(
+                query_id.clone(),
+                Pending {
+                    stage: Stage::Geocoding {
+                        query,
+                        resolver,
+                        search_only,
+                        unqualified: true,
+                    },
+                    inflight: 1,
+                    reply,
+                    unit,
+                    deadline,
+                    provider,
+                    qweather,
+                },
+            );
+            return self.issue(&query_id, url, vec![], HttpSlot::Only, now).ok();
+        }
+        if search_only {
+            let data = crate::presentation::search_envelope(
+                resolver,
+                &candidates,
+                truncated,
+                &attributions,
+            );
+            return Some(PluginToCore::RawResult(RawToolResult {
+                id: query_id,
+                data,
+                error: None,
+            }));
+        }
+        if candidates.is_empty() {
+            return Some(failed(
+                query_id,
+                reply,
+                error(
+                    "location_not_found",
+                    "未找到符合名称与限定的地点，请尝试更完整名称",
+                ),
+            ));
+        }
+        if candidates.len() == 1
+            && crate::location::can_auto_resolve(&query, &candidates)
+            && !truncated
+        {
+            let location = candidates.into_iter().next().unwrap();
+            // 名称解析唯一确认后按本次请求的天气来源进入天气阶段。
+            let mut requests: Vec<(String, Vec<(String, String)>, HttpSlot)> = Vec::new();
+            let stage = match provider {
+                Provider::OpenMeteo => {
+                    requests.push((open_meteo::weather_url(&location), vec![], HttpSlot::Only));
+                    Stage::WeatherOpenMeteo(location)
+                }
+                Provider::QWeather => {
+                    let credentials = qweather.as_ref().expect("validated at start");
+                    requests.push((
+                        qweather::current_url(credentials, &location),
+                        credentials.headers(),
+                        HttpSlot::QCurrent,
+                    ));
+                    requests.push((
+                        qweather::daily_url(credentials, &location),
+                        credentials.headers(),
+                        HttpSlot::QDaily,
+                    ));
+                    Stage::WeatherQWeather {
+                        location,
+                        current: None,
+                        daily: None,
+                    }
+                }
+            };
+            self.queries.insert(
+                query_id.clone(),
+                Pending {
+                    stage,
+                    inflight: requests.len(),
+                    reply,
+                    unit,
+                    deadline,
+                    provider,
+                    qweather,
+                },
+            );
+            return self
+                .flush_http(&query_id, requests, now, reply)
+                .into_iter()
+                .next();
+        }
+        let (items, data) = crate::presentation::needs_location(&candidates, resolver);
+        Some(match reply {
+            ReplyKind::Query => PluginToCore::Response(PluginResponse {
+                id: query_id,
+                items,
+                error: None,
+            }),
+            ReplyKind::Tool => PluginToCore::RawResult(RawToolResult {
+                id: query_id,
+                data,
+                error: None,
+            }),
+        })
+    }
+
+    /// 和风聚合：两侧都 Ok 才算完整；一侧失败时另一侧可用数据仍可构成 partial，
+    /// 两侧都失败则返回先到的错误。
+    fn finish_qweather(&mut self, query_id: String, pending: Pending) -> PluginToCore {
+        let Stage::WeatherQWeather {
+            location,
+            current,
+            daily,
+        } = pending.stage
+        else {
+            unreachable!("finish_qweather requires qweather stage");
+        };
+        let (current, daily) = match (current, daily) {
+            (Some(current), Some(daily)) => (current, daily),
+            _ => unreachable!("both slots settle before aggregation"),
+        };
+        let snapshot = match (current, daily) {
+            (Ok(current), Ok(daily)) => {
+                let mut warnings = Vec::new();
+                if current.0.temperature_c.is_none()
+                    && current.0.condition.is_none()
+                    && current.0.wind_speed_kmh.is_none()
+                {
+                    warnings.push("和风实况字段不可用，仅提供预报".into());
+                }
+                if daily.0.is_empty() {
+                    warnings.push("逐日预报不可用，仅提供实况".into());
+                } else if daily.0.len() < 7 {
+                    warnings.push(format!("未来预报可用 {} 天（请求 7 天）", daily.0.len()));
+                }
+                let mut attributions = current.1;
+                for attribution in daily.1 {
+                    if !attributions.contains(&attribution) {
+                        attributions.push(attribution);
+                    }
+                }
+                WeatherSnapshot {
+                    location,
+                    provider: "qweather",
+                    fetched_at: chrono::Utc::now().to_rfc3339(),
+                    current: Some(current.0),
+                    daily: daily.0,
+                    warnings,
+                    attributions,
+                }
+            }
+            (Err(e), _) | (_, Err(e)) => return failed(query_id, pending.reply, e),
+        };
+        eprintln!(
+            "[weather] completed: provider=qweather status={} daily_days={}",
+            snapshot.status(),
+            snapshot.daily.len()
+        );
+        self.complete(query_id, pending.reply, &snapshot, pending.unit)
+    }
+
+    fn complete(
+        &self,
+        query_id: String,
+        reply: ReplyKind,
+        snapshot: &WeatherSnapshot,
+        unit: TemperatureUnit,
+    ) -> PluginToCore {
+        let (items, data) = crate::presentation::render(snapshot, unit);
+        match reply {
+            ReplyKind::Query => PluginToCore::Response(PluginResponse {
+                id: query_id,
+                items,
+                error: None,
+            }),
+            ReplyKind::Tool => PluginToCore::RawResult(RawToolResult {
+                id: query_id,
+                data,
+                error: None,
+            }),
+        }
+    }
+}
+
+/// 网络错误/状态码 → 统一错误分类（原始网络错误文本不透出）。
+fn classify_http(
+    status: u16,
+    body: Option<&str>,
+    network_error: Option<&str>,
+) -> Result<String, PluginError> {
+    if network_error.is_some() || status != 200 {
+        if network_error.is_some_and(|e| e.starts_with("busy:")) {
+            return Err(error("busy", "宿主天气请求繁忙，请稍后重试"));
+        }
+        if network_error.is_some_and(|e| e.starts_with("timeout:")) {
+            return Err(error("timeout", "天气服务请求超时，请稍后重试"));
+        }
+        return Err(match status {
+            401 | 403 => error("authentication_failed", "天气服务拒绝请求，请检查服务配置"),
+            429 => error("rate_limited", "天气服务请求过于频繁，请稍后重试"),
+            400 => error(
+                "invalid_arguments",
+                "天气服务无法处理该查询，请检查城市名称",
+            ),
+            _ => error("network_failed", "天气服务连接失败，请检查网络后重试"),
+        });
+    }
+    body.map(str::to_owned)
+        .ok_or_else(|| error("invalid_response", "天气服务没有返回数据"))
+}
+
+/// 和风子请求的错误分类：网络/超时先行，HTTP 错误交给供应商适配器按
+/// problem+json type 细分；成功保留原始 body 供聚合时解析。
+fn parse_qweather_current(
+    status: u16,
+    body: Option<&str>,
+    network_error: Option<&str>,
+) -> Result<(CurrentWeather, Vec<String>), PluginError> {
+    if network_error.is_some() || status != 200 {
+        if network_error.is_some_and(|e| e.starts_with("busy:")) {
+            return Err(error("busy", "宿主天气请求繁忙，请稍后重试"));
+        }
+        if network_error.is_some_and(|e| e.starts_with("timeout:")) {
+            return Err(error("timeout", "天气服务请求超时，请稍后重试"));
+        }
+        return Err(qweather::error_from_response(status, body.unwrap_or("")));
+    }
+    qweather::parse_current(body.ok_or_else(|| error("invalid_response", "和风天气没有返回数据"))?)
+}
+
+fn parse_qweather_daily(
+    status: u16,
+    body: Option<&str>,
+    network_error: Option<&str>,
+) -> Result<(Vec<DailyWeather>, Vec<String>), PluginError> {
+    if network_error.is_some() || status != 200 {
+        if network_error.is_some_and(|e| e.starts_with("busy:")) {
+            return Err(error("busy", "宿主天气请求繁忙，请稍后重试"));
+        }
+        if network_error.is_some_and(|e| e.starts_with("timeout:")) {
+            return Err(error("timeout", "天气服务请求超时，请稍后重试"));
+        }
+        return Err(qweather::error_from_response(status, body.unwrap_or("")));
+    }
+    qweather::parse_daily(body.ok_or_else(|| error("invalid_response", "和风天气没有返回数据"))?)
 }
 
 pub fn run() {
@@ -425,10 +828,58 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn qweather_settings() -> serde_json::Value {
+        json!({
+            "default_provider": "qweather",
+            "qweather_api_host": "https://abc123.re.qweatherapi.com",
+            "qweather_api_key": "test-key",
+            "default_city": "广州"
+        })
+    }
+
+    fn tool(id: &str, budget_ms: Option<u64>) -> CoreToPlugin {
+        CoreToPlugin::ToolCall {
+            id: id.into(),
+            tool_name: "get_weather".into(),
+            arguments: json!({}),
+            settings: Some(json!({"default_city":"广州"})),
+            budget_ms,
+        }
+    }
+
+    fn qweather_location() -> serde_json::Value {
+        json!({"location":{"latitude":23.129,"longitude":113.264,"coordinate_system":"wgs84","name":"广州"}})
+    }
+
+    fn http_id(message: &PluginToCore) -> String {
+        match message {
+            PluginToCore::HttpRequest(request) => request.id.clone(),
+            _ => panic!("expected HTTP request"),
+        }
+    }
+
+    fn http_ids(messages: &[PluginToCore]) -> Vec<String> {
+        messages.iter().map(http_id).collect()
+    }
+
+    fn geo_response(id: String, body: &str) -> CoreToPlugin {
+        CoreToPlugin::HttpResponse {
+            id,
+            status: 200,
+            body: Some(body.to_owned()),
+            error: None,
+        }
+    }
+
+    const GEO_UNIQUE: &str = r#"{"results":[{"name":"广州","latitude":23.13,"longitude":113.26,"feature_code":"PPLA"}]}"#;
+
+    const QW_DAILY_ONE: &str = r#"{"days":[{"forecastStartTime":"2026-10-15T06:00+08:00","temperatureMax":{"value":30,"unit":"°C"},"temperatureMin":{"value":20,"unit":"°C"},"daytime":{"condition":{"text":"小雨","code":"305"},"wind":{"speed":{"value":1.87,"unit":"m/s"}},"precipitation":{"probability":0.4}},"nighttime":{"condition":{"text":"多云","code":101},"wind":{"speed":{"value":8.0,"unit":"km/h"}},"precipitation":{"probability":0.64}}}]}"#;
+    const QW_CURRENT: &str = r#"{"condition":{"text":"阴","code":104},"temperature":{"value":21.5,"unit":"°C"},"wind":{"speed":{"value":3.0,"unit":"m/s"}},"metadata":{"attributions":["https://developer.qweather.com/attribution.html"]}}"#;
+
     #[test]
     fn default_coordinates_start_weather_without_geocoding() {
         let mut service = WeatherService::default();
-        let result=service.handle(CoreToPlugin::ToolCall{id:"coordinates".into(),tool_name:"get_weather".into(),arguments:json!({}),settings:Some(json!({"default_location":{"latitude":23.13,"longitude":113.26,"coordinate_system":"wgs84","name":"广州"},"default_city":"wrong"})),budget_ms:None},Instant::now());
+        let result = service.handle(CoreToPlugin::ToolCall{id:"coordinates".into(),tool_name:"get_weather".into(),arguments:json!({}),settings:Some(json!({"default_location":{"latitude":23.13,"longitude":113.26,"coordinate_system":"wgs84","name":"广州"},"default_city":"wrong"})),budget_ms:None},Instant::now());
         let PluginToCore::HttpRequest(request) = &result[0] else {
             panic!("weather expected");
         };
@@ -441,18 +892,357 @@ mod tests {
     }
 
     #[test]
+    fn qweather_weather_issues_two_parallel_requests_with_key_header() {
+        let mut service = WeatherService::default();
+        let now = Instant::now();
+        let result = service.handle(
+            CoreToPlugin::ToolCall {
+                id: "qw".into(),
+                tool_name: "get_weather".into(),
+                arguments: qweather_location(),
+                settings: Some(qweather_settings()),
+                budget_ms: Some(8000),
+            },
+            now,
+        );
+        assert_eq!(result.len(), 2, "current + daily 并行");
+        let (first, second) = match (&result[0], &result[1]) {
+            (PluginToCore::HttpRequest(a), PluginToCore::HttpRequest(b)) => (a, b),
+            _ => panic!("expected http requests"),
+        };
+        assert!(first.url.contains("/weather/v1/current/23.13/113.26/"));
+        assert!(second.url.contains("/weather/v1/daily/23.13/113.26/"));
+        assert!(second.url.contains("days=7"));
+        for request in [first, second] {
+            assert_eq!(request.timeout_ms, 8000);
+            assert!(
+                request
+                    .headers
+                    .iter()
+                    .any(|(name, value)| name == "X-QW-Api-Key" && value == "test-key")
+            );
+            assert!(!request.url.contains("test-key"), "key 只能出现在 header");
+        }
+        assert_eq!(service.queries.len(), 1, "两个子请求只占一条逻辑查询");
+        assert_eq!(service.http.len(), 2);
+    }
+
+    #[test]
+    fn qweather_first_response_waits_for_second_then_aggregates() {
+        let mut service = WeatherService::default();
+        let now = Instant::now();
+        let requests = service.handle(
+            CoreToPlugin::ToolCall {
+                id: "qw".into(),
+                tool_name: "get_weather".into(),
+                arguments: qweather_location(),
+                settings: Some(qweather_settings()),
+                budget_ms: None,
+            },
+            now,
+        );
+        let ids = http_ids(&requests);
+        // 第一份（daily）到达：无回复，查询保留等待另一侧
+        let pending = service.handle(geo_response(ids[1].clone(), QW_DAILY_ONE), now);
+        assert!(pending.is_empty());
+        assert!(service.queries.contains_key("qw"));
+        // 第二份（current）到达：聚合完成
+        let result = service.handle(geo_response(ids[0].clone(), QW_CURRENT), now);
+        let PluginToCore::RawResult(raw) = &result[0] else {
+            panic!("expected aggregated result");
+        };
+        assert_eq!(raw.data[0]["provider"], "qweather");
+        assert_eq!(raw.data[0]["temp"], "22°C");
+        assert_eq!(raw.data[0]["condition"], "阴");
+        assert_eq!(raw.data[0]["daily"][0]["condition"], "白天小雨/夜间多云");
+        assert!(service.queries.is_empty());
+        assert!(service.http.is_empty());
+    }
+
+    #[test]
+    fn qweather_day_only_daily_condition_has_no_night_segment() {
+        let mut service = WeatherService::default();
+        let now = Instant::now();
+        let requests = service.handle(
+            CoreToPlugin::ToolCall {
+                id: "qw".into(),
+                tool_name: "get_weather".into(),
+                arguments: qweather_location(),
+                settings: Some(qweather_settings()),
+                budget_ms: None,
+            },
+            now,
+        );
+        let ids = http_ids(&requests);
+        service.handle(geo_response(ids[1].clone(), r#"{"days":[{"forecastStartTime":"2026-10-15T06:00","temperatureMax":{"value":30,"unit":"°C"},"daytime":{"condition":{"text":"晴","code":100}}}]}"#), now);
+        let result = service.handle(
+            geo_response(ids[0].clone(), r#"{"condition":{"text":"晴","code":100}}"#),
+            now,
+        );
+        let PluginToCore::RawResult(raw) = &result[0] else {
+            panic!("expected result")
+        };
+        assert_eq!(raw.data[0]["daily"][0]["condition"], "白天晴");
+    }
+
+    #[test]
+    fn qweather_authentication_error_on_one_side_fails_the_query_after_both_settle() {
+        let mut service = WeatherService::default();
+        let now = Instant::now();
+        let requests = service.handle(
+            CoreToPlugin::ToolCall {
+                id: "qw".into(),
+                tool_name: "get_weather".into(),
+                arguments: qweather_location(),
+                settings: Some(qweather_settings()),
+                budget_ms: None,
+            },
+            now,
+        );
+        let ids = http_ids(&requests);
+        let unauthorized =
+            r#"{"error":{"status":401,"type":"https://x/#unauthorized","title":"Unauthorized"}}"#;
+        let result = service.handle(
+            CoreToPlugin::HttpResponse {
+                id: ids[0].clone(),
+                status: 401,
+                body: Some(unauthorized.to_owned()),
+                error: None,
+            },
+            now,
+        );
+        assert!(result.is_empty(), "另一子请求仍在途，暂不回复");
+        let result = service.handle(geo_response(ids[1].clone(), r#"{"days":[]}"#), now);
+        let PluginToCore::RawResult(raw) = &result[0] else {
+            panic!("expected failure")
+        };
+        assert_eq!(raw.error.as_ref().unwrap().code, "authentication_failed");
+        assert!(service.queries.is_empty() && service.http.is_empty());
+    }
+
+    #[test]
+    fn qweather_cancel_removes_both_subrequests_and_late_responses_are_dropped() {
+        let mut service = WeatherService::default();
+        let now = Instant::now();
+        let requests = service.handle(
+            CoreToPlugin::ToolCall {
+                id: "qw".into(),
+                tool_name: "get_weather".into(),
+                arguments: qweather_location(),
+                settings: Some(qweather_settings()),
+                budget_ms: None,
+            },
+            now,
+        );
+        let ids = http_ids(&requests);
+        assert!(
+            service
+                .handle(CoreToPlugin::Cancel { id: "qw".into() }, now)
+                .is_empty()
+        );
+        for id in ids {
+            assert!(service.handle(geo_response(id, "{}"), now).is_empty());
+        }
+        assert!(service.queries.is_empty() && service.http.is_empty());
+    }
+
+    #[test]
+    fn qweather_parallel_requests_use_one_of_four_query_slots() {
+        let mut service = WeatherService::default();
+        let now = Instant::now();
+        for i in 0..MAX_PENDING_QUERIES {
+            let requests = service.handle(
+                CoreToPlugin::ToolCall {
+                    id: format!("qw{i}"),
+                    tool_name: "get_weather".into(),
+                    arguments: qweather_location(),
+                    settings: Some(qweather_settings()),
+                    budget_ms: Some(10_000),
+                },
+                now,
+            );
+            assert_eq!(requests.len(), 2);
+        }
+        assert_eq!(service.queries.len(), MAX_PENDING_QUERIES);
+        let busy = service.handle(
+            CoreToPlugin::ToolCall {
+                id: "extra".into(),
+                tool_name: "get_weather".into(),
+                arguments: qweather_location(),
+                settings: Some(qweather_settings()),
+                budget_ms: None,
+            },
+            now,
+        );
+        let PluginToCore::RawResult(raw) = &busy[0] else {
+            panic!("expected busy")
+        };
+        assert_eq!(raw.error.as_ref().unwrap().code, "busy");
+    }
+
+    #[test]
+    fn name_resolution_prefers_qweather_only_when_configured() {
+        let mut service = WeatherService::default();
+        let now = Instant::now();
+        // 未配置和风：名称解析走 Open-Meteo
+        let om = service.handle(tool("om", None), now);
+        let PluginToCore::HttpRequest(request) = &om[0] else {
+            panic!()
+        };
+        assert!(
+            request
+                .url
+                .starts_with("https://geocoding-api.open-meteo.com/")
+        );
+        // 已配置和风：名称解析优先和风 GeoAPI，天气来源仍独立
+        let mut qw_tool = tool("qw", None);
+        if let CoreToPlugin::ToolCall { settings, .. } = &mut qw_tool {
+            *settings = Some(qweather_settings());
+        }
+        let qw = service.handle(qw_tool, now);
+        let PluginToCore::HttpRequest(request) = &qw[0] else {
+            panic!()
+        };
+        assert!(
+            request
+                .url
+                .starts_with("https://abc123.re.qweatherapi.com/geo/v2/city/lookup")
+        );
+        assert!(request.url.contains("location="));
+    }
+
+    #[test]
+    fn qweather_geocoding_ambiguity_returns_candidates_with_resolver_label() {
+        let mut service = WeatherService::default();
+        let now = Instant::now();
+        let mut qw_tool = tool("qw", None);
+        if let CoreToPlugin::ToolCall { settings, .. } = &mut qw_tool {
+            *settings = Some(qweather_settings());
+        }
+        let first = service.handle(qw_tool, now);
+        let id = http_id(&first[0]);
+        let body = r#"{"code":"200","location":[
+            {"name":"朝阳","id":"101070301","lat":"41.57","lon":"120.45","adm1":"辽宁省","country":"中国","type":"city"},
+            {"name":"朝阳","id":"101060407","lat":"39.92","lon":"116.44","adm1":"北京市","country":"中国","type":"city"}
+        ]}"#;
+        let result = service.handle(geo_response(id, body), now);
+        let PluginToCore::RawResult(raw) = &result[0] else {
+            panic!("expected needs_location")
+        };
+        assert_eq!(raw.data[0]["status"], "needs_location");
+        assert_eq!(raw.data[0]["resolver"], "qweather");
+        assert_eq!(raw.data[0]["candidates"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn search_resolver_explicit_qweather_without_credentials_errors() {
+        let mut service = WeatherService::default();
+        let now = Instant::now();
+        let result = service.handle(
+            CoreToPlugin::ToolCall {
+                id: "search".into(),
+                tool_name: "search_locations".into(),
+                arguments: json!({"query":"广州","resolver":"qweather"}),
+                settings: None,
+                budget_ms: None,
+            },
+            now,
+        );
+        let PluginToCore::RawResult(raw) = &result[0] else {
+            panic!("expected error")
+        };
+        assert_eq!(raw.error.as_ref().unwrap().code, "provider_not_configured");
+        assert!(service.queries.is_empty());
+    }
+
+    #[test]
+    fn search_resolver_open_meteo_explicit_or_auto_without_qweather() {
+        let mut service = WeatherService::default();
+        let now = Instant::now();
+        for (index, arguments) in [
+            json!({"query":"广州","resolver":"open_meteo"}),
+            json!({"query":"广州"}),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let result = service.handle(
+                CoreToPlugin::ToolCall {
+                    id: format!("search{index}"),
+                    tool_name: "search_locations".into(),
+                    arguments,
+                    settings: None,
+                    budget_ms: None,
+                },
+                now,
+            );
+            let PluginToCore::HttpRequest(request) = &result[0] else {
+                panic!("expected open-meteo search");
+            };
+            assert!(
+                request
+                    .url
+                    .starts_with("https://geocoding-api.open-meteo.com/")
+            );
+        }
+    }
+
+    #[test]
+    fn search_via_qweather_returns_envelope_with_attribution_and_truncation() {
+        let mut service = WeatherService::default();
+        let now = Instant::now();
+        let first = service.handle(
+            CoreToPlugin::ToolCall {
+                id: "search".into(),
+                tool_name: "search_locations".into(),
+                arguments: json!({"query":"朝阳","limit":2}),
+                settings: Some(qweather_settings()),
+                budget_ms: None,
+            },
+            now,
+        );
+        let PluginToCore::HttpRequest(request) = &first[0] else {
+            panic!("expected qweather search")
+        };
+        assert!(request.url.contains("number=2"));
+        let body = r#"{"code":"200","location":[
+            {"name":"朝阳","id":"101070301","lat":"41.57","lon":"120.45","adm1":"辽宁省","country":"中国","type":"city"},
+            {"name":"朝阳","id":"101060407","lat":"39.92","lon":"116.44","adm1":"北京市","country":"中国","type":"city"}
+        ],"refer":{"sources":["https://developer.qweather.com/attribution.html"]}}"#;
+        let result = service.handle(geo_response(request.id.clone(), body), now);
+        let PluginToCore::RawResult(raw) = &result[0] else {
+            panic!("expected envelope")
+        };
+        assert_eq!(raw.data[0]["resolver"], "qweather");
+        assert_eq!(raw.data[0]["count"], 2);
+        assert_eq!(raw.data[0]["truncated"], true, "返回数达到 number 上限");
+        assert_eq!(
+            raw.data[0]["attributions"][0],
+            "https://developer.qweather.com/attribution.html"
+        );
+    }
+
+    #[test]
     fn ambiguous_city_returns_candidates_without_weather_or_config_writes() {
         let now = Instant::now();
         let mut service = WeatherService::default();
         let first = service.handle(tool("ambiguity", None), now);
-        let result=service.handle(CoreToPlugin::HttpResponse{id:http_id(&first[0]),status:200,error:None,body:Some(r#"{"results":[{"id":1,"name":"广州","latitude":23,"longitude":113,"feature_code":"PPL"},{"id":2,"name":"广州","latitude":24,"longitude":114,"feature_code":"PPL"}]}"#.into())},now);
+        let result = service.handle(
+            CoreToPlugin::HttpResponse {
+                id: http_id(&first[0]),
+                status: 200,
+                error: None,
+                body: Some(r#"{"results":[{"id":1,"name":"广州","latitude":23,"longitude":113,"feature_code":"PPL"},{"id":2,"name":"广州","latitude":24,"longitude":114,"feature_code":"PPL"}]}"#.into()),
+            },
+            now,
+        );
         let PluginToCore::RawResult(result) = &result[0] else {
             panic!("candidate result expected");
         };
         assert_eq!(result.data[0]["status"], "needs_location");
         assert!(result.data[0].get("current").is_none());
         assert_eq!(result.data[0]["candidates"].as_array().unwrap().len(), 2);
-        assert!(service.pending.is_empty());
+        assert!(service.queries.is_empty());
     }
 
     #[test]
@@ -470,12 +1260,7 @@ mod tests {
             now,
         );
         let retry = service.handle(
-            CoreToPlugin::HttpResponse {
-                id: http_id(&first[0]),
-                status: 200,
-                body: Some("{}".into()),
-                error: None,
-            },
+            geo_response(http_id(&first[0]), "{}"),
             now + Duration::from_millis(30),
         );
         let PluginToCore::HttpRequest(request) = &retry[0] else {
@@ -484,12 +1269,7 @@ mod tests {
         assert_eq!(request.timeout_ms, 70);
         assert!(!request.url.contains("%2C"));
         let result = service.handle(
-            CoreToPlugin::HttpResponse {
-                id: request.id.clone(),
-                status: 200,
-                body: Some("{}".into()),
-                error: None,
-            },
+            geo_response(request.id.clone(), "{}"),
             now + Duration::from_millis(40),
         );
         let PluginToCore::RawResult(result) = &result[0] else {
@@ -497,32 +1277,7 @@ mod tests {
         };
         assert!(result.error.is_none());
         assert_eq!(result.data[0]["count"], 0);
-        assert!(service.pending.is_empty());
-    }
-    fn tool(id: &str, budget_ms: Option<u64>) -> CoreToPlugin {
-        CoreToPlugin::ToolCall {
-            id: id.into(),
-            tool_name: "get_weather".into(),
-            arguments: json!({}),
-            settings: Some(json!({"default_city":"广州"})),
-            budget_ms,
-        }
-    }
-    fn http_id(message: &PluginToCore) -> String {
-        match message {
-            PluginToCore::HttpRequest(r) => r.id.clone(),
-            _ => panic!("expected HTTP request"),
-        }
-    }
-    fn geo(id: String) -> CoreToPlugin {
-        CoreToPlugin::HttpResponse {
-            id,
-            status: 200,
-            body: Some(
-                r#"{"results":[{"name":"广州","latitude":23.13,"longitude":113.26,"feature_code":"PPLA"}]}"#.into(),
-            ),
-            error: None,
-        }
+        assert!(service.queries.is_empty());
     }
 
     #[test]
@@ -536,16 +1291,24 @@ mod tests {
                 .handle(CoreToPlugin::Cancel { id: "tc_1".into() }, now)
                 .is_empty()
         );
-        assert!(service.handle(geo(http), now).is_empty());
-        assert!(service.pending.is_empty());
+        assert!(
+            service
+                .handle(geo_response(http, GEO_UNIQUE), now)
+                .is_empty()
+        );
+        assert!(service.queries.is_empty());
     }
+
     #[test]
     fn remaining_budget_is_shared_and_expired_response_cannot_continue() {
         let mut service = WeatherService::default();
         let now = Instant::now();
         let initial = service.handle(tool("tc_1", Some(100)), now);
         let id = http_id(&initial[0]);
-        let next = service.handle(geo(id), now + Duration::from_millis(60));
+        let next = service.handle(
+            geo_response(id, GEO_UNIQUE),
+            now + Duration::from_millis(60),
+        );
         match &next[0] {
             PluginToCore::HttpRequest(r) => assert_eq!(r.timeout_ms, 40),
             _ => panic!("expected weather request"),
@@ -563,8 +1326,9 @@ mod tests {
             PluginToCore::RawResult(r) => assert_eq!(r.error.as_ref().unwrap().code, "timeout"),
             _ => panic!("expected timeout"),
         }
-        assert!(service.pending.is_empty());
+        assert!(service.queries.is_empty());
     }
+
     #[test]
     fn concurrent_requests_have_distinct_ids_and_cancel_does_not_cross_queries() {
         let mut service = WeatherService::default();
@@ -573,9 +1337,19 @@ mod tests {
         let b = service.handle(tool("b", None), now);
         assert_ne!(http_id(&a[0]), http_id(&b[0]));
         service.handle(CoreToPlugin::Cancel { id: "a".into() }, now);
-        assert_eq!(service.handle(geo(http_id(&b[0])), now).len(), 1);
-        assert!(service.handle(geo(http_id(&a[0])), now).is_empty());
+        assert_eq!(
+            service
+                .handle(geo_response(http_id(&b[0]), GEO_UNIQUE), now)
+                .len(),
+            1
+        );
+        assert!(
+            service
+                .handle(geo_response(http_id(&a[0]), GEO_UNIQUE), now)
+                .is_empty()
+        );
     }
+
     #[test]
     fn pending_work_is_bounded_and_expiry_releases_capacity() {
         let mut service = WeatherService::default();
@@ -590,8 +1364,9 @@ mod tests {
         }
         let resumed = service.handle(tool("new", None), now + Duration::from_millis(11));
         assert!(matches!(resumed.last(), Some(PluginToCore::HttpRequest(_))));
-        assert_eq!(service.pending.len(), 1);
+        assert_eq!(service.queries.len(), 1);
     }
+
     #[test]
     fn complete_tool_flow_keeps_array_and_explicit_unit() {
         let mut service = WeatherService::default();
@@ -601,8 +1376,16 @@ mod tests {
             *arguments = json!({"unit":"fahrenheit"});
         }
         let first = service.handle(request, now);
-        let second = service.handle(geo(http_id(&first[0])), now);
-        let final_result=service.handle(CoreToPlugin::HttpResponse{id:http_id(&second[0]),status:200,body:Some(r#"{"current":{"temperature_2m":0,"weather_code":96,"wind_speed_10m":2},"daily":{"time":["2026-10-15"],"temperature_2m_max":[10],"temperature_2m_min":[0]}}"#.into()),error:None},now);
+        let second = service.handle(geo_response(http_id(&first[0]), GEO_UNIQUE), now);
+        let final_result = service.handle(
+            CoreToPlugin::HttpResponse {
+                id: http_id(&second[0]),
+                status: 200,
+                body: Some(r#"{"current":{"temperature_2m":0,"weather_code":96,"wind_speed_10m":2},"daily":{"time":["2026-10-15"],"temperature_2m_max":[10],"temperature_2m_min":[0]}}"#.into()),
+                error: None,
+            },
+            now,
+        );
         match &final_result[0] {
             PluginToCore::RawResult(r) => {
                 assert!(r.error.is_none());
@@ -613,8 +1396,9 @@ mod tests {
             }
             _ => panic!("expected raw result"),
         }
-        assert!(service.pending.is_empty());
+        assert!(service.queries.is_empty());
     }
+
     #[test]
     fn unknown_tool_and_zero_budget_never_start_http() {
         let mut service = WeatherService::default();
@@ -629,7 +1413,7 @@ mod tests {
                 PluginToCore::RawResult(_)
             ));
         }
-        assert!(service.pending.is_empty());
+        assert!(service.queries.is_empty());
     }
 
     #[test]
@@ -660,7 +1444,7 @@ mod tests {
             let error = result.error.as_ref().unwrap();
             assert_eq!(error.code, code);
             assert!(!error.message.contains("private-key"));
-            assert!(service.pending.is_empty());
+            assert!(service.queries.is_empty());
             assert!(matches!(
                 service.handle(tool("new", None), now).last(),
                 Some(PluginToCore::HttpRequest(_))
@@ -681,6 +1465,6 @@ mod tests {
                 )
                 .is_empty()
         );
-        assert!(service.pending.is_empty());
+        assert!(service.queries.is_empty());
     }
 }

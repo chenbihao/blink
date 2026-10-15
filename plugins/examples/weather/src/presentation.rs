@@ -1,12 +1,49 @@
 //! 搜索与工具出口共用的格式化；兼容旧数据字段。
+//!
+//! 条件描述双轨：供应商原始文本（和风）优先，否则 WMO 数值代码映射（Open-Meteo）；
+//! 两轨都缺失即"未知"，不用缺省代码伪造晴天。
 use crate::conditions::wmo_description;
-use crate::model::WeatherSnapshot;
+use crate::model::{CurrentWeather, DailyWeather, ProviderCondition, WeatherSnapshot};
 use crate::protocol::{PluginAction, PluginItem};
 use crate::settings::TemperatureUnit;
 use serde_json::{Value, json};
 
-fn condition(code: Option<u32>) -> &'static str {
-    code.map(wmo_description).unwrap_or("未知")
+/// 归因链接的显示来源名。
+pub fn provider_label(provider: &str) -> &'static str {
+    match provider {
+        "qweather" => "QWeather",
+        _ => "Open-Meteo",
+    }
+}
+
+/// 归因链接出口白名单：HTTPS 且 host 属于已知数据源域（保留声明页路径），
+/// 防止响应里的任意 URL 经结果项直达 open_url。
+fn attribution_url(attributions: &[String]) -> Option<String> {
+    attributions.iter().find_map(|value| {
+        let rest = value.strip_prefix("https://")?;
+        let host = rest.split(['/', '?', '#']).next()?;
+        let allowed = host == "open-meteo.com"
+            || host.ends_with(".open-meteo.com")
+            || host == "qweather.com"
+            || host.ends_with(".qweather.com");
+        allowed.then(|| value.clone())
+    })
+}
+
+fn condition_label(current: &CurrentWeather) -> String {
+    match &current.condition {
+        Some(ProviderCondition { text, .. }) => text.clone(),
+        None => wmo_description(current.condition_code.unwrap_or(u32::MAX)).to_owned(),
+    }
+}
+
+fn daily_condition_label(day: &DailyWeather) -> String {
+    match (&day.day_condition, &day.night_condition) {
+        (Some(daytime), Some(nighttime)) => format!("白天{}/夜间{}", daytime.text, nighttime.text),
+        (Some(daytime), None) => format!("白天{}", daytime.text),
+        (None, Some(nighttime)) => format!("夜间{}", nighttime.text),
+        (None, None) => wmo_description(day.condition_code.unwrap_or(u32::MAX)).to_owned(),
+    }
 }
 
 fn temperature(unit: TemperatureUnit, value: Option<f64>) -> String {
@@ -21,9 +58,12 @@ fn wind(value: Option<f64>) -> String {
         .unwrap_or_else(|| "未知".into())
 }
 
-pub fn needs_location(candidates: &[crate::model::ResolvedLocation]) -> (Vec<PluginItem>, Value) {
+pub fn needs_location(
+    candidates: &[crate::model::ResolvedLocation],
+    resolver: &str,
+) -> (Vec<PluginItem>, Value) {
     let summary = "需要确认地点，请补充行政区限定或在设置中选择默认地点";
-    let data = json!([{"status":"needs_location","summary":summary,"resolver":"open_meteo","candidates":candidates}]);
+    let data = json!([{"status":"needs_location","summary":summary,"resolver":resolver,"candidates":candidates}]);
     let items = candidates
         .iter()
         .map(|location| PluginItem {
@@ -37,27 +77,53 @@ pub fn needs_location(candidates: &[crate::model::ResolvedLocation]) -> (Vec<Plu
     (items, data)
 }
 
+/// 地点搜索结果包（search_locations 工具出口）；resolver 是实际使用的解析来源。
+pub fn search_envelope(
+    resolver: &str,
+    candidates: &[crate::model::ResolvedLocation],
+    truncated: bool,
+    attributions: &[String],
+) -> Value {
+    json!([{
+        "resolver": resolver,
+        "summary": format!("找到 {} 个地点候选", candidates.len()),
+        "count": candidates.len(),
+        "truncated": truncated || candidates.len() >= 20,
+        "attributions": attributions,
+        "candidates": candidates,
+    }])
+}
+
 pub fn render(snapshot: &WeatherSnapshot, unit: TemperatureUnit) -> (Vec<PluginItem>, Value) {
     let current = snapshot.current.as_ref();
     let temp = current
         .map(|c| temperature(unit, c.temperature_c))
         .unwrap_or_default();
     let desc = current
-        .map(|c| condition(c.condition_code))
-        .unwrap_or("仅预报");
+        .map(condition_label)
+        .unwrap_or_else(|| "仅预报".into());
     let wind_speed = current.map(|c| wind(c.wind_speed_kmh)).unwrap_or_default();
+    let label = provider_label(snapshot.provider);
     let summary = format!("{} {} {}", snapshot.location.name, temp, desc)
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
+    let day_night_split = snapshot
+        .daily
+        .iter()
+        .any(|d| d.day_condition.is_some() || d.night_condition.is_some());
     let daily: Vec<Value> = snapshot
         .daily
         .iter()
         .map(|d| {
             json!({
                 "date":d.date,
-                "condition":condition(d.condition_code),
+                "condition":daily_condition_label(d),
                 "condition_code":d.condition_code,
+                "condition_day":d.day_condition.as_ref().map(|c| c.text.clone()),
+                "condition_night":d.night_condition.as_ref().map(|c| c.text.clone()),
+                "condition_day_code":d.day_condition.as_ref().map(|c| c.code.clone()),
+                "condition_night_code":d.night_condition.as_ref().map(|c| c.code.clone()),
                 "temp_max":temperature(unit,d.temperature_max_c),
                 "temp_min":temperature(unit,d.temperature_min_c),
                 "precip_prob":d.precipitation_probability_percent.map(|v|format!("{v:.0}%")),
@@ -68,7 +134,7 @@ pub fn render(snapshot: &WeatherSnapshot, unit: TemperatureUnit) -> (Vec<PluginI
         })
         .collect();
     let mut copy = format!(
-        "{summary}\n{} · 来源：Open-Meteo",
+        "{summary}\n{} · 来源：{label}",
         snapshot.location.display_name
     );
     if !wind_speed.is_empty() {
@@ -94,7 +160,11 @@ pub fn render(snapshot: &WeatherSnapshot, unit: TemperatureUnit) -> (Vec<PluginI
     if !snapshot.warnings.is_empty() {
         copy.push_str(&format!("\n{}", snapshot.warnings.join("；")));
     }
-    copy.push_str("\n逐日天气现象表示当天最严重天气，不代表全天持续。");
+    if day_night_split {
+        copy.push_str("\n逐日现象按白天/夜间分段描述。");
+    } else {
+        copy.push_str("\n逐日天气现象表示当天最严重天气，不代表全天持续。");
+    }
     let data = json!([{
         "status":snapshot.status(), "summary":summary,
         "city":snapshot.location.name, "temp":temp, "condition":desc,
@@ -103,10 +173,11 @@ pub fn render(snapshot: &WeatherSnapshot, unit: TemperatureUnit) -> (Vec<PluginI
         "fetched_at":snapshot.fetched_at, "current":snapshot.current,
         "warnings":snapshot.warnings, "attributions":snapshot.attributions,
         "availability":{"current":current.is_some(),"daily_days":snapshot.daily.len()},
-        "temperature_unit":unit, "daily_condition_semantics":"most_severe_of_day",
+        "temperature_unit":unit,
+        "daily_condition_semantics":if day_night_split { "day_night_split" } else { "most_severe_of_day" },
         "copy_text":copy,
     }]);
-    let mut subtitle = format!("{} · Open-Meteo", snapshot.location.display_name);
+    let mut subtitle = format!("{} · {label}", snapshot.location.display_name);
     if !wind_speed.is_empty() {
         subtitle.push_str(&format!(" · 风速 {wind_speed}"));
     }
@@ -117,51 +188,68 @@ pub fn render(snapshot: &WeatherSnapshot, unit: TemperatureUnit) -> (Vec<PluginI
         subtitle.push_str(&format!(" · {}", snapshot.warnings.join("；")));
     }
     subtitle.push_str(" | 按 Enter 复制天气摘要");
-    let items = vec![PluginItem {
+    let mut items = vec![PluginItem {
         title: summary,
         subtitle: Some(subtitle),
         score: 1.0,
         action: PluginAction::Copy { text: copy },
         payload: Some(data[0].clone()),
     }];
+    // 数据来源声明项：链接经 HTTPS + 来源域白名单校验，Enter 在外部浏览器打开。
+    if let Some(url) = attribution_url(&snapshot.attributions) {
+        items.push(PluginItem {
+            title: format!("数据来源：{label}"),
+            subtitle: Some(format!("按 Enter 打开数据来源与使用声明 {url}")),
+            score: 0.9,
+            action: PluginAction::Open { path: url },
+            payload: Some(data[0].clone()),
+        });
+    }
     (items, data)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{CurrentWeather, DailyWeather, ResolvedLocation};
+    use crate::model::{CurrentWeather, DailyWeather, ProviderCondition, ResolvedLocation};
+
+    fn location() -> ResolvedLocation {
+        ResolvedLocation {
+            name: "广州".into(),
+            display_name: "广州 · 广东 · 中国".into(),
+            latitude: 23.13,
+            longitude: 113.26,
+            coordinate_system: "wgs84",
+            administrative_area: "广东".into(),
+            country: "中国".into(),
+            country_code: Some("CN".into()),
+            administrative_areas: vec!["广东".into()],
+            timezone: Some("Asia/Shanghai".into()),
+            kind: "city_center",
+            source: "open_meteo",
+            source_id: None,
+            resolved_at: "2026-10-15T00:00:00Z".into(),
+        }
+    }
 
     #[test]
     fn fahrenheit_applies_to_current_daily_and_copy_without_losing_raw_codes() {
         let snapshot = WeatherSnapshot {
-            location: ResolvedLocation {
-                name: "广州".into(),
-                display_name: "广州 · 广东 · 中国".into(),
-                latitude: 23.13,
-                longitude: 113.26,
-                coordinate_system: "wgs84",
-                administrative_area: "广东".into(),
-                country: "中国".into(),
-                country_code: Some("CN".into()),
-                administrative_areas: vec!["广东".into()],
-                timezone: Some("Asia/Shanghai".into()),
-                kind: "city_center",
-                source: "open_meteo",
-                source_id: None,
-                resolved_at: "2026-10-15T00:00:00Z".into(),
-            },
+            location: location(),
             provider: "open_meteo",
             fetched_at: "2026-10-15T00:00:00Z".into(),
             current: Some(CurrentWeather {
                 temperature_c: Some(0.0),
                 condition_code: Some(96),
+                condition: None,
                 wind_speed_kmh: None,
                 valid_at: None,
             }),
             daily: vec![DailyWeather {
                 date: "2026-10-15".into(),
                 condition_code: None,
+                day_condition: None,
+                night_condition: None,
                 temperature_max_c: Some(10.0),
                 temperature_min_c: Some(0.0),
                 precipitation_probability_percent: None,
@@ -183,7 +271,85 @@ mod tests {
                 assert!(text.contains("50°F"));
                 assert_ne!(text, "广州");
             }
-            PluginAction::None => panic!("weather item must copy summary"),
+            _ => panic!("weather item must copy summary"),
         }
+    }
+
+    #[test]
+    fn qweather_day_night_split_and_attribution_item() {
+        let snapshot = WeatherSnapshot {
+            location: location(),
+            provider: "qweather",
+            fetched_at: "2026-10-15T00:00:00Z".into(),
+            current: Some(CurrentWeather {
+                temperature_c: Some(25.0),
+                condition_code: None,
+                condition: Some(ProviderCondition {
+                    text: "小雨".into(),
+                    code: "305".into(),
+                }),
+                wind_speed_kmh: Some(17.06),
+                valid_at: None,
+            }),
+            daily: vec![DailyWeather {
+                date: "2026-10-15".into(),
+                condition_code: None,
+                day_condition: Some(ProviderCondition {
+                    text: "小雨".into(),
+                    code: "305".into(),
+                }),
+                night_condition: Some(ProviderCondition {
+                    text: "多云".into(),
+                    code: "101".into(),
+                }),
+                temperature_max_c: Some(29.94),
+                temperature_min_c: Some(20.93),
+                precipitation_probability_percent: Some(64.0),
+                wind_max_kmh: Some(8.0),
+            }],
+            warnings: vec![],
+            attributions: vec!["https://developer.qweather.com/attribution.html".into()],
+        };
+        let (items, data) = render(&snapshot, TemperatureUnit::Celsius);
+        assert_eq!(data[0]["provider"], "qweather");
+        assert_eq!(data[0]["condition"], "小雨");
+        // WMO 数值代码缺失不为 0，未知代码不落进晴
+        assert_eq!(data[0]["daily"][0]["condition"], "白天小雨/夜间多云");
+        assert_eq!(data[0]["daily"][0]["condition_day"], "小雨");
+        assert_eq!(data[0]["daily"][0]["condition_night_code"], "101");
+        assert_eq!(data[0]["daily_condition_semantics"], "day_night_split");
+        assert!(items[0].subtitle.as_deref().unwrap().contains("QWeather"));
+        // 第二项是可打开的来源声明
+        assert_eq!(items.len(), 2);
+        match &items[1].action {
+            PluginAction::Open { path } => {
+                assert_eq!(path, "https://developer.qweather.com/attribution.html");
+            }
+            _ => panic!("attribution item must open the source page"),
+        }
+    }
+
+    #[test]
+    fn attribution_link_whitelist_rejects_unknown_hosts() {
+        let snapshot = WeatherSnapshot {
+            location: location(),
+            provider: "open_meteo",
+            fetched_at: "2026-10-15T00:00:00Z".into(),
+            current: None,
+            daily: vec![],
+            warnings: vec!["仅预报".into()],
+            attributions: vec![
+                "http://qweather.com/insecure".into(),
+                "https://evil.example.com/qweather".into(),
+                "https://open-meteo.com/".into(),
+            ],
+        };
+        let (items, data) = render(&snapshot, TemperatureUnit::Celsius);
+        assert_eq!(items.len(), 2);
+        match &items[1].action {
+            PluginAction::Open { path } => assert_eq!(path, "https://open-meteo.com/"),
+            _ => panic!("expected whitelisted attribution"),
+        }
+        assert_eq!(data[0]["status"], "partial");
     }
 }

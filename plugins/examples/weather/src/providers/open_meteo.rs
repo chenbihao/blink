@@ -92,6 +92,7 @@ pub fn parse_weather(
         .map(|c| CurrentWeather {
             temperature_c: c.temperature_2m.filter(|v| v.is_finite()),
             condition_code: c.weather_code,
+            condition: None,
             wind_speed_kmh: c.wind_speed_10m.filter(|v| v.is_finite() && *v >= 0.0),
             valid_at: valid_time(c.time.as_deref(), response.utc_offset_seconds),
         })
@@ -153,6 +154,8 @@ pub fn parse_weather(
             daily.push(DailyWeather {
                 date: date.clone(),
                 condition_code,
+                day_condition: None,
+                night_condition: None,
                 temperature_max_c,
                 temperature_min_c,
                 precipitation_probability_percent,
@@ -176,7 +179,7 @@ pub fn parse_weather(
         current,
         daily,
         warnings,
-        attributions: vec!["https://open-meteo.com/"],
+        attributions: vec!["https://open-meteo.com/".to_owned()],
     })
 }
 

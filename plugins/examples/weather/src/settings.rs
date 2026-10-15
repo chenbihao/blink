@@ -21,12 +21,98 @@ impl TemperatureUnit {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Provider {
+    OpenMeteo,
+    QWeather,
+}
+
+/// 地点解析来源；Auto = 已配置和风时优先和风，否则 Open-Meteo。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resolver {
+    Auto,
+    OpenMeteo,
+    QWeather,
+}
+
+/// 本次调用可用的和风凭据（host 已通过校验规范化；key 仅用于请求头，不进日志）。
+#[derive(Clone)]
+pub struct QWeatherCredentials {
+    pub host: String,
+    pub key: String,
+}
+
+impl QWeatherCredentials {
+    pub fn headers(&self) -> Vec<(String, String)> {
+        vec![("X-QW-Api-Key".to_owned(), self.key.clone())]
+    }
+}
+
 pub struct RequestParameters {
     #[cfg(test)]
     pub city: String,
     pub unit: TemperatureUnit,
     pub location: Option<crate::model::ResolvedLocation>,
     pub location_query: Option<crate::location::LocationQuery>,
+    pub provider: Provider,
+    pub qweather: Option<QWeatherCredentials>,
+}
+
+/// 从 settings 提取已通过校验的和风凭据；host/key 任一缺失即未配置（None）。
+/// 非法 host 值返回 Err——执行边界不能静默跳过无效配置。
+pub fn qweather_credentials(
+    settings: Option<&serde_json::Map<String, Value>>,
+) -> Result<Option<QWeatherCredentials>, crate::protocol::PluginError> {
+    let Some(settings) = settings else {
+        return Ok(None);
+    };
+    let host = optional_string(Some(settings), "qweather_api_host", "qweather_api_host")?
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let key = optional_string(Some(settings), "qweather_api_key", "qweather_api_key")?
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    match (host, key) {
+        (None, _) | (_, None) => Ok(None),
+        (Some(host), Some(key)) => {
+            if !valid_qweather_host(host) {
+                return Err(invalid_arguments(
+                    "和风 API Host 必须是 https 服务根地址（如 https://abc123.re.qweatherapi.com）",
+                ));
+            }
+            Ok(Some(QWeatherCredentials {
+                host: host.to_owned(),
+                key: key.to_owned(),
+            }))
+        }
+    }
+}
+
+/// 与宿主 `weather_config.rs` 同一规则：HTTPS 域名根地址，无路径/查询/碎片/
+/// 用户信息/端口，至少两段且末段为字母（排除 IP 字面量）。
+pub fn valid_qweather_host(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix("https://") else {
+        return false;
+    };
+    if rest.is_empty() || rest.len() > 253 || rest.contains(['/', '?', '#', '@', ':', '\\']) {
+        return false;
+    }
+    let labels: Vec<&str> = rest.split('.').collect();
+    if labels.len() < 2 {
+        return false;
+    }
+    let valid_label = |label: &str| {
+        !label.is_empty()
+            && label.len() <= 63
+            && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+    };
+    if !labels.iter().all(|label| valid_label(label)) {
+        return false;
+    }
+    let last = labels[labels.len() - 1];
+    last.len() >= 2 && last.chars().all(|c| c.is_ascii_alphabetic())
 }
 
 pub fn parse(
@@ -47,16 +133,23 @@ pub fn parse(
         optional_string(settings, "temperature_unit", "settings.temperature_unit")?,
         "settings.temperature_unit",
     )?;
-
-    if let Some(provider) =
-        optional_string(settings, "default_provider", "settings.default_provider")?
+    let provider = match optional_string(settings, "default_provider", "settings.default_provider")?
     {
-        if provider != "open_meteo" {
+        None | Some("open_meteo") => Provider::OpenMeteo,
+        Some("qweather") => Provider::QWeather,
+        Some(_) => {
             return Err(crate::protocol::PluginError {
-                code: "provider_not_configured".into(),
-                message: "当前版本仅支持 Open-Meteo 天气来源".into(),
+                code: "invalid_arguments".into(),
+                message: "天气来源必须是 open_meteo 或 qweather".into(),
             });
         }
+    };
+    let qweather = qweather_credentials(settings)?;
+    if provider == Provider::QWeather && qweather.is_none() {
+        return Err(crate::protocol::PluginError {
+            code: "provider_not_configured".into(),
+            message: "和风天气需要先在设置中配置 API Host 与 API Key".into(),
+        });
     }
     let country = optional_string(arguments, "country_code", "arguments.country_code")?;
     let admin = optional_string(arguments, "admin", "arguments.admin")?;
@@ -105,7 +198,25 @@ pub fn parse(
         unit: argument_unit
             .or(configured_unit)
             .unwrap_or(TemperatureUnit::Celsius),
+        provider,
+        qweather,
     })
+}
+
+/// 地点解析来源策略；显式和风缺配置在服务层报错（不静默换源），auto 由调用方决定。
+pub fn parse_resolver(arguments: Option<&Value>) -> Result<Resolver, crate::protocol::PluginError> {
+    match optional_string(
+        as_object(arguments, "arguments")?,
+        "resolver",
+        "arguments.resolver",
+    )? {
+        None | Some("auto") => Ok(Resolver::Auto),
+        Some("open_meteo") => Ok(Resolver::OpenMeteo),
+        Some("qweather") => Ok(Resolver::QWeather),
+        Some(_) => Err(invalid_arguments(
+            "resolver 必须是 auto、open_meteo 或 qweather",
+        )),
+    }
 }
 
 /// 保存地点沿用解析器信息；工具传入的名称/来源仅是用户元信息，不冒充解析器确认。
@@ -194,10 +305,11 @@ pub fn parse_location(
     } else {
         "manual"
     };
-    let source = if trusted && obj.get("source").and_then(Value::as_str) == Some("open_meteo") {
-        "open_meteo"
-    } else {
-        "user"
+    // 已确认地点保留解析来源（含和风命名空间）；工具传入的来源是用户元信息，不冒充。
+    let source = match obj.get("source").and_then(Value::as_str) {
+        Some("open_meteo") if trusted => "open_meteo",
+        Some("qweather") if trusted => "qweather",
+        _ => "user",
     };
     Ok(crate::model::ResolvedLocation {
         name,
@@ -222,9 +334,12 @@ pub fn parse_location(
     })
 }
 
-pub fn parse_search(
-    arguments: &Value,
-) -> Result<crate::location::LocationQuery, crate::protocol::PluginError> {
+pub struct SearchParameters {
+    pub query: crate::location::LocationQuery,
+    pub resolver: Resolver,
+}
+
+pub fn parse_search(arguments: &Value) -> Result<SearchParameters, crate::protocol::PluginError> {
     let args = arguments
         .as_object()
         .ok_or_else(|| invalid_arguments("搜索参数必须是对象"))?;
@@ -240,7 +355,10 @@ pub fn parse_search(
                 .ok_or_else(|| invalid_arguments("limit 必须是1到20的整数"))? as usize
         }
     };
-    crate::location::parse_query(query, country, admin, limit)
+    Ok(SearchParameters {
+        query: crate::location::parse_query(query, country, admin, limit)?,
+        resolver: parse_resolver(Some(arguments))?,
+    })
 }
 fn as_object<'a>(
     value: Option<&'a Value>,
@@ -288,7 +406,11 @@ fn invalid_arguments(message: impl Into<String>) -> crate::protocol::PluginError
 
 #[cfg(test)]
 mod tests {
-    use super::{TemperatureUnit, parse, parse_search};
+    use super::TemperatureUnit;
+    use super::{
+        Provider, Resolver, parse, parse_resolver, parse_search, qweather_credentials,
+        valid_qweather_host,
+    };
     use crate::protocol::PluginError;
     use serde_json::{Value, json};
 
@@ -311,6 +433,33 @@ mod tests {
         assert_eq!(explicit.kind, "manual");
         assert!(explicit.source_id.is_none());
         assert!(parse(None, Some(&json!({"city":"北京","location":saved})), None).is_err());
+    }
+
+    #[test]
+    fn saved_qweather_location_keeps_resolver_metadata_on_reload() {
+        // 和风解析器确认后保存的地点重启回读时保留来源/ID/类型，不退化为手工坐标。
+        let saved = json!({"latitude":23.13,"longitude":113.26,"coordinate_system":"wgs84","name":"广州","source":"qweather","source_id":"qweather:101280101","kind":"city_center"});
+        let defaults = parse(
+            None,
+            Some(&json!({})),
+            Some(&json!({"default_location":saved})),
+        )
+        .unwrap();
+        let location = defaults.location.unwrap();
+        assert_eq!(location.source, "qweather");
+        assert_eq!(location.source_id.as_deref(), Some("qweather:101280101"));
+        assert_eq!(location.kind, "city_center");
+        // 工具传入的同对象仍视为用户元信息，不冒充解析器确认。
+        let explicit = parse(
+            None,
+            Some(&json!({"location":{"latitude":23.13,"longitude":113.26,"coordinate_system":"wgs84","source":"qweather","source_id":"qweather:101280101","kind":"city_center"}})),
+            None,
+        )
+        .unwrap()
+        .location
+        .unwrap();
+        assert_eq!(explicit.source, "user");
+        assert_eq!(explicit.kind, "manual");
     }
 
     #[test]
@@ -475,5 +624,106 @@ mod tests {
             error_code(parse(Some(&two_hundred_one_chars), None, None)),
             "invalid_arguments"
         );
+    }
+
+    #[test]
+    fn provider_whitelist_and_qweather_readiness() {
+        let host = json!("https://abc123.re.qweatherapi.com");
+        // 显式选择和风但未配置 → provider_not_configured
+        assert_eq!(
+            error_code(parse(
+                None,
+                Some(&json!({})),
+                Some(&json!({"default_provider": "qweather"}))
+            )),
+            "provider_not_configured"
+        );
+        // 有 host 无 key 同样未配置
+        assert_eq!(
+            error_code(parse(
+                None,
+                Some(&json!({})),
+                Some(&json!({"default_provider": "qweather", "qweather_api_host": host}))
+            )),
+            "provider_not_configured"
+        );
+        // 完整配置：默认坐标直接查询
+        let configured = parse(
+            None,
+            Some(&json!({})),
+            Some(&json!({
+                "default_provider": "qweather",
+                "qweather_api_host": host,
+                "qweather_api_key": "secret-key",
+                "default_location": {"latitude": 23.13, "longitude": 113.26, "coordinate_system": "wgs84", "name": "广州"}
+            })),
+        )
+        .unwrap();
+        assert_eq!(configured.provider, Provider::QWeather);
+        assert!(configured.qweather.is_some());
+        // 未知来源值拒绝；open_meteo 是缺省，和风配置同时存在不改变缺省来源
+        assert_eq!(
+            error_code(parse(
+                None,
+                Some(&json!({})),
+                Some(&json!({"default_provider": "caiyun"}))
+            )),
+            "invalid_arguments"
+        );
+        let open_meteo = parse(
+            None,
+            Some(&json!({"city": "北京"})),
+            Some(&json!({"qweather_api_host": host, "qweather_api_key": "secret-key"})),
+        )
+        .unwrap();
+        assert_eq!(open_meteo.provider, Provider::OpenMeteo);
+        assert!(open_meteo.qweather.is_some());
+    }
+
+    #[test]
+    fn invalid_qweather_host_fails_at_execution_boundary() {
+        for host in [
+            "http://abc.re.qweatherapi.com",
+            "https://abc.re.qweatherapi.com/path",
+            "https://abc.re.qweatherapi.com:8443",
+            "https://127.0.0.1",
+        ] {
+            assert_eq!(
+                error_code(parse(
+                    None,
+                    Some(&json!({"city": "北京"})),
+                    Some(&json!({
+                        "qweather_api_host": host,
+                        "qweather_api_key": "secret-key"
+                    }))
+                )),
+                "invalid_arguments",
+                "host={host}"
+            );
+        }
+        assert!(valid_qweather_host("https://abc123.re.qweatherapi.com"));
+        assert!(!valid_qweather_host("abc123.re.qweatherapi.com"));
+    }
+
+    #[test]
+    fn resolver_argument_accepts_known_values_only() {
+        assert_eq!(parse_resolver(None).unwrap(), Resolver::Auto);
+        assert_eq!(
+            parse_resolver(Some(&json!({"resolver": "qweather"}))).unwrap(),
+            Resolver::QWeather
+        );
+        assert_eq!(
+            parse_resolver(Some(&json!({"resolver": "open_meteo"}))).unwrap(),
+            Resolver::OpenMeteo
+        );
+        assert_eq!(
+            parse_resolver(Some(&json!({"resolver": "caiyun"})))
+                .unwrap_err()
+                .code,
+            "invalid_arguments"
+        );
+        let search = parse_search(&json!({"query": "广州", "resolver": "qweather"})).unwrap();
+        assert_eq!(search.resolver, Resolver::QWeather);
+        assert_eq!(search.query.query, "广州");
     }
 }

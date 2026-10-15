@@ -649,7 +649,28 @@ async fn execute_http_request(
 ) -> (u16, Option<String>, Option<String>) {
     use reqwest::Client;
 
-    let client = match Client::builder()
+    // 0.26.2:带鉴权头的请求禁止跨目的地重定向——reqwest 跟随重定向时只剥离
+    // Authorization/Cookie 等内建敏感头，自定义头（如 X-QW-Api-Key）会原样重发，
+    // 用户凭据可能被送往配置 Host 之外的服务器。同 host 的 HTTPS 重定向仍允许。
+    let builder = if headers.iter().any(|(name, _)| is_sensitive_header(name)) {
+        match url_host(url) {
+            Some(host) => {
+                Client::builder().redirect(reqwest::redirect::Policy::custom(move |attempt| {
+                    if attempt.url().scheme() == "https"
+                        && attempt.url().host_str() == Some(host.as_str())
+                    {
+                        attempt.follow()
+                    } else {
+                        attempt.stop()
+                    }
+                }))
+            }
+            None => Client::builder().redirect(reqwest::redirect::Policy::none()),
+        }
+    } else {
+        Client::builder()
+    };
+    let client = match builder
         .timeout(std::time::Duration::from_millis(
             timeout_ms.clamp(1, 60_000),
         ))
@@ -721,6 +742,25 @@ async fn execute_http_request(
     }
 }
 
+/// 带凭据语义的请求头——重定向到其他目的地时不得重发。
+fn is_sensitive_header(name: &str) -> bool {
+    name.eq_ignore_ascii_case("authorization")
+        || name.eq_ignore_ascii_case("x-qw-api-key")
+        || name.eq_ignore_ascii_case("proxy-authorization")
+}
+
+/// 从 URL 字符串提取 host（去除 userinfo 与端口）；无法解析时返回 None。
+fn url_host(url: &str) -> Option<String> {
+    let rest = url.split_once("://")?.1;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let host = match authority.rsplit_once('@') {
+        Some((_, host)) => host,
+        None => authority,
+    };
+    let host = host.split(':').next()?;
+    (!host.is_empty()).then(|| host.to_string())
+}
+
 /// 解析插件 stderr 行的级别标记（stderr reader 转发用）。
 ///
 /// 约定：插件在 stderr 行内嵌入方括号级别标记（如 `[translate][error] ali HTTP error: ...`），
@@ -773,6 +813,30 @@ mod tests {
         let error = error.unwrap();
         assert!(!error.contains("private-api-key"));
         assert!(!error.contains("private-secret"));
+    }
+
+    #[test]
+    fn sensitive_headers_are_detected_case_insensitively() {
+        assert!(is_sensitive_header("Authorization"));
+        assert!(is_sensitive_header("x-qw-api-key"));
+        assert!(is_sensitive_header("X-QW-API-KEY"));
+        assert!(is_sensitive_header("Proxy-Authorization"));
+        assert!(!is_sensitive_header("Accept-Encoding"));
+        assert!(!is_sensitive_header("Content-Type"));
+    }
+
+    #[test]
+    fn url_host_extraction_strips_userinfo_and_port() {
+        assert_eq!(
+            url_host("https://abc.re.qweatherapi.com/geo/v2/city/lookup?location=x"),
+            Some("abc.re.qweatherapi.com".to_string())
+        );
+        assert_eq!(
+            url_host("https://user:pw@example.com:8443/path"),
+            Some("example.com".to_string())
+        );
+        assert_eq!(url_host("example.com/no-scheme"), None);
+        assert_eq!(url_host("https:///empty-host"), None);
     }
 
     /// 显式运行：先 cargo build -p blink-plugin-weather，再指定此 ignored test。
@@ -836,7 +900,8 @@ mod tests {
             .query("", &Default::default(), Some(&settings))
             .await
             .unwrap();
-        assert_eq!(items.len(), 1);
+        // 0.26.2 起 Query 出口附加一个可打开的数据来源声明项，排在天气主项之后。
+        assert_eq!(items.len(), 2);
         assert!(items[0].title.contains("°C"), "{}", items[0].title);
         match &items[0].action {
             PluginAction::Copy { text } => {
@@ -848,6 +913,11 @@ mod tests {
             _ => panic!("weather query must copy the summary"),
         }
         println!("live query: {}", items[0].title);
+        assert_eq!(items[1].title, "数据来源：Open-Meteo");
+        match &items[1].action {
+            PluginAction::Open { path } => assert_eq!(path, "https://open-meteo.com/"),
+            _ => panic!("attribution item must open the source page"),
+        }
         let ambiguous = handle
             .execute_tool_raw(
                 "get_weather",

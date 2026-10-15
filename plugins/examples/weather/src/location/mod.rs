@@ -4,6 +4,7 @@ use crate::model::ResolvedLocation;
 use crate::protocol::PluginError;
 
 pub mod open_meteo;
+pub mod qweather;
 
 const MAX_QUERY_CHARS: usize = 200;
 const MAX_LIMIT: usize = 20;

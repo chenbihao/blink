@@ -33,7 +33,7 @@ png = "0.17"
 quick-xml = "0.39.4"
 pinyin = "0.11.0"
 # reqwest: infra HTTP 工具（与根同款 rustls 默认后端）
-reqwest = { version = "0.13", features = ["json", "stream"] }
+reqwest = { version = "0.13", features = ["json", "stream", "gzip"] }
 # rig-core: conversations.rs 存取 rig_core::completion::Message（与根同版本）
 rig-core = "0.43"
 # rig-reqwest: http_log.rs 的 LoggingHttpClient 内核（rig 0.43 起默认 transport 拆出）
