@@ -27,6 +27,7 @@
 | 方向 | 状态 | 当前结论 | 进入 Phase 的条件 |
 |---|---|---|---|
 | 主链路可靠性与性能 | **持续优先** | 始终高于新功能 | 出现焦点、唤起、输入或首结果回退时立即处理 |
+| 天气插件接入和风、彩云天气 | **条件候选** | 两家均列入候选，首期仅适配现有实况与 7 天预报，独立凭据配置；暂缓实现 | 安排需求插入，并完成免费额度、账号权限、接口联调与查询时间预算核验 |
 | 跨 Provider 深度思考模式适配 | **近期优先** | 当前按钮默认开启，实时 reasoning 展示已接通；请求侧尚缺统一、诚实的 Provider/模型能力映射 | 明确 OpenAI-compatible/vLLM/DeepSeek、Anthropic、Gemini、Ollama 的开启/关闭协议、能力声明、custom params 覆盖和历史元数据语义 |
 | Agent 能力增强 | **条件候选** | 集中评估路径级授权、`write_text_file`、受控 `read_url` 与长任务边界 | 出现稳定的“读取→修改→保存”或“URL→正文→处理”高频场景 |
 | 多类型 API 扩展（生图/TTS 等） | **条件候选** | 语言大模型 API 为主；生图端点覆盖差（DeepSeek/Anthropic 无），TTS 未立项 | 支持配置独立类型的 API 端点（生图/STT/TTS）后，再评估 rig image_generation/audio_generation 接入收益 |
@@ -119,6 +120,16 @@ rig-agent ExtractorBuilder 提供 schema 约束输出 + 可配置重试（含"�
 ### 4.11 per-conversation MCP 工具限定
 
 `/mcp` 查看已在 0.26.7 落地；"限定当前对话只用某个 MCP 来源"是另一件事：工具池现为全局 disabled_tools 过滤 + epoch 触发 Agent 重建（chat_service 组装时 collect_tools 无 conversation 维度参数）。对话级白名单需要 InvokeContext/agent 组装链路带 conversation 级 tool 过滤并重新定义缓存键语义，单独设计后再立项。
+
+---
+
+### 4.12 天气插件接入和风、彩云天气
+
+和风与彩云均列入候选，可按账号权限与联调结果分批安排。首期仅在现有 `builtin.weather` 内适配供应商，保持城市查询、默认城市、温度单位、当前天气与未来 7 天预报，以及搜索和 `get_weather` 两条出口。和风采用 API Key + API Host；彩云优先评估稳定版 v2.6 与 App Key + App Secret 签名认证，已有 Token 的兼容范围立项时确定。各家独立配置，密钥复用插件 `secret` 字段与 Credential Manager；保留 Open-Meteo，允许选择供应商。自动降级、分钟降雨、AQI 与预警不纳入首期，后续有需求再评估。
+
+复杂度为局部中等：宿主 HTTP headers 与插件配置可复用，但需适配城市解析、实况和逐日接口、统一单位与时间，并处理现有查询总超时 5 秒与单次 HTTP 超时 15 秒不一致的问题。彩云另需明确城市到坐标的解析来源、中国大陆 GCJ-02 与其他地区 WGS84 的坐标系适配，以及请求签名。立项时核验 Gzip 解压、来源归因、错误分类和取消后停止后续请求；避免为两家供应商预建通用调度框架。
+
+2026-10-15 调研时，[和风官方定价](https://dev.qweather.com/docs/finance/pricing/)列明天气和基础服务价格组每月前 50,000 次请求免费；城市解析、实况与逐日均需按 API 请求计数，不能将一次插件查询视为一次请求。[彩云官方公开价格单](https://caiyunapp.com/api/caiyun_api_service_price.pdf)列出免费用户 1,000 次/天，但未标明生效日期；[当前计费文档](https://docs.caiyunapp.com/weather-api/billing.html)要求到开放平台查看套餐，因此新账号实际赠送额度、有效期及 7 天预报权限须登录控制台核验，不作为已确认承诺。立项时重新核验两家价格、账号权限与当前接口文档，再以真实凭据验证中文城市、海外城市、摄氏/华氏、鉴权失败及超时路径。当前仅留作候选，不预占版本号。
 
 ---
 

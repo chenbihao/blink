@@ -123,7 +123,7 @@ Summon: `Alt+A` in the main window (empty input; can be promoted to a global hot
 | Free-form selection | Left-button drag | Live `(x, y) w × h` size label |
 | Adjust region | Drag the 8 edge handles / drag inside the region | Resize / move (clamped to the monitor) |
 | Toolbar | Appears automatically after selection | Shapes (rectangle/ellipse/spotlight/magnifier), pens (pencil/arrow/highlighter), text (text/numbered badge/watermark), mosaic/Gaussian blur, eraser |
-| Undo / redo / reset | `Alt+Z` / `Alt+Y` / `Alt+R` | Annotation-command-level undo |
+| Undo / redo / reset | `Ctrl+Z` / `Ctrl+Y` (or `Ctrl+Shift+Z`) / `Ctrl+R` | Annotation-command-level undo; while editing text, undo/redo applies to the text |
 | Output | Copy / save / pin / OCR / translate / translate & pin (see §5) | Double-click inside the region to confirm copying the screenshot, including over OCR text; after OCR, translate on the image or drag-select text to copy |
 | Scrolling capture | Toolbar "Scrolling capture" | Scrolls the target window and stitches frames; supports "auto scroll"; enters annotation mode when done |
 | Cancel | `Esc` / `✕` / right-click without a selection | Layered closing: OCR panel / subpanels / dropdowns first, then the whole layer |
@@ -132,9 +132,10 @@ Summon: `Alt+A` in the main window (empty input; can be promoted to a global hot
 
 | Trick | Trigger | Notes |
 |---|---|---|
-| Shortcut badges | **Hold `Alt`** | Toolbar buttons show number badges |
+| Shortcut badges | **Hold `Alt` / `Ctrl`** | `Alt` shows tool-switching badges; `Ctrl` shows Z/Y/R badges for undo / redo / reset |
 | Cycle within group | Repeat `Alt+1`~`Alt+5` | Cycles tools within the group and briefly expands the dropdown to show the current item |
 | Wheel tunes everything | Wheel over a tool group button / thickness step / intensity·font-size slider / hue·opacity bar / preset swatches / color format | Switches tools, adjusts thickness, steps sliders, tunes color, switches formats respectively |
+| Brush size on the canvas | With the pencil or a brush-mode tool selected, wheel inside the region | Scroll up to increase size, down to decrease it; the cursor outline updates immediately with a brief size readout. Use presets or the slider for fine adjustment. Size stays fixed during a stroke; adjust after releasing. Existing annotations keep their size. During scrolling capture, the wheel still scrolls the target window |
 | Square constraint | Hold `Shift` while selecting / drawing rectangles or ellipses | Ratio constraint, applied live on press and release |
 | `E` key | Press `E` while annotating | Toggles the OCR panel |
 | Double-click full-screen copy | Double-click the dim overlay without a selection | Copies the whole screen |
@@ -247,8 +248,8 @@ Things you would almost never discover without this list:
 4. **Type `#fff` to detect colors** — works in both the main window and the clipboard panel; `Enter` copies HEX.
 5. **Clipboard mixed selection** — use `Ctrl+click` to toggle entries and `Shift+click` for ranges. Text-only selections support batch copy / paste; mixed selections offer actions by type in the context menu, including batch image pinning.
 6. **Clipboard bare `Delete` deletes** — no need to reach for `Alt+D`.
-7. **Hold `Alt` in a screenshot to reveal shortcuts** — every toolbar button shows its number badge.
-8. **The screenshot wheel tunes everything** — wheel over tool buttons / thickness / sliders / hue bar / preset swatches; all respond.
+7. **Screenshot shortcut badges follow their modifier** — hold `Alt` for tool-switching hints, or `Ctrl` for undo / redo / reset hints.
+8. **The screenshot wheel tunes everything** — wheel inside the region to adjust brush size with a live cursor preview; tool buttons / thickness / sliders / hue bar / preset swatches also respond to the wheel.
 9. **Double-click the dim overlay = copy the whole screen.**
 10. **Press `E` while annotating to toggle the OCR panel.**
 11. **Text becomes selectable right after you select a region** — silent background OCR; `Ctrl+C` copies text straight off the image.
@@ -304,7 +305,7 @@ Things you would almost never discover without this list:
 |---|---|
 | `Alt+1` ~ `Alt+5` | Switch tool groups (repeat to cycle within the group) |
 | Hold `Alt` | Show shortcut badges |
-| `Alt+Z` / `Alt+Y` / `Alt+R` | Undo / redo / reset annotations |
+| `Ctrl+Z` / `Ctrl+Y` (or `Ctrl+Shift+Z`) / `Ctrl+R` | Undo / redo / reset annotations |
 | `E` | Toggle the OCR panel |
 | `Shift` (while selecting / drawing) | Square / ratio constraint |
 | Arrow keys | Nudge the region by 1px (fine-tune the sampler in the eyedropper) |

@@ -2441,8 +2441,8 @@ body.image-editor-mode #canvas.long-image-editing {
     box-shadow: var(--shadow-modal);
 }
 
-/* ── Alt 快捷键提示：按住 Alt 时在工具栏按钮右下角显示 kbd 标记 ──────────────
-   默认隐藏（opacity:0 + visibility:hidden），body[data-alt-down] 时淡入。
+/* ── 快捷键提示：工具组随 Alt、操作组随 Ctrl 显示 kbd 标记 ──────────────
+   默认隐藏（opacity:0 + visibility:hidden），对应修饰键按住时淡入。
    绝对定位到按钮右下角，不挤占图标空间。 */
 .kbd-hint {
     position: absolute;
@@ -2467,7 +2467,8 @@ body.image-editor-mode #canvas.long-image-editing {
     position: relative;
 }
 
-body[data-alt-down="true"] .kbd-hint {
+body[data-alt-down="true"] .kbd-hint:not([data-modifier="ctrl"]),
+body[data-ctrl-down="true"] .kbd-hint[data-modifier="ctrl"] {
     opacity: 1;
     visibility: visible;
     /* 0.23.19：按下立即显示（修饰键状态指示不该有入场延迟）；
@@ -2518,3 +2519,16 @@ html.eyedropper-picking * {
     visibility: visible;
     transition: opacity 0.12s ease-out;
 }
+
+/* 粗细快捷档保留；滑杆支持档位之间的细调。 */
+.brush-size-control {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    padding: var(--space-sm);
+}
+.brush-size-control input { width: 100px; accent-color: var(--accent); }
+.brush-size-control output { min-width: 5ch; font-variant-numeric: tabular-nums; }
+
+#stroke-width-trigger-icon { border-bottom: 2px solid currentColor; }
+#stroke-width-trigger-icon[data-stroke-style="dashed"] { border-bottom-style: dashed; }

@@ -34,6 +34,8 @@
 import {copyToClipboard, hideScreenshotOverlay, invoke, ocrImage, screenshotSetAnnotationMode,} from "../shared/api.js";
 import {normalizeError} from "../shared/tauri.js";
 import * as annot from "./annotation-engine.js";
+import {createCanvasSizeWheel} from "./ss-brush-controls.js";
+import {bindShortcutHints} from "./ss-shortcut-hints.js";
 import {ensureSpriteLoaded} from "../shared/icon.js";
 import {applyThemeFromConfig} from "../shared/theme.js";
 
@@ -107,6 +109,7 @@ import {
 } from "./ss-output.js";
 import {
     bindToolbar,
+    runAnnotationOperation,
     cycleToolInGroup,
     flashToolDropdown,
     resetToolbarDropdowns,
@@ -121,7 +124,7 @@ import {resetColorToDefault} from "./ss-color-picker.js";
 // 0.23.19：自定义 tooltip（多屏 title 提示定位修复）
 import {initSsTooltip} from "./ss-tooltip.js";
 // 0.23.19-fix：编辑器会话决策纯函数（可行为测试），见 ss-editor-policy.js
-import {editorEscExempt, isTextEntryTarget} from "./ss-editor-policy.js";
+import {annotationOperationShortcut, editorEscExempt, isTextEntryTarget} from "./ss-editor-policy.js";
 // 0.15.8：智能窗口吸附 + 像素放大镜
 import {
     clearHover,
@@ -192,6 +195,7 @@ function maybeStartCaptureHints() {
 }
 
 initDOM();
+const clearShortcutHints = bindShortcutHints(window, document.body);
 
 // 注册跨模块回调（避免循环依赖）
 ss._invalidateSelectionContent = invalidateSelectionContent;
@@ -499,6 +503,7 @@ function cleanupSessionVisuals() {
 
 /** 完全重置前端状态——每次 overlay 显示时都要走一遍 */
 function resetState() {
+    clearShortcutHints();
     const _t0 = performance.now();
     console.debug('[screenshot] resetState start');
     cancelActiveScreenshotFetch();
@@ -2113,6 +2118,12 @@ function queueSelectionNudge(dx, dy) {
 // 0.23.19：isTextEntryTarget（文本输入类控件判定）移至 ss-editor-policy.js（纯函数，行为测试）
 
 document.addEventListener('keydown', (e) => {
+    const operation = annotationOperationShortcut(e, ss);
+    if (operation) {
+        e.preventDefault();
+        runAnnotationOperation(operation);
+        return;
+    }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') {
         const tgt = e.target;
         const isTextField = tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable);
@@ -2150,9 +2161,8 @@ document.addEventListener('keydown', (e) => {
         }
         return;
     }
-    // ── Alt 快捷键：工具切换 + undo/reset（仅标注模式生效）──────────
+    // ── Alt 快捷键：工具切换（仅标注模式生效）──────────
     // Alt+` → 选取工具；Alt+1~5 → 图形/画笔/文字/马赛克/橡皮；重复按循环组内下一个
-    // Alt+Z → undo；Alt+Y → redo；Alt+R → reset（清除全部标注）
     if (e.altKey && !e.ctrlKey && !e.metaKey && ss.isAnnotating) {
         // IME 组合中的按键不属于快捷键
         if (e.isComposing || e.keyCode === 229) return;
@@ -2214,27 +2224,6 @@ document.addEventListener('keydown', (e) => {
             if (TOOL_GROUPS[annot.getTool()] === 'eraser') cycleToolInGroup('eraser');
             else selectTool('eraser');
             flashToolDropdown(annot.getTool());
-            return;
-        }
-        if (key === 'z' || key === 'Z') {
-            e.preventDefault();
-            annot.undo();
-            updateUndoRedoButtons();
-            return;
-        }
-        // 0.23.19：重做统一走 Alt 系（与 Alt+Z 撤销成对）。旧按钮提示写的
-        // Ctrl+Y 从未有对应处理器——重做此前实际没有可用快捷键。
-        if (key === 'y' || key === 'Y') {
-            e.preventDefault();
-            annot.redo();
-            updateUndoRedoButtons();
-            return;
-        }
-        if (key === 'r' || key === 'R') {
-            e.preventDefault();
-            annot.clearAll();
-            updateUndoRedoButtons();
-            redrawAnnotFull();
             return;
         }
     }
@@ -2341,6 +2330,7 @@ window.addEventListener('keydown', (e) => {
 window.addEventListener('keydown', refreshShapePreviewOnShift);
 
 // 0.15.7：长截图手动滚动检测——capturing 阶段 wheel 触发截帧
+window.addEventListener('wheel', createCanvasSizeWheel(), {passive: false});
 window.addEventListener('wheel', onScrollWheel, {passive: true});
 
 // 长图平移（Space / 中键）的窗口层兜底。
@@ -2370,28 +2360,6 @@ window.addEventListener('keyup', (e) => {
             ss.canvas.style.cursor = ss._imagePan && annot.getTool() === 'select' ? 'grab' : '';
         }
     }
-});
-
-// ── Alt 按键状态跟踪：显示/隐藏工具栏上的 kbd 快捷键提示 ──
-// 按住 Alt 时 body 加 data-alt-down，CSS 据此显示 .kbd-hint
-// 0.23.19：preventDefault 抑制 WebView2 把"单独按 Alt"当菜单激活键——
-// 那条路径会吞掉 Alt 的 keyup（甚至触发窗口失焦），此后再按 Alt 的 keydown
-// 带 repeat=true，旧守卫直接跳过，表现为"连按两下 Alt 提示不再显示"。
-// repeat 的 Alt keydown 现在也照常置位（幂等，只重设同一状态）。
-window.addEventListener('keydown', (e) => {
-    if (e.key === 'Alt') {
-        e.preventDefault();
-        document.body.dataset.altDown = 'true';
-    }
-});
-window.addEventListener('keyup', (e) => {
-    if (e.key === 'Alt') {
-        e.preventDefault();
-        delete document.body.dataset.altDown;
-    }
-});
-window.addEventListener('blur', () => {
-    delete document.body.dataset.altDown;
 });
 
 window.addEventListener('blur', () => {

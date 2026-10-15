@@ -56,3 +56,15 @@ export function cancelIsImageEditorSession(source, imageEditorMode) {
         || source === IMAGE_SOURCE.PIN
         || Boolean(imageEditorMode);
 }
+
+/** 标注操作独用 Ctrl；文本输入的撤销/重做交给浏览器。 */
+export function annotationOperationShortcut(event, state) {
+    if (event.defaultPrevented || !state.isAnnotating || state.isAnnotDragging
+        || state.eyedropperActive || event.isComposing || event.keyCode === 229
+        || !event.ctrlKey || event.altKey || event.metaKey || isTextEntryTarget(event.target)) return null;
+    const key = event.key.toLowerCase();
+    if (key === 'z') return event.shiftKey ? 'redo' : 'undo';
+    if (!event.shiftKey && key === 'y') return 'redo';
+    if (!event.shiftKey && key === 'r') return 'reset';
+    return null;
+}

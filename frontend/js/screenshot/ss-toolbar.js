@@ -8,6 +8,7 @@
 //! - updateUndoRedoButtons()：撤销/重做按钮状态
 
 import {ss, TOOL_CAPS} from './ss-state.js';
+import {bindSizeControls, syncSizeControls} from './ss-brush-controls.js';
 import {applyFloatingUiScale, findDisplayCssAt} from './ss-display.js';
 import {drawFinalSelection, redrawAnnotFull} from './ss-draw.js';
 import {updateSelectionCursor} from './ss-interaction.js';
@@ -27,6 +28,16 @@ export function updateUndoRedoButtons() {
     const btnRedo = document.getElementById('btn-redo');
     if (btnUndo) btnUndo.disabled = !annot.canUndo();
     if (btnRedo) btnRedo.disabled = !annot.canRedo();
+}
+
+/** 工具栏与键盘共用，保持撤销栈、按钮状态和画布一致。 */
+export function runAnnotationOperation(operation) {
+    if (operation === 'undo') annot.undo();
+    else if (operation === 'redo') annot.redo();
+    else if (operation === 'reset') annot.clearAll();
+    else return;
+    updateUndoRedoButtons();
+    if (operation === 'reset') redrawAnnotFull();
 }
 
 /** 工具切换统一入口 */
@@ -601,7 +612,7 @@ export function showTextInput(x, y) {
         } else if (e.key === 'Escape') {
             e.stopPropagation();
             // 0.23.19：有文本时 ESC = 落袋退出（Figma 语义——ESC 关掉输入框但
-            // 不丢已输入内容，误留可 Alt+Z 撤销）；空输入仍取消退场。
+            // 不丢已输入内容，误留可 Ctrl+Z 撤销）；空输入仍取消退场。
             // commit() 内部按是否有文本分支 commitText/cancelText。
             // stopPropagation 保留：ESC 不冒泡给编辑器级联（不退出整个会话）。
             commit(getText());
@@ -1035,24 +1046,8 @@ export function bindToolbar() {
         });
     });
 
-    // 笔画粗细选择（0.15.0：原 width-dropdown 拆为 stroke-width-dropdown + brush-size-dropdown）
-    const strokeWidthTrigger = document.getElementById('stroke-width-trigger');
+    bindSizeControls();
     const strokeWidthDropdown = document.getElementById('stroke-width-dropdown');
-    // 0.15.8-fix：由 hover 自动展开
-    const strokeWidthTriggerIcon = document.getElementById('stroke-width-trigger-icon');
-    const strokeWidthItems = strokeWidthDropdown ? strokeWidthDropdown.querySelectorAll('[data-stroke-width]') : [];
-    const strokeSizes = [1, 2, 4, 6, 8];
-    strokeWidthItems.forEach((item) => {
-        item.addEventListener('click', () => {
-            const width = parseInt(item.dataset.strokeWidth, 10);
-            annot.setStrokeWidth(width);
-            strokeWidthItems.forEach((b) => b.classList.remove('active'));
-            item.classList.add('active');
-            const icon = item.querySelector('.item-icon');
-            if (strokeWidthTriggerIcon && icon) strokeWidthTriggerIcon.innerHTML = icon.innerHTML;
-            // 0.15.8-fix：hover 模式下不关闭，让 mouseleave 自然关闭
-        });
-    });
     // 笔画样式（实线/虚线）
     const strokeStyleItems = strokeWidthDropdown ? strokeWidthDropdown.querySelectorAll('[data-stroke-style]') : [];
     strokeStyleItems.forEach((item) => {
@@ -1061,87 +1056,14 @@ export function bindToolbar() {
             annot.setStrokeStyle(style);
             strokeStyleItems.forEach((b) => b.classList.remove('active'));
             item.classList.add('active');
-            // 0.15.8-fix：更新触发器图标以反映虚线/实线状态
-            if (strokeWidthTriggerIcon) {
-                const icon = item.querySelector('.item-icon');
-                if (icon) strokeWidthTriggerIcon.innerHTML = icon.innerHTML;
-            }
+            syncSizeControls();
             // 0.15.8-fix：hover 模式下不关闭，让 mouseleave 自然关闭
         });
     });
 
-    // 画笔粗细选择
-    const brushSizeTrigger = document.getElementById('brush-size-trigger');
-    const brushSizeDropdown = document.getElementById('brush-size-dropdown');
-    // 0.15.8-fix：由 hover 自动展开
-    const brushSizeTriggerIcon = document.getElementById('brush-size-trigger-icon');
-    const brushSizeItems = brushSizeDropdown ? brushSizeDropdown.querySelectorAll('[data-brush-size]') : [];
-    const brushSizes = [8, 16, 24, 32, 48];
-    brushSizeItems.forEach((item) => {
-        item.addEventListener('click', () => {
-            const size = parseInt(item.dataset.brushSize, 10);
-            annot.setBrushSize(size);
-            brushSizeItems.forEach((b) => b.classList.remove('active'));
-            item.classList.add('active');
-            const icon = item.querySelector('.item-icon');
-            if (brushSizeTriggerIcon && icon) brushSizeTriggerIcon.innerHTML = icon.innerHTML;
-            // 0.15.8-fix：hover 模式下不关闭，让 mouseleave 自然关闭
-        });
-    });
-    // 0.15.1 T5：滚轮优先——悬浮笔画/画笔粗触发器时滚轮调值
-    if (strokeWidthTrigger) strokeWidthTrigger.addEventListener('wheel', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const cur = annot.getStrokeWidth();
-        let idx = strokeSizes.indexOf(cur);
-        if (idx < 0) idx = 2;
-        idx += e.deltaY > 0 ? 1 : -1;  // 0.15.14：恢复正常方向（下滚=下一个/更大）
-        idx = Math.max(0, Math.min(strokeSizes.length - 1, idx));
-        const nw = strokeSizes[idx];
-        annot.setStrokeWidth(nw);
-        strokeWidthItems.forEach((b) => b.classList.toggle('active', parseInt(b.dataset.strokeWidth, 10) === nw));
-        const active = strokeWidthDropdown.querySelector(`[data-stroke-width="${nw}"]`);
-        if (active && strokeWidthTriggerIcon) {
-            const icon = active.querySelector('.item-icon');
-            if (icon) strokeWidthTriggerIcon.innerHTML = icon.innerHTML;
-        }
-    }, {passive: false});
-    if (brushSizeTrigger) brushSizeTrigger.addEventListener('wheel', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        const cur = annot.getBrushSize();
-        let idx = brushSizes.indexOf(cur);
-        if (idx < 0) idx = 1;
-        idx += e.deltaY > 0 ? 1 : -1;  // 0.15.14：恢复正常方向（下滚=下一个/更大）
-        idx = Math.max(0, Math.min(brushSizes.length - 1, idx));
-        const ns = brushSizes[idx];
-        annot.setBrushSize(ns);
-        brushSizeItems.forEach((b) => b.classList.toggle('active', parseInt(b.dataset.brushSize, 10) === ns));
-        const active = brushSizeDropdown.querySelector(`[data-brush-size="${ns}"]`);
-        if (active && brushSizeTriggerIcon) {
-            const icon = active.querySelector('.item-icon');
-            if (icon) brushSizeTriggerIcon.innerHTML = icon.innerHTML;
-        }
-    }, {passive: false});
-
-    // 撤销/重做
-    const btnUndo = document.getElementById('btn-undo');
-    const btnRedo = document.getElementById('btn-redo');
-    if (btnUndo) btnUndo.addEventListener('click', () => {
-        annot.undo();
-        updateUndoRedoButtons();
-    });
-    if (btnRedo) btnRedo.addEventListener('click', () => {
-        annot.redo();
-        updateUndoRedoButtons();
-    });
-    // 0.15.9：重置全部标注
-    const btnReset = document.getElementById('btn-reset');
-    if (btnReset) btnReset.addEventListener('click', () => {
-        annot.clearAll();
-        updateUndoRedoButtons();
-        redrawAnnotFull();
-    });
+    for (const operation of ['undo', 'redo', 'reset']) {
+        document.getElementById(`btn-${operation}`)?.addEventListener('click', () => runAnnotationOperation(operation));
+    }
 
     // 输出/取消
     const bind = (id, fn) => {

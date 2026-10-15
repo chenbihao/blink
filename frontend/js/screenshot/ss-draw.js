@@ -20,6 +20,7 @@
 
 import {ss} from './ss-state.js';
 import * as annot from './annotation-engine.js';
+import {brushDiameter} from './brush-size.js';
 import {cssPointToScreen, cssRectToBitmap, formatSelectionInfo, monitorDprAtCss} from './ss-selection-geometry.js';
 import {applyFloatingUiScaleAt} from './ss-display.js';
 import {hideLiveSelection} from './ss-live-selection.js';
@@ -307,7 +308,7 @@ export function redrawAnnotPreview() {
                 const w = annot.getWidthForTool(tool);
                 const alpha = tool === 'highlight-multiply' ? 0.55 : 0.30;
                 annotCtx.strokeStyle = annot.withAlpha(annot.getColor(), alpha);
-                annotCtx.lineWidth = w * 4;
+                annotCtx.lineWidth = brushDiameter(tool, w);
                 annotCtx.lineCap = 'round';
                 annotCtx.lineJoin = 'round';
                 annotCtx.beginPath();
@@ -339,7 +340,7 @@ export function redrawAnnotPreview() {
             const pts = annot.getCurrentPoints();
             if (pts.length >= 1) {
                 const w = annot.getWidthForTool('eraser');
-                const r = Math.max(6, w * 3);
+                const r = brushDiameter('eraser', w) / 2;
                 annotCtx.globalCompositeOperation = 'destination-out';
                 drawContinuousBrushPreview(annotCtx, pts, r * 2, '#000');
             }
@@ -365,7 +366,7 @@ export function redrawAnnotPreview() {
             // brush 模式预览：半透明灰色笔画
             const pts = annot.getCurrentPoints();
             if (pts.length >= 1) {
-                const r = Math.max(8, annot.getBrushSize());
+                const r = brushDiameter(tool, annot.getBrushSize()) / 2;
                 drawContinuousBrushPreview(annotCtx, pts, r * 2, 'rgba(150, 150, 150, 0.3)');
             }
             break;
@@ -377,7 +378,7 @@ export function redrawAnnotPreview() {
                 // 画笔模式预览：半透明连续笔画，宽度与最终马赛克遮罩一致。
                 const pts = annot.getCurrentPoints();
                 if (pts.length >= 1) {
-                    const r = Math.max(8, annot.getBrushSize());
+                    const r = brushDiameter(tool, annot.getBrushSize()) / 2;
                     drawContinuousBrushPreview(annotCtx, pts, r * 2, 'rgba(150, 150, 150, 0.3)');
                 }
                 break;
@@ -402,7 +403,7 @@ export function redrawAnnotPreview() {
             if (blurMode === 'brush') {
                 const pts = annot.getCurrentPoints();
                 if (pts.length >= 1) {
-                    const r = Math.max(8, annot.getBrushSize());
+                    const r = brushDiameter(tool, annot.getBrushSize()) / 2;
                     drawContinuousBrushPreview(annotCtx, pts, r * 2, 'rgba(150, 150, 150, 0.3)');
                 }
             } else {

@@ -387,6 +387,10 @@
             <span id="stroke-width-trigger-icon"><span class="width-bar width-bar-medium"></span></span>
         </button>
         <div class="dropdown" data-open="false" id="stroke-width-dropdown">
+            <label class="brush-size-control">
+                <input id="stroke-width-range" type="range" min="1" max="32" step="1" value="4" aria-label="笔画粗细"/>
+                <output id="stroke-width-value" for="stroke-width-range">4 px</output>
+            </label>
             <button class="dropdown-item" data-stroke-width="1"><span class="item-icon"><span
                     class="width-bar width-bar-thin"></span></span><span class="item-label">1</span></button>
             <button class="dropdown-item" data-stroke-width="2"><span class="item-icon"><span
@@ -414,6 +418,10 @@
             <span id="brush-size-trigger-icon"><span class="width-bar width-bar-medium"></span></span>
         </button>
         <div class="dropdown" data-open="false" id="brush-size-dropdown">
+            <label class="brush-size-control">
+                <input id="brush-size-range" type="range" min="2" max="128" step="1" value="16" aria-label="画笔粗细"/>
+                <output id="brush-size-value" for="brush-size-range">16 px</output>
+            </label>
             <button class="dropdown-item" data-brush-size="8"><span class="item-icon"><span
                     class="width-bar width-bar-thin"></span></span><span class="item-label">8</span></button>
             <button class="dropdown-item active" data-brush-size="16"><span class="item-icon"><span
@@ -431,21 +439,21 @@
 
     <!-- 操作区（0.15.9：undo/redo 始终可见 + 重置按钮，三键一组） -->
     <div class="toolbar-group undo-group" data-group="ops">
-        <button class="tool-btn" disabled id="btn-undo" title="撤销 (Alt+Z)">
+        <button class="tool-btn" disabled id="btn-undo" title="撤销 (Ctrl+Z)">
             <svg aria-hidden="true" class="icon">
                 <use href="#icon-undo-2"/>
             </svg>
-            <span class="kbd-hint">Z</span></button>
-        <button class="tool-btn" disabled id="btn-redo" title="重做 (Alt+Y)">
+            <span class="kbd-hint" data-modifier="ctrl">Z</span></button>
+        <button class="tool-btn" disabled id="btn-redo" title="重做 (Ctrl+Y / Ctrl+Shift+Z)">
             <svg aria-hidden="true" class="icon">
                 <use href="#icon-redo-2"/>
             </svg>
-            <span class="kbd-hint">Y</span></button>
-        <button class="tool-btn" id="btn-reset" title="重置全部标注 (Alt+R)">
+            <span class="kbd-hint" data-modifier="ctrl">Y</span></button>
+        <button class="tool-btn" id="btn-reset" title="重置全部标注 (Ctrl+R)">
             <svg aria-hidden="true" class="icon">
                 <use href="#icon-refresh-cw"/>
             </svg>
-            <span class="kbd-hint">R</span></button>
+            <span class="kbd-hint" data-modifier="ctrl">R</span></button>
     </div>
 
     <div class="toolbar-divider"></div>

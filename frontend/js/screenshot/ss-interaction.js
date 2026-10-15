@@ -17,6 +17,7 @@ import {applySquareConstraint, computeDragRect} from './ss-utils.js';
 import {resetLiveSelection, updateLiveSelection} from './ss-live-selection.js';
 import {applyFloatingUiScaleAt, findDisplayCssAt} from './ss-display.js';
 import * as annot from './annotation-engine.js';
+import {brushDiameter} from './brush-size.js';
 import {
     applySquareResize,
     cssPointToBitmap,
@@ -733,43 +734,17 @@ export function updateStrokeCursor(clientX, clientY) {
     const w = annot.getWidthForTool(tool);
     // 画笔光标大小映射到 CSS 显示，bitmap→CSS = renderScale
     const _meta = window.__blinkScreenMeta || {vx: 0, vy: 0};
-    const {scaleX: rsx} = getRenderScale(_meta);
-    let cssPxDiameter = 0;
-    if (tool === 'pencil') {
-        cssPxDiameter = w / rsx;
-    } else if (tool === 'highlight-multiply' || tool === 'highlight-translucent') {
-        cssPxDiameter = (w * 4) / rsx;
-    } else if (tool === 'eraser') {
-        cssPxDiameter = (Math.max(6, w * 3) * 2) / rsx;
-    } else if (tool === 'mosaic' || tool === 'pixelate' || tool === 'blur') {
-        // 0.15.8-fix→fix：统一画笔模式工具的光标大小计算。
-        // 0.15.11：pixelate/blur 的 widthCat='effect'，getWidthForTool 返回 blurIntensity（统一强度）
-        // 而非 brush.size。画笔光标应基于 brush.size。
-        const brushSize = annot.getBrushSize();
-        if (tool === 'blur') {
-            // blur brush 模式的笔画宽度 = brush.size * 2
-            cssPxDiameter = (brushSize * 2) / rsx;
-        } else {
-            // mosaic/pixelate brush 模式的半径 = max(8, brush.size / 2 + 8)，直径 = 半径 * 2
-            cssPxDiameter = (Math.max(8, brushSize / 2 + 8) * 2) / rsx;
-        }
-    } else if (tool === 'number') {
-        // 0.15.11：数字标号光标——圆形虚线圈，大小跟随 brushSize
-        const brushSize = annot.getBrushSize();
-        cssPxDiameter = (Math.max(10, brushSize * 1.2) * 2) / rsx;
-    } else {
-        strokeCursor.style.display = 'none';
-        return;
-    }
+    const {scaleX: rsx, scaleY: rsy} = getRenderScale(_meta);
+    const cssPxDiameter = brushDiameter(tool, w) / rsx;
     if (cssPxDiameter < 4) {
         strokeCursor.style.display = 'none';
         return;
     }
     strokeCursor.style.display = 'block';
     strokeCursor.style.width = cssPxDiameter + 'px';
-    strokeCursor.style.height = cssPxDiameter + 'px';
+    strokeCursor.style.height = (brushDiameter(tool, w) / rsy) + 'px';
     strokeCursor.style.left = (clientX - cssPxDiameter / 2) + 'px';
-    strokeCursor.style.top = (clientY - cssPxDiameter / 2) + 'px';
+    strokeCursor.style.top = (clientY - brushDiameter(tool, w) / rsy / 2) + 'px';
     // 0.15.13：所有笔触预览统一使用当前选择的颜色（包括橡皮擦）
     strokeCursor.style.borderColor = annot.getColor();
 }

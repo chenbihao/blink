@@ -679,8 +679,13 @@ impl IntentRouter for RuleRouter {
         //     用户输入 "ai xxx" 直接进入 AI 模式，不走 plugin keyword 匹配。
         //     "ai" 是本体保留前缀，优先级介于 EngineTakeover 和 plugin keyword 之间。
         //     空 arg（"ai" 或 "ai "）不触发——等同于无参，留给 Ghost 兜底。
-        if takeover_enabled && q.len() > 3 && q[..3].eq_ignore_ascii_case("ai ") {
-            let arg = q[3..].trim();
+        // 输入可能以 ASCII + 中文/emoji 开头，前三字节不一定落在字符边界。
+        if takeover_enabled
+            && q.get(..3)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("ai "))
+            && let Some(rest) = q.get(3..)
+        {
+            let arg = rest.trim();
             if !arg.is_empty() {
                 return Route::AiTrigger {
                     arg: arg.to_string(),
@@ -1528,6 +1533,63 @@ mod tests {
         let h = std::collections::HashMap::new();
         // 0.8.4 §5.3.1：route 断 Awareness 依赖,不再传 snapshot；hint=None
         r.route(q, &h, None).await
+    }
+
+    #[tokio::test]
+    async fn ai_prefix_check_accepts_unicode_search_queries() {
+        let r = router_with_rules(true);
+        for query in [
+            "偏贵哦",
+            "t偏贵哦",
+            "ip偏贵哦",
+            "a中",
+            "ab中",
+            "😀",
+            "t😀",
+            "ip😀",
+            "abc",
+        ] {
+            let route = run_route(&r, query).await;
+            assert!(
+                matches!(route, Route::Mixed { candidates } if candidates.is_empty()),
+                "query={query}"
+            );
+        }
+
+        // 逐字在已有中文前插入插件关键字，直到空格分隔参数后正常命中。
+        let route = run_route(&r, "ip 偏贵哦").await;
+        assert!(matches!(route, Route::Takeover { plugin_id, arg, .. }
+            if plugin_id == "builtin.ip"
+                && matches!(&arg, ExecArg::UserExplicit(text) if text == "偏贵哦")));
+    }
+
+    #[tokio::test]
+    async fn ai_prefix_check_preserves_trigger_semantics() {
+        let r = router_with_rules(true);
+        for (query, expected) in [
+            ("ai 中文", "中文"),
+            ("AI 中文", "中文"),
+            ("aI 😀", "😀"),
+            ("  Ai   中文  ", "中文"),
+        ] {
+            assert!(
+                matches!(run_route(&r, query).await, Route::AiTrigger { arg } if arg == expected),
+                "query={query}"
+            );
+        }
+        for query in ["", "a", "ai", "ai ", "ai   ", "ai中文", "ai\t中文"] {
+            assert!(
+                matches!(run_route(&r, query).await, Route::Mixed { candidates } if candidates.is_empty()),
+                "query={query}"
+            );
+        }
+        let disabled = router_with_rules(false);
+        for query in ["ai 中文", "AI 😀", "t偏贵哦"] {
+            assert!(
+                matches!(run_route(&disabled, query).await, Route::Mixed { candidates } if candidates.is_empty()),
+                "query={query}"
+            );
+        }
     }
 
     // ── 0.8.5 §6.4 EngineTakeover 分派 ──────────────────────────

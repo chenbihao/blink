@@ -198,3 +198,24 @@ describe('装配层接线（源码断言兜底）', () => {
         );
     });
 });
+
+// Ctrl 操作组与 Alt 工具切换分离；文本、IME、拖拽期不得操作标注栈。
+const {annotationOperationShortcut} = await import('./ss-editor-policy.js');
+const opState = {isAnnotating: true};
+const opEvent = (key, extra = {}) => ({key, ctrlKey: true, ...extra});
+assert.equal(annotationOperationShortcut(opEvent('z'), opState), 'undo');
+assert.equal(annotationOperationShortcut(opEvent('Y'), opState), 'redo');
+assert.equal(annotationOperationShortcut(opEvent('Z', {shiftKey: true}), opState), 'redo');
+assert.equal(annotationOperationShortcut(opEvent('r'), opState), 'reset');
+for (const extra of [{ctrlKey: false, altKey: true}, {altKey: true}, {metaKey: true},
+    {isComposing: true}, {keyCode: 229}, {defaultPrevented: true},
+    {target: {tagName: 'TEXTAREA'}}, {target: {isContentEditable: true}},
+    {target: {tagName: 'INPUT', getAttribute: () => 'text'}}]) {
+    assert.equal(annotationOperationShortcut(opEvent('z', extra), opState), null);
+}
+assert.equal(annotationOperationShortcut(opEvent('z', {target: {tagName: 'INPUT', getAttribute: () => 'range'}}), opState), 'undo');
+for (const state of [{isAnnotating: false}, {...opState, isAnnotDragging: true}, {...opState, eyedropperActive: true}]) {
+    assert.equal(annotationOperationShortcut(opEvent('z'), state), null);
+}
+assert.equal(annotationOperationShortcut(opEvent('r', {shiftKey: true}), opState), null);
+console.log('annotation operations: Ctrl shortcuts, text editing and interaction guards passed');

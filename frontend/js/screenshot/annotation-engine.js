@@ -35,6 +35,7 @@
 //! 前端鼠标事件 `offsetX/Y` 为 CSS 像素，需乘 `renderScale` 转物理像素。
 
 import {TOOL_CAPS} from './ss-state.js';
+import {brushDiameter, clampSize} from './brush-size.js';
 import {layoutOverlayText, OVERLAY_FONT_FAMILY} from './overlay-text-layout.js';
 
 /** 当前工具类型 */
@@ -168,6 +169,7 @@ export function init(annotCanvas) {
 export function reset(cropW, cropH, cropImageDataRef) {
     commands = [];
     undoIndex = -1;
+    currentPoints = [];
     cropImageData = cropImageDataRef;
     cropSourceCanvas = null;
     if (cropImageDataRef) {
@@ -241,7 +243,9 @@ export function getWidthForTool(tool) {
 }
 
 export function setStrokeWidth(w) {
-    config.stroke.width = w;
+    if (currentPoints.length) return;
+    const value = clampSize('stroke', w);
+    if (value !== null) config.stroke.width = value;
 }
 
 export function getStrokeWidth() {
@@ -249,7 +253,9 @@ export function getStrokeWidth() {
 }
 
 export function setBrushSize(s) {
-    config.brush.size = s;
+    if (currentPoints.length) return;
+    const value = clampSize('brush', s);
+    if (value !== null) config.brush.size = value;
 }
 
 export function getBrushSize() {
@@ -285,7 +291,7 @@ export function setToolMode(tool, mode) {
 
 // 0.15.1 兼容包装：旧 setWidth/getWidth
 export function setWidth(w) {
-    config.stroke.width = w;
+    setStrokeWidth(w);
 }
 
 export function getWidth() {
@@ -537,7 +543,7 @@ export function executeCommand(cmd, targetCtx) {
             // 粗细 = width × 4。
             if (cmd.points.length >= 2 && canvas) {
                 const alpha = cmd.type === 'highlight-multiply' ? 0.55 : 0.30;
-                const lineW = (cmd.width || config.brush.size) * 4;
+                const lineW = brushDiameter(cmd.type, cmd.width || config.brush.size);
                 const off = acquireCanvas(canvas.width, canvas.height);
                 const offCtx = off.getContext('2d');
                 offCtx.strokeStyle = cmd.color || currentColor;
@@ -585,7 +591,7 @@ export function executeCommand(cmd, targetCtx) {
                 const p = cmd.points[0];
                 const tc = cmd.textConfig || config.text;
                 // 圆形半径基于 brush.size（物理像素）
-                const radius = Math.max(10, config.brush.size * 1.2);
+                const radius = brushDiameter(cmd.type, cmd.width || config.brush.size) / 2;
                 // 0.15.12：圆心 = 点击位置（之前是 p.y + radius 偏下）
                 const cx = p.x;
                 const cy = p.y;
@@ -626,7 +632,7 @@ export function executeCommand(cmd, targetCtx) {
             // brush 模式（默认）：复用框选模式的经典像素块算法，再以连续笔迹裁剪。
             if (cmd.points.length >= 1 && cropImageData) {
                 const block = Math.max(2, config.effect.blurIntensity);
-                const brushW = (cmd.width || config.brush.size) * 2;
+                const brushW = brushDiameter(cmd.type, cmd.width || config.brush.size);
                 drawPixelateBrush(c, cropImageData, cmd.points, brushW, block);
             } else if (!cropImageData) {
                 console.warn('[annot] mosaic: cropImageData 为空，马赛克不可用');
@@ -636,7 +642,7 @@ export function executeCommand(cmd, targetCtx) {
             // 0.15.12：马赛克工具合并——画笔与框选共用经典像素块算法，区别仅在覆盖区域。
             if (cmd.mode === 'brush' && cmd.points.length >= 1 && cropImageData) {
                 const block = Math.max(2, config.effect.blurIntensity);
-                const brushW = (cmd.width || config.brush.size) * 2;
+                const brushW = brushDiameter(cmd.type, cmd.width || config.brush.size);
                 drawPixelateBrush(c, cropImageData, cmd.points, brushW, block);
                 break;
             }
@@ -678,7 +684,7 @@ export function executeCommand(cmd, targetCtx) {
             // brush 模式：离屏 stroke mask + source-in 模糊图。
             if (cmd.points.length >= 1 && cropSourceCanvas && canvas) {
                 const intensity = config.effect.blurIntensity;
-                const brushW = config.brush.size * 2;
+                const brushW = brushDiameter(cmd.type, cmd.width || config.brush.size);
                 const off = acquireCanvas(canvas.width, canvas.height);
                 const offCtx = off.getContext('2d');
                 // 1) 画 stroke mask
@@ -766,7 +772,7 @@ export function executeCommand(cmd, targetCtx) {
             }
             // brush 模式（默认）：沿路径圆形擦除
             if (cmd.points.length >= 1 && c) {
-                const r = Math.max(6, (cmd.width || config.brush.size) * 3);
+                const r = brushDiameter(cmd.type, cmd.width || config.brush.size) / 2;
                 c.save();
                 c.globalCompositeOperation = 'destination-out';
                 for (let i = 0; i < cmd.points.length; i++) {
@@ -1450,7 +1456,7 @@ function renderHighlightMultiplyLayer(cmds, targetCtx, w, h) {
         }
         const lc = layer.getContext('2d');
         lc.strokeStyle = color;
-        lc.lineWidth = (cmd.width || config.brush.size) * 4;
+        lc.lineWidth = brushDiameter(cmd.type, cmd.width || config.brush.size);
         lc.lineCap = 'round';
         lc.lineJoin = 'round';
         lc.beginPath();
