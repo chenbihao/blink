@@ -34,11 +34,67 @@ pub async fn clear_plugin_secret(
     app: tauri::AppHandle,
     plugin_id: String,
     field_key: String,
+    expected_revision: u64,
 ) -> Result<(), String> {
     let engine = app.state::<std::sync::Arc<crate::domain::plugin::PluginEngine>>();
-    engine.clear_secret(&plugin_id, &field_key)?;
+    engine
+        .clear_secret(&plugin_id, &field_key, expected_revision)
+        .await?;
+    use tauri::Emitter;
+    let _ = app.emit(
+        crate::domain::event_names::EventNames::CONFIG_CHANGED,
+        serde_json::json!({"key":"plugin_config"}),
+    );
     tracing::info!(plugin = %plugin_id, field = %field_key, "插件密钥已清除");
     Ok(())
+}
+
+/// 设置页的受限地点搜索桥接；不接受任意 tool ID，不绕过 Capability 门禁。
+#[tauri::command]
+pub async fn search_weather_locations(
+    app: tauri::AppHandle,
+    query: String,
+    country_code: Option<String>,
+    admin: Option<String>,
+    limit: Option<u64>,
+) -> Result<serde_json::Value, crate::app::command_error::CommandError> {
+    use crate::domain::capability::{
+        CapabilityRegistry, CapabilityResult, InvocationOrigin, InvokeContext, RuntimeCapabilities,
+    };
+    let env = app
+        .state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
+        .inner()
+        .clone();
+    let registry = app.state::<std::sync::Arc<CapabilityRegistry>>();
+    let ctx = InvokeContext {
+        env: env.as_ref(),
+        origin: InvocationOrigin::LocalSurface,
+        runtime: RuntimeCapabilities {
+            surface: Some(env.as_ref()),
+            main_process: true,
+            desktop_session: true,
+        },
+        deadline: Some(std::time::Instant::now() + std::time::Duration::from_secs(10)),
+    };
+    let mut args = serde_json::json!({"query":query,"limit":limit.unwrap_or(10)});
+    if let Some(country) = country_code.filter(|s| !s.trim().is_empty()) {
+        args["country_code"] = serde_json::json!(country);
+    }
+    if let Some(admin) = admin.filter(|s| !s.trim().is_empty()) {
+        args["admin"] = serde_json::json!(admin);
+    }
+    let result = registry
+        .invoke("builtin_weather_search_locations", args, &ctx)
+        .await
+        .map_err(crate::app::command_error::CommandError::from)?;
+    match result {
+        CapabilityResult::Items { mut items } if items.len() == 1 => Ok(items.remove(0).data),
+        _ => Err(crate::app::command_error::CommandError::new(
+            "invalid_response",
+            "地点搜索返回格式无效",
+            true,
+        )),
+    }
 }
 
 /// 列出所有已发现的 Skill 条目（设置页展示用）。

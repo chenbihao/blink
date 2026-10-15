@@ -21,6 +21,22 @@ fn wind(value: Option<f64>) -> String {
         .unwrap_or_else(|| "未知".into())
 }
 
+pub fn needs_location(candidates: &[crate::model::ResolvedLocation]) -> (Vec<PluginItem>, Value) {
+    let summary = "需要确认地点，请补充行政区限定或在设置中选择默认地点";
+    let data = json!([{"status":"needs_location","summary":summary,"resolver":"open_meteo","candidates":candidates}]);
+    let items = candidates
+        .iter()
+        .map(|location| PluginItem {
+            title: location.display_name.clone(),
+            subtitle: Some(format!("{summary}（例如：天气 辽宁/朝阳）")),
+            score: 1.0,
+            action: PluginAction::None,
+            payload: Some(data[0].clone()),
+        })
+        .collect();
+    (items, data)
+}
+
 pub fn render(snapshot: &WeatherSnapshot, unit: TemperatureUnit) -> (Vec<PluginItem>, Value) {
     let current = snapshot.current.as_ref();
     let temp = current
@@ -167,6 +183,7 @@ mod tests {
                 assert!(text.contains("50°F"));
                 assert_ne!(text, "广州");
             }
+            PluginAction::None => panic!("weather item must copy summary"),
         }
     }
 }

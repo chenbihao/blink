@@ -16,6 +16,10 @@ use crate::search::scorer::clamp_plugin_score;
 use super::process::PluginHandle;
 use super::protocol::{PluginAction, PluginItem, PluginQueryContext};
 
+#[cfg(test)]
+#[path = "config_tests.rs"]
+mod config_tests;
+
 /// 聚合所有 builtin 插件的查询执行器(见 §3.5)。
 ///
 /// 0.5.1 起:持有每个插件的 `PluginConfig`(enabled + settings)内存快照 + DB pool。
@@ -26,6 +30,7 @@ pub struct PluginEngine {
     /// plugin_id → 配置。启动时 `init_configs` 从 DB 加载;`update_config` 时更新。
     configs: Arc<RwLock<HashMap<String, crate::config::PluginConfig>>>,
     pool: SqlitePool,
+    update_lock: tokio::sync::Mutex<()>,
     /// 全局代理(HTTP,HTTPS),进程启动时 env 注入;插件 ure/reqwest 原生读取。
     #[allow(dead_code)] // 保留用于未来插件代理配置
     global_proxy: Option<(String, String)>,
@@ -41,6 +46,7 @@ impl PluginEngine {
             plugins,
             configs: Arc::new(RwLock::new(HashMap::new())),
             pool,
+            update_lock: tokio::sync::Mutex::new(()),
             global_proxy,
         }
     }
@@ -137,11 +143,12 @@ impl PluginEngine {
                     "triggers": triggers,
                     "custom_triggers": custom_triggers,
                     "disabled_default_triggers": config.disabled_default_triggers,
-                    "enabled": self.is_enabled(&manifest.id),
+                    "enabled": config.enabled,
+                    "revision": config.revision,
                     // 0.25.20：runtime 类型透传——python/node 脚本插件启用时
                     // 前端引导安装托管解释器（powershell 系统自带、process 无需）。
                     "runtime_type": manifest.runtime.r#type.wire_name(),
-                    "settings": self.get_settings(&manifest.id),
+                    "settings": config.settings,
                     "settings_schema": schema,
                 })
             })
@@ -183,7 +190,10 @@ impl PluginEngine {
             let context = context.clone();
             // 0.25.16:喂插件进程的 settings 用 resolved（CM 密钥已还原明文），
             // 插件二进制与协议零改动——SQLite 侧只有空串占位。
-            let settings = self.resolved_settings(id);
+            let settings = self.resolved_settings(id).await;
+            if !self.is_enabled(id) {
+                continue;
+            }
             set.spawn(async move {
                 match plugin.query(&arg, &context, settings.as_ref()).await {
                     Ok(items) => items
@@ -266,13 +276,13 @@ impl PluginEngine {
         mut config: crate::config::PluginConfig,
         router: Option<&crate::intent::RuleRouter>,
     ) -> Result<(), String> {
-        self.sanitize_config_secrets(plugin_id, &mut config);
-        crate::config::set_plugin_config(&self.pool, plugin_id, &config).await?;
-        self.configs
-            .write()
-            .unwrap()
-            .insert(plugin_id.to_string(), config.clone());
-
+        self.update_config_with_store(
+            plugin_id,
+            &mut config,
+            &super::secret_update::PlatformSecretStore,
+            vec![],
+        )
+        .await?;
         // 如果传入了 router，热更新触发规则
         if let Some(r) = router
             && let Some(manifest) = self.get_manifest(plugin_id)
@@ -285,6 +295,97 @@ impl PluginEngine {
         Ok(())
     }
 
+    /// revision 校验在任何 CM 写之前；DB 条件写失败后恢复旧密钥。
+    async fn update_config_with_store(
+        &self,
+        plugin_id: &str,
+        config: &mut crate::config::PluginConfig,
+        store: &dyn super::secret_update::SecretStore,
+        mut secret_updates: Vec<(String, Option<blink_infra::platform::secret::SecretString>)>,
+    ) -> Result<(), String> {
+        let _guard = self.update_lock.lock().await;
+        let key = format!("plugin:{plugin_id}");
+        let baseline = blink_infra::data::config::config_value(&self.pool, &key)
+            .await
+            .map_err(|_| "plugin_config_read_failed".to_string())?;
+        let current: crate::config::PluginConfig = match baseline.as_deref() {
+            Some(raw) => serde_json::from_str(raw)
+                .map_err(|_| "plugin_config_invalid: 已保存配置无法解析".to_string())?,
+            None => self.get_config(plugin_id).unwrap_or_default(),
+        };
+        if current.revision != config.revision {
+            // 回填权威快照，让冲突后的设置页重读也能得到最新代次。
+            self.configs
+                .write()
+                .unwrap()
+                .insert(plugin_id.to_string(), current);
+            return Err("config_conflict: 插件配置已被其他窗口修改，请重新读取后重试".into());
+        }
+        // settings 是补丁语义：未提交字段保留，对象原样保存；显式 null 是明确值。
+        let mut settings = current.settings.as_object().cloned().unwrap_or_default();
+        match &config.settings {
+            serde_json::Value::Null => {}
+            serde_json::Value::Object(patch) => settings.extend(patch.clone()),
+            _ => return Err("invalid_arguments: 插件 settings 必须是对象或 null".into()),
+        }
+        config.settings = serde_json::Value::Object(settings);
+        if plugin_id == "builtin.weather" {
+            super::weather_config::validate_settings(&config.settings)?;
+        }
+        for field in self.secret_field_keys(plugin_id) {
+            if let Some(value) = config.settings.get(&field) {
+                let value = value
+                    .as_str()
+                    .ok_or_else(|| "invalid_arguments: 密钥字段必须是文本".to_string())?;
+                if !value.trim().is_empty() {
+                    secret_updates.push((
+                        field.clone(),
+                        Some(blink_infra::platform::secret::SecretString::new(
+                            value.to_owned(),
+                        )),
+                    ));
+                }
+            }
+            config.settings[&field] = serde_json::json!("");
+        }
+        config.revision = current
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| "plugin_config_revision_exhausted".to_string())?;
+        let serialized = serde_json::to_string(config)
+            .map_err(|_| "plugin_config_serialize_failed".to_string())?;
+        let secrets = super::secret_update::apply(store, plugin_id, secret_updates)?;
+        let written = blink_infra::data::config::compare_set_config(
+            &self.pool,
+            &key,
+            baseline.as_deref(),
+            &serialized,
+        )
+        .await;
+        match written {
+            Ok(true) => {}
+            other => {
+                secrets.rollback()?;
+                return Err(if matches!(other, Ok(false)) {
+                    "config_conflict: 插件配置已变化，请重新读取后重试"
+                } else {
+                    "plugin_config_write_failed: 保存失败，已恢复密钥，请重试"
+                }
+                .into());
+            }
+        }
+        secrets.commit();
+        self.configs
+            .write()
+            .unwrap()
+            .insert(plugin_id.to_string(), config.clone());
+        tracing::debug!(
+            plugin = plugin_id,
+            revision = config.revision,
+            "插件配置代次已提交"
+        );
+        Ok(())
+    }
     /// 插件是否启用(无配置记录视为启用)。
     pub fn is_enabled(&self, id: &str) -> bool {
         self.configs
@@ -455,8 +556,20 @@ impl PluginEngine {
     /// `get_settings` 脱敏版 + CM 明文覆盖。调用方：`query_subset` /
     /// `PluginCapabilityAdapter`（喂子进程 stdin）。**禁止**用于设置页回显、
     /// setting_bindings 注入等对前端/AI 暴露的路径。CM 无值的占位保持空串（=未配置）。
-    pub fn resolved_settings(&self, id: &str) -> Option<serde_json::Value> {
-        let mut settings = self.get_settings(id)?;
+    pub async fn resolved_settings(&self, id: &str) -> Option<serde_json::Value> {
+        // 与 CM/SQLite 提交共用更新锁；查询只拿完整旧/新快照，不能拿旧 Host + 新 Key。
+        let _guard = self.update_lock.lock().await;
+        let config = self.get_config(id)?;
+        let mut settings = config.settings;
+        if settings.is_null() {
+            return None;
+        }
+        if let Some(obj) = settings.as_object_mut() {
+            obj.insert(
+                "settings_revision".into(),
+                serde_json::json!(config.revision),
+            );
+        }
         let secret_keys = self.secret_field_keys(id);
         if secret_keys.is_empty() {
             return Some(settings);
@@ -548,32 +661,32 @@ impl PluginEngine {
     }
 
     /// 删除插件密钥字段（设置页「清除」按钮，0.25.16）。幂等——NotFound 视为已删。
-    pub fn clear_secret(&self, plugin_id: &str, field_key: &str) -> Result<(), String> {
-        #[cfg(target_os = "windows")]
+    pub async fn clear_secret(
+        &self,
+        plugin_id: &str,
+        field_key: &str,
+        expected_revision: u64,
+    ) -> Result<(), String> {
+        if !self
+            .secret_field_keys(plugin_id)
+            .iter()
+            .any(|k| k == field_key)
         {
-            use blink_infra::platform::secret::{SecretRef, delete_secret};
-            if !self
-                .secret_field_keys(plugin_id)
-                .iter()
-                .any(|k| k == field_key)
-            {
-                return Err(format!("字段未声明为密钥: {field_key}"));
-            }
-            match delete_secret(&SecretRef::plugin(plugin_id, field_key)) {
-                Ok(()) => Ok(()),
-                // NotFound 视为已删（幂等）
-                Err(blink_infra::platform::secret::SecretError::NotFound(_)) => Ok(()),
-                Err(e) => Err(e.to_string()),
-            }
+            return Err("invalid_arguments: 字段未声明为密钥".into());
         }
-        #[cfg(not(target_os = "windows"))]
-        {
-            let _ = (plugin_id, field_key);
-            Ok(())
-        }
+        let mut config = self.get_config(plugin_id).unwrap_or_default();
+        config.revision = expected_revision;
+        config.settings = serde_json::json!({});
+        config.settings[field_key] = serde_json::json!("");
+        self.update_config_with_store(
+            plugin_id,
+            &mut config,
+            &super::secret_update::PlatformSecretStore,
+            vec![(field_key.to_owned(), None)],
+        )
+        .await
     }
 }
-
 /// `PluginSettingResolver` 实现（0.8.2 §3.4.1 + 0.8.3 §4.13 扩展）——把 settings 字段
 /// 字符串读出来给 `RuleRouter` 用；0.8.3 起同时暴露 `is_enabled` 供 Context Suggestion
 /// 产出前查启用态（禁用联动决策）。
@@ -640,6 +753,33 @@ fn to_search_item(plugin_id: &str, item: PluginItem) -> SearchItem {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn resolved_settings_waits_for_a_complete_config_snapshot() {
+        let engine = test_engine().await;
+        tokio::time::pause();
+        let guard = engine.update_lock.lock().await;
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(5),
+                engine.resolved_settings("snapshot")
+            )
+            .await
+            .is_err()
+        );
+        engine.configs.write().unwrap().insert(
+            "snapshot".into(),
+            crate::config::PluginConfig {
+                revision: 3,
+                settings: serde_json::json!({"provider":"open_meteo"}),
+                ..Default::default()
+            },
+        );
+        drop(guard);
+        let settings = engine.resolved_settings("snapshot").await.unwrap();
+        assert_eq!(settings["settings_revision"], 3);
+        assert_eq!(settings["provider"], "open_meteo");
+    }
+
     async fn test_engine() -> PluginEngine {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:")
             .await
@@ -666,15 +806,15 @@ mod tests {
             },
         );
         assert_eq!(
-            engine.resolved_settings("no.such.plugin").unwrap(),
-            serde_json::json!({"target_lang": "zh"})
+            engine.resolved_settings("no.such.plugin").await.unwrap(),
+            serde_json::json!({"target_lang": "zh", "settings_revision":0})
         );
         // settings 为 null → get_settings 返回 None → resolved 同样 None
         engine.configs.write().unwrap().insert(
             "null.settings".into(),
             crate::config::PluginConfig::default(),
         );
-        assert!(engine.resolved_settings("null.settings").is_none());
+        assert!(engine.resolved_settings("null.settings").await.is_none());
     }
 
     #[tokio::test]

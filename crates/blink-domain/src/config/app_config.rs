@@ -185,6 +185,8 @@ pub struct PluginConfigUpdate {
     pub plugin_id: String,
     pub enabled: bool,
     pub settings: serde_json::Value,
+    #[serde(default)]
+    pub expected_revision: Option<u64>,
 }
 
 // ── 默认值函数（AppConfig 字段用）──────────────────────────────────────────────

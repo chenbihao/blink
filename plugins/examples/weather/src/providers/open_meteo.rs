@@ -4,47 +4,11 @@ use crate::protocol::PluginError;
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime};
 use serde::Deserialize;
 
-pub fn geocoding_url(city: &str) -> String {
-    format!(
-        "https://geocoding-api.open-meteo.com/v1/search?name={}&count=1&language=zh&format=json",
-        urlencoding::encode(city)
-    )
-}
-
 pub fn weather_url(location: &ResolvedLocation) -> String {
     format!(
         "https://api.open-meteo.com/v1/forecast?latitude={}&longitude={}&current=temperature_2m,weather_code,wind_speed_10m&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,wind_speed_10m_max&temperature_unit=celsius&wind_speed_unit=kmh&timezone=auto&forecast_days=7",
         location.latitude, location.longitude
     )
-}
-
-#[derive(Debug, Deserialize)]
-pub struct GeoResponse {
-    #[serde(default)]
-    pub results: Vec<GeoLocation>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct GeoLocation {
-    #[serde(default)]
-    pub id: Option<u64>,
-    pub name: String,
-    pub latitude: f64,
-    pub longitude: f64,
-    #[serde(default)]
-    pub admin1: Option<String>,
-    #[serde(default)]
-    pub admin2: Option<String>,
-    #[serde(default)]
-    pub admin3: Option<String>,
-    #[serde(default)]
-    pub admin4: Option<String>,
-    #[serde(default)]
-    pub country: Option<String>,
-    #[serde(default)]
-    pub country_code: Option<String>,
-    #[serde(default)]
-    pub timezone: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,51 +56,6 @@ fn invalid_response() -> PluginError {
         code: "invalid_response".into(),
         message: "天气服务返回了无法解析的数据，请稍后重试".into(),
     }
-}
-
-pub fn parse_location(body: &str) -> Result<ResolvedLocation, PluginError> {
-    let geo: GeoResponse = serde_json::from_str(body).map_err(|_| invalid_response())?;
-    let loc = geo.results.into_iter().next().ok_or_else(|| PluginError {
-        code: "location_not_found".into(),
-        message: "未找到城市，请检查名称或配置默认城市".into(),
-    })?;
-    if !loc.latitude.is_finite()
-        || !loc.longitude.is_finite()
-        || !(-90.0..=90.0).contains(&loc.latitude)
-        || !(-180.0..=180.0).contains(&loc.longitude)
-        || loc.name.trim().is_empty()
-    {
-        return Err(invalid_response());
-    }
-    let administrative_area = loc.admin1.clone().unwrap_or_default();
-    let administrative_areas = [loc.admin1, loc.admin2, loc.admin3, loc.admin4]
-        .into_iter()
-        .flatten()
-        .filter(|s| !s.trim().is_empty())
-        .collect::<Vec<_>>();
-    let country = loc.country.unwrap_or_default();
-    let display_name = [&loc.name, &administrative_area, &country]
-        .into_iter()
-        .filter(|v| !v.is_empty())
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(" · ");
-    Ok(ResolvedLocation {
-        name: loc.name,
-        display_name,
-        latitude: loc.latitude,
-        longitude: loc.longitude,
-        coordinate_system: "wgs84",
-        administrative_area,
-        country,
-        country_code: loc.country_code,
-        administrative_areas,
-        timezone: loc.timezone,
-        kind: "city_center",
-        source: "open_meteo",
-        source_id: loc.id.map(|id| format!("open_meteo:{id}")),
-        resolved_at: chrono::Utc::now().to_rfc3339(),
-    })
 }
 
 fn number(values: &[Option<f64>], index: usize) -> Option<f64> {
@@ -265,19 +184,9 @@ pub fn parse_weather(
 mod tests {
     use super::*;
     fn location() -> ResolvedLocation {
-        parse_location(r#"{"results":[{"name":"广州","latitude":23.13,"longitude":113.26,"timezone":"Asia/Shanghai"}]}"#).unwrap()
+        crate::settings::parse_location(&serde_json::json!({"name":"广州","latitude":23.13,"longitude":113.26,"timezone":"Asia/Shanghai","coordinate_system":"wgs84"}),true).unwrap()
     }
 
-    #[test]
-    fn no_geocoding_results_is_not_a_parse_error() {
-        assert_eq!(parse_location("{}").unwrap_err().code, "location_not_found");
-        assert_eq!(
-            parse_location(r#"{"results":[{"name":"bad","latitude":999,"longitude":0}]}"#)
-                .unwrap_err()
-                .code,
-            "invalid_response"
-        );
-    }
     #[test]
     fn missing_daily_codes_and_short_arrays_never_become_clear_weather() {
         let result=parse_weather(r#"{"daily":{"time":["2026-10-16","2026-10-15","bad","2026-10-15"],"temperature_2m_max":[25,26,27,28],"temperature_2m_min":[20]}}"#,location()).unwrap();

@@ -792,7 +792,18 @@ mod tests {
             serde_json::json!(root.join("target/debug/blink-plugin-weather.exe"));
         let manifest: PluginManifest = serde_json::from_value(value).unwrap();
         let handle = PluginHandle::new(Arc::new(manifest), root, None);
-        let settings = serde_json::json!({"default_city":"Guangzhou","temperature_unit":"celsius"});
+        let locations = handle
+            .execute_tool_raw(
+                "search_locations",
+                &serde_json::json!({"query":"广州","country_code":"CN","limit":10}),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(locations.data[0]["count"], 1);
+        let location = locations.data[0]["candidates"][0].clone();
+        let settings = serde_json::json!({"default_city":"incorrect legacy city","default_location":location,"temperature_unit":"celsius"});
         let start = std::time::Instant::now();
         let raw = handle
             .execute_tool_raw(
@@ -837,6 +848,21 @@ mod tests {
             _ => panic!("weather query must copy the summary"),
         }
         println!("live query: {}", items[0].title);
+        let ambiguous = handle
+            .execute_tool_raw(
+                "get_weather",
+                &serde_json::json!({"city":"朝阳"}),
+                Some(&settings),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(ambiguous.data[0]["status"], "needs_location");
+        assert!(ambiguous.data[0]["candidates"].as_array().unwrap().len() > 1);
+        println!(
+            "live ambiguity: candidates={}",
+            ambiguous.data[0]["candidates"].as_array().unwrap().len()
+        );
     }
 
     #[tokio::test]

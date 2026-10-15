@@ -60,9 +60,12 @@ pub async fn set_config(
                 "config_conflict",
                 "autostart_failed",
                 "autostart_restore_failed",
+                "secret_read_failed",
+                "secret_write_failed",
+                "secret_restore_failed",
             ]
             .into_iter()
-            .find(|code| message.starts_with(&format!("{code}:")))
+            .find(|code| message == *code || message.starts_with(&format!("{code}:")))
             .unwrap_or("config_update_failed");
             crate::app::command_error::CommandError::new(code, &message, true)
         })
@@ -414,6 +417,11 @@ async fn set_config_value(
             let mut config = engine.get_config(&v.plugin_id).unwrap_or_default();
             config.enabled = v.enabled;
             config.settings = v.settings;
+            if let Some(revision) = v.expected_revision {
+                config.revision = revision;
+            } else if v.plugin_id == "builtin.weather" {
+                return Err("config_conflict: 天气设置缺少版本，请刷新后重试".into());
+            }
             let result = engine
                 .update_config(&v.plugin_id, config, Some(&router))
                 .await;

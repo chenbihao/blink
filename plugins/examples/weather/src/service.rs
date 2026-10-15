@@ -18,14 +18,18 @@ enum ReplyKind {
 }
 
 enum Stage {
-    Geocoding,
+    Geocoding {
+        query: crate::location::LocationQuery,
+        search_only: bool,
+        unqualified: bool,
+    },
     Weather(ResolvedLocation),
 }
 
 struct Pending {
     query_id: String,
     reply: ReplyKind,
-    parameters: RequestParameters,
+    unit: crate::settings::TemperatureUnit,
     deadline: Instant,
     stage: Stage,
 }
@@ -109,7 +113,12 @@ impl WeatherService {
                 settings,
                 budget_ms,
             } => {
-                if tool_name != "get_weather" {
+                if tool_name == "search_locations" {
+                    Some(match settings::parse_search(&arguments) {
+                        Ok(query) => self.start_search(id, query, budget_ms, now),
+                        Err(e) => failed(id, ReplyKind::Tool, e),
+                    })
+                } else if tool_name != "get_weather" {
                     Some(failed(
                         id,
                         ReplyKind::Tool,
@@ -154,20 +163,71 @@ impl WeatherService {
         if budget == 0 {
             return failed(id, reply, error("timeout", "天气查询时间预算已用尽"));
         }
-        let url = open_meteo::geocoding_url(&parameters.city);
+        let (stage, url) = if let Some(location) = parameters.location {
+            let url = open_meteo::weather_url(&location);
+            (Stage::Weather(location), url)
+        } else {
+            let query = parameters.location_query.expect("name query was validated");
+            let url = crate::location::open_meteo::search_url(&query);
+            (
+                Stage::Geocoding {
+                    query,
+                    search_only: false,
+                    unqualified: false,
+                },
+                url,
+            )
+        };
         self.issue(
             Pending {
                 query_id: id,
                 reply,
-                parameters,
+                unit: parameters.unit,
                 deadline: now + Duration::from_millis(budget),
-                stage: Stage::Geocoding,
+                stage,
             },
             url,
             now,
         )
     }
 
+    fn start_search(
+        &mut self,
+        id: String,
+        query: crate::location::LocationQuery,
+        budget_ms: Option<u64>,
+        now: Instant,
+    ) -> PluginToCore {
+        if self.pending.len() >= MAX_PENDING_QUERIES
+            || self.pending.values().any(|p| p.query_id == id)
+        {
+            return failed(
+                id,
+                ReplyKind::Tool,
+                error("busy", "地点搜索繁忙，请稍后重试"),
+            );
+        }
+        let budget = budget_ms.unwrap_or(DEFAULT_BUDGET_MS).min(MAX_BUDGET_MS);
+        if budget == 0 {
+            return failed(id, ReplyKind::Tool, error("timeout", "地点搜索预算已用尽"));
+        }
+        let url = crate::location::open_meteo::search_url(&query);
+        self.issue(
+            Pending {
+                query_id: id,
+                reply: ReplyKind::Tool,
+                unit: crate::settings::TemperatureUnit::Celsius,
+                deadline: now + Duration::from_millis(budget),
+                stage: Stage::Geocoding {
+                    query,
+                    search_only: true,
+                    unqualified: false,
+                },
+            },
+            url,
+            now,
+        )
+    }
     fn issue(&mut self, pending: Pending, url: String, now: Instant) -> PluginToCore {
         let timeout_ms = remaining_ms(pending.deadline, now);
         if timeout_ms == 0 {
@@ -200,7 +260,7 @@ impl WeatherService {
     ) -> Option<PluginToCore> {
         let pending = self.pending.remove(id)?;
         let stage = match &pending.stage {
-            Stage::Geocoding => "geocoding",
+            Stage::Geocoding { .. } => "geocoding",
             Stage::Weather(_) => "weather",
         };
         eprintln!(
@@ -238,8 +298,46 @@ impl WeatherService {
             Err(e) => return Some(failed(pending.query_id, pending.reply, e)),
         };
         match pending.stage {
-            Stage::Geocoding => match open_meteo::parse_location(body) {
-                Ok(location) => {
+            Stage::Geocoding {
+                query,
+                search_only,
+                unqualified,
+            } => match crate::location::open_meteo::parse_candidates(body, &query) {
+                Ok(candidates)
+                    if candidates.is_empty() && query.admin.is_some() && !unqualified =>
+                {
+                    let url = crate::location::open_meteo::unqualified_search_url(&query);
+                    Some(self.issue(
+                        Pending {
+                            stage: Stage::Geocoding {
+                                query,
+                                search_only,
+                                unqualified: true,
+                            },
+                            ..pending
+                        },
+                        url,
+                        now,
+                    ))
+                }
+                Ok(candidates) if search_only => Some(PluginToCore::RawResult(RawToolResult {
+                    id: pending.query_id,
+                    data: serde_json::json!([{"resolver":"open_meteo","summary":format!("找到 {} 个地点候选",candidates.len()),"count":candidates.len(),"truncated":candidates.len()>=query.limit || crate::location::open_meteo::possibly_truncated(body),"candidates":candidates}]),
+                    error: None,
+                })),
+                Ok(candidates) if candidates.is_empty() => Some(failed(
+                    pending.query_id,
+                    pending.reply,
+                    error(
+                        "location_not_found",
+                        "未找到符合名称与限定的地点，请尝试更完整名称",
+                    ),
+                )),
+                Ok(mut candidates)
+                    if crate::location::can_auto_resolve(&query, &candidates)
+                        && !crate::location::open_meteo::possibly_truncated(body) =>
+                {
+                    let location = candidates.remove(0);
                     let url = open_meteo::weather_url(&location);
                     Some(self.issue(
                         Pending {
@@ -249,6 +347,21 @@ impl WeatherService {
                         url,
                         now,
                     ))
+                }
+                Ok(candidates) => {
+                    let (items, data) = crate::presentation::needs_location(&candidates);
+                    Some(match pending.reply {
+                        ReplyKind::Query => PluginToCore::Response(PluginResponse {
+                            id: pending.query_id,
+                            items,
+                            error: None,
+                        }),
+                        ReplyKind::Tool => PluginToCore::RawResult(RawToolResult {
+                            id: pending.query_id,
+                            data,
+                            error: None,
+                        }),
+                    })
                 }
                 Err(e) => Some(failed(pending.query_id, pending.reply, e)),
             },
@@ -260,8 +373,7 @@ impl WeatherService {
                         snapshot.status(),
                         snapshot.daily.len()
                     );
-                    let (items, data) =
-                        crate::presentation::render(&snapshot, pending.parameters.unit);
+                    let (items, data) = crate::presentation::render(&snapshot, pending.unit);
                     Some(match pending.reply {
                         ReplyKind::Query => PluginToCore::Response(PluginResponse {
                             id: pending.query_id,
@@ -312,6 +424,81 @@ pub fn run() {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn default_coordinates_start_weather_without_geocoding() {
+        let mut service = WeatherService::default();
+        let result=service.handle(CoreToPlugin::ToolCall{id:"coordinates".into(),tool_name:"get_weather".into(),arguments:json!({}),settings:Some(json!({"default_location":{"latitude":23.13,"longitude":113.26,"coordinate_system":"wgs84","name":"广州"},"default_city":"wrong"})),budget_ms:None},Instant::now());
+        let PluginToCore::HttpRequest(request) = &result[0] else {
+            panic!("weather expected");
+        };
+        assert!(
+            request
+                .url
+                .starts_with("https://api.open-meteo.com/v1/forecast")
+        );
+        assert!(request.url.contains("latitude=23.13"));
+    }
+
+    #[test]
+    fn ambiguous_city_returns_candidates_without_weather_or_config_writes() {
+        let now = Instant::now();
+        let mut service = WeatherService::default();
+        let first = service.handle(tool("ambiguity", None), now);
+        let result=service.handle(CoreToPlugin::HttpResponse{id:http_id(&first[0]),status:200,error:None,body:Some(r#"{"results":[{"id":1,"name":"广州","latitude":23,"longitude":113,"feature_code":"PPL"},{"id":2,"name":"广州","latitude":24,"longitude":114,"feature_code":"PPL"}]}"#.into())},now);
+        let PluginToCore::RawResult(result) = &result[0] else {
+            panic!("candidate result expected");
+        };
+        assert_eq!(result.data[0]["status"], "needs_location");
+        assert!(result.data[0].get("current").is_none());
+        assert_eq!(result.data[0]["candidates"].as_array().unwrap().len(), 2);
+        assert!(service.pending.is_empty());
+    }
+
+    #[test]
+    fn search_empty_is_normal_and_city_admin_retry_uses_remaining_budget() {
+        let now = Instant::now();
+        let mut service = WeatherService::default();
+        let first = service.handle(
+            CoreToPlugin::ToolCall {
+                id: "search".into(),
+                tool_name: "search_locations".into(),
+                arguments: json!({"query":"广州/天河区","limit":1}),
+                settings: None,
+                budget_ms: Some(100),
+            },
+            now,
+        );
+        let retry = service.handle(
+            CoreToPlugin::HttpResponse {
+                id: http_id(&first[0]),
+                status: 200,
+                body: Some("{}".into()),
+                error: None,
+            },
+            now + Duration::from_millis(30),
+        );
+        let PluginToCore::HttpRequest(request) = &retry[0] else {
+            panic!("unqualified retry expected");
+        };
+        assert_eq!(request.timeout_ms, 70);
+        assert!(!request.url.contains("%2C"));
+        let result = service.handle(
+            CoreToPlugin::HttpResponse {
+                id: request.id.clone(),
+                status: 200,
+                body: Some("{}".into()),
+                error: None,
+            },
+            now + Duration::from_millis(40),
+        );
+        let PluginToCore::RawResult(result) = &result[0] else {
+            panic!("search result expected");
+        };
+        assert!(result.error.is_none());
+        assert_eq!(result.data[0]["count"], 0);
+        assert!(service.pending.is_empty());
+    }
     fn tool(id: &str, budget_ms: Option<u64>) -> CoreToPlugin {
         CoreToPlugin::ToolCall {
             id: id.into(),
@@ -332,7 +519,7 @@ mod tests {
             id,
             status: 200,
             body: Some(
-                r#"{"results":[{"name":"广州","latitude":23.13,"longitude":113.26}]}"#.into(),
+                r#"{"results":[{"name":"广州","latitude":23.13,"longitude":113.26,"feature_code":"PPLA"}]}"#.into(),
             ),
             error: None,
         }

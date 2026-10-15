@@ -64,9 +64,19 @@ Every Chord action can be remapped in Settings and promoted to a **global hotkey
 | Result item menu | Right-click a result entry | Open containing folder, copy path / file name, open shortcut target, reset that entry's launch-frequency stats, and more |
 | Drag the main window | Drag the card's blank area | Moves the main window (no visual hint, but the blank area really is draggable) |
 
-### Weather results
+### Weather
 
-- A configured default city remains the fallback when a query omits a city.
+#### Configure a location
+
+- Go to **Settings → Plugins → Weather configuration** and choose “Change location” on the existing location card to search in that card's panel. Narrow the search with a two-letter country code or a parent administrative area. Select a complete location candidate and save the card. The temperature unit is saved explicitly as well.
+- For advanced use, enter WGS84 latitude and longitude manually. If the display name is blank, the location is shown by its coordinates.
+- Canceling an edit does not save it. Clearing the default location also clears the legacy city so it cannot remain as a fallback.
+- You can edit the location card manually while the Weather plugin is disabled; network search requires the plugin to be enabled. The legacy `default_city` remains usable by queries but is shown as unconfirmed, and queries do not rewrite it automatically. If settings change while you are editing, the panel loads the latest saved configuration; review and confirm your draft again.
+
+#### Queries and results
+
+- A query without a location uses the saved default coordinates. An explicit `city` or `location` passed to the weather tool overrides the default; do not pass both. `search_locations` only searches and returns candidates; it does not save a location.
+- Ambiguous names prompt you for a parent administrative area or a fuller place name, such as “辽宁/朝阳” or “广州/天河区.” The first candidate is never selected automatically. Open-Meteo may not find a Chinese name; try the full district or county name, an English name, or enter coordinates manually. A same-name place is not guaranteed to be uniquely identifiable automatically.
 - If a tool call explicitly specifies a temperature unit, it takes priority over the saved preference. Current conditions and daily forecasts use the same unit. Copying a weather result copies the complete weather summary.
 - Missing fields appear as “Unknown,” while other available information remains visible. Each daily description shows the most severe condition expected that day; it does not mean that condition lasts all day.
 

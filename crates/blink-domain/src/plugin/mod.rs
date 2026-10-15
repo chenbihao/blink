@@ -8,6 +8,8 @@ mod engine;
 mod manifest;
 mod process;
 mod protocol;
+mod secret_update;
+mod weather_config;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

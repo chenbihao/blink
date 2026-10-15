@@ -2,6 +2,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod conditions;
+mod location;
 mod model;
 mod presentation;
 mod protocol;

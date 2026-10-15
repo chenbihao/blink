@@ -1,9 +1,15 @@
 {
   "schema_version": 1,
   "id": "builtin.weather",
-  "name": { "zh": "天气", "en": "Weather" },
-  "version": "0.2.0",
-  "description": { "zh": "查询城市天气（open-meteo，免费无需 key）", "en": "City weather (open-meteo, free, no key needed)" },
+  "name": {
+    "zh": "天气",
+    "en": "Weather"
+  },
+  "version": "0.3.0",
+  "description": {
+    "zh": "查询城市天气（open-meteo，免费无需 key）",
+    "en": "City weather (open-meteo, free, no key needed)"
+  },
   "builtin": true,
   "runtime": {
     "type": "process",
@@ -15,26 +21,76 @@
     "concurrency": 4
   },
   "triggers": [
-    { "type": "keyword", "keyword": "天气", "exclusive": true },
-    { "type": "keyword", "keyword": "weather", "exclusive": true }
+    {
+      "type": "keyword",
+      "keyword": "天气",
+      "exclusive": true
+    },
+    {
+      "type": "keyword",
+      "keyword": "weather",
+      "exclusive": true
+    }
   ],
-  "capabilities": ["query"],
+  "capabilities": [
+    "query"
+  ],
   "tools": [
     {
       "name": "get_weather",
-      "description": "查询指定城市的当前天气及未来 7 天预报，包括温度、天气状况和风速。数据来自 open-meteo（免费无需 API key）。不传 city 时用配置的默认城市。",
+      "description": "查询当前天气及最多7天预报。city与location可选且互斥；都省略则执行时读取用户默认地点。地点歧义返回needs_location及候选，请确认后传完整location；不可把候选当作天气。",
       "parameters": {
         "type": "object",
         "properties": {
           "city": {
             "type": "string",
-            "description": "城市名称（中文或英文），如「北京」「Tokyo」「New York」。不传时用配置的默认城市"
+            "description": "城市或区县名称，可用辽宁/朝阳等上级行政区/地点限定；省略时用用户默认地点"
           },
           "unit": {
             "type": "string",
             "description": "温度单位",
-            "enum": ["celsius", "fahrenheit"],
-            "default": "celsius"
+            "enum": [
+              "celsius",
+              "fahrenheit"
+            ]
+          },
+          "country_code": {
+            "type": "string",
+            "description": "城市搜索的两位国家代码，如CN、US"
+          },
+          "admin": {
+            "type": "string",
+            "description": "城市搜索的上级行政区名称"
+          },
+          "location": {
+            "properties": {
+              "coordinate_system": {
+                "type": "string",
+                "enum": [
+                  "wgs84"
+                ]
+              },
+              "latitude": {
+                "maximum": 90,
+                "minimum": -90,
+                "type": "number"
+              },
+              "longitude": {
+                "maximum": 180,
+                "minimum": -180,
+                "type": "number"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "latitude",
+              "longitude",
+              "coordinate_system"
+            ],
+            "description": "明确地点，直接查询坐标。可传search_locations候选对象；不修改用户默认配置",
+            "type": "object"
           }
         }
       },
@@ -42,34 +98,76 @@
       "result_type": "items",
       "hint": "读取 status/warnings 判断数据完整度；部分可用时明确说明缺失项。逐日天气是当天最严重现象，不代表全天持续。返回来源、地点、有效时间和实际可用预报。",
       "progress_hint": "查询天气",
-      "setting_bindings": {
-        "city": "default_city",
-        "unit": "temperature_unit"
-      },
       "projection": {
         "result_shape": "items",
         "items_pointer": "$",
         "item_pointer": "$.summary",
         "item_desc_pointer": "$.location.display_name"
       }
+    },
+    {
+      "name": "search_locations",
+      "projection": {
+        "result_shape": "items",
+        "items_pointer": "$",
+        "item_pointer": "$.summary"
+      },
+      "hint": "候选为地点，不含天气；需用户或明确上下文确认后才选择。",
+      "description": "按名称和可选国家/行政区搜索地点候选，返回完整坐标，不修改默认地点。可以返回正常空列表。候选可传给get_weather.location。",
+      "result_type": "items",
+      "danger_class": "Safe",
+      "progress_hint": "搜索地点",
+      "parameters": {
+        "properties": {
+          "limit": {
+            "maximum": 20,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "admin": {
+            "type": "string",
+            "description": "上级行政区名称"
+          },
+          "country_code": {
+            "type": "string",
+            "description": "两位国家代码，如CN"
+          },
+          "query": {
+            "type": "string",
+            "description": "完整城市或区县名称，可用辽宁/朝阳格式"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      }
     }
   ],
   "settings_schema": [
     {
-      "key": "default_city",
-      "type": "string",
-      "title": { "zh": "默认城市", "en": "Default city" },
-      "description": { "zh": "无参数时查询的城市（如「北京」）", "en": "City queried with no argument (e.g. 'Beijing')" },
-      "default": ""
-    },
-    {
       "key": "temperature_unit",
       "type": "enum",
-      "title": { "zh": "温度单位", "en": "Temperature unit" },
+      "title": {
+        "zh": "温度单位",
+        "en": "Temperature unit"
+      },
       "default": "celsius",
       "options": [
-        { "value": "celsius", "label": { "zh": "摄氏度 (°C)", "en": "Celsius (°C)" } },
-        { "value": "fahrenheit", "label": { "zh": "华氏度 (°F)", "en": "Fahrenheit (°F)" } }
+        {
+          "value": "celsius",
+          "label": {
+            "zh": "摄氏度 (°C)",
+            "en": "Celsius (°C)"
+          }
+        },
+        {
+          "value": "fahrenheit",
+          "label": {
+            "zh": "华氏度 (°F)",
+            "en": "Fahrenheit (°F)"
+          }
+        }
       ]
     }
   ]

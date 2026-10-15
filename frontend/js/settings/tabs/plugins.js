@@ -6,11 +6,19 @@
  * 命令名 list_plugins 与容器 plugins-list 均不存在导致页面空白；0.9.5.1 还原原版
  * get_plugins + plugins-container + 整套 schema/触发词/拖拽）。
  */
-import {confirmDialog, invoke} from "../../shared/tauri.js";
+import {confirmDialog, invoke, listen} from "../../shared/tauri.js";
 import {onLangChange, t} from "../../i18n/index.js";
 import {iconHTML} from "../../shared/icon.js";
 import {saveConfig} from "../../shared/config-keys.js";
 import {navigateSettings} from "../navigation.js";
+import {renderWeatherSettings, mountWeatherSettings, WEATHER_EDITOR_CLOSED} from "./weather-settings.js";
+import {EVENTS} from "../../shared/event-names.js";
+let pluginsLoadRevision = 0;
+let pluginWrites = 0;
+const weatherEditors = new Map();
+let pluginConfigListener = false;
+let pendingPluginReload = false;
+const renderedPlugins = new Map();
 
 /** 插件图标映射（0.10.8：emoji → Lucide 图标名） */
 const PLUGIN_ICONS = {
@@ -33,47 +41,72 @@ export function initPluginsTab() {
     loadPlugins();
     initNumberSpinner();
     initExternalLinkDelegate();
-
-    // 语言切换时重新渲染（插件配置需重新加载）
-    if (!_langChangeRegistered) {
-        _langChangeRegistered = true;
-        onLangChange(() => {
-            loadPlugins();
+    if (!pluginConfigListener) {
+        pluginConfigListener = true;
+        listen(EVENTS.CONFIG_CHANGED, ({payload}) => {
+            if (!payload?.key || payload.key === "plugin_config" || payload.key.startsWith("plugin:")) loadPlugins();
         });
     }
+    if (!_langChangeRegistered) {
+        _langChangeRegistered=true;
+        onLangChange(()=>loadPlugins(true));
+    }
 }
-
 // ── 插件列表（搬自原 settings.js）─────────────────────────────────────────────
 
 /**
  * 加载插件列表
  */
-async function loadPlugins() {
+async function loadPlugins(force = false) {
+    const revision = ++pluginsLoadRevision;
     const container = document.getElementById("plugins-container");
     if (!container) return;
-
     let plugins;
     try {
         plugins = await invoke("get_plugins");
-    } catch (e) {
-        console.error("loadPlugins failed:", e);
-        container.innerHTML = `<p class="msg-error" style="padding: 20px;">${t("plugin.load_failed")}</p>`;
+    } catch (error) {
+        if (revision !== pluginsLoadRevision) return;
+        console.error("loadPlugins failed:", error);
+        if (!force && pluginWrites) {
+            pendingPluginReload = true;
+            return;
+        }
+        if (container.querySelector('[data-weather-editor][aria-hidden="false"]')) {
+            pendingPluginReload = true;
+            const card = container.querySelector('.extension-card[data-plugin-id="builtin.weather"]');
+            if (card) flash(card, t("config.load_failed", {err: error?.message || String(error)}), true, 6000);
+            return;
+        }
+        for (const editor of weatherEditors.values()) editor.dispose();
+        weatherEditors.clear();
+        container.innerHTML = `<p class="msg-error">${t("plugin.load_failed")}</p>`;
         return;
     }
-
-    if (!Array.isArray(plugins) || plugins.length === 0) {
+    if (revision !== pluginsLoadRevision) return;
+    if (!force && pluginWrites) {
+        pendingPluginReload = true;
+        return;
+    }
+    if (!Array.isArray(plugins)) plugins = [];
+    if (!force && container.querySelector('[data-weather-editor][aria-hidden="false"]')) {
+        pendingPluginReload = true;
+        const current = renderedPlugins.get("builtin.weather");
+        const latest = plugins.find(plugin => plugin.id === "builtin.weather");
+        const card = container.querySelector('.extension-card[data-plugin-id="builtin.weather"]');
+        if (card && latest?.revision !== current?.revision) flash(card, t("weather.config_changed"), true, 6000);
+        return;
+    }
+    pendingPluginReload = false;
+    for (const editor of weatherEditors.values()) editor.dispose();
+    weatherEditors.clear();
+    renderedPlugins.clear();
+    for (const plugin of plugins) renderedPlugins.set(plugin.id, plugin);
+    if (plugins.length === 0) {
         container.innerHTML = `<p class="msg-muted" style="padding: 20px;">${t("plugin.empty")}</p>`;
         return;
     }
-
     container.innerHTML = plugins.map(renderPluginCard).join("");
-
-    // 绑定每个插件卡片事件（用 data-plugin-id 定位）
-    for (const plugin of plugins) {
-        bindPluginCardEvents(plugin);
-    }
-
-    // 初始化可拖动排序列表
+    for (const plugin of plugins) bindPluginCardEvents(plugin);
     initSortableLists();
 }
 
@@ -93,7 +126,7 @@ function renderPluginCard(plugin) {
     const triggersTags = renderTriggersTags(plugin);
 
     const configSection = hasFields
-        ? renderConfigSection(t("plugin.section"), schema, settings, {collapsible: true, collapsed: true})
+        ? renderConfigSection(t("plugin.section"), schema, settings, {collapsible: true, collapsed: true, extraHtml: plugin.id === "builtin.weather" ? renderWeatherSettings(plugin) : "", saveLabel: plugin.id === "builtin.weather" ? t("weather.save") : ""})
         : `<div class="plugin-no-config">${t("plugin.no_config")}</div>`;
 
     const headerRight = `<div class="plugin-master-toggle">
@@ -454,6 +487,7 @@ function renderConfigSection(title, schema, values, opts = {}) {
         return `<details class="plugin-config-section" ${collapsed ? "" : "open"}>
        <summary class="plugin-section-title">${escapeHtml(title)}</summary>
        <div class="plugin-config-body">
+         ${opts.extraHtml || ""}
          ${ungroupedHtml}
          ${groupedHtml}
          ${saveRow}
@@ -530,33 +564,62 @@ function bindPluginCardEvents(plugin) {
     const id = plugin.id;
     const schema = plugin.settings_schema || [];
 
+    const weatherEditor = id === "builtin.weather" ? mountWeatherSettings(card, plugin) : null;
+    if (weatherEditor) {
+        weatherEditors.set(id,weatherEditor);
+        card.addEventListener(WEATHER_EDITOR_CLOSED,()=> {if(pendingPluginReload) loadPlugins();});
+    }
+    let saving = false;
     const save = async (enabledOverride) => {
-        const settings = collectSettings(card, schema);
+        if (saving) return false;
+        saving = true;
+        pluginWrites++;
+        const settings = enabledOverride !== undefined && weatherEditor
+            ? {...(plugin.settings || {})}
+            : {...collectSettings(card,schema,plugin.settings),...(weatherEditor?.collect() || {})};
         const enabled = enabledOverride !== undefined ? enabledOverride : card.querySelector(".plugin-enabled").checked;
         try {
-            await saveConfig("plugin_config", {pluginId: id, enabled, settings});
-            // 0.25.16:密钥已转存 CM——清空输入框并回填掩码 hint（值不再回显，
-            // 也避免后续其他字段触发的自动保存重复提交同一密钥）
-            card.querySelectorAll(".plugin-field.plugin-secret-field").forEach((el) => {
-                if (el.value !== "") {
-                    el.value = "";
-                    el._refreshHint?.();
-                }
+            await saveConfig("plugin_config", {pluginId:id,enabled,settings,expectedRevision:plugin.revision ?? 0});
+            // 提交已经成功；之后的刷新失败不能报告为保存失败。
+            plugin.revision=(plugin.revision ?? 0)+1;
+            plugin.settings={...settings};
+            for(const f of schema) if(f.secret) plugin.settings[f.key]="";
+            plugin.enabled=enabled;
+            try {
+                const latest=(await invoke("get_plugins")).find(p=>p.id===id);
+                if(latest?.revision === plugin.revision) {plugin.settings=latest.settings;plugin.enabled=latest.enabled;}
+                else if(latest) {pendingPluginReload=true;flash(card,t("weather.config_changed"),true,6000);}
+            } catch(error) {flash(card,t("config.load_failed",{err:error?.message || String(error)}),true,6000);}
+            card.querySelectorAll(".plugin-field.plugin-secret-field").forEach(el=> {
+                if (el.value !== "") { el.value=""; el._refreshHint?.(); }
             });
             return true;
         } catch (err) {
-            console.error("update_plugin_config failed:", err);
-            flash(card, t("common.save_failed_msg", {err}), true, 5000);
+            flash(card,t("common.save_failed_msg",{err:err?.message || String(err)}),true,6000);
+            if (err?.code === "config_conflict" || String(err?.message || err).includes("config_conflict")) {
+                await loadPlugins(true);
+                const refreshed=document.querySelector(`.extension-card[data-plugin-id="${id}"]`);
+                if(refreshed) {
+                    const section=refreshed.querySelector("details.plugin-config-section");
+                    if(section) section.open=true;
+                    flash(refreshed,t("weather.save_conflict"),true,8000);
+                }
+            }
             return false;
-        }
+        } finally { saving=false; pluginWrites--; }
     };
-
+    card.querySelectorAll(".weather-save, .plugin-save").forEach(button=>button.addEventListener("click",async()=> {
+        button.disabled=true;
+        const ok=await save();
+        if (ok) await loadPlugins(true);
+        else if (button.isConnected) button.disabled=false;
+    }));
     card.querySelector(".plugin-enabled")?.addEventListener("change", async (e) => {
         const ok = await save(e.target.checked);
         if (!ok) e.target.checked = !e.target.checked;
         // 0.25.20：启用态即时反映到卡片视觉（is-disabled 原本只在渲染时
         // 决定，默认禁用的插件启用后卡片一直灰显）
-        if (ok) card.classList.toggle("is-disabled", !e.target.checked);
+        if (ok) { card.classList.toggle("is-disabled", !e.target.checked); weatherEditor?.setEnabled(e.target.checked); }
         // 0.25.20：启用脚本插件且托管运行时未安装 → 显式确认后引导安装
         // （不做静默后台下载——失败不可见、流量不可控）
         if (ok && e.target.checked) {
@@ -568,7 +631,7 @@ function bindPluginCardEvents(plugin) {
     card.querySelectorAll(".plugin-field").forEach((el) => {
         el.addEventListener("change", async () => {
             applyFieldVisibility(card, schema);
-            await save();
+            if (!weatherEditor) await save();
         });
     });
 
@@ -576,7 +639,7 @@ function bindPluginCardEvents(plugin) {
     bindNoSpaceHints(card, schema);
 
     // 密钥字段（secret）：掩码 hint 回填 placeholder + 清除按钮（0.25.16）
-    bindSecretFields(card, id, schema);
+    bindSecretFields(card, id, schema, () => plugin.revision ?? 0);
 
     // 条件显隐初算（如"降级顺序"仅在"允许降级"开启时显示）
     applyFieldVisibility(card, schema);
@@ -699,9 +762,10 @@ function bindPluginCardEvents(plugin) {
 /**
  * 从卡片控件收集 settings 对象（按 schema type 转换类型）
  */
-function collectSettings(card, schema) {
-    const settings = {};
+function collectSettings(card, schema, baseline = {}) {
+    const settings = {...(baseline || {})};
     for (const f of schema) {
+        if (f.secret) delete settings[f.key];
         if (f.type === "sortable_list") {
             settings[f.key] = collectSortableValue(card, f.key);
             continue;
@@ -731,7 +795,7 @@ function collectSettings(card, schema) {
  * 真实密钥在系统凭据管理器，前端只拿 format_hint 掩码（如 sk-a••••cdef）。
  * 清除走专门 invoke（不走 settings 保存——settings 里的空串语义是"未修改"）。
  */
-function bindSecretFields(card, pluginId, schema) {
+function bindSecretFields(card, pluginId, schema, revision) {
     for (const f of schema) {
         if (f.type !== "string" || !f.secret) continue;
         const input = card.querySelector(`.plugin-field.plugin-secret-field[data-key="${f.key}"]`);
@@ -753,7 +817,8 @@ function bindSecretFields(card, pluginId, schema) {
         clearBtn?.addEventListener("click", async () => {
             clearBtn.disabled = true;
             try {
-                await invoke("clear_plugin_secret", {pluginId, fieldKey: f.key});
+                await invoke("clear_plugin_secret", {pluginId, fieldKey:f.key, expectedRevision:revision()});
+                await loadPlugins(true);
                 input.value = "";
                 await refreshHint();
                 flash(card, t("plugin.secret_cleared"), false, 1500);

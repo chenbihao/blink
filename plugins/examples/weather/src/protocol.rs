@@ -96,7 +96,11 @@ pub struct PluginItem {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum PluginAction {
-    Copy { text: String },
+    #[serde(rename = "none")]
+    None,
+    Copy {
+        text: String,
+    },
 }
 
 #[cfg(test)]

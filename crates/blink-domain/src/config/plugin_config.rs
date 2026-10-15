@@ -28,6 +28,7 @@ pub struct CustomTrigger {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(from = "CompatPluginConfig")]
 pub struct PluginConfig {
+    pub revision: u64,
     pub enabled: bool,
     #[serde(default = "default_null")]
     pub settings: serde_json::Value,
@@ -41,6 +42,8 @@ pub struct PluginConfig {
 /// 兼容旧配置格式（用于数据迁移）。
 #[derive(Debug, Deserialize)]
 struct CompatPluginConfig {
+    #[serde(default)]
+    pub revision: u64,
     pub enabled: bool,
     #[serde(default = "default_null")]
     pub settings: serde_json::Value,
@@ -58,6 +61,7 @@ impl From<CompatPluginConfig> for PluginConfig {
         let disabled_default_triggers = compat.disabled_default_triggers.unwrap_or_default();
 
         Self {
+            revision: compat.revision,
             enabled: compat.enabled,
             settings: compat.settings,
             disabled_default_triggers,
@@ -69,6 +73,7 @@ impl From<CompatPluginConfig> for PluginConfig {
 impl Default for PluginConfig {
     fn default() -> Self {
         Self {
+            revision: 0,
             enabled: true,
             settings: serde_json::Value::Null,
             disabled_default_triggers: Vec::new(),

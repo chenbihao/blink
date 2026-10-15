@@ -136,8 +136,34 @@ impl Capability for PluginCapabilityAdapter {
                 detail: "当前运行模式未初始化插件引擎".into(),
             })?;
         // 0.25.16:喂插件进程用 resolved（CM 密钥已还原明文）——与 query_subset 同口径
-        let settings = plugin_engine.resolved_settings(plugin_id);
+        if !plugin_engine.is_enabled(plugin_id) {
+            return Err(CapabilityError::InvalidState {
+                detail: "插件已禁用，请先在设置中启用".into(),
+            });
+        }
+        let started = std::time::Instant::now();
+        let deadline = ctx.deadline.map_or(
+            started + std::time::Duration::from_millis(self.plugin.manifest().timeout_ms()),
+            |d| {
+                d.min(
+                    started + std::time::Duration::from_millis(self.plugin.manifest().timeout_ms()),
+                )
+            },
+        );
+        let settings = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            plugin_engine.resolved_settings(plugin_id),
+        )
+        .await
+        .map_err(|_| CapabilityError::Timeout {
+            detail: "等待插件配置快照超时".into(),
+        })?;
 
+        if !plugin_engine.is_enabled(plugin_id) {
+            return Err(CapabilityError::InvalidState {
+                detail: "插件已禁用，请先在设置中启用".into(),
+            });
+        }
         tracing::debug!(
             plugin = %plugin_id,
             tool = %self.tool_name,
@@ -162,7 +188,7 @@ impl Capability for PluginCapabilityAdapter {
 
         let raw = self
             .plugin
-            .execute_tool_raw(&self.tool_name, &args, settings.as_ref(), ctx.deadline)
+            .execute_tool_raw(&self.tool_name, &args, settings.as_ref(), Some(deadline))
             .await
             .map_err(plugin_capability_error)?;
 

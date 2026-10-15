@@ -1,0 +1,374 @@
+/* 天气默认地点编辑器：仅作用于插件设置卡片中的内嵌面板。 */
+.weather-settings,
+.weather-settings * {
+    box-sizing: border-box;
+    font-style: normal;
+}
+
+.weather-settings {
+    color: var(--text);
+    font-size: var(--text-base);
+}
+
+.weather-location-summary {
+    display: grid;
+    gap: var(--space-sm);
+    padding: var(--space-md);
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-md);
+    background: var(--bg);
+}
+
+.weather-location-heading,
+.weather-edit-toggle,
+.weather-manual-section > summary,
+.weather-manual-use,
+.weather-candidate-action {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-sm);
+}
+
+.weather-location-heading {
+    color: var(--text-sub);
+    font-weight: var(--weight-semibold);
+}
+
+.weather-location-heading .icon,
+.weather-edit-toggle .icon,
+.weather-manual-section > summary .icon,
+.weather-manual-use .icon,
+.weather-clear-location .icon,
+.weather-save .icon,
+.weather-candidate-action .icon {
+    width: 1em;
+    height: 1em;
+    flex: 0 0 auto;
+}
+
+.weather-location-current {
+    min-width: 0;
+}
+
+.weather-location-details {
+    display: grid;
+    gap: var(--space-xs);
+    min-width: 0;
+}
+
+.weather-location-name {
+    display: grid;
+    gap: var(--space-2xs);
+    overflow-wrap: anywhere;
+}
+
+.weather-location-name strong {
+    font-size: var(--text-md);
+    font-weight: var(--weight-semibold);
+}
+
+.weather-location-name > span,
+.weather-location-meta,
+.weather-location-empty,
+.weather-legacy-location p,
+.weather-editor-heading p,
+.weather-manual-section > p {
+    color: var(--text-sub);
+}
+
+.weather-location-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-xs) var(--space-md);
+    font-size: var(--text-sm);
+    line-height: var(--leading-normal);
+    overflow-wrap: anywhere;
+}
+
+.weather-location-empty,
+.weather-legacy-location p {
+    margin: 0;
+}
+
+.weather-legacy-location {
+    display: grid;
+    gap: var(--space-xs);
+}
+
+.weather-edit-toggle,
+.weather-manual-use,
+.weather-cancel,
+.weather-save {
+    min-height: 32px;
+    padding: var(--space-xs) var(--space-md);
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    cursor: pointer;
+    transition: color var(--transition-fast), border-color var(--transition-fast), background var(--transition-fast);
+}
+
+.weather-edit-toggle {
+    justify-self: start;
+    color: var(--accent);
+}
+
+.weather-edit-toggle:hover,
+.weather-manual-use:hover,
+.weather-cancel:hover {
+    border-color: var(--accent);
+    background: var(--accent-bg);
+}
+
+.weather-location-editor {
+    display: grid;
+    gap: var(--space-lg);
+    margin-top: var(--space-md);
+    padding: var(--space-lg);
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-lg);
+    background: var(--surface);
+}
+
+.weather-location-editor.hidden {
+    display: none;
+}
+
+.weather-editor-heading h4 {
+    margin: 0 0 var(--space-xs);
+    font-size: var(--text-lg);
+    font-weight: var(--weight-semibold);
+}
+
+.weather-editor-heading p,
+.weather-manual-section > p {
+    margin: 0;
+    line-height: var(--leading-normal);
+}
+
+.weather-search-fields,
+.weather-manual-fields {
+    display: grid;
+    grid-template-columns: minmax(0, 1.5fr) minmax(110px, 0.55fr) minmax(130px, 0.9fr);
+    gap: var(--space-md);
+}
+
+.weather-field {
+    display: grid;
+    gap: var(--space-xs);
+    min-width: 0;
+    color: var(--text-sub);
+    font-size: var(--text-sm);
+}
+
+.weather-field input {
+    width: 100%;
+    min-width: 0;
+    min-height: 34px;
+    padding: var(--space-xs) var(--space-sm);
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-sm);
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+    font-size: var(--text-base);
+}
+
+.weather-field input:focus-visible {
+    border-color: var(--accent);
+    outline: none;
+    box-shadow: var(--ring-focus);
+}
+
+.weather-field input:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+}
+
+.weather-search-status,
+.weather-manual-status,
+.weather-draft-status {
+    min-height: 1.4em;
+    margin: var(--space-sm) 0 0;
+    color: var(--text-sub);
+    line-height: var(--leading-normal);
+}
+
+.weather-search-status.is-error,
+.weather-manual-status.is-error {
+    color: var(--red);
+}
+
+.weather-search-status.is-loading {
+    color: var(--accent);
+}
+
+.weather-manual-status.is-success,
+.weather-location-pending {
+    color: var(--green);
+}
+
+.weather-candidates {
+    display: none;
+    max-height: 320px;
+    margin-top: var(--space-sm);
+    overflow: auto;
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-md);
+}
+
+.weather-candidates.has-candidates {
+    display: grid;
+}
+
+.weather-candidate {
+    display: grid;
+    gap: var(--space-sm);
+    width: 100%;
+    padding: var(--space-md);
+    border: 0;
+    border-bottom: 1px solid var(--surface-2);
+    background: transparent;
+    color: var(--text);
+    text-align: left;
+    font: inherit;
+    cursor: pointer;
+    transition: background var(--transition-fast);
+}
+
+.weather-candidate:last-child {
+    border-bottom: 0;
+}
+
+.weather-candidate:hover,
+.weather-candidate.is-active {
+    background: var(--accent-bg);
+}
+
+.weather-candidate.is-active {
+    box-shadow: inset 3px 0 var(--accent);
+}
+
+.weather-candidate-action {
+    justify-self: end;
+    color: var(--accent);
+    font-size: var(--text-sm);
+}
+
+.weather-manual-section {
+    display: grid;
+    gap: var(--space-md);
+    padding: var(--space-md);
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-md);
+}
+
+.weather-manual-section > summary {
+    color: var(--text);
+    font-weight: var(--weight-medium);
+    cursor: pointer;
+    list-style: none;
+}
+
+.weather-manual-section > summary::-webkit-details-marker {
+    display: none;
+}
+
+.weather-manual-section[open] > summary {
+    color: var(--accent);
+}
+
+.weather-manual-fields {
+    grid-template-columns: minmax(110px, 0.7fr) minmax(110px, 0.7fr) minmax(180px, 1.4fr);
+}
+
+.weather-manual-actions,
+.weather-editor-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+}
+
+.weather-manual-actions .weather-manual-status {
+    flex: 1;
+    margin: 0;
+}
+
+.weather-manual-use {
+    flex: 0 0 auto;
+}
+
+.weather-location-pending {
+    margin: var(--space-xs) 0 0;
+    font-size: var(--text-sm);
+}
+
+.weather-editor-actions {
+    padding-top: var(--space-md);
+    border-top: 1px solid var(--surface-2);
+}
+
+.weather-clear-location {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-xs);
+    min-height: 32px;
+    padding: var(--space-xs) var(--space-sm);
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--red);
+    font: inherit;
+    cursor: pointer;
+}
+
+.weather-clear-location:hover {
+    background: var(--danger-hover-bg);
+}
+
+.weather-clear-location:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+}
+
+.weather-action-spacer {
+    flex: 1;
+}
+
+.weather-save {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-xs);
+    border-color: var(--accent);
+    background: var(--accent);
+    color: var(--on-accent);
+    font-weight: var(--weight-semibold);
+}
+
+.weather-save:hover {
+    filter: brightness(1.06);
+}
+
+.weather-settings button:focus-visible,
+.weather-manual-section > summary:focus-visible {
+    outline: none;
+    box-shadow: var(--ring-focus);
+}
+
+@media (max-width: 680px) {
+    .weather-search-fields,
+    .weather-manual-fields {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+.extension-card[data-plugin-id="builtin.weather"].is-disabled {
+    opacity: 1;
+}
+
+/* 禁用只限制网络执行，地点和凭据配置仍应可编辑。 */
+.extension-card[data-plugin-id="builtin.weather"].is-disabled .plugin-config-section {
+    pointer-events: auto;
+}
+
