@@ -5,7 +5,7 @@
     "zh": "天气",
     "en": "Weather"
   },
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": {
     "zh": "查询城市天气（默认 Open-Meteo 免费；可配置和风天气或彩云天气）",
     "en": "City weather (Open-Meteo by default; QWeather or Caiyun configurable)"

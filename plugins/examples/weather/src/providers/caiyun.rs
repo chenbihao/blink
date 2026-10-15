@@ -301,7 +301,10 @@ struct DatedPrecipitation {
 
 /// 综合响应 → 统一快照。实况/逐日各自检查可用性：一块完整一块缺失构成 partial，
 /// 两块都无有效数据返回错误；不足 7 天只说明实际天数，不断言原因。
-pub fn parse_weather(body: &str, location: ResolvedLocation) -> Result<WeatherSnapshot, PluginError> {
+pub fn parse_weather(
+    body: &str,
+    location: ResolvedLocation,
+) -> Result<WeatherSnapshot, PluginError> {
     let response: WeatherResponse = serde_json::from_str(body).map_err(|_| invalid_response())?;
     if response.status.as_deref() != Some("ok") {
         return Err(failed_body_error(&response.error.unwrap_or_default()));
@@ -353,6 +356,12 @@ pub fn parse_weather(body: &str, location: ResolvedLocation) -> Result<WeatherSn
     }
     if current.is_none() {
         warnings.push("彩云实况不可用，仅提供预报".into());
+    } else if current.as_ref().is_some_and(|current| {
+        current.temperature_c.is_none()
+            || current.condition.is_none()
+            || current.wind_speed_kmh.is_none()
+    }) {
+        warnings.push("彩云实况部分字段不可用".into());
     }
     if daily.is_empty() {
         warnings.push("彩云逐日预报不可用，仅提供实况".into());
@@ -362,6 +371,15 @@ pub fn parse_weather(body: &str, location: ResolvedLocation) -> Result<WeatherSn
             daily.len(),
             DAILY_STEPS
         ));
+    }
+    if daily.iter().any(|day| {
+        day.temperature_max_c.is_none()
+            || day.temperature_min_c.is_none()
+            || day.condition.is_none()
+            || day.wind_max_kmh.is_none()
+            || day.precipitation_probability_percent.is_none()
+    }) {
+        warnings.push("彩云逐日预报部分字段不可用".into());
     }
     Ok(WeatherSnapshot {
         location,
@@ -463,7 +481,16 @@ fn parse_daily(daily: &DailyBlock, warnings: &mut Vec<String>) -> Vec<DailyWeath
         warnings.push(format!("已忽略 {dropped} 个无法按日期解释的逐日条目"));
     }
     days.into_iter()
-        .filter_map(|(date, day)| {
+        .filter_map(|(date, mut day)| {
+            if day
+                .temperature_max
+                .zip(day.temperature_min)
+                .is_some_and(|(max, min)| max < min)
+            {
+                warnings.push("已忽略无效的预报温度范围，保留其他可用字段".into());
+                day.temperature_max = None;
+                day.temperature_min = None;
+            }
             if day.temperature_max.is_none()
                 && day.temperature_min.is_none()
                 && day.condition.is_none()
@@ -727,30 +754,96 @@ mod tests {
 
     #[test]
     fn full_seven_days_are_ok_and_shorter_days_report_actual_count_only() {
-        let day_entry = |offset: usize| {
-            format!(
-                r#"{{"date":"2026-10-1{}T00:00+08:00","max":30,"min":20}}"#,
-                offset
-            )
-        };
-        let full = format!(
-            r#"{{"status":"ok","result":{{"realtime":{{"status":"ok","temperature":21,"skycon":"CLEAR_DAY"}},"daily":{{"temperature":[{}],"skycon":[],"wind":[],"precipitation":[]}}}}}}"#,
-            (0..7).map(day_entry).collect::<Vec<_>>().join(",")
-        );
-        let snapshot = parse_weather(&full, location()).unwrap();
+        let mut full = full_weather_body();
+        let snapshot = parse_weather(&full.to_string(), location()).unwrap();
         assert_eq!(snapshot.daily.len(), 7);
         assert_eq!(snapshot.status(), "ok");
 
-        let partial = format!(
-            r#"{{"status":"ok","result":{{"realtime":{{"status":"ok","temperature":21,"skycon":"CLEAR_DAY"}},"daily":{{"temperature":[{}]}}}}}}"#,
-            (0..3).map(day_entry).collect::<Vec<_>>().join(",")
-        );
-        let snapshot = parse_weather(&partial, location()).unwrap();
+        for field in ["temperature", "skycon", "wind", "precipitation"] {
+            full["result"]["daily"][field]
+                .as_array_mut()
+                .unwrap()
+                .truncate(3);
+        }
+        let snapshot = parse_weather(&full.to_string(), location()).unwrap();
         assert_eq!(snapshot.status(), "partial");
-        assert!(snapshot
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("可用 3 天") && warning.contains("请求 7 天")));
+        assert_eq!(snapshot.warnings.len(), 1);
+        assert!(
+            snapshot
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("可用 3 天") && warning.contains("请求 7 天"))
+        );
+    }
+
+    fn full_weather_body() -> serde_json::Value {
+        use serde_json::json;
+        let dates: Vec<_> = (16..23).map(|day| format!("2026-10-{day}")).collect();
+        json!({"status":"ok","result":{
+            "realtime":{"status":"ok","temperature":21,"skycon":"CLEAR_DAY","wind":{"speed":5}},
+            "daily":{"status":"ok",
+                "temperature":dates.iter().map(|date|json!({"date":date,"max":30,"min":20})).collect::<Vec<_>>(),
+                "skycon":dates.iter().map(|date|json!({"date":date,"value":"CLEAR_DAY"})).collect::<Vec<_>>(),
+                "wind":dates.iter().map(|date|json!({"date":date,"max":{"speed":5}})).collect::<Vec<_>>(),
+                "precipitation":dates.iter().map(|date|json!({"date":date,"probability":0.2})).collect::<Vec<_>>()
+            }
+        }})
+    }
+
+    #[test]
+    fn missing_fields_in_current_or_seven_daily_rows_are_partial() {
+        for field in ["temperature", "skycon", "wind"] {
+            let mut body = full_weather_body();
+            body["result"]["realtime"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            let snapshot = parse_weather(&body.to_string(), location()).unwrap();
+            assert_eq!(snapshot.status(), "partial", "current {field}");
+            assert!(
+                snapshot
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains("实况部分字段"))
+            );
+        }
+        for (array, field) in [
+            ("temperature", "max"),
+            ("temperature", "min"),
+            ("skycon", "value"),
+            ("wind", "max"),
+            ("precipitation", "probability"),
+        ] {
+            let mut body = full_weather_body();
+            body["result"]["daily"][array][0]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            let snapshot = parse_weather(&body.to_string(), location()).unwrap();
+            assert_eq!(snapshot.status(), "partial", "daily {array}.{field}");
+            assert_eq!(snapshot.daily.len(), 7);
+            assert!(
+                snapshot
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains("逐日预报部分字段"))
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_temperature_range_retains_other_fields_and_is_partial() {
+        let mut body = full_weather_body();
+        body["result"]["daily"]["temperature"][0]["max"] = serde_json::json!(10);
+        let snapshot = parse_weather(&body.to_string(), location()).unwrap();
+        assert_eq!(snapshot.status(), "partial");
+        assert!(snapshot.daily[0].temperature_max_c.is_none());
+        assert!(snapshot.daily[0].temperature_min_c.is_none());
+        assert_eq!(snapshot.daily[0].wind_max_kmh, Some(5.0));
+        assert_eq!(
+            snapshot.daily[0].condition.as_ref().unwrap().code,
+            "CLEAR_DAY"
+        );
     }
 
     #[test]

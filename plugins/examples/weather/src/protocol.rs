@@ -76,7 +76,7 @@ pub struct PluginResponse {
     pub error: Option<PluginError>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PluginError {
     pub code: String,
     pub message: String,

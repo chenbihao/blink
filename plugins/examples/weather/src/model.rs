@@ -38,7 +38,7 @@ pub struct ProviderCondition {
     pub code: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CurrentWeather {
     pub temperature_c: Option<f64>,
     pub condition_code: Option<u32>,
@@ -48,7 +48,7 @@ pub struct CurrentWeather {
     pub valid_at: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DailyWeather {
     pub date: String,
     pub condition_code: Option<u32>,
@@ -64,7 +64,7 @@ pub struct DailyWeather {
     pub wind_max_kmh: Option<f64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct WeatherSnapshot {
     pub location: ResolvedLocation,
     pub provider: &'static str,

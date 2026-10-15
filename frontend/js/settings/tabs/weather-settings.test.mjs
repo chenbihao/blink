@@ -1,11 +1,69 @@
 import assert from "node:assert/strict";
 import {test} from "node:test";
+import {TestElement, weatherCardFixture} from "./weather-settings-test-helpers.mjs";
 
 // The editor's production module imports the Tauri bridge, whose compatibility
 // shim installs its dialog guards on window when loaded.
 globalThis.window ??= {};
 
-const {buildWeatherSettingsPatch, isWeatherSearchCurrent} = await import("./weather-settings.js");
+const {buildWeatherSettingsPatch, isWeatherSearchCurrent, mountWeatherSettings} = await import("./weather-settings.js");
+
+test("saved location region can be confirmed without selecting the location again", {timeout: 2000}, async () => {
+    const location = {name: "Guangzhou", latitude: 23.13, longitude: 113.26, coordinate_system: "wgs84",
+        source: "qweather", source_id: "qweather:101280101", timezone: "Asia/Shanghai"};
+    const {card, root} = weatherCardFixture();
+    const editor = mountWeatherSettings(card, {settings: {default_location: location}});
+    try {
+        await root.fire("click", {target: root.querySelector(".weather-edit-toggle")});
+        assert.deepEqual(editor.collect(), {}, "opening does not create a write");
+        const region = root.querySelector(".weather-region");
+        assert.equal(region.value, "unknown");
+        region.value = "mainland";
+        await root.fire("change", {target: region});
+        assert.deepEqual(editor.collect().default_location, {...location, in_mainland_china: true});
+        assert.equal(location.in_mainland_china, undefined, "saved snapshot is unchanged before save");
+        await root.fire("click", {target: new TestElement("weather-cancel")});
+        assert.deepEqual(editor.collect(), {}, "cancel discards the region draft");
+    } finally { editor.dispose(); }
+});
+
+test("opening restores the saved region, and clearing the location cannot be undone by region edits", {timeout: 2000}, async () => {
+    for (const [saved, shown] of [[true, "mainland"], [false, "outside"]]) {
+        const location = {latitude: 0, longitude: 0, coordinate_system: "wgs84", in_mainland_china: saved};
+        const {card, root} = weatherCardFixture();
+        const editor = mountWeatherSettings(card, {enabled: false, settings: {default_location: location}});
+        try {
+            await root.fire("click", {target: root.querySelector(".weather-edit-toggle")});
+            const region = root.querySelector(".weather-region");
+            assert.equal(region.value, shown);
+            region.value = "unknown";
+            await root.fire("change", {target: region});
+            assert.equal(editor.collect().default_location.in_mainland_china, null);
+            await root.fire("click", {target: new TestElement("weather-clear-location")});
+            region.value = "mainland";
+            await root.fire("change", {target: region});
+            assert.equal(editor.collect().default_location, null);
+        } finally { editor.dispose(); }
+    }
+});
+
+test("new manual coordinates do not inherit a saved location's region automatically", {timeout: 2000}, async () => {
+    const {card, root} = weatherCardFixture();
+    const editor = mountWeatherSettings(card, {settings: {default_location: {
+        latitude: 23.13, longitude: 113.26, coordinate_system: "wgs84", in_mainland_china: true,
+    }}});
+    try {
+        await root.fire("click", {target: root.querySelector(".weather-edit-toggle")});
+        root.querySelector(".weather-latitude").value = "0";
+        root.querySelector(".weather-longitude").value = "0";
+        await root.fire("click", {target: new TestElement("weather-manual-use")});
+        assert.equal(editor.collect().default_location.in_mainland_china, null);
+        const region = root.querySelector(".weather-region");
+        region.value = "outside";
+        await root.fire("change", {target: region});
+        assert.equal(editor.collect().default_location.in_mainland_china, false);
+    } finally { editor.dispose(); }
+});
 
 test("weather location patch keeps untouched settings out of the write", () => {
     assert.deepEqual(buildWeatherSettingsPatch(undefined, false), {});

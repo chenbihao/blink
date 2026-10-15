@@ -198,14 +198,22 @@ pub fn parse(
             });
         }
     };
-    let qweather = qweather_credentials(settings)?;
+    let mut qweather = if provider == Provider::QWeather {
+        qweather_credentials(settings)?
+    } else {
+        None
+    };
     if provider == Provider::QWeather && qweather.is_none() {
         return Err(crate::protocol::PluginError {
             code: "provider_not_configured".into(),
             message: "和风天气需要先在设置中配置 API Host 与 API Key".into(),
         });
     }
-    let caiyun = caiyun_credentials(settings)?;
+    let caiyun = if provider == Provider::Caiyun {
+        caiyun_credentials(settings)?
+    } else {
+        None
+    };
     if provider == Provider::Caiyun && caiyun.is_none() {
         return Err(crate::protocol::PluginError {
             code: "provider_not_configured".into(),
@@ -247,6 +255,11 @@ pub fn parse(
         ));
     }
     let location_query = if location.is_none() {
+        // 名称查询的 auto 解析仍优先已配置和风；明确坐标不使用解析器，
+        // 不让闲置来源的凭据错误阻断当前天气来源。
+        if provider != Provider::QWeather {
+            qweather = qweather_credentials(settings)?;
+        }
         Some(crate::location::parse_query(&city, country, admin, 20)?)
     } else {
         None
@@ -802,7 +815,9 @@ mod tests {
                 error_code(parse(
                     None,
                     Some(&json!({})),
-                    Some(&json!({"caiyun_app_key": key, "caiyun_app_secret": "s"}))
+                    Some(
+                        &json!({"default_provider":"caiyun", "caiyun_app_key": key, "caiyun_app_secret": "s"})
+                    )
                 )),
                 "invalid_arguments",
                 "key={key}"
@@ -814,12 +829,48 @@ mod tests {
             Some(&json!({"city": "北京"})),
             Some(&json!({"caiyun_app_key": "bad key", "caiyun_app_secret": "s"})),
         );
-        // 注意：凭据提取在 parse 内统一执行，非法形状即使未选用也拒绝（配置错误应可见）
-        assert!(open_meteo.is_err());
+        assert!(open_meteo.is_ok());
         // 凭据提取独立可用：缺失/空白=未配置（None），不报错
         assert!(caiyun_credentials(None).unwrap().is_none());
         let blank = json!({"caiyun_app_key": "  ", "caiyun_app_secret": ""});
         assert!(caiyun_credentials(blank.as_object()).unwrap().is_none());
+    }
+
+    #[test]
+    fn coordinate_weather_ignores_unused_credentials_but_validates_the_selected_provider() {
+        let location = json!({"latitude":23.13,"longitude":113.26,"coordinate_system":"wgs84"});
+        let mut settings = json!({
+            "default_location":location,
+            "qweather_api_host":"not-a-host","qweather_api_key":"fixture-key",
+            "caiyun_app_key":"bad/key","caiyun_app_secret":"fixture-secret"
+        });
+        let request = parse(None, None, Some(&settings)).unwrap();
+        assert!(request.qweather.is_none() && request.caiyun.is_none());
+
+        settings["default_provider"] = json!("qweather");
+        assert_eq!(
+            error_code(parse(None, None, Some(&settings))),
+            "invalid_arguments"
+        );
+        settings["qweather_api_host"] = json!("https://fixture.qweatherapi.com");
+        let request = parse(None, None, Some(&settings)).unwrap();
+        assert!(request.qweather.is_some() && request.caiyun.is_none());
+
+        settings["default_provider"] = json!("caiyun");
+        assert_eq!(
+            error_code(parse(None, None, Some(&settings))),
+            "invalid_arguments"
+        );
+        settings["caiyun_app_key"] = json!("fixture-key");
+        settings["qweather_api_host"] = json!("not-a-host");
+        let request = parse(None, None, Some(&settings)).unwrap();
+        assert!(request.qweather.is_none() && request.caiyun.is_some());
+
+        // 名称查询实际使用 auto 解析器，错误和风配置仍需反馈，不能静默换源。
+        assert_eq!(
+            error_code(parse(Some("广州"), None, Some(&settings))),
+            "invalid_arguments"
+        );
     }
 
     #[test]

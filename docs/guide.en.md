@@ -86,6 +86,8 @@ Every Chord action can be remapped in Settings and promoted to a **global hotkey
 
 #### Queries and results
 
+- Complete successful weather results may be reused for up to 5 minutes, and location candidates for up to 6 hours. Reused results keep their original fetch time. Partial results and errors are not cached, and expired data is not used as a fallback. Changing the provider, credentials, or other plugin settings makes the next query use the new configuration. Restarting clears temporary caches while keeping the saved default location.
+- Identical queries can share a network request. Cancelling one caller keeps other waiters active; callers with incompatible time budgets use separate requests. Cached data does not bypass plugin enablement or outlet authorization.
 - A query without a location uses the saved default coordinates. An explicit `city` or `location` passed to the weather tool overrides the default; do not pass both. `search_locations` only searches and returns candidates (a `resolver` argument selects the geocoding source); it does not save a location.
 - Ambiguous names prompt you for a parent administrative area or a fuller place name, such as “辽宁/朝阳” or “广州/天河区.” The first candidate is never selected automatically. Open-Meteo may not find a Chinese name; try the full district or county name, an English name, or enter coordinates manually. A same-name place is not guaranteed to be uniquely identifiable automatically.
 - If a tool call explicitly specifies a temperature unit, it takes priority over the saved preference. Current conditions and daily forecasts use the same unit. Copying a weather result copies the complete weather summary.

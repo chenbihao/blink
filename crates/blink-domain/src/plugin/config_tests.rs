@@ -189,6 +189,47 @@ fn weather_settings() -> Value {
 }
 
 #[tokio::test]
+async fn returned_revision_can_save_settings_after_a_trigger_only_update() {
+    let initial = config(4, weather_settings());
+    // 无 secret schema，不产生任何凭据读取/写入；持久化仅使用内存 SQLite。
+    let (engine, pool) = setup_engine_with_secrets(Some(initial.clone()), true, &[]).await;
+    let mut triggers = initial.clone();
+    triggers.settings = json!({});
+    triggers.disabled_default_triggers.push("天气".into());
+    let revision = engine
+        .update_config(PLUGIN_ID, triggers, None)
+        .await
+        .unwrap();
+    assert_eq!(revision, 5);
+
+    let stale = config(4, json!({"temperature_unit":"fahrenheit"}));
+    assert!(
+        engine
+            .update_config(PLUGIN_ID, stale, None)
+            .await
+            .unwrap_err()
+            .starts_with("config_conflict")
+    );
+    let mut settings = engine.get_config(PLUGIN_ID).unwrap();
+    settings.revision = revision;
+    settings.settings = json!({"temperature_unit":"fahrenheit"});
+    assert_eq!(
+        engine
+            .update_config(PLUGIN_ID, settings, None)
+            .await
+            .unwrap(),
+        6
+    );
+    let saved = database_config(&pool).await;
+    assert_eq!(saved.settings["temperature_unit"], "fahrenheit");
+    assert_eq!(
+        saved.settings["default_location"],
+        initial.settings["default_location"]
+    );
+    assert_eq!(saved.disabled_default_triggers, vec!["天气".to_string()]);
+}
+
+#[tokio::test]
 async fn same_revision_concurrent_saves_only_commit_one() {
     let initial = config(0, json!({"api_key": ""}));
     let (engine, pool) = setup_engine(Some(initial.clone()), true).await;

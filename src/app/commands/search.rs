@@ -750,12 +750,16 @@ pub async fn toggle_default_trigger(
     plugin_id: String,
     keyword: String,
     disabled: bool,
-) -> Result<(), String> {
+    expected_revision: Option<u64>,
+) -> Result<u64, String> {
     let engine = app.state::<std::sync::Arc<crate::domain::plugin::PluginEngine>>();
     let router = app.state::<std::sync::Arc<crate::domain::intent::RuleRouter>>();
 
     // 读取现有配置
     let mut config = engine.get_config(&plugin_id).unwrap_or_default();
+    if let Some(revision) = expected_revision {
+        config.revision = revision;
+    }
 
     if disabled {
         // 加入禁用列表
@@ -767,11 +771,11 @@ pub async fn toggle_default_trigger(
         config.disabled_default_triggers.retain(|k| k != &keyword);
     }
 
-    engine
+    let revision = engine
         .update_config(&plugin_id, config, Some(&router))
         .await?;
     tracing::info!(plugin_id, keyword, disabled, "默认触发词状态已更新");
-    Ok(())
+    Ok(revision)
 }
 
 /// 添加一个自定义触发词。
@@ -780,11 +784,15 @@ pub async fn add_custom_trigger(
     app: tauri::AppHandle,
     plugin_id: String,
     keyword: String,
-) -> Result<(), String> {
+    expected_revision: Option<u64>,
+) -> Result<u64, String> {
     let engine = app.state::<std::sync::Arc<crate::domain::plugin::PluginEngine>>();
     let router = app.state::<std::sync::Arc<crate::domain::intent::RuleRouter>>();
 
     let mut config = engine.get_config(&plugin_id).unwrap_or_default();
+    if let Some(revision) = expected_revision {
+        config.revision = revision;
+    }
 
     // 检查是否已存在（不区分大小写，简单重复检查）
     let keyword_lower = keyword.to_lowercase();
@@ -805,11 +813,11 @@ pub async fn add_custom_trigger(
             surface: None,
         });
 
-    engine
+    let revision = engine
         .update_config(&plugin_id, config, Some(&router))
         .await?;
     tracing::info!(plugin_id, keyword, "自定义触发词已添加");
-    Ok(())
+    Ok(revision)
 }
 
 /// 删除一个自定义触发词。
@@ -818,11 +826,15 @@ pub async fn delete_custom_trigger(
     app: tauri::AppHandle,
     plugin_id: String,
     keyword: String,
-) -> Result<(), String> {
+    expected_revision: Option<u64>,
+) -> Result<u64, String> {
     let engine = app.state::<std::sync::Arc<crate::domain::plugin::PluginEngine>>();
     let router = app.state::<std::sync::Arc<crate::domain::intent::RuleRouter>>();
 
     let mut config = engine.get_config(&plugin_id).unwrap_or_default();
+    if let Some(revision) = expected_revision {
+        config.revision = revision;
+    }
     let before_len = config.custom_triggers.len();
     config.custom_triggers.retain(|t| t.keyword != keyword);
 
@@ -830,11 +842,11 @@ pub async fn delete_custom_trigger(
         return Err(format!("触发词 '{keyword}' 不存在"));
     }
 
-    engine
+    let revision = engine
         .update_config(&plugin_id, config, Some(&router))
         .await?;
     tracing::info!(plugin_id, keyword, "自定义触发词已删除");
-    Ok(())
+    Ok(revision)
 }
 
 /// 获取引擎配置（通用 API）。

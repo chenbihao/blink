@@ -325,8 +325,8 @@ export function mountWeatherSettings(card, plugin) {
     let searchTimer = null;
     let candidates = [];
     let activeCandidateIndex = -1;
-    /** 区域声明选择：unknown/mainland/outside，与当前草稿绑定（地点更换即失效重置）。 */
-    let regionChoice = "unknown";
+    /** 回显旧地点的区域不作为新地点的证据；新地点只沿用本次显式选择。 */
+    let regionExplicit = false;
 
     const REGION_VALUES = {unknown: null, mainland: true, outside: false};
 
@@ -336,10 +336,10 @@ export function mountWeatherSettings(card, plugin) {
 
     function syncRegionSelect(inMainlandChina) {
         if (!regionSelect) return;
-        regionChoice = inMainlandChina === true
+        regionExplicit = false;
+        regionSelect.value = inMainlandChina === true
             ? "mainland"
             : inMainlandChina === false ? "outside" : "unknown";
-        regionSelect.value = regionChoice;
     }
 
     function setSearchStatus(key, values = {}, state = "") {
@@ -445,6 +445,8 @@ export function mountWeatherSettings(card, plugin) {
     }
 
     function openEditor() {
+        const location = draftLocation === NO_DRAFT ? settings.default_location : draftLocation;
+        syncRegionSelect(location?.in_mainland_china);
         setEditorOpen(true);
         setSearchStatus(enabled ? "weather.search_idle" : "weather.search_disabled");
         queryInput?.focus({preventScroll: true});
@@ -521,7 +523,7 @@ export function mountWeatherSettings(card, plugin) {
         // 本会话中的显式选择，仍无则保持未确认。
         const region = typeof location.in_mainland_china === "boolean"
             ? location.in_mainland_china
-            : regionChoiceValue();
+            : regionExplicit ? regionChoiceValue() : null;
         draftLocation = {...location, in_mainland_china: region};
         syncRegionSelect(region);
         refreshCurrentView();
@@ -540,16 +542,19 @@ export function mountWeatherSettings(card, plugin) {
         }
         invalidateSearch();
         // 手工坐标没有解析器证据，区域只能来自用户显式选择
-        draftLocation = createManualLocation(latitude, longitude, manualNameInput?.value || "", regionChoiceValue());
+        const region = regionExplicit ? regionChoiceValue() : null;
+        draftLocation = createManualLocation(latitude, longitude, manualNameInput?.value || "", region);
+        syncRegionSelect(region);
         refreshCurrentView();
         setManualStatus("weather.manual_selected", "success");
     }
 
     /** 区域选择变化：立即写入当前草稿（不落库）；无草稿时记住，供下一个候选/手工坐标使用。 */
     function handleRegionChange() {
-        regionChoice = regionSelect?.value || "unknown";
-        if (draftLocation && draftLocation !== NO_DRAFT) {
-            draftLocation = {...draftLocation, in_mainland_china: regionChoiceValue()};
+        regionExplicit = true;
+        const location = draftLocation === NO_DRAFT ? settings.default_location : draftLocation;
+        if (location && typeof location === "object") {
+            draftLocation = {...location, in_mainland_china: regionChoiceValue()};
             refreshCurrentView();
         }
     }

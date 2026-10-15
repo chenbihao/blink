@@ -164,10 +164,41 @@ impl PluginEngine {
         candidates: &[(String, String)],
         context: &PluginQueryContext,
     ) -> Vec<SearchItem> {
+        self.query_subset_with(
+            candidates,
+            context,
+            |plugin, arg, context, settings| async move {
+                let plugin_id = plugin.id().to_owned();
+                match plugin.query(&arg, &context, settings.as_ref()).await {
+                    Ok(items) => items,
+                    Err(e) => {
+                        tracing::warn!(plugin = %plugin_id, error = %e, "插件查询失败");
+                        Vec::new()
+                    }
+                }
+            },
+        )
+        .await
+    }
+
+    async fn query_subset_with<F, Fut>(
+        &self,
+        candidates: &[(String, String)],
+        context: &PluginQueryContext,
+        query: F,
+    ) -> Vec<SearchItem>
+    where
+        F: Fn(Arc<PluginHandle>, String, PluginQueryContext, Option<serde_json::Value>) -> Fut
+            + Clone
+            + Send
+            + Sync
+            + 'static,
+        Fut: std::future::Future<Output = Vec<PluginItem>> + Send + 'static,
+    {
         if candidates.is_empty() {
             return Vec::new();
         }
-        let mut set: JoinSet<Vec<SearchItem>> = JoinSet::new();
+        let mut set: JoinSet<(String, Option<u64>, Vec<SearchItem>)> = JoinSet::new();
         for (id, arg) in candidates {
             if !self.is_enabled(id) {
                 tracing::debug!(plugin_id = %id, "query_subset: 插件已禁用,跳过");
@@ -190,28 +221,47 @@ impl PluginEngine {
             let context = context.clone();
             // 0.25.16:喂插件进程的 settings 用 resolved（CM 密钥已还原明文），
             // 插件二进制与协议零改动——SQLite 侧只有空串占位。
-            let settings = self.resolved_settings(id).await;
+            let (settings, settings_revision) = self.resolved_settings_snapshot(id).await;
             if !self.is_enabled(id) {
                 continue;
             }
+            let query = query.clone();
             set.spawn(async move {
-                match plugin.query(&arg, &context, settings.as_ref()).await {
-                    Ok(items) => items
-                        .into_iter()
-                        .map(|it| to_search_item(&plugin_id, it))
-                        .collect(),
-                    Err(e) => {
-                        tracing::warn!(plugin = %plugin_id, error = %e, "插件查询失败");
-                        Vec::new()
-                    }
-                }
+                let items = query(plugin, arg, context, settings)
+                    .await
+                    .into_iter()
+                    .map(|it| to_search_item(&plugin_id, it))
+                    .collect();
+                (plugin_id, settings_revision, items)
             });
         }
-        let mut items = Vec::new();
+        let mut completed = Vec::new();
         while let Some(res) = set.join_next().await {
-            if let Ok(part) = res {
-                items.extend(part);
+            if let Ok(result) = res {
+                completed.push(result);
             }
+        }
+
+        // 等全部并发查询完成后，在同一配置快照下校验，避免先完成的旧结果在
+        // 等待其他插件期间通过校验、随后又和更新后的配置结果一起返回。
+        let configs = self.configs.read().unwrap();
+        let mut items = Vec::new();
+        for (plugin_id, settings_revision, part) in completed {
+            let current = match configs.get(&plugin_id) {
+                Some(config) => config.enabled && Some(config.revision) == settings_revision,
+                // 无配置记录按 is_enabled 的约定视为启用；但如果查询曾带有 revision，
+                // 此后记录消失也代表快照不再有效。
+                None => settings_revision.is_none(),
+            };
+            if !current {
+                tracing::debug!(
+                    plugin_id = %plugin_id,
+                    settings_revision = ?settings_revision,
+                    "query_subset: 插件配置已变化或已禁用,丢弃迟到结果"
+                );
+                continue;
+            }
+            items.extend(part);
         }
         items
     }
@@ -266,7 +316,7 @@ impl PluginEngine {
         self.configs.write().unwrap().extend(loaded);
     }
 
-    /// 更新插件配置:写 DB + 更新内存 map(command 层 `update_plugin_config` 调)。
+    /// 更新插件配置:写 DB + 更新内存 map，返回本次提交的 revision。
     ///
     /// 0.25.16:持久化前先过 `sanitize_config_secrets`——manifest `secret:true` 字段的
     /// 非空值转存 Credential Manager，SQLite settings 只留空串占位。
@@ -275,7 +325,7 @@ impl PluginEngine {
         plugin_id: &str,
         mut config: crate::config::PluginConfig,
         router: Option<&crate::intent::RuleRouter>,
-    ) -> Result<(), String> {
+    ) -> Result<u64, String> {
         self.update_config_with_store(
             plugin_id,
             &mut config,
@@ -292,7 +342,7 @@ impl PluginEngine {
             tracing::info!(plugin = %plugin_id, "插件配置更新,触发规则已热重载");
         }
 
-        Ok(())
+        Ok(config.revision)
     }
 
     /// revision 校验在任何 CM 写之前；DB 条件写失败后恢复旧密钥。
@@ -557,28 +607,36 @@ impl PluginEngine {
     /// `PluginCapabilityAdapter`（喂子进程 stdin）。**禁止**用于设置页回显、
     /// setting_bindings 注入等对前端/AI 暴露的路径。CM 无值的占位保持空串（=未配置）。
     pub async fn resolved_settings(&self, id: &str) -> Option<serde_json::Value> {
+        self.resolved_settings_snapshot(id).await.0
+    }
+
+    /// 与明文 settings 一起返回其配置 revision，供异步查询在完成时校验代次。
+    async fn resolved_settings_snapshot(
+        &self,
+        id: &str,
+    ) -> (Option<serde_json::Value>, Option<u64>) {
         // 与 CM/SQLite 提交共用更新锁；查询只拿完整旧/新快照，不能拿旧 Host + 新 Key。
         let _guard = self.update_lock.lock().await;
-        let config = self.get_config(id)?;
+        let Some(config) = self.get_config(id) else {
+            return (None, None);
+        };
+        let revision = config.revision;
         let mut settings = config.settings;
         if settings.is_null() {
-            return None;
+            return (None, Some(revision));
         }
         if let Some(obj) = settings.as_object_mut() {
-            obj.insert(
-                "settings_revision".into(),
-                serde_json::json!(config.revision),
-            );
+            obj.insert("settings_revision".into(), serde_json::json!(revision));
         }
         let secret_keys = self.secret_field_keys(id);
         if secret_keys.is_empty() {
-            return Some(settings);
+            return (Some(settings), Some(revision));
         }
         #[cfg(target_os = "windows")]
         {
             use blink_infra::platform::secret::{SecretRef, load_secret};
             let Some(obj) = settings.as_object_mut() else {
-                return Some(settings);
+                return (Some(settings), Some(revision));
             };
             for key in &secret_keys {
                 if let Ok(secret) = load_secret(&SecretRef::plugin(id, key)) {
@@ -591,7 +649,7 @@ impl PluginEngine {
         }
         #[cfg(not(target_os = "windows"))]
         let _ = &secret_keys;
-        Some(settings)
+        (Some(settings), Some(revision))
     }
 
     /// 存量明文密钥搬迁到 CM（启动期一次性，0.25.16；幂等由构造保证）。
@@ -815,6 +873,11 @@ mod tests {
             crate::config::PluginConfig::default(),
         );
         assert!(engine.resolved_settings("null.settings").await.is_none());
+        assert_eq!(
+            engine.resolved_settings_snapshot("null.settings").await,
+            (None, Some(0)),
+            "settings 为 null 时仍需保留配置 revision 用于迟到结果校验"
+        );
     }
 
     #[tokio::test]
@@ -830,3 +893,7 @@ mod tests {
         assert_eq!(config.settings, serde_json::json!({"target_lang": "en"}));
     }
 }
+
+#[cfg(test)]
+#[path = "query_tests.rs"]
+mod query_tests;

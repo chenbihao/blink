@@ -1033,46 +1033,105 @@ mod tests {
             serde_json::json!(root.join("target/debug/blink-plugin-weather.exe"));
         let manifest: PluginManifest = serde_json::from_value(value).unwrap();
         let handle = PluginHandle::new(Arc::new(manifest), root, None);
+        let assert_cache = |value: &serde_json::Value, expected_hit: bool, label: &str| {
+            let cache = value
+                .get("cache")
+                .unwrap_or_else(|| panic!("{label}: cache metadata missing: {value}"));
+            assert_eq!(
+                cache["hit"].as_bool(),
+                Some(expected_hit),
+                "{label}: unexpected cache hit state: {cache}"
+            );
+            assert!(
+                cache["age_ms"].as_u64().is_some(),
+                "{label}: cache age_ms must be an unsigned integer: {cache}"
+            );
+        };
+        let location_args = serde_json::json!({"query":"广州","country_code":"CN","limit":10});
+        let mut settings = serde_json::json!({
+            "default_city":"incorrect legacy city",
+            "temperature_unit":"celsius",
+            "settings_revision":1
+        });
+
+        let location_start = std::time::Instant::now();
         let locations = handle
-            .execute_tool_raw(
-                "search_locations",
-                &serde_json::json!({"query":"广州","country_code":"CN","limit":10}),
-                None,
-                None,
-            )
+            .execute_tool_raw("search_locations", &location_args, Some(&settings), None)
             .await
             .unwrap();
+        assert_cache(&locations.data[0], false, "initial location lookup");
         assert_eq!(locations.data[0]["count"], 1);
-        let location = locations.data[0]["candidates"][0].clone();
-        let settings = serde_json::json!({"default_city":"incorrect legacy city","default_location":location,"temperature_unit":"celsius"});
-        let start = std::time::Instant::now();
-        let raw = handle
-            .execute_tool_raw(
-                "get_weather",
-                &serde_json::json!({"unit":"fahrenheit"}),
-                Some(&settings),
-                None,
-            )
+        println!(
+            "[weather-smoke] location cold hit={} age_ms={} elapsed_ms={}",
+            locations.data[0]["cache"]["hit"],
+            locations.data[0]["cache"]["age_ms"],
+            location_start.elapsed().as_millis()
+        );
+
+        let location_hit_start = std::time::Instant::now();
+        let locations_hit = handle
+            .execute_tool_raw("search_locations", &location_args, Some(&settings), None)
             .await
             .unwrap();
-        let row = &raw.data[0];
+        assert_cache(&locations_hit.data[0], true, "repeated location lookup");
+        assert_eq!(locations_hit.data[0]["count"], 1);
+        println!(
+            "[weather-smoke] location warm hit={} age_ms={} elapsed_ms={}",
+            locations_hit.data[0]["cache"]["hit"],
+            locations_hit.data[0]["cache"]["age_ms"],
+            location_hit_start.elapsed().as_millis()
+        );
+
+        let location = locations.data[0]["candidates"][0].clone();
+        settings["default_location"] = location;
+
+        // 第一条 get_weather ToolCall 必须是天气缓存冷请求。
+        let cold_start = std::time::Instant::now();
+        let cold = handle
+            .execute_tool_raw("get_weather", &serde_json::json!({}), Some(&settings), None)
+            .await
+            .unwrap();
+        let row = &cold.data[0];
         assert!(matches!(row["status"].as_str(), Some("ok" | "partial")));
         assert_eq!(row["provider"], "open_meteo");
-        assert!(row["temp"].as_str().unwrap().ends_with("°F"));
+        assert!(row["temp"].as_str().unwrap().ends_with("°C"));
         assert_eq!(row["daily"].as_array().unwrap().len(), 7);
         assert!(
             row["daily"][0]["temp_max"]
                 .as_str()
                 .unwrap()
-                .ends_with("°F")
+                .ends_with("°C")
         );
         assert!(row["current"]["valid_at"].as_str().is_some());
+        assert_cache(row, false, "initial weather ToolCall");
+        let initial_complete = row["status"].as_str() == Some("ok");
+        let fetched_at = row["fetched_at"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        if initial_complete {
+            assert!(
+                fetched_at.is_some(),
+                "complete weather result must include fetched_at"
+            );
+        }
         println!(
-            "live tool: {} status={} days=7 elapsed_ms={}",
+            "[weather-smoke] weather cold: {} status={} cache_hit={} age_ms={} days=7 elapsed_ms={}",
             row["summary"],
             row["status"],
-            start.elapsed().as_millis()
+            row["cache"]["hit"],
+            row["cache"]["age_ms"],
+            cold_start.elapsed().as_millis()
         );
+
+        if !initial_complete {
+            eprintln!(
+                "[weather-smoke] DIAGNOSTIC: initial upstream result is partial; partial results are not cached, so subsequent weather cache hits and fetched_at equality are not assumed"
+            );
+        }
+
+        // 相同地点/provider 的默认 Query 与显式温标 ToolCall 应复用冷请求结果。
+        let query_start = std::time::Instant::now();
         let items = handle
             .query("", &Default::default(), Some(&settings))
             .await
@@ -1080,6 +1139,125 @@ mod tests {
         // 0.26.2 起 Query 出口附加一个可打开的数据来源声明项，排在天气主项之后。
         assert_eq!(items.len(), 2);
         assert!(items[0].title.contains("°C"), "{}", items[0].title);
+        let query_data = items[0]
+            .payload
+            .as_ref()
+            .expect("weather query item should expose structured payload");
+        if initial_complete {
+            assert_cache(query_data, true, "default weather Query");
+            assert_eq!(query_data["fetched_at"].as_str(), fetched_at.as_deref());
+        } else {
+            eprintln!(
+                "[weather-smoke] DIAGNOSTIC: default Query returned status={}; cache hit={}; fetched_at={}",
+                query_data["status"], query_data["cache"]["hit"], query_data["fetched_at"]
+            );
+        }
+        println!(
+            "[weather-smoke] default Query status={} cache_hit={} age_ms={} elapsed_ms={}",
+            query_data["status"],
+            query_data["cache"]["hit"],
+            query_data["cache"]["age_ms"],
+            query_start.elapsed().as_millis()
+        );
+
+        for (unit, suffix) in [("fahrenheit", "°F"), ("celsius", "°C")] {
+            let start = std::time::Instant::now();
+            let raw = handle
+                .execute_tool_raw(
+                    "get_weather",
+                    &serde_json::json!({"unit":unit}),
+                    Some(&settings),
+                    None,
+                )
+                .await
+                .unwrap();
+            let row = &raw.data[0];
+            assert!(row["temp"].as_str().unwrap().ends_with(suffix));
+            assert_eq!(row["provider"], "open_meteo");
+            if initial_complete {
+                assert_cache(row, true, "explicit temperature-unit ToolCall");
+                assert_eq!(row["fetched_at"].as_str(), fetched_at.as_deref());
+            } else {
+                eprintln!(
+                    "[weather-smoke] DIAGNOSTIC: explicit {unit} returned status={}; cache hit={}; fetched_at={}",
+                    row["status"], row["cache"]["hit"], row["fetched_at"]
+                );
+            }
+            println!(
+                "[weather-smoke] explicit {unit}: status={} cache_hit={} age_ms={} elapsed_ms={}",
+                row["status"],
+                row["cache"]["hit"],
+                row["cache"]["age_ms"],
+                start.elapsed().as_millis()
+            );
+        }
+
+        // 配置代次变化会清空插件内缓存；新代次首个天气调用必须冷启动。
+        settings["settings_revision"] = serde_json::json!(2);
+        let revision_start = std::time::Instant::now();
+        let after_revision = handle
+            .execute_tool_raw("get_weather", &serde_json::json!({}), Some(&settings), None)
+            .await
+            .unwrap();
+        let revision_row = &after_revision.data[0];
+        assert!(matches!(
+            revision_row["status"].as_str(),
+            Some("ok" | "partial")
+        ));
+        assert_cache(
+            revision_row,
+            false,
+            "weather after settings revision change",
+        );
+        println!(
+            "[weather-smoke] revision=2 weather cold: status={} cache_hit={} age_ms={} elapsed_ms={}",
+            revision_row["status"],
+            revision_row["cache"]["hit"],
+            revision_row["cache"]["age_ms"],
+            revision_start.elapsed().as_millis()
+        );
+        if revision_row["status"].as_str() == Some("partial") {
+            eprintln!(
+                "[weather-smoke] DIAGNOSTIC: revision=2 upstream result is partial and is not assumed to populate the weather cache"
+            );
+        }
+
+        // 新 revision 的地点缓存也从冷查询开始，再次查询必须命中。
+        let location_revision_start = std::time::Instant::now();
+        let location_after_revision = handle
+            .execute_tool_raw("search_locations", &location_args, Some(&settings), None)
+            .await
+            .unwrap();
+        assert_eq!(location_after_revision.data[0]["count"], 1);
+        assert_cache(
+            &location_after_revision.data[0],
+            false,
+            "location lookup after settings revision change",
+        );
+        println!(
+            "[weather-smoke] revision=2 location cold hit={} age_ms={} elapsed_ms={}",
+            location_after_revision.data[0]["cache"]["hit"],
+            location_after_revision.data[0]["cache"]["age_ms"],
+            location_revision_start.elapsed().as_millis()
+        );
+        let location_revision_hit_start = std::time::Instant::now();
+        let location_after_revision_hit = handle
+            .execute_tool_raw("search_locations", &location_args, Some(&settings), None)
+            .await
+            .unwrap();
+        assert_eq!(location_after_revision_hit.data[0]["count"], 1);
+        assert_cache(
+            &location_after_revision_hit.data[0],
+            true,
+            "repeated location lookup after settings revision change",
+        );
+        println!(
+            "[weather-smoke] revision=2 location warm hit={} age_ms={} elapsed_ms={}",
+            location_after_revision_hit.data[0]["cache"]["hit"],
+            location_after_revision_hit.data[0]["cache"]["age_ms"],
+            location_revision_hit_start.elapsed().as_millis()
+        );
+
         match &items[0].action {
             PluginAction::Copy { text } => {
                 assert!(text.contains("来源：Open-Meteo"));

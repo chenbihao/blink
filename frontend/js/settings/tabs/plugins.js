@@ -558,7 +558,7 @@ async function guideScriptRuntimeInstall(runtimeType) {
 /**
  * 绑定单个插件卡片事件（enabled 开关 + 保存 settings + 触发词增删禁用）
  */
-function bindPluginCardEvents(plugin) {
+export function bindPluginCardEvents(plugin) {
     const card = document.querySelector(`.extension-card[data-plugin-id="${plugin.id}"]`);
     if (!card) return;
     const id = plugin.id;
@@ -570,6 +570,29 @@ function bindPluginCardEvents(plugin) {
         card.addEventListener(WEATHER_EDITOR_CLOSED,()=> {if(pendingPluginReload) loadPlugins();});
     }
     let saving = false;
+    // 触发词与设置共用一次写入门禁；只接收本次提交的版本，不重绘或覆盖草稿。
+    const mutateTriggers = async (command, args) => {
+        if (saving) return false;
+        saving = true;
+        pluginWrites++;
+        try {
+            const revision = await invoke(command, {
+                pluginId: id, ...args, expectedRevision: plugin.revision ?? 0,
+            });
+            if (!Number.isSafeInteger(revision) || revision <= (plugin.revision ?? 0)) {
+                throw new Error("invalid plugin revision");
+            }
+            plugin.revision = revision;
+            return true;
+        } catch (error) {
+            console.error(`${command} failed:`, error);
+            flash(card, t("common.save_failed_msg", {err: error?.message || String(error)}), true, 6000);
+            return false;
+        } finally {
+            saving = false;
+            pluginWrites--;
+        }
+    };
     const save = async (enabledOverride) => {
         if (saving) return false;
         saving = true;
@@ -658,7 +681,10 @@ function bindPluginCardEvents(plugin) {
             btn.disabled = true;
 
             try {
-                await invoke("toggle_default_trigger", {pluginId: id, keyword, disabled: !isDisabled});
+                if (!await mutateTriggers("toggle_default_trigger", {keyword, disabled: !isDisabled})) {
+                    btn.innerHTML = originalContent;
+                    return;
+                }
                 tag.classList.toggle("trigger-tag-disabled", !isDisabled);
                 btn.innerHTML = !isDisabled ? "↻" : "×";
                 btn.title = !isDisabled ? t("plugin.trigger_restore") : t("plugin.trigger_disable");
@@ -679,8 +705,7 @@ function bindPluginCardEvents(plugin) {
             const keyword = btn.dataset.keyword;
             if (!tag || !keyword) return;
             try {
-                await invoke("delete_custom_trigger", {pluginId: id, keyword});
-                tag.remove();
+                if (await mutateTriggers("delete_custom_trigger", {keyword})) tag.remove();
             } catch (err) {
                 console.error("delete_custom_trigger failed:", err);
             }
@@ -716,8 +741,7 @@ function bindPluginCardEvents(plugin) {
         newTag.querySelector(".trigger-tag-btn-delete")?.addEventListener("click", async (e) => {
             e.stopPropagation();
             try {
-                await invoke("delete_custom_trigger", {pluginId: id, keyword: kw});
-                newTag.remove();
+                if (await mutateTriggers("delete_custom_trigger", {keyword: kw})) newTag.remove();
             } catch (err) {
                 console.error("delete_custom_trigger failed:", err);
             }
@@ -733,7 +757,7 @@ function bindPluginCardEvents(plugin) {
             return;
         }
         try {
-            await invoke("add_custom_trigger", {pluginId: id, keyword: kw});
+            if (!await mutateTriggers("add_custom_trigger", {keyword: kw})) return;
             appendCustomTag(kw);
         } catch (err) {
             console.error("add_custom_trigger failed:", err);
