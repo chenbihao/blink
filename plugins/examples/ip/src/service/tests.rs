@@ -1164,6 +1164,57 @@ fn test_ipv6_returning_ipv4_is_failure_instead_of_fake_ipv6_success() {
 }
 
 #[test]
+fn local_lookup_preserves_successful_egress_cache_during_provider_cooldown() {
+    let now = Instant::now();
+    let mut engine = Engine::default();
+    let settings = json!({"geo_provider":"international","use_ipv6":true});
+    let out = engine.handle(query("online", "", settings.clone()), now, Some(network()));
+    let reqs = requests(&out);
+    reply(&mut engine, &reqs[0].0, r#"{"ip":"8.8.8.8"}"#, now);
+    reply(
+        &mut engine,
+        &reqs[1].0,
+        r#"callback({"ip":"2409::555","type":"ipv6"})"#,
+        now,
+    );
+    let local = engine.handle(
+        query("local", "local", settings.clone()),
+        now + Duration::from_secs(1),
+        Some(network()),
+    );
+    assert!(requests(&local).is_empty());
+    assert!(!value(&local).to_string().contains("2409::555"));
+    let online = engine.handle(
+        query("again", "", settings),
+        now + Duration::from_secs(2),
+        Some(network()),
+    );
+    assert!(requests(&online).is_empty());
+    let text = value(&online).to_string();
+    assert!(text.contains("8.8.8.8") && text.contains("2409::555"));
+    assert!(text.contains("缓存") && !text.contains("检测未完成"));
+}
+
+#[test]
+fn cooldown_without_a_successful_ip_reports_remaining_wait_and_skipped_request() {
+    let now = Instant::now();
+    let mut engine = Engine::default();
+    let settings =
+        json!({"geo_provider":"domestic","domestic_order":["pubyun"],"allow_fallback":false});
+    let out = engine.handle(query("first", "", settings.clone()), now, Some(network()));
+    fail(&mut engine, &requests(&out)[0].0, now);
+    let out = engine.handle(
+        query("again", "refresh", settings),
+        now + Duration::from_millis(10_001),
+        Some(network()),
+    );
+    assert!(requests(&out).is_empty());
+    let text = value(&out).to_string();
+    assert!(text.contains("50 秒后可重试") && text.contains("本次未请求"));
+    assert!(text.contains("检测未完成"));
+}
+
+#[test]
 fn basic_temporary_ipv6_is_labelled_copied_and_sorted_in_query_and_tool() {
     for tool in [false, true] {
         let mut net = v6_network();

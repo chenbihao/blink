@@ -35,7 +35,7 @@ pub async fn get_config(app: tauri::AppHandle) -> Result<serde_json::Value, Stri
 /// # 支持的 key
 ///
 /// **AppConfig 分片**：`language` / `log_level` / `auto_start` / `onboarding_version` / `hotkey` /
-/// `tap_threshold` / `grace_period` / `general_config` / `autosuggest` /
+/// `tap_threshold` / `grace_period` / `general_config` / `wheel_mode` / `autosuggest` /
 /// `chord_toggles` / `clipboard_enabled` / `disabled_builtin_actions` /
 /// `disabled_context_bindings` / `disabled_chord_actions` / `window_opacity`
 ///
@@ -181,6 +181,15 @@ async fn set_config_value(
             crate::app::config::refresh_input_config(&app).await;
             tracing::info!(display = %hotkey.display, "全局热键已更新");
         }
+        "wheel_mode" => {
+            let mode = serde_json::from_value(value).map_err(|e| e.to_string())?;
+            let expected = expected
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|e| e.to_string())?;
+            crate::app::setting_service::apply_wheel_mode(&app, mode, expected).await?;
+            tracing::info!(?mode, "主窗口滚轮行为已更新");
+        }
         "general_config" => {
             let general: crate::app::config::GeneralConfig =
                 serde_json::from_value(value).map_err(|e| e.to_string())?;
@@ -276,7 +285,6 @@ async fn set_config_value(
                 max_items = cfg.max_items,
                 retention_days = cfg.retention_days,
                 max_image_items = cfg.max_image_items,
-                wheel_mode = %cfg.wheel_mode,
                 candidate_limit = cfg.candidate_limit,
                 "剪贴板配置已更新"
             );

@@ -41,6 +41,54 @@ fn response(id: &str) -> CoreToPlugin {
         error: None,
     }
 }
+
+#[test]
+fn reader_queue_time_consumes_query_and_tool_budgets() {
+    for tool in [false, true] {
+        let mut service = WeatherService::default();
+        let received = Instant::now();
+        let message = |id: &str| {
+            if tool {
+                request(id, "celsius", 1)
+            } else {
+                CoreToPlugin::Query {
+                    id: id.into(),
+                    query: "广州".into(),
+                    settings: None,
+                    budget_ms: Some(DEFAULT_BUDGET_MS),
+                }
+            }
+        };
+        let out = service.handle_received(
+            message("queued"),
+            received,
+            received + Duration::from_secs(3),
+        );
+        let http = out
+            .iter()
+            .find_map(|m| match m {
+                PluginToCore::HttpRequest(http) => Some(http),
+                _ => None,
+            })
+            .expect("remaining budget must still allow HTTP");
+        assert_eq!(http.timeout_ms, 7000);
+        let out = service.handle_received(
+            message("expired"),
+            received,
+            received + Duration::from_secs(11),
+        );
+        assert!(
+            ids(&out).is_empty(),
+            "expired queued requests must not start HTTP"
+        );
+        let code = match out.last().unwrap() {
+            PluginToCore::RawResult(result) => &result.error.as_ref().unwrap().code,
+            PluginToCore::Response(result) => &result.error.as_ref().unwrap().code,
+            _ => panic!("expected a caller error"),
+        };
+        assert_eq!(code, "timeout");
+    }
+}
 fn raw(message: &PluginToCore) -> &RawToolResult {
     match message {
         PluginToCore::RawResult(r) => r,

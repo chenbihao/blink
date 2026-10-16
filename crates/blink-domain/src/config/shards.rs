@@ -100,7 +100,16 @@ impl ConfigKey for AppearanceConfig {
 
 // ── SearchConfig ──────────────────────────────────────────────────────────────
 
-/// 搜索行为分片。历史 / 结果数 / 分页 / surface takeover。
+/// 主窗口列表滚轮策略，普通搜索与剪贴板共用。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WheelMode {
+    #[default]
+    Step,
+    Page,
+}
+
+/// 搜索行为分片。历史 / 结果数 / 分页 / 滚轮 / surface takeover。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchConfig {
     #[serde(default = "default_true")]
@@ -111,6 +120,8 @@ pub struct SearchConfig {
     pub max_results: u32,
     #[serde(default = "default_page_size")]
     pub page_size: u32,
+    #[serde(default)]
+    pub wheel_mode: WheelMode,
     #[serde(default = "default_surface_takeover_enabled")]
     pub surface_takeover_enabled: bool,
 }
@@ -122,6 +133,7 @@ impl Default for SearchConfig {
             search_history_days: 30,
             max_results: 50,
             page_size: default_page_size(),
+            wheel_mode: WheelMode::default(),
             surface_takeover_enabled: true,
         }
     }

@@ -182,6 +182,18 @@ pub async fn apply_general_config(
     save_search(app, &search).await
 }
 
+pub async fn apply_wheel_mode(
+    app: &tauri::AppHandle,
+    mode: crate::domain::config::WheelMode,
+    expected: Option<crate::domain::config::WheelMode>,
+) -> Result<(), String> {
+    let _guard = SETTING_UPDATE_LOCK.lock().await;
+    let pool = &app.state::<crate::infra::data::DbPools>().config;
+    crate::domain::config::list_navigation::update_wheel_mode(pool, mode, expected).await?;
+    emit_changed(app, "app.search");
+    Ok(())
+}
+
 pub async fn apply_window_opacity(app: &tauri::AppHandle, opacity: f64) -> Result<(), String> {
     let _guard = SETTING_UPDATE_LOCK.lock().await;
     update_appearance(app, |cfg| {
@@ -238,7 +250,11 @@ async fn update_appearance(
 
 async fn save_search(app: &tauri::AppHandle, cfg: &SearchConfig) -> Result<(), String> {
     let pool = &app.state::<crate::infra::data::DbPools>().config;
-    ConfigStore::set(pool, cfg).await?;
+    ConfigStore::update::<SearchConfig>(pool, |current| {
+        *current = cfg.clone();
+        Ok(())
+    })
+    .await?;
     if let Some(service) = app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>() {
         service.update_max_results(cfg.max_results as usize);
         // 0.20.1: page_size 变化时同步到 ClipboardEngine

@@ -670,18 +670,7 @@ function renderClipboardDetail(cfg) {
     const blacklist = Array.isArray(cfg.blacklist_keywords)
         ? cfg.blacklist_keywords.join(", ")
         : "";
-    // 0.25.29：默认逐条滚动（用户裁决），仅显式 page 才整页翻页
-    const wheelMode = cfg.wheel_mode === "page" ? "page" : "step";
     return `<div class="chord-clipboard-detail">
-    <div class="chord-field">
-      <label class="setting-label chord-field-label">${t("chord.clipboard.wheel_mode.label")}
-        <span class="field-hint-icon" title="${escapeAttr(t("chord.clipboard.wheel_mode.hint"))}">ⓘ</span>
-      </label>
-      <select class="clip-field" data-field="wheel_mode">
-        <option value="page" ${wheelMode === "page" ? "selected" : ""}>${t("chord.clipboard.wheel_mode.page")}</option>
-        <option value="step" ${wheelMode === "step" ? "selected" : ""}>${t("chord.clipboard.wheel_mode.step")}</option>
-      </select>
-    </div>
     <div class="chord-field">
       <label class="setting-label chord-field-label">${t("chord.clipboard.max_items.label")}
         <span class="field-hint-icon" title="${escapeAttr(t("chord.clipboard.max_items.hint"))}">ⓘ</span>

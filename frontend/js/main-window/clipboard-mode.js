@@ -23,6 +23,7 @@
 //! - ESC：有多选时先清空选择；无多选直接隐藏窗口（模式由 HIDDEN reset 兜底复位）
 //! - 选中外壳隐藏 / SHOWN / HIDDEN：自动复位
 
+import {listNavigation} from "./list-navigation.js";
 import {queryEl, resultsEl} from "./dom.js";
 import * as results from "./results.js";
 import * as ghost from "./ghost.js";
@@ -100,12 +101,6 @@ let pageCursor = null;
 let hasMore = false;
 /** 在途追加持有的游标对象，false 表示空闲；旧请求不能释放新请求的标记。 */
 let loadingMore = false;
-
-// ── 0.25.29 滚轮模式（clipboard.wheel_mode）─────────────────────────────────
-
-/** 默认逐条；配置启动读取、SHOWN 和广播均由 lifecycle 同步。 */
-let wheelMode = "step";
-let wheelRevision = 0;
 
 // ── 状态查询 ──────────────────────────────────────────────────────────────
 
@@ -302,7 +297,7 @@ export function exit() {
     pageCursor = null;
     hasMore = false;
     loadingMore = false;
-    wheelRevision++;
+    listNavigation.reset();
 
     // 移除 body 标记——恢复 chord 提示可见性
     document.body.classList.remove("clipboard-mode-active");
@@ -346,6 +341,7 @@ export function handleInput(value, {force = false, immediate = false} = {}) {
     // 防抖只延迟发请求；输入变化时立即使旧响应失效并记住当前 query。
     clearTimeout(timer);
     lastQuery = q;
+    listNavigation.reset();
     seq++;
 
     // 0.20.3：颜色字面量优先——在剪贴板模式中输入颜色也立即返回颜色结果。
@@ -385,7 +381,7 @@ export function handleInput(value, {force = false, immediate = false} = {}) {
  */
 async function doSearch(query, keepPage = false) {
     const mySeq = ++seq;
-    wheelRevision++;
+    listNavigation.reset();
     lastQuery = query;
     lastSearchAt = Date.now();
     // 首批重置流式状态（query/kind 变化 = 新数据集；旧游标立即失效）
@@ -476,7 +472,7 @@ async function loadMore() {
     }
 }
 
-/** 0.25.29: 流式状态快照（results.refreshStatusbar 的 step 模式条数区间用）。 */
+/** 0.25.29: 流式状态快照（results.refreshStatusbar 的已加载量提示用）。 */
 export function getStreamInfo() {
     return {hasMore, loaded: results.getLoadedCount()};
 }
@@ -489,26 +485,6 @@ export function removeLocalItems(refs) {
     selection.reconcileAfterReorder(collectEntryKeys(results.getItems?.() || []));
     refreshSelectionCss();
     results.refreshStatusbar();
-}
-
-/** 0.25.29: 当前滚轮模式是否为逐条平移（keyboard.js 滚轮分流用）。 */
-export function isStepWheel() {
-    return wheelMode === "step";
-}
-
-/** 供滚轮累积器区分查询、模式与配置切换，余量不能跨上下文继承。 */
-export function getWheelRevision() {
-    return wheelRevision;
-}
-
-/** 从 AppConfig 刷新滚轮模式快照（启动、SHOWN 与配置广播共用）。
- *  默认逐条平移（用户裁决），仅显式 "page" 才整页翻——与后端 serde default 同语义。 */
-export function refreshWheelMode(clipCfg) {
-    const next = clipCfg?.wheel_mode === "page" ? "page" : "step";
-    if (next === wheelMode) return;
-    wheelMode = next;
-    wheelRevision++;
-    if (active) results.refreshStatusbar();
 }
 
 // ── 0.20.2 多选键盘处理 ────────────────────────────────────────────────────

@@ -34,6 +34,7 @@ function setup() {
     const noop = () => {};
     const queryEl = {value: '', placeholder: '', focus: noop};
     const context = vm.createContext({
+        listNavigation: {reset: () => {}},
         queryEl, resultsEl: {querySelectorAll: () => lis}, selection: selectionState, parseColor,
         ...entryModel,
         createClipboardBatch: deps => createClipboardBatch({...deps,
@@ -346,16 +347,6 @@ for (const fail of [false, true]) {
     });
     await flush();
     assert.equal(h.requests.length, 1, '距底充足不预取');
-}
-{
-    const h = setup();
-    assert.equal(h.context.isStepWheel(), true, '首次读取前默认逐条，与设置/后端一致');
-    const revision = h.context.getWheelRevision();
-    h.context.refreshWheelMode({wheel_mode: 'page'});
-    assert.equal(h.context.isStepWheel(), false);
-    assert.ok(h.context.getWheelRevision() > revision, '模式切换作废滚轮余量');
-    h.context.refreshWheelMode({wheel_mode: 'step'});
-    assert.equal(h.context.isStepWheel(), true, '配置更新立即生效，不重进模式');
 }
 for (const oldFails of [false, true]) {
     const h = setup();

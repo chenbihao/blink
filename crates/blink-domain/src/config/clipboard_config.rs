@@ -16,12 +16,6 @@ pub async fn update_clipboard_config(
         .as_ref()
         .map(|v| v.as_object().ok_or("剪贴板配置基线必须为字段对象"))
         .transpose()?;
-    if let Some(mode) = fields.get("wheel_mode")
-        && mode != "step"
-        && mode != "page"
-    {
-        return Err("剪贴板滚轮行为必须为 step 或 page".into());
-    }
     ConfigStore::update::<ClipboardConfig>(pool, |cfg| {
         let mut current = serde_json::to_value(&*cfg).map_err(|e| e.to_string())?;
         for (key, value) in fields {
@@ -68,14 +62,14 @@ mod tests {
             .unwrap();
         let cfg = update_clipboard_config(
             &pool,
-            json!({"wheel_mode":"page"}),
-            Some(json!({"wheel_mode":"step"})),
+            json!({"max_items":20000}),
+            Some(json!({"max_items":10000})),
         )
         .await
         .unwrap();
         assert!(!cfg.enabled);
         assert_eq!(cfg.max_image_items, 77);
-        assert_eq!(cfg.wheel_mode, "page");
+        assert_eq!(cfg.max_items, 20000);
         let raw: Value = serde_json::from_str(
             &config_value(&pool, "clipboard:config")
                 .await
@@ -84,24 +78,24 @@ mod tests {
         )
         .unwrap();
         assert_eq!(raw["future_setting"], "keep");
-        // 另一字段写入不会重置刚保存的滚轮模式。
+        // 另一字段写入不会重置刚保存的存储上限。
         let cfg = update_clipboard_config(&pool, json!({"enabled":true}), None)
             .await
             .unwrap();
-        assert_eq!(cfg.wheel_mode, "page");
+        assert_eq!(cfg.max_items, 20000);
     }
 
     #[tokio::test]
-    async fn rejects_conflicts_invalid_modes_and_corrupt_config_without_overwrite() {
+    async fn rejects_conflicts_retired_fields_and_corrupt_config_without_overwrite() {
         let pool = pool().await;
-        update_clipboard_config(&pool, json!({"wheel_mode":"page"}), None)
+        update_clipboard_config(&pool, json!({"max_items":20000}), None)
             .await
             .unwrap();
         let before = config_value(&pool, "clipboard:config").await.unwrap();
         let err = update_clipboard_config(
             &pool,
-            json!({"wheel_mode":"step"}),
-            Some(json!({"wheel_mode":"step"})),
+            json!({"max_items":10000}),
+            Some(json!({"max_items":10000})),
         )
         .await
         .unwrap_err();

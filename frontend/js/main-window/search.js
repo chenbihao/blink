@@ -3,6 +3,7 @@
 //! 空 query 也走 search 接口（0.8.2 的 fetchContextSuggestions 已废弃）——
 //! Context Suggestion 走 Ghost + Tab 采纳,不再抢首屏。
 
+import {listNavigation} from "./list-navigation.js";
 import {queryEl} from "./dom.js";
 import {searchApps} from "../shared/api.js";
 import {listen} from "../shared/tauri.js";
@@ -91,6 +92,7 @@ export function init() {
 
 /** 复位：取消防抖 + 作废在途请求（生命周期 shown/hidden 调用）。 */
 export function reset() {
+    listNavigation.reset();
     clearTimeout(timer);
     seq++;
     isComposing = false;
@@ -147,6 +149,7 @@ export function retrigger() {
  * 相较 `onInput` 的空 query 分支：绕过 40ms 防抖，让 shown 到 Ghost 出现无感延迟。
  */
 export async function fetchContextSuggestions() {
+    listNavigation.reset();
     const mySeq = ++seq;
     try {
         const resp = await searchApps("", mySeq);
@@ -172,6 +175,7 @@ export async function fetchContextSuggestions() {
  * 竞态防护：++seq 作废在途请求；用户在结果返回前开始输入也会作废此结果。
  */
 export async function fillQuery(text) {
+    listNavigation.reset();
     clearTimeout(timer);
     queryEl.value = text;
     // 0.25.12: 程序化设值/设选区不触发浏览器自动滚动（实测 Chromium 无焦点移动不滚、
@@ -203,6 +207,7 @@ function onCompositionUpdate() {
 }
 
 function onInput() {
+    listNavigation.reset();
     clearTimeout(timer);
 
     // 0.19.15: 剪贴板模式 → 直接调 searchClipboard，跳过 searchApps

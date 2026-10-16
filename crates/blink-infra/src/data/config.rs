@@ -140,6 +140,46 @@ pub async fn compare_set_config(
     Ok(true)
 }
 
+/// 多分片条件更新：任一基线变化则整笔回滚，提交后统一刷新缓存。
+pub async fn compare_set_configs(
+    pool: &SqlitePool,
+    values: &[(String, Option<String>, String)],
+) -> Result<bool, sqlx::Error> {
+    let _guard = CONFIG_WRITE_LOCK.lock().await;
+    let mut tx = pool.begin().await?;
+    for (key, expected, value) in values {
+        let result = if let Some(expected) = expected {
+            sqlx::query(
+                "UPDATE config SET value = ?1, updated_at = ?2 WHERE key = ?3 AND value = ?4",
+            )
+            .bind(value)
+            .bind(chrono::Utc::now().timestamp())
+            .bind(key)
+            .bind(expected)
+            .execute(&mut *tx)
+            .await?
+        } else {
+            sqlx::query("INSERT INTO config (key, value, updated_at) VALUES (?1, ?2, ?3) ON CONFLICT(key) DO NOTHING")
+                .bind(key).bind(value).bind(chrono::Utc::now().timestamp())
+                .execute(&mut *tx).await?
+        };
+        if result.rows_affected() == 0 {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+    }
+    tx.commit().await?;
+    CACHE_GENERATION.fetch_add(1, Ordering::AcqRel);
+    if crate::runtime_mode::is_production() {
+        if let Ok(mut cache) = config_cache().write() {
+            for (key, _, value) in values {
+                cache.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    Ok(true)
+}
+
 /// 明确的全量保存（迁移/重置）一次事务提交，失败不留下部分分片。
 pub async fn set_configs(
     pool: &SqlitePool,

@@ -250,6 +250,16 @@
                 </div>
             </div>
 
+            <div class="setting-row">
+                <label for="wheel-mode" class="setting-label" data-i18n="general.wheel_mode.label">主窗口滚轮行为<span
+                        class="field-hint-icon" data-i18n-title="general.wheel_mode.hint">ⓘ</span></label>
+                <select id="wheel-mode">
+                    <option value="step" data-i18n="general.wheel_mode.step">逐条滚动</option>
+                    <option value="page" data-i18n="general.wheel_mode.page">整页翻页</option>
+                </select>
+            </div>
+            <p id="wheel-mode-status" class="hidden" role="status" aria-live="polite"></p>
+
             <!-- 0.8.3 §4.9 输入补全（Ghost Text，0.8.1 §2.8）已挪至「上下文感知」面板 -->
         </div>
 

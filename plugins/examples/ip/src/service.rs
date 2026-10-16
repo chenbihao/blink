@@ -191,6 +191,18 @@ impl Engine {
         if self.jobs.len() >= MAX_JOBS || self.jobs.contains_key(&id) {
             return vec![error(id, tool, "busy", "IP 查询繁忙，请稍后重试")];
         }
+        // A local-only lookup does not change the active detector configuration.
+        // Keep successful egress results available when switching back during cooldown.
+        if settings.groups.is_empty() {
+            return vec![presentation::response(
+                id,
+                tool,
+                &settings,
+                &network,
+                &[],
+                &[],
+            )];
+        }
         if !self
             .current
             .as_ref()
@@ -229,8 +241,9 @@ impl Engine {
                     job.observations.push((group, observation));
                     if refresh && cooling {
                         job.warnings.push(format!(
-                            "{}刷新过快，保留上次结果，请稍后重试",
-                            group.label()
+                            "{}刷新过快，保留上次结果（{} 秒后可重试）",
+                            group.label(),
+                            self.cooldown_seconds(entry.observation.provider, now)
                         ));
                     }
                     continue;
@@ -261,6 +274,14 @@ impl Engine {
             .is_some_and(|next| now < *next)
     }
 
+    fn cooldown_seconds(&self, provider: Provider, now: Instant) -> u64 {
+        self.next_request.get(&provider).map_or(0, |next| {
+            next.saturating_duration_since(now)
+                .as_millis()
+                .div_ceil(1000) as u64
+        })
+    }
+
     fn advance(&mut self, id: &str, group: Group, now: Instant) -> Vec<PluginToCore> {
         loop {
             let Some(job) = self.jobs.get_mut(id) else {
@@ -287,6 +308,7 @@ impl Engine {
             let provider = chain.providers[chain.next];
             chain.next += 1;
             if self.cooling(provider, now) {
+                let seconds = self.cooldown_seconds(provider, now);
                 self.jobs
                     .get_mut(id)
                     .unwrap()
@@ -294,7 +316,10 @@ impl Engine {
                     .get_mut(&group)
                     .unwrap()
                     .failures
-                    .push(format!("{}：刷新间隔内", provider.name()));
+                    .push(format!(
+                        "{}：刷新间隔内（{seconds} 秒后可重试，本次未请求）",
+                        provider.name()
+                    ));
                 continue;
             }
             self.next_request.insert(

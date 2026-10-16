@@ -8,7 +8,18 @@ import {applyI18n, setLang, t} from "../../i18n/index.js";
 import {buildChordTogglesPayload, saveConfig} from "../../shared/config-keys.js";
 import {commandErrorText} from "../../shared/tauri.js";
 import {withConfigActivity} from "../../shared/config-sync.js";
+import {createWheelModeWriter} from "./list-navigation.js";
 import {getCurrentConfig} from "../shared/state.js";
+
+const wheelModeWriter = createWheelModeWriter({
+    onSaved: value => { const cfg = getCurrentConfig(); if (cfg) cfg.wheel_mode = value; },
+    onError: error => {
+        const el = document.getElementById("wheel-mode-status");
+        if (!el) return;
+        el.textContent = error ? commandErrorText(error, t("config.save_failed")) : "";
+        el.classList.toggle("hidden", !error);
+    },
+});
 
 /**
  * 初始化通用设置 Tab
@@ -177,6 +188,10 @@ export function initGeneralTab(cfg) {
             }
         });
     }
+
+    document.getElementById("wheel-mode")?.addEventListener("change", e => {
+        void wheelModeWriter.save(e.target.value);
+    });
 
     // Autosuggestion
     initAutosuggestion();
@@ -377,6 +392,10 @@ export function applyGeneralConfig(cfg) {
     if (maxResults && cfg.max_results !== undefined) maxResults.value = cfg.max_results;
     const pageSize = document.getElementById("page-size");
     if (pageSize && cfg.page_size !== undefined) pageSize.value = cfg.page_size;
+
+    wheelModeWriter.setConfirmed(cfg.wheel_mode);
+    const wheelMode = document.getElementById("wheel-mode");
+    if (wheelMode) wheelMode.value = cfg.wheel_mode === "page" ? "page" : "step";
 
     // 窗口透明度
     const opacitySlider = document.getElementById("window-opacity");

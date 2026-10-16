@@ -4,6 +4,7 @@
 //! secondary；点击与键盘共用 suggestion-accept.js 的 acceptance 路径。
 //! Alt 状态由后端事件驱动，不再轮询。chord 触发门禁用 `inputState.isAltDown() || e.altKey`。
 
+import {listNavigation} from "./list-navigation.js";
 import {getAwarenessText, hideWindow, triggerChord} from "../shared/api.js";
 import {listen} from "../shared/tauri.js";
 import {EVENTS} from "../shared/event-names.js";
@@ -29,54 +30,19 @@ export function init() {
     document.addEventListener("keydown", onEscape);
     document.addEventListener("keydown", onBlockModifiers, true);
     listen(EVENTS.CHORD_FOLLOW_TRIGGERED, onFollowChordTriggered);
-    // 滚轮翻页：向上滚 = PageUp，向下滚 = PageDown（整页翻，用鼠标就不用手移到方向键了）
-    // 监听 appEl 而非 resultsEl：window-size.js 的 maxHeight 机制会让窗口在末页
-    // 保持满页高度，#results 下方可能有空白区域（属于 #app），监听 appEl 可覆盖
-    // 全窗口，滚轮不溢出到背后窗口。
+    // 覆盖主窗空白区域；AI/命令视图保留自身滚动语义。
     appEl.addEventListener("wheel", (e) => {
-        const revision = clipboardMode.getWheelRevision();
-        if (revision !== wheelRevision || !clipboardMode.isActive()) {
-            wheelAccum = 0;
-            wheelRevision = revision;
-        }
-        // 0.18.0: AI 模式放行默认滚动（让 #ai-display 可滚），搜索模式仍 preventDefault + 翻页
-        if (aiMode.isActive()) return;
-        // 0.18.6: 命令模式无结果可翻页，放行默认行为
-        if (cmdMode.isActive()) return;
-        // 0.25.29: 剪贴板 step 滚轮模式 = 数据窗口逐条平移。表现形式零变化
-        // （仍一屏 page_size 条、窗口贴合、Alt+1~9 不变）；累积器把 deltaY
-        // 换算成条数（一格 ±100/120 → 1 条，触摸板小 delta 累积过阈值才动）。
-        if (clipboardMode.isActive() && clipboardMode.isStepWheel()) {
-            e.preventDefault();
-            if (!results.hasItems()) return;
-            const delta = e.deltaY * (e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? WHEEL_STEP : 1);
-            if (wheelAccum * delta < 0) wheelAccum = 0;
-            wheelAccum += delta;
-            const steps = Math.trunc(Math.abs(wheelAccum) / WHEEL_STEP);
-            if (steps > 0) {
-                const dir = wheelAccum > 0 ? 1 : -1;
-                wheelAccum -= dir * steps * WHEEL_STEP;
-                results.scrollItems(dir * steps);
-            }
-            return;
-        }
-        // 0.19.15: 剪贴板模式有结果，正常翻页
-        e.preventDefault(); // 阻止默认滚动（列表本来就不滚动）
-        if (!results.hasItems()) return;
-        if (e.deltaY < 0) {
-            results.pageUp(); // 向上滚 → 上一页（等价于 PageUp）
-        } else if (e.deltaY > 0) {
-            results.pageDown(); // 向下滚 → 下一页（等价于 PageDown）
-        }
-    });
+        if (aiMode.isActive() || cmdMode.isActive()) { listNavigation.reset(); return; }
+        e.preventDefault();
+        if (!results.hasItems()) { listNavigation.reset(); return; }
+        const context = JSON.stringify([clipboardMode.isActive(), queryEl.value]);
+        const {mode, steps} = listNavigation.consumeWheel(e, context);
+        if (!steps) return;
+        if (mode === "step") results.scrollItems(steps);
+        else if (steps > 0) results.pageDown(steps);
+        else results.pageUp(-steps);
+    }, {passive: false});
 }
-
-/** 0.25.29: step 滚轮累积器——deltaY 累积，每满一格（约一次标准滚轮刻度）
- *  平移 1 条；触摸板高频小 delta 需累积，避免平移过快。 */
-let wheelAccum = 0;
-let wheelRevision = -1;
-/** 一格滚轮的 deltaY 基准（标准滚轮刻度 ±100/120，取 100）。 */
-const WHEEL_STEP = 100;
 
 // ── Autosuggestion 采纳（0.24 §3.2 键随槽走）───────────────────────────
 

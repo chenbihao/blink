@@ -175,6 +175,26 @@ fn weather_key(epoch: &Epoch, provider: &str, location: &ResolvedLocation) -> Ke
 }
 
 impl WeatherService {
+    fn handle_received(
+        &mut self,
+        mut message: CoreToPlugin,
+        received_at: Instant,
+        now: Instant,
+    ) -> Vec<PluginToCore> {
+        if let CoreToPlugin::Query { budget_ms, .. } | CoreToPlugin::ToolCall { budget_ms, .. } =
+            &mut message
+        {
+            let spent = now.saturating_duration_since(received_at).as_millis() as u64;
+            *budget_ms = Some(
+                budget_ms
+                    .unwrap_or(DEFAULT_BUDGET_MS)
+                    .min(MAX_BUDGET_MS)
+                    .saturating_sub(spent),
+            );
+        }
+        self.handle(message, now)
+    }
+
     fn observe_settings(&mut self, settings: Option<&Value>) -> Result<Epoch, PluginError> {
         let revision = match settings.and_then(|s| s.get("settings_revision")) {
             None => 0,
@@ -750,7 +770,7 @@ pub fn run() {
             }
             match serde_json::from_str(&line) {
                 Ok(message) => {
-                    if tx.send(message).is_err() {
+                    if tx.send((message, Instant::now())).is_err() {
                         break;
                     }
                 }
@@ -762,7 +782,9 @@ pub fn run() {
     let mut service = WeatherService::default();
     loop {
         let messages = match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(message) => service.handle(message, Instant::now()),
+            Ok((message, received_at)) => {
+                service.handle_received(message, received_at, Instant::now())
+            }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => service.poll(Instant::now()),
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         };

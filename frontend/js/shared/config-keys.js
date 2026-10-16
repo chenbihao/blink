@@ -7,7 +7,7 @@
  * # 支持的 key
  *
  * **AppConfig 分片**：`language` / `log_level` / `auto_start` / `hotkey` /
- * `tap_threshold` / `grace_period` / `general_config` / `autosuggest` /
+ * `tap_threshold` / `grace_period` / `general_config` / `wheel_mode` / `autosuggest` /
  * `chord_toggles` / `chord_bindings`（0.10.7）/ `clipboard_enabled` /
  * `clipboard_config`（0.10.7）/ `disabled_builtin_actions` /
  * `disabled_context_bindings` / `disabled_chord_actions`

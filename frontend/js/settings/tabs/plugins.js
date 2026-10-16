@@ -44,6 +44,11 @@ export function initPluginsTab() {
     initExternalLinkDelegate();
     if (!pluginConfigListener) {
         pluginConfigListener = true;
+        document.getElementById("plugins-container")?.addEventListener("focusout", () => {
+            // Wait until focus has reached its new target. loadPlugins still protects
+            // an active editor, revision conflict, or queued config write.
+            setTimeout(() => { if (pendingPluginReload) void loadPlugins(); }, 0);
+        });
         // Settings windows are reused after hiding; reset only credential disclosure,
         // keeping the card, saved values and any editor draft in place.
         window.addEventListener("blur", () => {

@@ -8,7 +8,7 @@ use sqlx::SqlitePool;
 
 use super::shards::{
     AiPermissionConfig, AppearanceConfig, CalcConfig, ChordConfig, ContextConfig, DisableConfig,
-    FileSearchConfig, HotkeyConfig, SearchConfig, StartMenuConfig, SuggestionConfig,
+    FileSearchConfig, HotkeyConfig, SearchConfig, StartMenuConfig, SuggestionConfig, WheelMode,
 };
 use super::store::ConfigStore;
 
@@ -36,6 +36,8 @@ pub struct AppConfig {
     pub max_results: u32,
     #[serde(default = "default_page_size")]
     pub page_size: u32,
+    #[serde(default)]
+    pub wheel_mode: WheelMode,
     #[serde(default = "default_false")]
     pub proactive_enabled: bool,
     #[serde(default = "default_5")]
@@ -97,6 +99,7 @@ impl Default for AppConfig {
             search_history_days: default_30(),
             max_results: default_50(),
             page_size: default_page_size(),
+            wheel_mode: WheelMode::default(),
             proactive_enabled: default_false(),
             empty_query_topn: default_5(),
             clipboard: blink_infra::data::clipboard::ClipboardConfig::default(),
@@ -233,11 +236,37 @@ fn default_window_opacity() -> f64 {
 /// 初始化配置：首次运行写默认值 + 检测旧 `app_config` 单 key 触发迁移。
 pub async fn init_config(pool: &SqlitePool) -> Result<(), String> {
     // Step 1: 检测旧 KV 迁移
-    // P1-3：typed deserialize 失败时不写回默认值（会覆盖有效用户配置）。
-    // 旧 JSON 损坏时只删除旧 key，让 Step 2 的首次运行逻辑补写默认分片。
-    if let Some(json) = blink_infra::data::history::get_config(pool, "app_config").await {
+    // 读取失败/损坏不能伪装成首次运行；保留原记录，拒绝默认值覆盖。
+    if let Some(json) = blink_infra::data::config::config_value(pool, "app_config")
+        .await
+        .map_err(|e| format!("旧 app_config 读取失败: {e}"))?
+    {
         tracing::info!("检测到旧 app_config 单 key,开始迁移到分片 KV");
-        match serde_json::from_str::<AppConfig>(&json) {
+        // 旧单 key 残留与新分片并存时，统一滚轮偏好仍以新分片为准。
+        let saved_search = blink_infra::data::config::config_value(pool, "app.search")
+            .await
+            .map_err(|e| e.to_string())?
+            .map(|raw| serde_json::from_str::<serde_json::Value>(&raw))
+            .transpose()
+            .map_err(|e| format!("app.search 无效，未迁移: {e}"))?;
+        if let Some(search) = &saved_search {
+            serde_json::from_value::<SearchConfig>(search.clone())
+                .map_err(|e| format!("app.search 无效，未迁移: {e}"))?;
+        }
+        let saved_mode = saved_search.as_ref().and_then(|v| v.get("wheel_mode"));
+        match serde_json::from_str::<serde_json::Value>(&json).and_then(|mut raw| {
+            if raw.is_object() && saved_mode.is_some() {
+                raw["wheel_mode"] = saved_mode.unwrap().clone();
+            } else if raw.is_object() && raw.get("wheel_mode").is_none() {
+                let mode = raw
+                    .pointer("/clipboard/wheel_mode")
+                    .cloned()
+                    .filter(|v| v == "step" || v == "page")
+                    .unwrap_or(serde_json::json!("step"));
+                raw["wheel_mode"] = mode;
+            }
+            serde_json::from_value::<AppConfig>(raw)
+        }) {
             Ok(legacy) => {
                 save_config(pool, &legacy).await?;
                 blink_infra::data::history::delete_config(pool, "app_config")
@@ -246,16 +275,17 @@ pub async fn init_config(pool: &SqlitePool) -> Result<(), String> {
                 tracing::info!("app_config 单 key 已拆分到 6 分片 + clipboard 独立 KV,旧 key 删除");
             }
             Err(e) => {
-                tracing::warn!(
+                tracing::error!(
                     error = %e,
-                    "旧 app_config JSON 反序列化失败，跳过迁移写回（不覆盖），仅删除旧 key"
+                    "旧 app_config JSON 反序列化失败，保留原记录，停止迁移"
                 );
-                blink_infra::data::history::delete_config(pool, "app_config")
-                    .await
-                    .map_err(|e| e.to_string())?;
+                return Err(format!("旧 app_config 无效，未迁移: {e}"));
             }
         }
     }
+
+    // 0.26.7：先于 typed 默认值与首次写入迁移滚轮偏好。
+    super::list_navigation::migrate_wheel_mode(pool).await?;
 
     // Step 2: 首次运行
     let existing = blink_infra::data::history::get_all_config(pool).await;
@@ -451,6 +481,7 @@ pub async fn get_config(pool: &SqlitePool) -> AppConfig {
         search_history_days: search.search_history_days,
         max_results: search.max_results,
         page_size: search.page_size,
+        wheel_mode: search.wheel_mode,
         autosuggest_enabled: suggestion.autosuggest_enabled,
         autosuggest_min_score: suggestion.autosuggest_min_score,
         autosuggest_tab_key: suggestion.autosuggest_tab_key,
@@ -498,6 +529,7 @@ pub async fn save_config(pool: &SqlitePool, config: &AppConfig) -> Result<(), St
         search_history_days: config.search_history_days,
         max_results: config.max_results,
         page_size: config.page_size,
+        wheel_mode: config.wheel_mode,
         surface_takeover_enabled: config.surface_takeover_enabled,
     })?);
 
@@ -1357,14 +1389,14 @@ mod tests {
             .await
             .unwrap();
 
-        init_config(&pool).await.unwrap();
+        assert!(init_config(&pool).await.is_err());
 
-        // 旧 key 应被删除
+        // 损坏记录保留，禁止默认为首次运行或静默丢弃。
         assert!(
             blink_infra::data::history::get_config(&pool, "app_config")
                 .await
-                .is_none(),
-            "损坏的旧 app_config key 应被删除"
+                .is_some(),
+            "损坏的旧 app_config key 应保留"
         );
 
         // 已有分片配置不应被覆盖

@@ -93,12 +93,6 @@ pub struct ClipboardConfig {
     /// 范围 [50, 5000]。
     #[serde(default = "default_candidate_limit")]
     pub candidate_limit: u32,
-    /// 剪贴板模式滚轮行为（0.25.29）：`"step"` = 数据窗口逐条平移（默认，
-    /// 用户裁决 20261013——一页仍 page_size 条、Alt+1~9 不变）；
-    /// `"page"` = 整页翻页（历史行为）。
-    /// 仅前端消费；未知值由前端回落 step。
-    #[serde(default = "default_wheel_mode")]
-    pub wheel_mode: String,
 }
 
 /// 0.25.29：流式加载游标——`(created_at, id)` keyset 位置。
@@ -119,10 +113,6 @@ fn default_max_items() -> u32 {
 fn default_retention_days() -> u32 {
     // 0.25.29：默认保留期 30 → 180 天（仅影响无配置的新用户）
     180
-}
-/// 0.25.29：滚轮行为默认值——逐条平移（用户裁决；整页翻页成为显式选项）。
-fn default_wheel_mode() -> String {
-    "step".to_string()
 }
 /// 单次展示条数默认值（旧字段，迁移用）。30 = 3 页 × 10（旧默认 page_size）。
 fn default_display_count() -> u32 {
@@ -258,7 +248,6 @@ impl Default for ClipboardConfig {
             capture_images: true,
             max_image_items: default_max_image_items(),
             candidate_limit: 500,
-            wheel_mode: default_wheel_mode(),
         }
     }
 }

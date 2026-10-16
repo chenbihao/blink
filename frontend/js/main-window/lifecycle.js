@@ -1,5 +1,6 @@
 //! 窗口生命周期：响应后端 blink://shown / blink://hidden，复位输入与列表。
 
+import {listNavigation} from "./list-navigation.js";
 import {invoke, listen} from "../shared/tauri.js";
 import {resetSuggestionSession} from "../shared/api.js";
 import {EVENTS} from "../shared/event-names.js";
@@ -27,7 +28,7 @@ const configRefresher = createConfigRefresher({
         applyThemeFromConfigData(cfg);
         applyGlassOpacityFromConfigData(cfg);
         applyI18nFromConfigData(cfg);
-        clipboardMode.refreshWheelMode(cfg.clipboard);
+        listNavigation.refreshFromConfigData(cfg);
         results.refreshMaxResultsFromConfigData(cfg);
         autosuggestConfig.refreshFromConfigData(cfg);
         chord.refreshFromConfigData(cfg).then(() => inputState.reevaluate());
@@ -53,6 +54,7 @@ export function init() {
     const onShown = (event) => {
         if (!setWindowVisibility(true, event.payload?.revision)) return;
         observedRevision = event.payload.revision;
+        listNavigation.reset();
         void configRefresher.refresh();
         // SHOWN 自带模式，预告事件丢失时也不会先跑普通搜索。
         if (event.payload?.clipboard) clipboardMode.enter();
@@ -101,6 +103,7 @@ export function init() {
     const onHidden = (event) => {
         if (!setWindowVisibility(false, event.payload?.revision)) return;
         observedRevision = event.payload.revision;
+        listNavigation.reset();
         // Alt/Chord 状态由后端 INPUT_STATE_CHANGED 事件驱动，不在 HIDDEN 补偿清理。
         // 0.20-fix: 强制恢复 readOnly = false，防止 chord 待命态 readOnly 残留
         // （WebView 可能收不到 keyup，wasChordStandby 残留 true 导致输入框永久 readOnly）

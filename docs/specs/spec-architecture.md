@@ -172,7 +172,7 @@ pub struct SuggestionArbiter { producers: Vec<Arc<dyn SuggestionProducer>> }
 |---|---|---|
 | `HotkeyConfig` | `app.hotkey` | 快捷键 / tap 阈值 / grace period |
 | `AppearanceConfig` | `app.appearance` | 主题 / 语言 / 自启 |
-| `SearchConfig` | `app.search` | 结果条数 / 分页 / 历史开关 / takeover 总闸 |
+| `SearchConfig` | `app.search` | 结果条数 / 分页 / 主窗口滚轮 / 历史开关 / takeover 总闸 |
 | `SuggestionConfig` | `app.suggestion` | Autosuggest 开关 / 阈值 / Tab 键 |
 | `ChordConfig` | `app.chord` | Chord 总开关 / 提示可见性 |
 | `DisableConfig` | `app.disable` | 三个黑名单(builtin/context/chord) |

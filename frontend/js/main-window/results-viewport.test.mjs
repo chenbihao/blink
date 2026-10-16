@@ -28,9 +28,10 @@ function setup() {
     const resultsEl = mkEl();
     const statusCalls = [];
     const pageChanged = [];
-    let created = 0, clipActive = false, stepWheel = false;
+    let created = 0, clipActive = false, hasMore = false;
     const context = vm.createContext({
         ...clipboardEntry,
+        listNavigation: {reset: () => {}},
         resultsEl,
         resetMaxHeight: () => {}, syncWindowSize: () => {},
         bindClipboardPreview: () => {}, bindErrorPreview: () => {}, hideClipboardPreview: () => {},
@@ -41,8 +42,7 @@ function setup() {
         isColorEntry: () => false, parseColor: () => null,
         clipboardMode: {
             isActive: () => clipActive,
-            isStepWheel: () => stepWheel,
-            getStreamInfo: () => ({}),
+            getStreamInfo: () => ({hasMore}),
             onPageChanged: () => pageChanged.push(1),
         },
         document: {createElement: () => {created++; return mkEl();}},
@@ -54,7 +54,7 @@ function setup() {
         context, resultsEl, statusCalls, pageChanged,
         get created() {return created;},
         set clipActive(v) {clipActive = v;},
-        set stepWheel(v) {stepWheel = v;},
+        set hasMore(v) {hasMore = v;},
     };
 }
 
@@ -128,7 +128,7 @@ const clip = (hitId, score = 0.9) => ({
 {
     // step 模式 ArrowUp/Down 越界：平移 1 条（光标跟视口），不整页跳
     const h = setup();
-    h.clipActive = true; h.stepWheel = true;
+    h.clipActive = true;
     const items = Array.from({length: 12}, (_, i) => clip(`s${i}`));
     h.context.render(items, 1);
     for (let i = 0; i < 8; i++) h.context.move(1); // 光标走到视口末行 s8
@@ -164,5 +164,40 @@ const clip = (hitId, score = 0.9) => ({
     assert.equal(h.resultsEl.children.length, 7, '页大小热更新同步重绘 DOM');
     assert.equal(h.context.getNth(1).actions[0].hitId, 'config3', '热更新保留浏览位置');
     assert.equal(h.context.getLoadedCount(), 20, '已加载数据不重查');
+}
+for (const clipboard of [false, true]) {
+    const h = setup(); h.clipActive = clipboard;
+    h.context.render(Array.from({length: 30}, (_, i) => clip(`nav${i}`)), 1);
+    for (let i = 0; i < 9; i++) h.context.move(1);
+    assert.equal(h.context.getNth(1).actions[0].hitId, 'nav1', '方向键越界始终平移一条');
+    assert.equal(h.context.getActive().actions[0].hitId, 'nav9');
+    assert.equal(h.statusCalls.at(-1).p.rangeStart, 2, '非页对齐按实际范围显示');
+    h.context.pageDown();
+    assert.equal(h.context.getNth(1).actions[0].hitId, 'nav10', '整页操作保留非对齐位置');
+    h.context.pageUp();
+    assert.equal(h.context.getNth(1).actions[0].hitId, 'nav1');
+    h.context.scrollItems(-1);
+    assert.equal(h.statusCalls.at(-1).p.page, 1, '对齐后恢复页码');
+    h.context.pageDown(50);
+    assert.equal(h.context.getNth(1).actions[0].hitId, 'nav27', '多页操作在尾页停止');
+    h.context.scrollItems(1);
+    assert.equal(h.context.getNth(1).actions[0].hitId, 'nav27', '不满末页向下逐条不能倒退');
+    h.context.scrollItems(-1);
+    assert.equal(h.context.getNth(1).actions[0].hitId, 'nav26', '不满末页向上逐条连续移动');
+}
+{
+    const h = setup(); h.clipActive = true; h.hasMore = true;
+    h.context.render(Array.from({length: 18}, (_, i) => clip(`stream${i}`)), 1);
+    assert.equal(h.statusCalls.at(-1).p.hasMore, true, '页对齐但尚有数据时仍显示可增长总量');
+    assert.equal(h.statusCalls.at(-1).p.rangeStart, 1);
+    h.context.scrollItems(2);
+    h.context.move(1);
+    const before = h.context.getActive().actions[0].hitId;
+    h.context.appendItems([clip('stream18')], 1);
+    assert.equal(h.context.getNth(1).actions[0].hitId, 'stream2', '续载保留视口');
+    assert.equal(h.context.getActive().actions[0].hitId, before, '续载保留高亮');
+    h.context.refreshMaxResultsFromConfigData({wheel_mode: 'page'});
+    assert.equal(h.context.getNth(1).actions[0].hitId, 'stream2', '滚轮热切不重置视口');
+    assert.equal(h.context.getActive().actions[0].hitId, before);
 }
 console.log('results 视口模型：page/step、流式追加、局部移除与页大小热更新通过');

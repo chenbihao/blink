@@ -473,7 +473,8 @@ a.external-link:hover {
 }
 
 #auto-start-status.is-error,
-#chord-save-error {
+#chord-save-error,
+#wheel-mode-status {
     color: var(--red);
 }
 

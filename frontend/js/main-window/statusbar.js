@@ -151,7 +151,7 @@ function buildSecondary() {
 }
 
 /** 右侧：翻页提示（多于一屏才显示）。
- *  0.25.29: 条数区间形态（剪贴板 step 滚轮模式）——`第 12-18 条 · 共 245 条`，
+ *  0.25.29: 条数区间形态（非页对齐视口或尚有流式数据）——`第 12-18 条 · 共 245 条`，
  *  has_more 时总数带 `+`（还有更早的可加载）。 */
 function buildRight(paging) {
     if (paging.rangeStart != null) {

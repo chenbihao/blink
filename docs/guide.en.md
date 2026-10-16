@@ -30,7 +30,7 @@
 |---|---|---|
 | Summon / hide main window | `Alt+Space` (tap) | Keybinding is remappable in Settings |
 | Search | Just type | Fuzzy matching + pinyin initials + full pinyin (`wx` finds WeChat, `dksz` finds Open Settings — Chinese entries match by pinyin); never disturbs you while an IME is composing |
-| Pick a result | `↑` `↓` / mouse hover | Auto page-turn across page boundaries |
+| Pick a result | `↑` `↓` / mouse hover | Shifts the viewport one item at a time when crossing its edge |
 | Open result | `Enter` / click | Launches apps, copies, or runs actions depending on the result type |
 | Quick trigger | `Alt+1` ~ `Alt+9` | Directly activates the Nth item on the current page (hold `Alt` in the main window to show a number badge on each item) |
 | Accept completion | `Tab` | Type `fy` and a ghost `fanyi ` appears; press `Tab` to accept and start typing your translation right away |
@@ -55,7 +55,8 @@ Every Chord action can be remapped in Settings and promoted to a **global hotkey
 
 | Operation | Trigger | Notes |
 |---|---|---|
-| Page | `PgUp` / `PgDn`, or the **mouse wheel** over the results | Wheel up = previous page, down = next page; keeps your relative position within the page |
+| Page | `PgUp` / `PgDn` | Always moves a full screen, preserving the relative highlight position |
+| Wheel navigation | Scroll in the main window | Search and clipboard share the same preference, defaulting to line by line. Choose full-page scrolling in Settings → General → Main window wheel behavior; changes apply immediately and preserve the viewport and selection |
 | Dual-slot suggestions | `Tab` / `Shift+Tab` | Primary and secondary suggestions each own one key; you can also click the suggestion row |
 | Command mode | Start input with `>` | Exclusive mode; `Enter` runs the command in a terminal; `Backspace` past `>` exits |
 | Calculator | Just type an expression | An `= result` item appears; `Enter` copies the result |
@@ -298,7 +299,7 @@ Summon: `Alt+Q` (text in the main window's input is carried over automatically �
 Things you would almost never discover without this list:
 
 1. **The main window's blank area is draggable** — there is no drag bar, but holding the card's blank area moves the window.
-2. **Main window wheel = paging** — with more than 9 results, the wheel flips a whole page.
+2. **Shared main window wheel navigation** — search and clipboard scroll line by line by default; choose full-page scrolling in General settings. Arrow keys always move one item; `PgUp/PgDn` always page.
 3. **Type `>` to run commands** — `Enter` executes in a terminal, no need to open one first.
 4. **Type `#fff` to detect colors** — works in both the main window and the clipboard panel; `Enter` copies HEX.
 5. **Clipboard mixed selection** — use `Ctrl+click` to toggle entries and `Shift+click` for ranges. Text-only selections support batch copy / paste; mixed selections offer actions by type in the context menu, including batch image pinning.
@@ -331,10 +332,11 @@ Things you would almost never discover without this list:
 
 | Keys | Action |
 |---|---|
-| `↑` `↓` | Pick a result (auto page-turn across pages) |
+| `↑` `↓` | Pick a result (shifts the viewport one item at its edge) |
 | `Enter` | Open / copy / paste out |
 | `Alt+1` ~ `Alt+9` | Trigger the result at that position |
-| `PgUp` / `PgDn` / wheel | Page |
+| `PgUp` / `PgDn` | Full-page navigation |
+| Wheel | Line by line (choose full-page scrolling in General settings) |
 | `Tab` / `Shift+Tab` | Accept primary / secondary suggestion |
 | `Esc` | Exit mode / clear multi-selection / hide window |
 | `Alt+Q` `Alt+A` `Alt+C` `Alt+E` `Alt+S` | Chord actions |

@@ -16,6 +16,7 @@ function setup() {
     const noop = () => {};
     const node = () => ({value: '', offsetHeight: 100, style: {}, addEventListener: noop, focus: () => calls.focus++});
     const context = vm.createContext({
+        listNavigation: {reset: noop, refreshFromConfigData: cfg => calls.configs.push(cfg.wheel_mode)},
         appEl: node(), queryEl: node(), aiQueryEl: node(), console,
         EVENTS: new Proxy({}, {get: (_, key) => key}),
         listen: (name, callback) => { listeners.set(name, callback); return Promise.resolve(noop); },
@@ -31,7 +32,6 @@ function setup() {
             enter: () => { if (!active) { active = true; calls.enter++; } },
             reset: () => { if (active) { active = false; calls.reset++; } },
             isActive: () => active,
-            refreshWheelMode: cfg => calls.configs.push(cfg?.wheel_mode),
         },
         inputState: {inChordStandby: () => false, forceClearReadOnly: noop, onShown: noop, reevaluate: noop},
         aiMode: {isActive: () => false}, cmdMode: {reset: noop},
@@ -83,24 +83,24 @@ function setup() {
     await flush();
     assert.equal(h.reads.length, 1, '先订阅配置广播，再做启动读取');
     h.emit('SHOWN', {revision: 1, clipboard: true});
-    h.emit('CONFIG_CHANGED', {key: 'clipboard:config'});
-    h.reads[0].resolve({clipboard: {wheel_mode: 'page'}});
+    h.emit('CONFIG_CHANGED', {key: 'app.search'});
+    h.reads[0].resolve({wheel_mode: 'page'});
     await flush();
     assert.deepEqual(h.calls.configs, [], '配置广播前的旧读取不能覆盖新设置');
     assert.equal(h.reads.length, 2, '并发失效合并为一次最新读取');
-    h.reads[1].resolve({clipboard: {wheel_mode: 'step'}});
+    h.reads[1].resolve({wheel_mode: 'step'});
     await flush();
     assert.deepEqual(h.calls.configs, ['step'], '剪贴板 SHOWN 也刷新配置');
-    h.emit('CONFIG_CHANGED', {key: 'clipboard:config'});
+    h.emit('CONFIG_CHANGED', {key: 'app.search'});
     await flush();
-    h.reads[2].resolve({clipboard: {wheel_mode: 'page'}});
+    h.reads[2].resolve({wheel_mode: 'page'});
     await flush();
     assert.deepEqual(h.calls.configs, ['step', 'page'], '可见会话无需重开即响应配置');
     assert.equal(h.calls.enter, 1, '热刷新不重建剪贴板会话');
     h.emit('HIDDEN', {revision: 2});
-    h.emit('CONFIG_CHANGED', {key: 'clipboard:config'});
+    h.emit('CONFIG_CHANGED', {key: 'app.search'});
     await flush();
-    h.reads[3].resolve({clipboard: {wheel_mode: 'step'}});
+    h.reads[3].resolve({wheel_mode: 'step'});
     await flush();
     assert.equal(h.calls.configs.at(-1), 'step', '隐藏期间配置仍同步');
 }

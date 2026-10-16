@@ -7,10 +7,11 @@
 //!
 //! 0.25.29：页对齐起点 `page` 泛化为任意条对齐的 `viewStart`——
 //! - page 模式（搜索/剪贴板可选）：viewStart 每次按 PAGE_SIZE 移动；
-//! - step 模式（剪贴板滚轮逐条滚动）：滚轮平移 viewStart ±N，表现形式（一屏条数、
+//! - step 模式（普通搜索/剪贴板共用）：滚轮平移 viewStart ±N，表现形式（一屏条数、
 //!   窗口贴合高度、Alt+1~9 指向当前显示条目）完全不变，只是数据窗口滑动。
 //! 另新增流式加载配套：appendItems（追加专用路径）、removeItems（删除局部移除）。
 
+import {listNavigation} from "./list-navigation.js";
 import {resultsEl} from "./dom.js";
 import {resetMaxHeight, syncWindowSize} from "./window-size.js";
 import {activateItem} from "./actions.js";
@@ -49,7 +50,10 @@ export function refreshMaxResultsFromConfigData(cfg) {
         const previousPageSize = PAGE_SIZE;
         if (cfg.max_results) maxResults = cfg.max_results;
         if (cfg.page_size) PAGE_SIZE = cfg.page_size;
-        if (PAGE_SIZE !== previousPageSize && allItems.length) renderViewport();
+        if (PAGE_SIZE !== previousPageSize) {
+            listNavigation.reset();
+            if (allItems.length) renderViewport();
+        }
     }
 }
 
@@ -64,7 +68,7 @@ let allItems = [];
 /** 当前结果所属的请求 seq；render / merge 据此协调（同一 seq 合并，新 seq 重置）。 */
 let currentSeq = -1;
 /** 0.25.29: 视口起始索引（0-based，任意条对齐）。
- *  page 模式恒为页对齐（page × PAGE_SIZE）；step 模式由滚轮逐条平移。 */
+ *  整页操作按 PAGE_SIZE 平移；逐条与方向键允许非页对齐起点。 */
 let viewStart = 0;
 /** 当前视口内的相对选中索引（0 .. 本视口条数-1）。 */
 let selected = 0;
@@ -97,6 +101,7 @@ export function merge(items, seq) {
 /** 切到新 seq 时重置结果集；返回是否发生了重置。 */
 function ensureSeq(seq) {
     if (seq === currentSeq) return false;
+    listNavigation.reset();
     currentSeq = seq;
     allItems = [];
     viewStart = 0;
@@ -186,6 +191,7 @@ function appendNew(items, didReset) {
 
 /** 清空列表与状态。 */
 export function clear() {
+    listNavigation.reset();
     hideClipboardPreview();
     allItems = [];
     currentSeq = -1;
@@ -200,56 +206,27 @@ export function clear() {
     syncWindowSize();
 }
 
-/** 上下移动选中（delta: -1 上 / +1 下）；到当前视口边界自动翻页。
- *  0.25.29: 剪贴板 step 滚轮模式下越界改为平移 1 条（光标跟视口走，
- *  不整页跳）——与滚轮逐条滚动语义一致。 */
+/** 方向键始终逐条导航，越过视口边界时平移一条，与滚轮偏好无关。 */
 export function move(delta) {
     if (!allItems.length) return;
     const next = selected + delta;
-    const lastIdx = pageItems().length - 1;
-    const stepMode = clipboardMode.isActive() && clipboardMode.isStepWheel();
-
-    if (next > lastIdx) {
-        // 越过下边界：有下一页则翻页选第一个，否则停住
-        if (stepMode) {
-            scrollItems(1);
-            return;
-        }
-        if (hasNextPage()) {
-            viewStart += PAGE_SIZE;
-            selected = 0;
-            renderViewport();
-        }
-    } else if (next < 0) {
-        // 越过上边界：有上一页则翻页选最后一条
-        // （selected 必须基于目标页实际条数算，不能读旧页的 pageItems —— renderPage 尚未执行）
-        if (stepMode) {
-            scrollItems(-1);
-            return;
-        }
-        if (viewStart > 0) {
-            viewStart = Math.max(0, viewStart - PAGE_SIZE);
-            selected = viewportLength() - 1;
-            renderViewport();
-        }
-    } else {
-        selected = next;
-        updateSelection(); // 页内移动：只更新高亮，不重建 DOM
-    }
+    if (next >= viewportLength()) scrollItems(1);
+    else if (next < 0) scrollItems(-1);
+    else { selected = next; updateSelection(); }
 }
 
-/** 向下翻一页，保持页内相对位置（夹紧到目标页实际条数）。 */
-export function pageDown() {
+/** 整屏移动，保留相对高亮和非页对齐视口，末页允许不足一屏。 */
+export function pageDown(pages = 1) {
     if (!hasNextPage()) return;
-    viewStart += PAGE_SIZE;
+    const available = Math.ceil((allItems.length - viewStart) / PAGE_SIZE) - 1;
+    viewStart += PAGE_SIZE * Math.min(pages, available);
     selected = Math.min(selected, viewportLength() - 1);
     renderViewport();
 }
 
-/** 向上翻一页，保持页内相对位置。 */
-export function pageUp() {
+export function pageUp(pages = 1) {
     if (viewStart === 0) return;
-    viewStart = Math.max(0, viewStart - PAGE_SIZE);
+    viewStart = Math.max(0, viewStart - PAGE_SIZE * pages);
     selected = Math.min(selected, viewportLength() - 1);
     renderViewport();
 }
@@ -259,7 +236,7 @@ export function pageUp() {
  *  平移到边界（顶/底）时停住。 */
 export function scrollItems(delta) {
     if (!allItems.length || delta === 0) return;
-    const maxStart = Math.max(0, allItems.length - PAGE_SIZE);
+    const maxStart = Math.max(viewStart, allItems.length - PAGE_SIZE);
     const next = Math.min(Math.max(viewStart + delta, 0), maxStart);
     if (next === viewStart) return;
     viewStart = next;
@@ -480,7 +457,7 @@ export function removeItems(keys) {
     });
     if (allItems.length === before) return;
     // 视口夹紧到「至少一条可见」——不重置页对齐（page 模式末页允许不满页）；
-    // step 模式后续平移由 scrollItems 自行 clamp 到满屏边界
+    // 后续平移保持连续，不能因满屏钳制导致向下滚动反而倒退
     const maxStart = Math.max(0, allItems.length - 1);
     viewStart = Math.min(viewStart, maxStart);
     selected = Math.min(selected, Math.max(viewportLength() - 1, 0));
@@ -735,12 +712,11 @@ function updateSelection() {
     refreshStatusbar();
 }
 
-/** 把当前选中项 + 翻页信息推给提示栏。
- *  0.25.29: 剪贴板 step 滚轮模式显示条数区间（第 N-M 条 · 共 X 条），page 模式维持页码。 */
+/** 按实际视口显示页码或条数范围，不依赖来源或滚轮偏好。 */
 export function refreshStatusbar() {
     const isClipboard = clipboardMode.isActive();
-    if (isClipboard && clipboardMode.isStepWheel?.()) {
-        const stream = clipboardMode.getStreamInfo?.() || {};
+    const stream = isClipboard ? (clipboardMode.getStreamInfo?.() || {}) : {};
+    if (viewStart % PAGE_SIZE !== 0 || stream.hasMore) {
         statusbar.update(
             getActive(),
             {
