@@ -4,7 +4,7 @@
 >
 > **维护规则**：只保留尚未完成的方向；已立项内容迁入 `phases/`，已完成内容直接移出本文件。
 >
-> **当前判断**：短期优先保护主链路；插件系统升级已立项 [0.26](phases/0.26-plugin-system-upgrade.md)，首批天气插件按 0.26.0–0.26.4 五个里程碑交付；AI 交互与 Provider 适配规划见 [0.27](phases/0.27-ai-interaction-enhancement.md)。本文件只保留其余未立项方向，不立项 RAG、向量数据库或记忆向量化。
+> **当前判断**：短期优先保护主链路；插件系统升级 [0.26](phases/0.26-plugin-system-upgrade.md) 的 0.26.0–0.26.5 已完成，后续插件需求按确认范围从 0.26.6 起追加；AI 交互与 Provider 适配规划见 [0.27](phases/0.27-ai-interaction-enhancement.md)。本文件只保留其余未立项方向，不立项 RAG、向量数据库或记忆向量化。
 
 ---
 

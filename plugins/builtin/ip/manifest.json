@@ -2,64 +2,263 @@
   "schema_version": 1,
   "id": "builtin.ip",
   "name": "IP",
-  "version": "0.1.0",
-  "description": { "zh": "显示本机 IP / 公网 IP / 地理位置信息", "en": "Show local / public IP and geolocation" },
+  "version": "0.2.0",
+  "description": {
+    "zh": "显示本机 IP 与国内外出口，可选增强网络信息",
+    "en": "Show local and domestic/international egress IPs, with optional network details"
+  },
   "builtin": true,
   "runtime": {
     "type": "process",
     "protocol": "jsonl",
     "exec": "./bin/blink-plugin-ip.exe",
-    "timeout_ms": 2000,
+    "timeout_ms": 8000,
     "concurrency": 1
   },
   "triggers": [
-    { "type": "keyword", "keyword": "ip", "exclusive": true }
+    {
+      "type": "keyword",
+      "keyword": "ip",
+      "exclusive": true
+    }
   ],
-  "capabilities": ["query"],
+  "capabilities": [
+    "query"
+  ],
   "tools": [
     {
       "name": "get_ip",
-      "description": "获取本机 IP 地址信息，包括本地 IPv4、可选 IPv6、公网 IP 及地理位置。",
+      "description": "获取本机物理网卡地址与国内站/国际站观察到的出口 IPv4。可选包含本机非临时/临时 IPv6 与IPv6 出口；增强网络信息开启时额外返回网关、隧道/虚拟网卡与代理状态。",
       "parameters": {
         "type": "object",
         "properties": {
           "include_ipv6": {
             "type": "boolean",
-            "description": "是否包含 IPv6 地址",
+            "description": "是否包含有效本机非临时/临时 IPv6，并独立查询一组 IPv6 出口（仅本机模式不联网）",
+            "default": false
+          },
+          "refresh": {
+            "type": "boolean",
+            "description": "刷新出口结果，仍遵守服务的最小请求间隔",
             "default": false
           }
         }
       },
       "danger_class": "Safe",
       "result_type": "items",
-      "hint": "返回多个 IP（本地 IPv4/IPv6 + 公网 IP），公网 IP 通常最有价值",
+      "hint": "返回地址数组，每项含 ip/type、网卡或检测来源；首项 warnings 说明部分失败和代理状态",
       "progress_hint": "获取 IP",
       "projection": {
         "result_shape": "items",
         "items_pointer": "$",
         "item_pointer": "$.ip",
         "item_desc_pointer": "$.type",
-        "item_actions": [{"type": "copy"}]
+        "item_actions": [
+          {
+            "type": "copy"
+          }
+        ]
       }
     }
   ],
   "settings_schema": [
     {
+      "key": "geo_provider",
+      "type": "enum",
+      "title": {
+        "zh": "IPv4 出口查询范围",
+        "en": "IPv4 egress queries"
+      },
+      "description": {
+        "zh": "IPv4 国内、国际检测分别降级；IPv6 开启后单独检测一组出口。选择仅本机地址时所有出口检测均不联网",
+        "en": "Separate domestic/international IPv4 fallback chains; IPv6 uses one independent check when enabled. Local-only disables all egress requests"
+      },
+      "default": "ip-api.com",
+      "options": [
+        {
+          "value": "ip-api.com",
+          "label": {
+            "zh": "国内与国际 IPv4 出口",
+            "en": "Domestic and international IPv4"
+          }
+        },
+        {
+          "value": "domestic",
+          "label": {
+            "zh": "仅国内站 IPv4 出口",
+            "en": "Domestic IPv4 only"
+          }
+        },
+        {
+          "value": "international",
+          "label": {
+            "zh": "仅国际站 IPv4 出口",
+            "en": "International IPv4 only"
+          }
+        },
+        {
+          "value": "none",
+          "label": {
+            "zh": "仅本机地址（不联网）",
+            "en": "Local only (offline)"
+          }
+        }
+      ]
+    },
+    {
       "key": "use_ipv6",
       "type": "boolean",
-      "title": { "zh": "查询 IPv6 地址", "en": "Query IPv6 address" },
-      "description": { "zh": "额外显示本机 IPv6 出口地址（需 IPv6 环境）", "en": "Also show local IPv6 exit address (requires IPv6)" },
+      "title": {
+        "zh": "查询 IPv6",
+        "en": "Query IPv6"
+      },
+      "description": {
+        "zh": "显示各一个有效非临时和临时 IPv6，并检测 IPv6 出口；IPv4 优先，更多地址见增强信息",
+        "en": "Show one valid non-temporary and one temporary IPv6, and check IPv6 egress; IPv4 comes first, with more addresses in enhanced details"
+      },
       "default": false
     },
     {
-      "key": "geo_provider",
-      "type": "enum",
-      "title": { "zh": "定位服务", "en": "Geolocation" },
-      "description": { "zh": "公网 IP 地理位置查询；选「不查询」则只显示 IP", "en": "Public IP geolocation; choose 'None' to show IP only" },
-      "default": "ip-api.com",
+      "key": "enhanced_network",
+      "type": "boolean",
+      "title": {
+        "zh": "增强网络信息",
+        "en": "Enhanced network details"
+      },
+      "description": {
+        "zh": "开启后额外查询并显示网关、隧道/虚拟网卡及系统代理状态",
+        "en": "Also collect and show gateways, tunnel/virtual adapters and system proxy status when enabled"
+      },
+      "default": false
+    },
+    {
+      "key": "show_location",
+      "type": "boolean",
+      "title": {
+        "zh": "显示来源提供的归属地",
+        "en": "Show location when provided"
+      },
+      "description": {
+        "zh": "检测来源提供时显示归属地，不额外发起定位请求",
+        "en": "Display location supplied by the detector without extra geolocation requests"
+      },
+      "default": true
+    },
+    {
+      "key": "allow_fallback",
+      "type": "boolean",
+      "title": {
+        "zh": "允许降级到备用检测站",
+        "en": "Allow fallback detectors"
+      },
+      "description": {
+        "zh": "各组主来源失败后按顺序尝试备用站；刷新会遵守站点请求间隔",
+        "en": "Try backups within the same group after failure; refresh respects service rate limits"
+      },
+      "default": true
+    },
+    {
+      "key": "domestic_order",
+      "type": "sortable_list",
+      "title": {
+        "zh": "国内检测顺序",
+        "en": "Domestic detector order"
+      },
+      "description": {
+        "zh": "拖动排序，第一项为主来源；成功后停止，不会换成国际来源",
+        "en": "Drag to reorder; first is primary, stop after success, never substitute an international source"
+      },
       "options": [
-        { "value": "ip-api.com", "label": { "zh": "ip-api.com（推荐）", "en": "ip-api.com (recommended)" } },
-        { "value": "none", "label": { "zh": "不查询定位", "en": "No geolocation" } }
+        {
+          "value": "ipip",
+          "label": {
+            "zh": "IPIP",
+            "en": "IPIP"
+          }
+        },
+        {
+          "value": "pubyun",
+          "label": {
+            "zh": "公云 3322",
+            "en": "PubYun 3322"
+          }
+        },
+        {
+          "value": "oray",
+          "label": {
+            "zh": "花生壳",
+            "en": "Oray"
+          }
+        }
+      ],
+      "default": [
+        "ipip",
+        "pubyun",
+        "oray"
+      ]
+    },
+    {
+      "key": "international_order",
+      "type": "sortable_list",
+      "title": {
+        "zh": "国际检测顺序",
+        "en": "International detector order"
+      },
+      "description": {
+        "zh": "默认优先 ifconfig.co，提供归属地；失败后使用 ipify（仅 IP）。ifconfig.co 每次请求至少间隔一分钟",
+        "en": "Prefer ifconfig.co for location data; fall back to ipify (IP only). ifconfig.co requires at least one minute between requests"
+      },
+      "options": [
+        {
+          "value": "ifconfig",
+          "label": {
+            "zh": "ifconfig.co",
+            "en": "ifconfig.co"
+          }
+        },
+        {
+          "value": "ipify",
+          "label": {
+            "zh": "ipify",
+            "en": "ipify"
+          }
+        }
+      ],
+      "default": [
+        "ifconfig",
+        "ipify"
+      ]
+    },
+    {
+      "key": "ipv6_order",
+      "type": "sortable_list",
+      "title": {
+        "zh": "IPv6 出口检测顺序",
+        "en": "IPv6 egress detector order"
+      },
+      "description": {
+        "zh": "默认优先 test-ipv6.com，失败后使用 ipify；test-ipv6.com 每次请求至少间隔一分钟",
+        "en": "Prefer test-ipv6.com, with ipify as backup; test-ipv6.com requests are at least one minute apart"
+      },
+      "options": [
+        {
+          "value": "test_ipv6",
+          "label": {
+            "zh": "test-ipv6.com",
+            "en": "test-ipv6.com"
+          }
+        },
+        {
+          "value": "ipify_v6",
+          "label": {
+            "zh": "ipify IPv6",
+            "en": "ipify IPv6"
+          }
+        }
+      ],
+      "default": [
+        "test_ipv6",
+        "ipify_v6"
       ]
     }
   ]

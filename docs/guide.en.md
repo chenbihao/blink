@@ -285,11 +285,11 @@ Summon: `Alt+Q` (text in the main window's input is carried over automatically �
 
 ### IP lookup
 
-**How to call**: Type `ip` in the main window to view local addresses, your public IP and its location. Select an address result and press `Enter` to copy it.
+**How to call**: Type `ip` to view local addresses and the egress IPs seen by domestic and international detectors. Select an address and press `Enter` to copy it.
 
-**Common operations**: Enable “Query IPv6 address” in IP configuration to include local IPv6 addresses. Set “Geolocation” to “No geolocation” to query local addresses only.
+**Common operations**: Under **Settings → Plugins → IP**, choose the IPv4 query scope. “Query IPv6” is off by default; enable it to show one valid non-temporary and one temporary local IPv6, and run one independent IPv6 egress check, with IPv4 listed first. “Enhanced network details” is off by default; enable it to also query gateways, tunnel/virtual adapters and system proxy status, and show other valid IPv6 addresses. Drag to reorder domestic and international detectors. Failed checks use backups within the same group by default; fallback can be disabled. IPv6 prefers test-ipv6.com with ipify as backup, using a single group rather than domestic/international groups. International IPv4 prefers ifconfig.co for location data, with ipify (IP only) as backup; existing custom orders are preserved.
 
-**Tips**: Copy the local IP when sharing a LAN address with a colleague; check the public IP when investigating your network's exit address. IPv6 results depend on your network's IPv6 support.
+**Tips**: Use `ip local` for local addresses without network requests, or `ip refresh` to refresh egress results subject to detector rate limits. When sharing a LAN address, choose the physical adapter's local IPv4.
 
 ---
 

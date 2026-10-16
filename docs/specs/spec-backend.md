@@ -101,6 +101,15 @@ cargo test --workspace --exclude blink-plugin-ip --exclude blink-plugin-translat
 2. 错误项 = 负分 PluginItem，走正常「占位符替换 → 排序 → 展示」链路
 3. 四层处理：脚本端强制 UTF-8 → `PluginProcess::query()` 内部转化 → `PluginHandle::query()` 兜底 → 前端负分透传
 
+### 4.4 插件执行契约（强制）
+
+- 插件错误跨 Query/ToolCall/Capability 边界保留 code/message，不只保留字符串。工具数据与入口展示遵循 [spec-architecture §A5/§A6](spec-architecture.md)，不复制出口业务实现。
+- 宿主以 manifest 上限与调用方剩余时间取更小预算；排队、进程准备、stdin 写入、HTTP 和结果等待计入同一总期限。插件续发请求只能使用剩余预算。
+- cancel、调用方 drop、超时与进程退出须清理对应 pending，丢弃迟到响应；按请求与进程代次隔离，不能全局取消其他调用。并发与等待者须有上限，超限返回 busy；请求合并仅限预算兼容的调用，单个等待者退出不误取消其他等待者。
+- 插件联网复用宿主 HTTP 路径。鉴权请求限制非预期重定向；路径签名请求拒绝重定向。日志和用户错误不得回显路径/查询中的密钥或精确位置，网络库错误也须脱敏；协议 stdout 只发 JSONL，诊断使用宿主 stderr 分级桥。
+
+> 具体实现与回归入口见 [0.26 phase §七](../phases/0.26-plugin-system-upgrade.md)。
+
 ---
 
 ## 五、事件名常量化（强制）
@@ -183,6 +192,15 @@ cargo test --workspace --exclude blink-plugin-ip --exclude blink-plugin-translat
 ### 7.5 持久化对象的并发修改（强制）
 
 可能被 UI、Capability、MCP 等多个入口同时修改的持久化对象，必须携带 revision、`updated_at` 或等价版本并执行乐观并发校验；版本冲突应返回可识别错误，禁止静默覆盖较新的状态。显示/隐藏、删除/回收站等正交状态应分字段表达，不得压缩成一个含混状态。
+
+### 7.6 插件配置与密钥提交（强制）
+
+- 配置按字段补丁保留未修改的结构化与未知设置；未提交、显式 null、空密钥保留及明确清密钥须区分。插件只接收宿主注入的自身配置与还原凭据，不自行读取数据库或其他模块配置。
+- revision/CAS 冲突检查先于密钥变更，检查与提交同序。配置读取快照与提交须保证一致性，避免混用旧配置和新密钥；跨窗口广播后重读，陈旧版本不得覆盖新状态。
+- CM 与 SQLite 不视为跨存储原子事务。密钥或配置写入失败须恢复原值，恢复失败明确报错，不显示假成功；测试使用内存数据库与 mock SecretStore，不修改真实用户配置/密钥。
+- 配置或凭据变更推进代次，使旧缓存和迟到回填失效；新配置失败不得被旧成功结果掩盖。查询仅消费配置，不隐式迁移写库。
+
+> 具体实现与回归入口见 [0.26 phase §七](../phases/0.26-plugin-system-upgrade.md)。
 
 ---
 

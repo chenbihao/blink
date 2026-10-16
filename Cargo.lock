@@ -590,7 +590,7 @@ dependencies = [
 
 [[package]]
 name = "blink"
-version = "0.26.5"
+version = "0.26.6"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -802,11 +802,13 @@ dependencies = [
 
 [[package]]
 name = "blink-plugin-ip"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "windows",
+ "winreg 0.55.0",
 ]
 
 [[package]]
