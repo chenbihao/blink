@@ -3,6 +3,9 @@
     z-index: 100;
     box-sizing: border-box;
     overflow: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+    scrollbar-color: var(--text-faint) transparent;
     padding: 10px 12px;
     border: 1px solid var(--surface-2);
     border-radius: var(--radius-lg);
@@ -15,5 +18,36 @@
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     user-select: text;
+    -webkit-user-select: text;
     -webkit-app-region: no-drag;
+}
+
+.clipboard-text-preview::-webkit-scrollbar {
+    width: 4px;
+    height: 4px;
+}
+
+.clipboard-text-preview::-webkit-scrollbar-thumb {
+    background: var(--text-faint);
+    border-radius: var(--radius-sm);
+}
+
+.clipboard-text-preview::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.clipboard-text-preview.is-image-preview {
+    white-space: normal;
+}
+
+.clipboard-preview-image {
+    display: block;
+    max-width: 100%;
+    max-height: var(--preview-image-height);
+    width: auto;
+    height: auto;
+    margin-inline: auto;
+    object-fit: contain;
+    user-select: none;
+    -webkit-user-drag: none;
 }

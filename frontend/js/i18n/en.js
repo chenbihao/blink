@@ -7,8 +7,10 @@ export const en = {
 
     "plugin.reload_settings": "Reload settings",
 
+    "clipboard.preview_image_loading": "Loading image…",
     "clipboard.preview_loading": "Loading full text…",
     "clipboard.preview_missing": "This entry was removed or could not be loaded",
+    "clipboard.hover_full_text": "hover left for full text",
 
     "plugin.group_empty": "Not configured",
     "plugin.group_partial": "Incomplete",
@@ -1155,6 +1157,7 @@ export const en = {
     // ── Main window: context menu ──
     "menu.cut": "Cut",
     "menu.copy": "Copy",
+    "menu.copySelection": "Copy selected text",
     "menu.paste": "Paste",
     "menu.selectAll": "Select all",
     "menu.openSettings": "Open Settings",

@@ -13,12 +13,24 @@ const source = readFileSync(new URL('./results.js', import.meta.url), 'utf8')
 
 const mkEl = () => {
     const el = {
-        children: [], dataset: {}, style: {},
+        children: [], dataset: {}, style: {}, className: '',
         classList: {_set: new Set(), add(c) {this._set.add(c);}, remove(c) {this._set.delete(c);},
             toggle(c, on) {on ? this._set.add(c) : this._set.delete(c);}, contains(c) {return this._set.has(c);}},
         appendChild(child) {el.children.push(child); return child;},
         replaceChildren(...kids) {el.children = kids;},
-        remove() {}, addEventListener() {}, querySelector() {return null;},
+        remove() {}, addEventListener() {},
+        querySelector(sel) {
+            const cls = sel.replace(/^\./, '');
+            const walk = node => {
+                for (const kid of node.children || []) {
+                    if (kid.className === cls) return kid;
+                    const hit = walk(kid);
+                    if (hit) return hit;
+                }
+                return null;
+            };
+            return walk(el);
+        },
         _text: '', set textContent(v) {el._text = v;}, get textContent() {return el._text;},
     };
     return el;
@@ -35,6 +47,7 @@ function setup() {
         resultsEl,
         resetMaxHeight: () => {}, syncWindowSize: () => {},
         bindClipboardPreview: () => {}, bindErrorPreview: () => {}, hideClipboardPreview: () => {},
+        t: key => key,
         activateItem: () => {}, statusbar: {update: (a, p) => statusCalls.push({a, p})},
         invoke: async () => ({}),
         renderIcon: () => mkEl(),
@@ -200,4 +213,39 @@ for (const clipboard of [false, true]) {
     assert.equal(h.context.getNth(1).actions[0].hitId, 'stream2', '滚轮热切不重置视口');
     assert.equal(h.context.getActive().actions[0].hitId, before);
 }
-console.log('results 视口模型：page/step、流式追加、局部移除与页大小热更新通过');
+{
+    // 0.26.8：「左侧悬浮查看全文」提示只在标题被截断的剪贴板文本行追加
+    const h = setup();
+    const mk = (hitId, description) => ({
+        name: `item-${hitId}`, source: 'clipboard', score: 0.9, description,
+        clipboard_ref: {kind: 'text', id: hitId},
+        actions: [{kind: 'lazy_copy', hitId}],
+    });
+    const image = {name: 'photo', source: 'clipboard', description: '刚刚 · 800x600 · PNG · 左侧悬浮查看图片',
+        clipboard_ref: {kind: 'image', id: 'clipimg_i'}, actions: []};
+    const batch = () => [mk('long', '刚刚 · 1200 chars'), mk('short', '刚刚 · 5 chars'), image];
+    h.context.render(batch(), 1);
+    const byClass = cls => {
+        const found = [];
+        const walk = node => {
+            for (const kid of node.children || []) {
+                if (kid.className === cls) found.push(kid);
+                walk(kid);
+            }
+        };
+        walk(h.resultsEl);
+        return found;
+    };
+    const names = byClass('item-name'), descs = byClass('item-desc');
+    assert.equal(names.length, 3);
+    names[0].scrollWidth = 300; names[0].clientWidth = 120; // 文本行截断
+    names[1].scrollWidth = 80; names[1].clientWidth = 120;  // 文本行完整可见
+    names[2].scrollWidth = 300; names[2].clientWidth = 120; // 图片行标题截断也不加文本提示
+    h.context.render(batch(), 2); // 复用 li 重渲，读到上一步写入的布局值
+    assert.equal(descs[0].textContent, '刚刚 · 1200 chars · clipboard.hover_full_text', '截断行追加悬浮提示');
+    assert.equal(descs[1].textContent, '刚刚 · 5 chars', '完整可见的短行不加提示');
+    assert.equal(descs[2].textContent, '刚刚 · 800x600 · PNG · 左侧悬浮查看图片', '图片行提示由后端常显，前端不重算');
+    h.context.render(batch(), 3);
+    assert.equal(descs[0].textContent, '刚刚 · 1200 chars · clipboard.hover_full_text', '重渲以副行基准幂等重算，不叠加提示');
+}
+console.log('results 视口模型：page/step、流式追加、局部移除、页大小热更新与悬浮提示条件追加通过');

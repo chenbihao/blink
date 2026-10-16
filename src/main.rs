@@ -109,12 +109,17 @@ fn main() {
             });
         })
         // 自定义协议：http://blink-clipimg.localhost/<image-id>（0.16.4）——
-        // 按需懒加载剪贴板图片缩略图 PNG。前端 <img src> 直接引用。
+        // 列表缩略图；/preview/<id> 为停留后按需生成的有界大预览 PNG。
         .register_asynchronous_uri_scheme_protocol("blink-clipimg", |_ctx, request, responder| {
             let raw = request.uri().path().trim_start_matches('/').to_string();
-            let image_id = percent_decode(&raw);
+            let preview = raw.starts_with("preview/");
+            let image_id = percent_decode(raw.strip_prefix("preview/").unwrap_or(&raw));
             tauri::async_runtime::spawn(async move {
-                let thumb = crate::infra::data::clipboard_images::get_thumb_by_id_global(&image_id).await;
+                let thumb = if preview {
+                    crate::infra::data::clipboard_images::get_preview_by_id_global(&image_id).await
+                } else {
+                    crate::infra::data::clipboard_images::get_thumb_by_id_global(&image_id).await
+                };
                 let response = match thumb {
                     Some(bytes) => tauri::http::Response::builder()
                         .status(200)
@@ -123,7 +128,7 @@ fn main() {
                         .body(bytes)
                         .unwrap(),
                     None => {
-                        tracing::debug!(id = %image_id, "blink-clipimg: 未找到缩略图，返回 404");
+                        tracing::debug!(id = %image_id, preview, "blink-clipimg: 图片不存在或无法预览，返回 404");
                         tauri::http::Response::builder()
                             .status(404)
                             .body(Vec::new())

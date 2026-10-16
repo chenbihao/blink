@@ -7,8 +7,10 @@ export const zh = {
 
     "plugin.reload_settings": "重新加载设置",
 
+    "clipboard.preview_image_loading": "正在加载图片…",
     "clipboard.preview_loading": "正在加载完整内容…",
     "clipboard.preview_missing": "内容已被清理或暂时无法读取",
+    "clipboard.hover_full_text": "左侧悬浮查看全文",
 
     "plugin.group_empty": "未配置",
     "plugin.group_partial": "配置不完整",
@@ -1149,6 +1151,7 @@ export const zh = {
     // ── 主窗口：右键菜单 ──
     "menu.cut": "剪切",
     "menu.copy": "复制",
+    "menu.copySelection": "复制选中文本",
     "menu.paste": "粘贴",
     "menu.selectAll": "全选",
     "menu.openSettings": "打开设置",

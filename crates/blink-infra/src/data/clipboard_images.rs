@@ -9,6 +9,9 @@
 use sqlx::SqlitePool;
 use std::sync::OnceLock;
 
+mod preview;
+pub use preview::get_preview_by_id_global;
+
 /// 全局 cache pool（供 blink-clipimg 协议懒加载缩略图用，与 icon 模块同模式）。
 static POOL: OnceLock<SqlitePool> = OnceLock::new();
 

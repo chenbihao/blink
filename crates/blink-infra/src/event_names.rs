@@ -93,6 +93,7 @@ impl EventNames {
     // ── 上下文感知 ──
     pub const AWARENESS_UPDATED: &str = "blink://awareness-updated";
     pub const CONTEXT_MENU_ACTION: &str = "blink://context-menu-action";
+    pub const CONTEXT_MENU_CLOSED: &str = "blink://context-menu-closed";
 
     // ── 音频测试 ──
     pub const AUDIO_TEST_LEVEL: &str = "blink://audio-test-level";

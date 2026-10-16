@@ -31,6 +31,7 @@ import {EVENTS} from "../shared/event-names.js";
 import {parse as parseColor} from "../shared/color.js";
 import * as clipboardMode from "./clipboard-mode.js";
 import {refFromLi, refKey, selectionActions} from './clipboard-entry.js';
+import {getClipboardPreviewContext, holdClipboardPreview} from './clipboard-preview.js';
 
 /** 0.20.3：判断 shortcut 文本是否为颜色格式预览（#xxx / rgb(...) / hsl(...)）。 */
 function isColorShortcut(s) {
@@ -114,6 +115,7 @@ function colorMenuItems(colorHex) {
 /** 当前菜单数据（用于 Popup 点击时回调执行）。 */
 let currentItems = [];
 let currentMenuId = '';
+let releasePreview;
 let menuSerial = 0;
 const menuOwner = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
 
@@ -133,13 +135,14 @@ export function init() {
         const target = e.target;
 
         let items = [];
-        const li = closestLi(target);
+        const preview = getClipboardPreviewContext(target);
+        const li = preview?.anchor ?? closestLi(target);
         const previewError = target.closest?.(".clipboard-text-preview")?.dataset.errorText;
-        clipboardMode.prepareContextMenu(li);
+        if (!preview) clipboardMode.prepareContextMenu(li);
         if (previewError) {
             items = errorMenu(previewError);
         } else if (li) {
-            items = itemMenu(li);
+            items = itemMenu(li, {selectedText: preview?.selectedText});
         } else {
             items = unifiedMenu();
         }
@@ -147,7 +150,7 @@ export function init() {
         // 0.25.27: 多选时批量组完整接管——右键列表项只显示批量操作（单项操作
         // 与批量指向混杂会产生「复制的是哪条」歧义）；右键空白处保留通用菜单
         // （粘贴/设置等与选择集无指向冲突），批量组置顶插入。
-        if (!previewError && li?.dataset.isError !== "true" && clipboardMode.isActive() && clipboardMode.hasSelection()) {
+        if (!preview && !previewError && li?.dataset.isError !== "true" && clipboardMode.isActive() && clipboardMode.hasSelection()) {
             const task = clipboardMode.getSelectionSnapshot();
             const selectionItems = li && task.refs.length === 1 && items.length ? items : buildSelectionMenu(task);
             items = li
@@ -160,8 +163,10 @@ export function init() {
         items = items.filter((item, index) => !item.separator || !items[index - 1]?.separator);
         if (!items.length) return;
         currentMenuId = menuOwner + ":" + (++menuSerial);
-        items = items.map(item => ({...item, menuId: currentMenuId}));
+        items = items.map(item => ({...item, menuId: currentMenuId,
+            run: preview && item.run ? () => { if (preview.isCurrent()) return item.run(); } : item.run}));
         currentItems = items;
+        if (preview) releasePreview = holdClipboardPreview(preview);
 
         // 估算菜单尺寸（CSS 像素，后端会按目标显示器 DPI 缩放为物理像素）
         // item: padding 8px * 2 + font 13px * line-height 1.5 ≈ 35.5px
@@ -190,8 +195,12 @@ export function init() {
 
     // ESC 关闭
     document.addEventListener("keydown", (e) => {
-        if (e.key === "Escape") close();
-    });
+        if (e.key === "Escape" && currentMenuId) {
+            e.preventDefault();
+            e.stopPropagation();
+            close();
+        }
+    }, true);
     // 注意：移除了 window.addEventListener("blur", close)
     // 点击 Popup 窗口时，主窗口先失焦会触发 blur，导致菜单提前关闭
     // Popup 窗口自己有关闭逻辑（点击菜单项/外部/ESC），主窗口被看门狗隐藏时也会联动关闭菜单
@@ -202,10 +211,13 @@ export function init() {
             const {actionId, menuId} = event.payload || {};
             if (!menuId || menuId !== currentMenuId) return;
             const item = currentItems[actionId];
-            currentMenuId = ''; currentItems = [];
+            clearCurrentMenu();
             if (item && item.run && !item.separator) {
                 item.run();
             }
+        });
+        listen(EVENTS.CONTEXT_MENU_CLOSED, (event) => {
+            if (event.payload?.menuId === currentMenuId) clearCurrentMenu();
         });
 
         // 主窗 shown 时预拉取 chord 动作，右键时同步读缓存（无延迟）
@@ -241,22 +253,32 @@ function closestLi(target) {
  * 均由后端 `clamp_context_menu`（`GetCursorPos`）处理。
  */
 function showPopupWindow(width, height, items) {
+    const menuId = currentMenuId;
     invoke("show_context_menu", {
         width: width,
         height: height,
         items: JSON.stringify(items),
     }).catch((e) => {
         console.error("Failed to show context menu popup:", e);
+        if (currentMenuId === menuId) close();
     });
 }
 
 /** 关闭菜单（通知后端销毁 Popup 窗口）。 */
 function close() {
     const menuId = currentMenuId;
-    currentMenuId = ""; currentItems = [];
+    clearCurrentMenu();
     if (!menuId) return;
     invoke("hide_context_menu", {menuId}).catch(() => {
     });
+}
+
+function clearCurrentMenu() {
+    currentMenuId = "";
+    currentItems = [];
+    const release = releasePreview;
+    releasePreview = undefined;
+    release?.();
 }
 
 // ── 各区域菜单构建 ──────────────────────────────────────────────────────────
@@ -407,7 +429,7 @@ const KIND_LABELS = {
  * (b) 若 lnkPath 存在且为真实路径（首个 action 非 run），追加文件管理附加项
  * (c) 0.16.0 止血分支删除，由 actions 派生取代
  */
-function itemMenu(li) {
+function itemMenu(li, {selectedText = ""} = {}) {
     const data = readData(li);
     if (data.isError) return errorMenu(li.dataset.errorText || li.querySelector(".item-name")?.textContent || "");
     const inClipboard = clipboardMode.isActive();
@@ -435,19 +457,21 @@ function itemMenu(li) {
     // 0.20.3：颜色项不再跳过 (a) 段——当做文本处理，默认 Copy 动作正常显示。
     // 0.25.27：编辑/钉便签标注快捷键（与剪贴板模式键盘行为一致，菜单即契约）
     for (const action of actions) {
-        const label = action.hint ? t(action.hint) : (KIND_LABELS[action.kind]?.() ?? null);
+        const copySelection = !!selectedText && clipboardRef?.kind === 'text' && action.kind === 'copy';
+        const label = copySelection ? t('menu.copySelection')
+            : action.hint ? t(action.hint) : (KIND_LABELS[action.kind]?.() ?? null);
         if (!label) continue; // 无标签的动作（如无 hint 的 run）跳过
         const isClipboardCopy = inClipboard && (
             (clipboardRef?.kind === 'text' && action.kind === 'copy')
             || (clipboardRef?.kind === 'image' && action.kind === 'run' && action.runId === 'copy_clipboard_image')
         );
-        const shortcut = isClipboardCopy ? "Ctrl+C"
+        const shortcut = copySelection || isClipboardCopy ? "Ctrl+C"
             : action.runId === "edit_text_item" ? "Alt+E"
             : action.runId === "pin_text_item" ? "Alt+S" : undefined;
         items.push({
             label,
             shortcut,
-            run: () => activateItem({...data, actions: [action]}),
+            run: copySelection ? () => copyText(selectedText) : () => activateItem({...data, actions: [action]}),
         });
     }
 

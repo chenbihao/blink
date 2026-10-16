@@ -92,6 +92,7 @@ export const EVENTS = Object.freeze({
     // ── 上下文感知 ──
     AWARENESS_UPDATED: 'blink://awareness-updated',
     CONTEXT_MENU_ACTION: 'blink://context-menu-action',
+    CONTEXT_MENU_CLOSED: 'blink://context-menu-closed',
 
     // ── 音频测试 ──
     AUDIO_TEST_LEVEL: 'blink://audio-test-level',

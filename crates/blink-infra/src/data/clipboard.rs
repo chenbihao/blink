@@ -397,6 +397,48 @@ pub struct ClipboardMeta {
     pub hit_count: u32,
 }
 
+/// Display-only prefix for an already selected result batch. Candidate matching
+/// still uses the stored short preview; full text remains lazy-loaded.
+pub struct ClipboardDisplay {
+    pub prefix: String,
+    pub char_count: usize,
+}
+
+/// A 700px list needs far fewer than 1,024 glyphs. This is a transport bound,
+/// not a visible ellipsis: the frontend clips at its actual available width.
+pub async fn query_display_prefixes(
+    pool: &SqlitePool,
+    ids: &[&str],
+) -> Result<std::collections::HashMap<String, ClipboardDisplay>, sqlx::Error> {
+    if ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+        "SELECT id, substr(text, 1, 1024), length(text) FROM clipboard_history WHERE id IN (",
+    );
+    let mut values = query.separated(",");
+    for id in ids {
+        values.push_bind(id);
+    }
+    values.push_unseparated(")");
+    let rows = query
+        .build_query_as::<(String, String, i64)>()
+        .fetch_all(pool)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, prefix, count)| {
+            (
+                id,
+                ClipboardDisplay {
+                    prefix,
+                    char_count: count.max(0) as usize,
+                },
+            )
+        })
+        .collect())
+}
+
 /// 查询近 N 天的剪贴板元数据（不含 text 列）。
 ///
 /// 供搜索路径用——`query_recent_days` 的轻量版，不加载完整 `text` 列
@@ -797,6 +839,28 @@ mod tests {
             source_app: None,
             hit_count,
         }
+    }
+
+    #[tokio::test]
+    async fn display_prefixes_read_only_selected_ids_with_unicode_bound_and_full_count() {
+        let pool = test_pool().await;
+        let text = "中🙂i".repeat(1000);
+        let mut saved = item("selected", &text, 100, 0);
+        saved.preview = "legacy short preview...".into();
+        save_item(&pool, &saved).await.unwrap();
+        save_item(&pool, &item("other", "not requested", 101, 0))
+            .await
+            .unwrap();
+        let rows = query_display_prefixes(&pool, &["selected", "missing"])
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows["selected"].prefix,
+            text.chars().take(1024).collect::<String>()
+        );
+        assert_eq!(rows["selected"].char_count, 3000);
+        assert!(query_display_prefixes(&pool, &[]).await.unwrap().is_empty());
     }
 
     // ── 0.25.29 keyset 游标分页 ──────────────────────────────────────────

@@ -11,9 +11,9 @@ const source = readFileSync(new URL('./contextmenu.js', import.meta.url), 'utf8'
 
 async function setup(initialRefs, overrides = {}) {
     let refs = initialRefs, revision = 1;
-    const events = new Map(), ipc = [], calls = [];
+    const events = new Map(), ipc = [], calls = [], prepared = [], holds = [], releases = [];
     const clipboardMode = {
-        isActive: () => true, hasSelection: () => refs.length > 0, prepareContextMenu() {},
+        isActive: () => true, hasSelection: () => refs.length > 0, prepareContextMenu(li) {prepared.push(li);},
         getSelectionSnapshot: () => ({refs: refs.map(ref => ({...ref})), keys: refs.map(entryModel.refKey), epoch: 1, revision}),
         clearSelection: task => calls.push({id: 'clear', task}),
     };
@@ -21,7 +21,9 @@ async function setup(initialRefs, overrides = {}) {
         clipboardMode[name] = task => calls.push({id, task});
     }
     const context = vm.createContext({
-        ...entryModel, clipboardMode, EVENTS: {CONTEXT_MENU_ACTION: 'action', SHOWN: 'shown', HIDDEN: 'hidden'},
+        ...entryModel, clipboardMode, EVENTS: {CONTEXT_MENU_ACTION: 'action', CONTEXT_MENU_CLOSED: 'closed', SHOWN: 'shown', HIDDEN: 'hidden'},
+        getClipboardPreviewContext: target => target.previewContext ?? null,
+        holdClipboardPreview: context => {holds.push(context); return () => releases.push(context);},
         document: {addEventListener: (name, callback) => events.set(name, callback)},
         listen: (name, callback) => events.set(name, callback),
         invoke: async (command, args) => {ipc.push({command, args});},
@@ -34,13 +36,21 @@ async function setup(initialRefs, overrides = {}) {
     });
     vm.runInContext(source, context); context.init(); await Promise.resolve();
     return {
-        calls, events, ipc, clipboardMode,
+        calls, events, ipc, clipboardMode, prepared, holds, releases,
         set refs(value) {refs = value; revision++;},
         open(actions = []) {
             const ref = refs[0];
             const li = {dataset: {source: 'clipboard', clipboardKind: ref.kind, clipboardId: ref.id, actions: JSON.stringify(actions)},
                 closest() {return this;}, querySelector: () => null};
             events.get('contextmenu')({target: li, preventDefault() {}});
+            return JSON.parse(ipc.filter(call => call.command === 'show_context_menu').at(-1).args.items);
+        },
+        openPreview(ref, actions, selectedText = '', isCurrent = () => true) {
+            const li = {isConnected: true,
+                dataset: {source: 'clipboard', clipboardKind: ref.kind, clipboardId: ref.id, actions: JSON.stringify(actions)},
+                querySelector: () => null};
+            const target = {previewContext: {anchor: li, selectedText, isCurrent}, closest: () => null};
+            events.get('contextmenu')({target, preventDefault() {}});
             return JSON.parse(ipc.filter(call => call.command === 'show_context_menu').at(-1).args.items);
         },
     };
@@ -151,5 +161,112 @@ test('旧图片编辑完成不会隐藏后来的选择', async () => {
     h.events.get('action')({payload: {actionId: index, menuId: menu[index].menuId}});
     h.refs = [{kind: 'text', id: 'new'}];
     finish(); await Promise.resolve();
+    assert.equal(h.calls.length, 0);
+});
+
+const textActions = [
+    {kind: 'copy', hint: 'menu.copy', hitId: 'preview-text'},
+    {kind: 'run', runId: 'edit_text_item', hint: 'menu.edit', runArg: {originRef: 'preview-text'}},
+    {kind: 'run', runId: 'pin_text_item', hint: 'menu.sticky', runArg: {originRef: 'preview-text'}},
+];
+const textRef = {kind: 'text', id: 'preview-text'};
+const imageRef = {kind: 'image', id: 'preview-image'};
+const imageActions = [{kind: 'run', runId: 'copy_clipboard_image', hint: 'menu.copy', runArg: imageRef.id}];
+const choose = (h, menu, label) => {
+    const index = menu.findIndex(item => item.label === label);
+    assert.ok(index >= 0, 'menu contains ' + label);
+    h.events.get('action')({payload: {actionId: index, menuId: menu[index].menuId}});
+};
+
+test('文本预览复用单项菜单，选区只覆盖复制且不接管列表多选', async () => {
+    const copied = [];
+    const h = await setup([{kind: 'text', id: 'other'}, imageRef], {copyToClipboard: async text => copied.push(text)});
+    const menu = h.openPreview(textRef, textActions, '所选片段\n');
+    assert.deepEqual(menu.filter(item => !item.separator).map(item => item.label),
+        ['menu.copySelection', 'menu.edit', 'menu.sticky', 'menu.delete']);
+    assert.equal(menu[0].shortcut, 'Ctrl+C');
+    assert.equal(h.prepared.length, 0, 'preview does not mutate the list selection');
+    h.holds[0].selectedText = 'changed selection';
+    choose(h, menu, 'menu.copySelection');
+    await Promise.resolve();
+    assert.deepEqual(copied, ['所选片段\n'], 'copy uses the original selection snapshot');
+    assert.equal(h.calls.length, 0, 'does not activate or copy the whole entry');
+    for (const label of ['menu.edit', 'menu.sticky', 'menu.delete']) {
+        const next = h.openPreview(textRef, textActions, '所选片段');
+        choose(h, next, label);
+        const call = h.calls.at(-1);
+        if (label === 'menu.delete') {
+            assert.equal(call.id, 'delete');
+            assert.deepEqual(JSON.parse(JSON.stringify(call.task.refs)), [textRef]);
+        } else {
+            assert.equal(call.id, 'activate');
+            assert.equal(call.data.actions[0].runArg.originRef, textRef.id, 'edit/sticky still target the complete entry');
+        }
+    }
+    const full = h.openPreview(textRef, textActions);
+    choose(h, full, 'menu.copy');
+    assert.equal(h.calls.at(-1).data.actions[0].hitId, textRef.id, 'no selection retains full-entry copy');
+    h.clipboardMode.isActive = () => false;
+    assert.equal(h.openPreview(textRef, textActions, 'selection')[0].shortcut, 'Ctrl+C',
+        'preview text selection retains native copy in ordinary search');
+});
+
+test('图片预览复制、钉图、编辑与删除均使用原图单项身份', async () => {
+    const edited = [];
+    const h = await setup([textRef, {kind: 'image', id: 'other'}], {
+        openImageEditorFromHistory: async id => edited.push(id),
+    });
+    for (const label of ['menu.copy', 'menu.pin', 'menu.editImage', 'menu.delete']) {
+        const menu = h.openPreview(imageRef, imageActions);
+        assert.deepEqual(menu.filter(item => !item.separator).map(item => item.label),
+            ['menu.copy', 'menu.pin', 'menu.editImage', 'menu.delete']);
+        choose(h, menu, label);
+        if (label === 'menu.copy') assert.equal(h.calls.at(-1).data.actions[0].runArg, imageRef.id);
+        else if (label === 'menu.editImage') assert.deepEqual(edited, [imageRef.id]);
+        else assert.deepEqual(JSON.parse(JSON.stringify(h.calls.at(-1).task.refs)), [imageRef]);
+        await Promise.resolve();
+    }
+    assert.equal(h.prepared.length, 0);
+});
+
+test('预览菜单取消、失败与过期回调正确释放对应会话', async () => {
+    const h = await setup([textRef, imageRef]);
+    const old = h.openPreview(textRef, textActions);
+    const latest = h.openPreview(imageRef, imageActions);
+    assert.equal(h.releases.length, 1);
+    h.events.get('closed')({payload: {menuId: old[0].menuId}});
+    assert.equal(h.releases.length, 1, 'late dismissal must not release the new preview');
+    h.events.get('closed')({payload: {menuId: latest[0].menuId}});
+    assert.equal(h.releases.length, 2);
+    choose(h, latest, 'menu.delete');
+    assert.equal(h.calls.length, 0, 'dismissed menus cannot execute stale actions');
+
+    let current = true;
+    const stale = h.openPreview(textRef, textActions, '', () => current);
+    current = false;
+    choose(h, stale, 'menu.delete');
+    assert.equal(h.calls.length, 0, 'a cleared or replaced preview cannot execute its menu');
+
+    const failed = await setup([textRef], {
+        invoke: async command => {if (command === 'show_context_menu') throw new Error('test popup failure');},
+        console: {error() {}},
+    });
+    failed.events.get('contextmenu')({preventDefault() {}, target: {
+        closest: () => null, previewContext: {anchor: {
+            dataset: {clipboardKind: 'text', clipboardId: textRef.id, actions: JSON.stringify(textActions)},
+            querySelector: () => null,
+        }, selectedText: '', isCurrent: () => true},
+    }});
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(failed.releases.length, 1, 'popup failure must not leave the hover permanently held');
+});
+
+test('菜单存在时 Esc 只关闭菜单并释放预览', async () => {
+    const h = await setup([textRef]);
+    h.openPreview(textRef, textActions);
+    let stopped = false, prevented = false;
+    h.events.get('keydown')({key: 'Escape', preventDefault() {prevented = true;}, stopPropagation() {stopped = true;}});
+    assert.equal(stopped && prevented, true);
+    assert.equal(h.releases.length, 1);
     assert.equal(h.calls.length, 0);
 });

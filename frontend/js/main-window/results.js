@@ -21,6 +21,7 @@ import {createSwatch, getColorPayload, isColorEntry, parse as parseColor} from "
 import * as clipboardMode from "./clipboard-mode.js";
 import {entryRef, refKey, refFromLi} from './clipboard-entry.js';
 import {bindClipboardPreview, bindErrorPreview, hideClipboardPreview} from "./clipboard-preview.js";
+import {t} from "../i18n/index.js";
 
 // 0.17.6: showAiConfirm / getAiConfirmData / updateAiStream 已删除。
 // 主窗口 AI 改走 ChatService，流式渲染由 ai-mode.js 负责。
@@ -400,6 +401,7 @@ function renderViewport() {
     resultsEl.replaceChildren(...lis);
     pageLis = lis;
     liCache = nextCache;
+    applyClipboardHoverHints(lis, slice);
 
     // 0.20.2: 翻页后同步刷新剪贴板多选 CSS（clipboard-selected 可能因 DOM 重建丢失）
     resultsEl.classList.toggle("has-items", slice.length > 0);
@@ -408,6 +410,24 @@ function renderViewport() {
     updateSelection();
     clipboardMode.onPageChanged?.();
     syncWindowSize();
+}
+
+/**
+ * 0.26.8：剪贴板文本行的「左侧悬浮查看全文」提示只在标题被截断时追加——短内容行不加提示噪音。
+ * 节点已在 DOM（renderViewport 挂载后调用）；每次渲染以 slice 的副行文案为基准重算，
+ * 窗口宽度变化后重渲自然修正。图片行提示由后端常显（缩略图之外永远有更多可看）。
+ */
+function applyClipboardHoverHints(lis, slice) {
+    lis.forEach((li, i) => {
+        if (li.dataset.clipboardKind !== "text") return;
+        const name = li.querySelector(".item-name");
+        const desc = li.querySelector(".item-desc");
+        const base = slice[i]?.description;
+        if (!name || !desc || !base) return;
+        desc.textContent = name.scrollWidth > name.clientWidth + 1
+            ? `${base} · ${t("clipboard.hover_full_text")}`
+            : base;
+    });
 }
 
 /**
@@ -648,7 +668,8 @@ function createItem(app, i) {
             desc.classList.add("item-desc-arg");
         } else {
             desc.textContent = app.description;
-            if (!app.is_error && clipboardRef?.kind !== "text") desc.title = app.description;
+            // 剪贴板文本/图片行有自定义悬浮预览（0.26.8），原生 title 提示与之重复，不再挂
+            if (!app.is_error && !clipboardRef) desc.title = app.description;
         }
         body.appendChild(desc);
     }

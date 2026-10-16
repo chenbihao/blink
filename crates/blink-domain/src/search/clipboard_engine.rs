@@ -29,8 +29,9 @@ use sqlx::SqlitePool;
 
 use super::engine::{Lane, QueryContext, SearchAction, SearchEngine, SearchItem};
 use blink_infra::data::clipboard::{
-    ClipboardCursor, ClipboardMeta, query_recent_days_meta, query_recent_days_meta_after,
-    query_recent_meta, query_recent_meta_after,
+    ClipboardCursor, ClipboardDisplay, ClipboardMeta, query_display_prefixes,
+    query_recent_days_meta, query_recent_days_meta_after, query_recent_meta,
+    query_recent_meta_after,
 };
 use blink_infra::data::clipboard_images::{
     ClipboardImageListItem, query_recent_image_list, query_recent_image_list_after,
@@ -59,9 +60,6 @@ const DEFAULT_CANDIDATE_LIMIT: usize = 500;
 /// 搜索候选池下限/上限。下限 50 防几乎无结果，上限 5000 防内存/IO 过载。
 const CANDIDATE_LIMIT_MIN: usize = 50;
 const CANDIDATE_LIMIT_MAX: usize = 5000;
-
-/// 副行预览截断字符数（避免长文本挤爆 UI；前端本身也会截）。
-const PREVIEW_MAX_CHARS: usize = 60;
 
 /// 剪贴板模式类型筛选（0.25.23）。
 ///
@@ -321,12 +319,32 @@ impl ClipboardEngine {
         } else {
             None
         };
+        // Hydrate only this returned batch, never the full fuzzy candidate pool.
+        // Read a bounded display prefix so CSS can clip to the actual row width.
+        let display_ids: Vec<&str> = combined
+            .iter()
+            .take(page_end)
+            .filter_map(|(_, _, entry)| match entry {
+                ClipboardEntry::Text(meta) => Some(meta.id.as_str()),
+                _ => None,
+            })
+            .collect();
+        let display = match query_display_prefixes(&self.pool, &display_ids).await {
+            Ok(display) => display,
+            Err(error) => {
+                tracing::warn!(%error, "读取剪贴板展示前缀失败，回退摘要");
+                Default::default()
+            }
+        };
         let result: Vec<SearchItem> = combined
             .into_iter()
             .take(page_end)
             .enumerate()
             .map(|(i, (_, _, entry))| match entry {
-                ClipboardEntry::Text(meta) => to_search_item(meta, i, &lang),
+                ClipboardEntry::Text(meta) => {
+                    let prefix = display.get(&meta.id);
+                    to_search_item(meta, i, &lang, prefix)
+                }
                 ClipboardEntry::Image(meta) => to_image_search_item(meta, i, &lang),
             })
             .collect();
@@ -388,22 +406,26 @@ impl SearchEngine for ClipboardEngine {
 
 /// ClipboardMeta → SearchItem（延迟加载版）。
 ///
-/// - `title` 用 preview 的截断版（原文含换行则去掉），主行清爽
+/// - `title` 用本批展示前缀，换行可视化，省略由前端宽度决定
 /// - `subtitle` "3 分钟前 · N chars"（副行时间提示）
 /// - `score` 基线 0.9 起按名次递减 0.02，确保后端排序稳定（前端仍会按 score sort）
 /// - `action = LazyCopy { hit_id }`——搜索路径不预载 text，激活时前端按需拉取
 ///
 /// **与旧 `to_search_item` 的区别**：不再携带 `text`，改用 `LazyCopy` 变体。
-/// 副行的 chars 计数用 `preview.chars().count()`（preview 是 80 字符截断版，
-/// 精确计数需激活后拉取 text 才有——但副行只是提示性文案，截断值可接受）。
-fn to_search_item(meta: ClipboardMeta, index: usize, lang: &str) -> SearchItem {
-    let title = preview_line(&meta.preview);
-    let subtitle = format_subtitle(&meta, lang);
+/// 副行字数来自 DB length(text)，不以摘要长度冒充正文长度。
+fn to_search_item(
+    meta: ClipboardMeta,
+    index: usize,
+    lang: &str,
+    display: Option<&ClipboardDisplay>,
+) -> SearchItem {
+    let title = preview_line(display.map_or(meta.preview.as_str(), |d| d.prefix.as_str()));
+    let subtitle = format_subtitle(&meta, lang, display.map(|d| d.char_count));
     let score = (0.9 - index as f32 * 0.02).max(0.5);
 
     // 0.20：检测多行颜色列表（如截图配色面板"每行一个"复制格式）。
     // 对 preview 跑 parse_color_list，命中则给 SearchItem 附加 hex 数组，
-    // 前端渲染一排小 swatch。name 仍保留 preview_line 截断版。
+    // 前端渲染一排小 swatch；仍用匹配摘要检测，不改变颜色识别范围。
     let color_list_hex = crate::color::parse_color_list(&meta.preview)
         .map(|results| results.iter().map(|r| r.hex.clone()).collect());
 
@@ -537,11 +559,14 @@ fn format_image_subtitle(meta: &ClipboardImageListItem, lang: &str) -> String {
         }
     };
     // P3-#27 fix: zh/en 分支格式完全一样，消除死代码 if
-    format!("{time_desc} · {}x{}", meta.width, meta.height)
+    // 入库统一转 PNG（png_blob），后缀展示真实存储格式。图片预览提示常显（缩略图
+    // 之外永远有更多可看）；文本侧由前端在标题溢出时才追加提示（0.26.8）。
+    let hint = if is_zh { "左侧悬浮查看图片" } else { "hover left for image" };
+    format!("{time_desc} · {}x{} · PNG · {hint}", meta.width, meta.height)
 }
 
 /// 生成单行预览：换行符转为可见标记 ⏎（U+23CE），其余控制字符替换为空格，
-/// 压缩连续空白（⏎ 不被当作空白压缩），字符数截断。
+/// 压缩连续空白（⏎ 不被当作空白压缩），不按字符数追加省略号。
 ///
 /// 视觉效果：`foo\nbar` → `foo ⏎ bar`，用户能从预览看出换行位置，
 /// 同时保持单行布局不变。`\r\n` 视为一次换行（先归一化为 `\n`）。
@@ -582,13 +607,7 @@ fn preview_line(raw: &str) -> String {
             prev_space = false;
         }
     }
-    let out = out.trim();
-    if out.chars().count() <= PREVIEW_MAX_CHARS {
-        out.to_string()
-    } else {
-        let truncated: String = out.chars().take(PREVIEW_MAX_CHARS).collect();
-        format!("{}…", truncated)
-    }
+    out.trim().to_string()
 }
 
 /// 生成副行"N 分钟前 · M chars" / "N min ago · M chars"（0.8.5.1 §6.6 i18n）。
@@ -596,9 +615,8 @@ fn preview_line(raw: &str) -> String {
 /// zh/en 双语。lang 传入 "zh" 或 "en"（其他视作 en fallback）。
 /// "chars" 单位跨语言保留——ASCII 字数国际化收益低,且 CJK 字符计数概念相通。
 ///
-/// **注意**：chars 计数基于 `preview`（80 字符截断版），非完整 text。
-/// 精确计数需激活后拉取 text 才有——但副行只是提示性文案，截断值可接受。
-fn format_subtitle(meta: &ClipboardMeta, lang: &str) -> String {
+/// 展示前缀查询失败时不以摘要长度冒充完整字数。悬浮提示由前端在标题溢出时追加（0.26.8）。
+fn format_subtitle(meta: &ClipboardMeta, lang: &str, char_count: Option<usize>) -> String {
     let now = chrono::Utc::now().timestamp();
     let elapsed = (now - meta.created_at).max(0);
     let is_zh = lang == "zh";
@@ -630,8 +648,9 @@ fn format_subtitle(meta: &ClipboardMeta, lang: &str) -> String {
             format!("{n} d ago")
         }
     };
-    let char_count = meta.preview.chars().count();
-    format!("{time_desc} · {char_count} chars")
+    char_count.map_or(time_desc.clone(), |count| {
+        format!("{time_desc} · {count} chars")
+    })
 }
 
 /// nucleo fuzzy 匹配 `ClipboardMeta` 列表，按 preview 字段打分。
@@ -709,11 +728,11 @@ mod tests {
     }
 
     #[test]
-    fn preview_line_truncates_long() {
+    fn preview_line_leaves_ellipsis_to_frontend_width() {
         let long: String = "a".repeat(100);
         let out = preview_line(&long);
-        assert!(out.ends_with('…'));
-        assert_eq!(out.chars().count(), PREVIEW_MAX_CHARS + 1); // +1 for …
+        assert_eq!(out, long);
+        assert_eq!(preview_line(&"中文".repeat(100)), "中文".repeat(100));
     }
 
     #[test]
@@ -725,7 +744,7 @@ mod tests {
             source_app: None,
             hit_count: 0,
         };
-        let si = to_search_item(meta, 0, "zh");
+        let si = to_search_item(meta, 0, "zh", None);
         assert_eq!(si.id, "clipboard:clip_123");
         assert_eq!(si.source, "clipboard");
         if let SearchAction::LazyCopy { hit_id } = &si.action {
@@ -746,7 +765,7 @@ mod tests {
                 source_app: None,
                 hit_count: 0,
             };
-            to_search_item(meta, i, "zh").score
+            to_search_item(meta, i, "zh", None).score
         };
         assert!(mk(0) > mk(1));
         assert!(mk(1) > mk(2));
@@ -763,8 +782,9 @@ mod tests {
             source_app: None,
             hit_count: 0,
         };
-        assert!(format_subtitle(&meta, "zh").starts_with("刚刚"));
-        assert!(format_subtitle(&meta, "zh").ends_with("5 chars"));
+        assert!(format_subtitle(&meta, "zh", Some(500)).starts_with("刚刚"));
+        assert!(format_subtitle(&meta, "zh", Some(500)).ends_with("500 chars"));
+        assert!(!format_subtitle(&meta, "zh", None).contains("chars"));
     }
 
     #[test]
@@ -776,8 +796,22 @@ mod tests {
             source_app: None,
             hit_count: 0,
         };
-        assert!(format_subtitle(&meta, "en").starts_with("just now"));
-        assert!(format_subtitle(&meta, "en").ends_with("5 chars"));
+        assert!(format_subtitle(&meta, "en", Some(5)).starts_with("just now"));
+        assert!(format_subtitle(&meta, "en", Some(5)).ends_with("5 chars"));
+    }
+
+    #[test]
+    fn format_image_subtitle_appends_png_and_hover_hint() {
+        let meta = ClipboardImageListItem {
+            id: "img".into(),
+            width: 800,
+            height: 600,
+            created_at: chrono::Utc::now().timestamp() - 30,
+            source_app: None,
+            source_path: None,
+        };
+        assert!(format_image_subtitle(&meta, "zh").ends_with("800x600 · PNG · 左侧悬浮查看图片"));
+        assert!(format_image_subtitle(&meta, "en").ends_with("800x600 · PNG · hover left for image"));
     }
 
     #[test]
@@ -789,7 +823,7 @@ mod tests {
             source_app: None,
             hit_count: 0,
         };
-        assert!(format_subtitle(&meta, "zh").contains("分钟前"));
+        assert!(format_subtitle(&meta, "zh", Some(2)).contains("分钟前"));
     }
 
     #[test]
@@ -801,7 +835,7 @@ mod tests {
             source_app: None,
             hit_count: 0,
         };
-        assert!(format_subtitle(&meta, "en").contains("min ago"));
+        assert!(format_subtitle(&meta, "en", Some(2)).contains("min ago"));
     }
 
     // ── 0.25.29：display_pages 已退役，首屏 = page_size × 2 ───────────────
@@ -1056,6 +1090,41 @@ mod tests {
                 ..
             } if run_id == "copy_clipboard_image"
         )
+    }
+
+    #[tokio::test]
+    async fn displayed_batch_uses_original_prefix_instead_of_legacy_summary() {
+        let engine = engine_with_mixed_data().await;
+        let text = "i".repeat(160);
+        blink_infra::data::clipboard::save_item(
+            &engine.pool,
+            &blink_infra::data::clipboard::ClipboardItem {
+                id: "fresh".into(),
+                text: text.clone(),
+                preview: "i".repeat(80) + "...",
+                created_at: chrono::Utc::now().timestamp() + 5,
+                source_app: None,
+                hit_count: 0,
+            },
+        )
+        .await
+        .unwrap();
+        let page = engine.search_page("", ClipKind::Text, None, 1).await;
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(
+            page.items[0].title, text,
+            "no artificial 60/80-character ellipsis"
+        );
+        assert!(
+            page.items[0]
+                .subtitle
+                .as_ref()
+                .unwrap()
+                .ends_with("160 chars")
+        );
+        assert!(
+            matches!(&page.items[0].action, SearchAction::LazyCopy { hit_id } if hit_id == "fresh")
+        );
     }
 
     #[tokio::test]

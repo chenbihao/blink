@@ -79,7 +79,11 @@ Every Chord action can be remapped in Settings and promoted to a **global hotkey
 
 ## 3. Clipboard history
 
-Hover over a text entry briefly to preview its full content with line breaks. Long text scrolls inside the preview; moving into it keeps it open. Text is loaded on demand, and paging or closing the window dismisses the preview.
+Hover over the **left third** of a text or image entry for about 350ms: text previews its full content with line breaks, and images show the entire picture fitted proportionally (the subtitle notes the resolution and PNG format). Long text scrolls inside the preview. Drag to select text and press `Ctrl+C` to copy it. After clicking the preview, `Ctrl+A` selects only its content, and `Esc` closes it and returns focus to the search box. Rows with a truncated title show a “hover left for full text” hint in the subtitle; image rows always show “hover left for image”.
+
+The preview aligns with both edges of the result row and loads content on demand. A 150ms delay after leaving lets you cross other entries and move into it to keep reading. Dragging a text selection outside the preview keeps it open until release, when the exit delay begins. Clicking or dragging an entry, scrolling the list, paging, or hiding the window dismisses it.
+
+Right-click inside the preview to use that entry’s single-item menu: copy, edit, pin as a sticky note, or delete for text; copy, pin, edit image, or delete for images. With text selected, Copy becomes “Copy selected text”; other actions still apply to the whole entry. Existing list selections do not expand the preview menu’s scope. The preview stays open while its menu is open, then resumes the 150ms exit delay. `Esc` closes the menu first.
 
 Open with: `Alt+C` in the main window (or type `剪贴板` / `clip`). Text and images you copy are recorded in the background.
 
@@ -249,7 +253,7 @@ Summon: `Alt+Q` (text in the main window's input is carried over automatically �
 - Enable a plugin and expand its configuration under **Settings → Plugins**, then type its trigger in the main window. Translate is disabled by default; enable it and configure engine credentials first.
 - Ordinary settings save automatically. Weather's “Save location” button commits only the location draft, so click it after choosing a place.
 - Weather and Translate credential groups start collapsed each time you open settings. Their headings show Not configured, Incomplete or Configured; expand a group for its registration link. Configured means all fields are present; an actual query checks whether they work. Use “Remove spaces” below an input if it contains whitespace. Password fields are stored in Windows Credential Manager: leaving them blank keeps the saved value; use the side button to clear it.
-- Hover over a query error to read its full message. Right-click the entry or preview and choose “Copy error message” when reporting a problem.
+- Hover over the left third of a query error to read its full message. Right-click the entry or preview and choose “Copy error message” when reporting a problem.
 
 ### Weather
 

@@ -161,16 +161,21 @@ pub async fn hide_context_menu(
     app: tauri::AppHandle,
     menu_id: Option<String>,
 ) -> Result<(), String> {
-    {
+    hide_context_menu_window(&app, menu_id.as_deref(), true)
+}
+
+fn hide_context_menu_window(
+    app: &tauri::AppHandle,
+    menu_id: Option<&str>,
+    notify_dismissal: bool,
+) -> Result<(), String> {
+    let closed_menu_id = {
         let mut active = ACTIVE_MENU_ID.lock().map_err(|e| e.to_string())?;
-        if menu_id
-            .as_ref()
-            .is_some_and(|id| active.as_ref() != Some(id))
-        {
+        if menu_id.is_some_and(|id| active.as_deref() != Some(id)) {
             return Ok(());
         }
-        *active = None;
-    }
+        active.take()
+    };
     if let Some(win) = app.get_webview_window("context-menu") {
         // DWM Cloak 先行：瞬间消失无 fade 动画，避免截图时拍到右键窗口残影
         if let Ok(hwnd) = win.hwnd() {
@@ -181,6 +186,15 @@ pub async fn hide_context_menu(
         }
         let _ = win.hide();
         tracing::trace!("hide_context_menu: 已隐藏右键菜单窗口");
+    }
+    // Action callbacks have their own completion event; a dismissal must not
+    // invalidate currentItems before CONTEXT_MENU_ACTION arrives.
+    if notify_dismissal && let Some(menu_id) = closed_menu_id {
+        app.emit(
+            EventNames::CONTEXT_MENU_CLOSED,
+            serde_json::json!({"menuId": menu_id}),
+        )
+        .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -204,7 +218,7 @@ pub async fn context_menu_action(
         return Ok(());
     }
     // 1. 先隐藏 Popup 窗口，让主窗口有机会重回前台
-    hide_context_menu(app.clone(), Some(menu_id.clone())).await?;
+    hide_context_menu_window(&app, Some(&menu_id), false)?;
     // 2. 显式把主窗口置为前台并聚焦，保证 clipboard/execCommand 可用
     if let Some(main) = app.get_webview_window("main") {
         let _ = main.show();
