@@ -41,6 +41,7 @@ function setup() {
             api: new Proxy(deps.api, {get: (target, key) => context[key] ?? target[key]})}),
         results: {
             setClipboardMode: noop, clear: noop,
+            getPage: () => 0, getSelectedIndex: () => 0, restorePosition: noop,
             render: entries => renders.push(entries), refreshStatusbar: noop,
             // 0.25.29 流式/局部移除边界
             removeItems: refs => removed.push(refs.map(ref => ref.id)),
@@ -162,6 +163,38 @@ for (const fail of [false, true]) {
     await pending;
     assert.equal(selection.hasSelection(), fail, '当前会话成功清选，失败保留');
     assert.equal(h.feedback, fail ? 'clipboard.operation_failed' : null);
+}
+for (const fail of [false, true]) {
+    const h = setup();
+    const ref = {kind: 'image', id: 'older-image'};
+    selectionState.selectSingle(entryModel.refKey(ref));
+    h.context.copyClipboardImage = async id => {
+        assert.equal(id, ref.id);
+        if (fail) throw new Error('clipboard busy');
+    };
+    await h.context.batchCopy();
+    assert.equal(h.requests.length, fail ? 1 : 2, '图片复制成功即刷新置顶，失败不重排，250ms 内也不漏刷新');
+    assert.equal(selectionState.hasSelection(), fail);
+    if (!fail) {
+        h.requests[1].resolve({entries: [{is_image: true, lnk_path: 'promoted-image', name: 'promoted'}]});
+        await flush();
+        assert.equal(h.renders.at(-1)[0].name, 'promoted', '刷新呈现置顶后的图片');
+        h.requests[0].resolve({entries: [{name: 'stale'}]});
+        await flush();
+        assert.equal(h.renders.length, 1, '置顶刷新后旧搜索响应不能覆盖新顺序');
+    }
+}
+{
+    const h = setup(), copied = deferred();
+    selectionState.selectSingle(entryModel.refKey({kind: 'image', id: 'old'}));
+    h.context.copyClipboardImage = () => copied.promise;
+    const pending = h.context.batchCopy();
+    h.context.reset(); h.context.enter();
+    selection.toggleSelection('new');
+    const requests = h.requests.length;
+    copied.resolve(); await pending;
+    assert.equal(h.requests.length, requests, '旧图片复制回流不刷新新会话');
+    assert.deepEqual(selection.getSelectedKeys(), ['new']);
 }
 {
     const h = setup();

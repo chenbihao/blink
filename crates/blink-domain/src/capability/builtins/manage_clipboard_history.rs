@@ -48,7 +48,7 @@ impl Capability for ManageClipboardHistory {
             parameters: json!({"type":"object","properties":{
                 "operation":{"enum":["delete","pin"]},
                 "entries":{"type":"array","minItems":1,"maxItems":2000,"items":{"type":"object","properties":{
-                    "kind":{"enum":["text","image"]},"id":{"type":"string"}},"required":["kind","id"],"additionalProperties":false}}},
+                    "kind":{"enum":["text","image","file"]},"id":{"type":"string"}},"required":["kind","id"],"additionalProperties":false}}},
                 "required":["operation","entries"],"additionalProperties":false}),
             ..Default::default()
         }

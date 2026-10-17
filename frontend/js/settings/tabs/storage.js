@@ -236,6 +236,16 @@ function renderStorageInfo() {
         "db-clipboard-count",
         dbs.history ? t("storage.stat.clipboard", {count: dbs.history.clipboard_count ?? 0}) : "-"
     );
+    // 0.26.9：文件路径历史统计（条数 + 序列化载荷；清理走文本历史同按钮）
+    setText(
+        "db-clipboard-file-count",
+        dbs.history
+            ? t("storage.stat.clipboard_files", {
+                count: dbs.history.clipboard_file_count ?? 0,
+                size: formatSize(dbs.history.clipboard_file_payload_bytes ?? 0),
+            })
+            : "-"
+    );
 
     // AI 库
     setText("db-ai-size", dbs.ai ? formatSize(dbs.ai.size_bytes) : "-");

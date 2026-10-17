@@ -317,6 +317,12 @@ async fn publish_clipboard(
     let pools = app.state::<crate::infra::data::DbPools>();
     if cfg.retention_days != previous.retention_days {
         crate::infra::data::clipboard::cleanup_old(&pools.history, cfg.retention_days).await;
+        // 0.26.9：文件路径历史复用同一保留期
+        crate::infra::data::clipboard_files::cleanup_old_files(
+            &pools.history,
+            cfg.retention_days,
+        )
+        .await;
     }
     if cfg.max_items != previous.max_items {
         crate::infra::data::clipboard::cleanup_excess(&pools.history, cfg.max_items).await;
@@ -325,6 +331,13 @@ async fn publish_clipboard(
         crate::infra::data::clipboard_images::cleanup_excess_images(
             &pools.cache,
             cfg.max_image_items,
+        )
+        .await;
+    }
+    if cfg.max_file_items != previous.max_file_items {
+        crate::infra::data::clipboard_files::cleanup_excess_files(
+            &pools.history,
+            cfg.max_file_items,
         )
         .await;
     }

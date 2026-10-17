@@ -76,6 +76,8 @@ impl DbPools {
             tauri::async_runtime::spawn(async move {
                 if clip_enabled && days > 0 {
                     crate::data::clipboard::cleanup_old(&pool, days).await;
+                    // 0.26.9：文件路径历史复用同一保留期；采集关闭后清理仍工作
+                    crate::data::clipboard_files::cleanup_old_files(&pool, days).await;
                 }
             });
         }
@@ -242,6 +244,11 @@ async fn init_history_schema(pool: &SqlitePool) -> Result<(), String> {
 
     // clipboard_history 表由 clipboard::init_db 创建（保持现有代码不变）
     crate::data::clipboard::init_db(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // clipboard_files 表（0.26.9：文件路径历史，纯文本无 BLOB，同库分管）
+    crate::data::clipboard_files::init_db(pool)
         .await
         .map_err(|e| e.to_string())?;
 

@@ -592,9 +592,17 @@ function createItem(app, i) {
         li.appendChild(badge);
     }
 
+    // 0.26.9：剪贴板文件条目——Lucide file-text 占位（列表不读文件内容、
+    // 不查文件状态/图标/内容；多文件副行数量由后端展示）。
+    if (clipboardRef?.kind === "file") {
+        const iconWrap = document.createElement("span");
+        iconWrap.className = "app-icon clip-file-icon";
+        iconWrap.appendChild(renderIcon("file-text", {ariaLabel: "文件条目"}));
+        li.appendChild(iconWrap);
+    }
     // 0.20.3：颜色结果项——用大格子 swatch（比剪贴板图片缩略图更大一圈，
     // 颜色项里 swatch 就是内容主体，0.23.19 放大 36 → 44px 更醒目）。
-    if (isColorEntry(app)) {
+    else if (isColorEntry(app)) {
         const hex = getColorPayload(app) || app.name;
         const colorResult = parseColor(hex);
         if (colorResult) {

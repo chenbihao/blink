@@ -115,8 +115,12 @@ function colorMenuItems(colorHex) {
 /** 当前菜单数据（用于 Popup 点击时回调执行）。 */
 let currentItems = [];
 let currentMenuId = '';
+/** 0.26.10：当前菜单内容代次（同 menuId 原地更新时递增；null = 初始内容）。 */
+let currentGeneration = null;
 let releasePreview;
 let menuSerial = 0;
+/** 菜单内容代次计数器——跨菜单会话单调递增，更新与点击竞争由此区分。 */
+let menuGeneration = 0;
 const menuOwner = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
 
 /** Chord 动作缓存（shown 时预拉取，右键时同步读）。只含 semantic=tap 的动作。 */
@@ -163,34 +167,26 @@ export function init() {
         items = items.filter((item, index) => !item.separator || !items[index - 1]?.separator);
         if (!items.length) return;
         currentMenuId = menuOwner + ":" + (++menuSerial);
-        items = items.map(item => ({...item, menuId: currentMenuId,
+        currentGeneration = null;
+
+        // 0.26.10：单项文本/文件条目先冻结智能操作会话，菜单顶部插入不可点击的
+        // 「正在识别操作」；结果回流按 menuId/条目身份/锚点连接校验后更新同一菜单。
+        const smartSession = smartSessionFor(li, previewError, preview);
+        if (smartSession) {
+            smartSession.menuId = currentMenuId;
+            currentGeneration = 0;
+            smartSession.baseItems = items.map(item => ({...item,
+                run: preview && item.run ? () => { if (preview.isCurrent()) return item.run(); } : item.run}));
+            items = [smartLoadingItem(), {separator: true}, ...items];
+        }
+
+        items = items.map(item => ({...item, menuId: currentMenuId, generation: currentGeneration,
             run: preview && item.run ? () => { if (preview.isCurrent()) return item.run(); } : item.run}));
         currentItems = items;
         if (preview) releasePreview = holdClipboardPreview(preview);
 
-        // 估算菜单尺寸（CSS 像素，后端会按目标显示器 DPI 缩放为物理像素）
-        // item: padding 8px * 2 + font 13px * line-height 1.5 ≈ 35.5px
-        // separator: 1px height + margin 4px * 2 = 9px
-        // container padding: var(--space-sm) 8px * 2 = 16px
-        //
-        // 缓冲量（--shadow-card 的三层需要呼吸位，否则 overflow:hidden 会把边剪掉）：
-        //   - 宽：右侧 box-shadow spread 1px 外描边 + CSS→物理像素 round 半像素累计 → +8
-        //   - 高：底部 spread 1px + `0 1px 2px` / `0 24px 48px` 阴影想画在窗口内 → +8
-        // 不给缓冲会体感"右边少 2~3px、下面少 4~6px"。
-        const H_BUFFER = 8;
-        const V_BUFFER = 8;
-        const rows = items.reduce((h, it) => h + (it.separator ? 9 : 36), 0);
-        const estimatedHeight = rows + 16 + V_BUFFER;
-        // 0.20.3：颜色项 shortcut 同行显示，但格式预览较长，需要更宽的菜单
-        // 0.25.27：宽度按最宽项内容估算，下限 180（既有短菜单不缩窄）。
-        // 固定 180px 在「复制选中的 N 条 Ctrl+C」这类长文案下会裁切 label
-        //（.context-menu-item nowrap + shortcut flex-shrink:0 挤压 label）。
-        const hasColorShortcut = items.some((it) => isColorShortcut(it.shortcut));
-        const estimatedWidth = Math.max(hasColorShortcut ? 260 : 180, estimateMenuWidth(items)) + H_BUFFER;
-
-        // 光标物理坐标由后端 GetCursorPos 直接读取——MouseEvent.screenX/Y 在 WebView2
-        // 里是 CSS 像素，高 DPI 屏当物理像素用会偏 1/3；索性不传，避免 dpr 猜谜。
-        showPopupWindow(estimatedWidth, estimatedHeight, items);
+        showItemsPopup(items);
+        if (smartSession) updateSmartActions(smartSession);
     });
 
     // ESC 关闭
@@ -208,11 +204,13 @@ export function init() {
     // 监听来自 Popup 窗口的菜单项点击事件
     import("../shared/tauri.js").then(({listen}) => {
         listen(EVENTS.CONTEXT_MENU_ACTION, (event) => {
-            const {actionId, menuId} = event.payload || {};
+            const {actionId, menuId, generation} = event.payload || {};
             if (!menuId || menuId !== currentMenuId) return;
+            // 0.26.10：旧代次点击（内容已更新）不执行——不按新数组位置执行另一操作
+            if ((generation ?? null) !== currentGeneration) return;
             const item = currentItems[actionId];
             clearCurrentMenu();
-            if (item && item.run && !item.separator) {
+            if (item && item.run && !item.separator && !item.disabled) {
                 item.run();
             }
         });
@@ -264,6 +262,127 @@ function showPopupWindow(width, height, items) {
     });
 }
 
+/**
+ * 0.26.10：估算尺寸并弹出菜单（初始展示与智能组原地更新共用）。
+ *
+ * item: padding 8px * 2 + font 13px * line-height 1.5 ≈ 35.5px；
+ * separator 9px；container padding 16px；缓冲量 8px（阴影呼吸位）。
+ * 宽度按最宽项内容估算，下限 180（颜色项 260）。
+ */
+function showItemsPopup(items) {
+    const rows = items.reduce((h, it) => h + (it.separator ? 9 : 36), 0);
+    const estimatedHeight = rows + 16 + 8;
+    const hasColorShortcut = items.some((it) => isColorShortcut(it.shortcut));
+    const estimatedWidth = Math.max(hasColorShortcut ? 260 : 180, estimateMenuWidth(items)) + 8;
+    showPopupWindow(estimatedWidth, estimatedHeight, items);
+}
+
+// ── 0.26.10 右键智能操作（打开类条目派生）─────────────────────────────
+
+/** 打开类 Kind → Lucide 图标（与 SuggestionBar iconFor 同映射）。 */
+const SMART_ACTION_ICONS = {
+    openUrl: "globe",
+    openPath: "folder-open",
+    revealInExplorer: "folder-search",
+};
+/** 智能组目标摘要截断（与 SuggestionBar OPEN_TARGET_PREVIEW_MAX 对齐）。 */
+const SMART_TARGET_PREVIEW = 40;
+
+/**
+ * 多选接管/错误项/非剪贴板模式不注入智能组；只有单项文本/文件条目参与打开类派生。
+ * 预览右键按所属单项处理（不改变已有选择集），不受列表多选影响；
+ * 列表右键在多选时由批量菜单接管。
+ */
+function smartSessionFor(li, previewError, preview) {
+    if (previewError || li?.dataset.isError === "true") return null;
+    if (!clipboardMode.isActive()) return null;
+    if (!preview && clipboardMode.getSelectionSnapshot().refs.length > 1) return null;
+    const ref = refFromLi(li);
+    if (!ref || (ref.kind !== "text" && ref.kind !== "file")) return null;
+    const snapshot = clipboardMode.getSelectionSnapshot();
+    return {li, ref, snapshot, preview};
+}
+
+function smartLoadingItem() {
+    return {label: t("menu.smart_loading"), disabled: true};
+}
+
+/**
+ * 异步派生回流：校验菜单会话 / 条目身份 / 锚点连接后更新同一 Popup。
+ *
+ * 空组移除 loading 分组；识别失败显示不可点击失败态；基础菜单始终可用，
+ * 不能把基础操作推迟到识别完成。更新推进内容代次（menuGeneration），
+ * 旧内容上的点击由后端代次校验拒绝，前端 currentGeneration 同步比对。
+ * 关闭/切换条目/过滤重排/删除/退出模式/主窗隐藏都会使 currentMenuId 变化，
+ * 迟到结果不重开已关闭菜单。
+ */
+async function updateSmartActions(session) {
+    const {menuId, ref, baseItems} = session;
+    let actions = null;
+    let failed = false;
+    try {
+        actions = await invoke("get_clipboard_item_actions", {entry: ref});
+    } catch {
+        failed = true;
+    }
+    if (!isSmartSessionCurrent(session)) return;
+
+    let group;
+    if (failed) {
+        group = [{label: t("menu.smart_failed"), disabled: true}];
+    } else if (!Array.isArray(actions) || actions.length === 0) {
+        group = [];                                       // 空组：移除 loading 分组
+    } else {
+        group = actions.map(action => ({
+            label: t(`suggestionbar.${action.kind}_with`, {
+                text: truncateTarget(action.target || ""),
+            }),
+            icon: SMART_ACTION_ICONS[action.kind] || "zap",
+            run: () => {
+                // 点击处理已消费 currentMenuId，此处仍核对条目/选择/预览快照。
+                if (!isSmartSessionCurrent(session, false)) return;
+                runBuiltinAction(action.capabilityId, action.args)
+                    .then(() => reportSmartAction(action, "ok"))
+                    .catch(e => {
+                        showActionError("run_builtin_action", e);
+                        reportSmartAction(action, "error");
+                    });
+            },
+        }));
+    }
+
+    menuGeneration += 1;
+    currentGeneration = menuGeneration;
+    const stamp = item => ({...item, menuId, generation: menuGeneration});
+    const items = group.length
+        ? [...group.map(stamp), {separator: true, menuId}, ...baseItems.map(stamp)]
+        : baseItems.map(stamp);
+    currentItems = items;
+    showItemsPopup(items);
+}
+
+function isSmartSessionCurrent({menuId, li, ref, snapshot, preview}, checkMenu = true) {
+    if (checkMenu && menuId !== currentMenuId) return false;
+    if (!li.isConnected || !clipboardMode.isActive() || (preview && !preview.isCurrent())) return false;
+    const current = refFromLi(li), selection = clipboardMode.getSelectionSnapshot();
+    return !!current && refKey(current) === refKey(ref)
+        && selection.epoch === snapshot.epoch && selection.revision === snapshot.revision;
+}
+
+function truncateTarget(text) {
+    return text.length > SMART_TARGET_PREVIEW
+        ? text.slice(0, SMART_TARGET_PREVIEW) + "…" : text;
+}
+
+/** 采纳遥测：只记 Kind/动作 id/结果，不记目标内容（fire-and-forget）。 */
+function reportSmartAction(action, outcome) {
+    invoke("report_clipboard_item_action", {
+        kind: action.kind,
+        capabilityId: action.capabilityId,
+        outcome,
+    }).catch(() => {});
+}
+
 /** 关闭菜单（通知后端销毁 Popup 窗口）。 */
 function close() {
     const menuId = currentMenuId;
@@ -276,6 +395,7 @@ function close() {
 function clearCurrentMenu() {
     currentMenuId = "";
     currentItems = [];
+    currentGeneration = null;
     const release = releasePreview;
     releasePreview = undefined;
     release?.();
@@ -290,7 +410,8 @@ function clearCurrentMenu() {
  * 只有纯文本选择标注文本快捷键；混选显式操作类型子集，Esc 清空选择。
  */
 function buildSelectionMenu(task) {
-    const operations = {copy: clipboardMode.batchCopy, paste: clipboardMode.batchPaste,
+    const operations = {copy: clipboardMode.batchCopy, copy_paths: clipboardMode.batchCopyPaths,
+        paste: clipboardMode.batchPaste,
         edit: clipboardMode.batchEdit, sticky: clipboardMode.batchSticky,
         pin: clipboardMode.batchPin, delete: clipboardMode.batchDelete};
     const items = [];
@@ -522,6 +643,29 @@ function itemMenu(li, {selectedText = ""} = {}) {
                             showActionError('open_image_editor_from_history', err);
                         }
                     });
+            },
+        });
+    }
+
+    // 0.26.9：文件条目操作——复制路径列表（原始路径每行一个）与存为图片条目。
+    // 「存为图片」以用户点击触发后端校验（单路径 + 受限路径 + 解码），
+    // 菜单打开时不读取文件判断可用性。
+    if (clipboardRef?.kind === "file") {
+        items.push({separator: true});
+        items.push({
+            label: t("menu.copyFilePaths"),
+            shortcut: "Ctrl+C",
+            run: () => {
+                if (inClipboard) clipboardMode.batchCopyPaths(task);
+                else runBuiltinAction("copy_clipboard_file_paths", {ids: [clipboardRef.id]})
+                    .catch(e => showActionError("copy_clipboard_file_paths", e));
+            },
+        });
+        items.push({
+            label: t("menu.saveAsImage"),
+            run: () => {
+                runBuiltinAction("save_clipboard_file_as_image", {id: clipboardRef.id})
+                    .catch(e => showActionError("save_clipboard_file_as_image", e));
             },
         });
     }

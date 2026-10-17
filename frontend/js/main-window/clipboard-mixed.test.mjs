@@ -132,3 +132,25 @@ test('钉图防重入，隐藏后旧回流不污染新会话', async () => {
     assert.deepEqual(selection.getSelectedKeys(), keys([text('new')]));
     assert.equal(h.calls.feedback.length, feedbackCount);
 });
+
+// ── 0.26.9 文件条目操作矩阵 ────────────────────────────────────────────
+const file = id => ({kind: 'file', id});
+test('文件条目支持复制路径与删除，不提供文本/图片专属操作', () => {
+    const actions = selectionActions([file('f1'), text('a'), image('i1')]);
+    assert.deepEqual(actions.map(action => action.id),
+        ['copy', 'copy_paths', 'paste', 'edit', 'sticky', 'pin', 'delete', 'delete', 'delete', 'delete'],
+        'copy/paste/edit/sticky 只含文本子集，copy_paths 只含文件子集，删除按类型分组 + 全部');
+    const copyPaths = actions.find(action => action.id === 'copy_paths');
+    assert.deepEqual(copyPaths.refs, [file('f1')]);
+    assert.equal(copyPaths.shortcut, '', '混选不标注快捷键');
+    // 纯文件选择标注 Ctrl+C
+    const pure = selectionActions([file('f1'), file('f2')]);
+    assert.equal(pure.find(action => action.id === 'copy_paths').shortcut, 'Ctrl+C');
+    // 文件不可进入文本执行路径
+    assert.equal(selectionActions([file('f1')]).some(action => ['copy', 'paste', 'edit', 'sticky', 'pin'].includes(action.id)), false);
+});
+test('文件条目与文本同 ID 独立身份，删除分组含 file', () => {
+    const actions = selectionActions([file('same'), text('same'), image('same')]);
+    const scopes = actions.filter(action => action.id === 'delete').map(action => action.scope);
+    assert.deepEqual(scopes.sort(), ['all', 'file', 'image', 'text']);
+});

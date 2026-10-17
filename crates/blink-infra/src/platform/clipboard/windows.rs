@@ -20,8 +20,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{PCWSTR, w};
 
 use crate::data::clipboard::{self, ClipboardItem};
+use crate::data::clipboard_files;
 use crate::data::clipboard_images::{self, ClipboardImage};
 
+use super::dropfiles;
 use super::{is_active, state, take_self_write};
 
 /// 缩略图最大边长（像素）。采集时生成，不延后到展示——避免列表滚动时重复解码。
@@ -34,6 +36,8 @@ const DEDUP_WINDOW_MS: u128 = 10_000;
 /// 保证异步入库顺序与 WM_CLIPBOARDUPDATE 顺序一致，避免同内容“删旧留新”反向覆盖。
 static TEXT_PERSIST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static IMAGE_PROCESS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// 文件条目落库顺序锁（0.26.9），与文本/图片各自独立。
+static FILE_PERSIST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 pub(super) fn start_watcher_thread() {
     if let Err(e) = std::thread::Builder::new()
@@ -155,194 +159,267 @@ fn on_clipboard_change() {
     // 自写入 skip_persist 标志
     let skip_persist = self_write.as_ref().is_some_and(|(_, skip)| *skip);
 
-    // 先尝试读文本；文本失败则尝试读图片（CF_DIB）
-    let text = read_clipboard_text();
-    if let Some(ref text) = text {
+    let Some(s) = state() else { return };
+    let capture_images = s.capture_images.load(std::sync::atomic::Ordering::Relaxed);
+    let capture_files = s.capture_files.load(std::sync::atomic::Ordering::Relaxed);
+
+    // 0.26.9：单次 OpenClipboard 会话内按「文本 → DIB（若开启）→ HDROP（若开启）」
+    // 读取快照——多格式来自同一个剪贴板序列，避免多次打开期间混入另一轮复制；
+    // 空白文本/格式读取失败可继续下一类，每轮最多选一类入库，不重复。
+    let snap = read_clipboard_snapshot(capture_images, capture_files);
+
+    // ── 文本分支：有效非空文本优先 ──
+    if let Some(ref text) = snap.text {
         if text.trim().is_empty() {
-            tracing::trace!("剪贴板：文本仅空白,跳过");
-            return;
-        }
-        // 0.25.27 兜底：标记 miss（一次写入双事件错位消费 / TTL 过期）时按内容
-        // 指纹识别自写入，命中则沿用该写入的标签与 skip 语义（见 mod.rs 模块注释）
-        let mut skip_persist = skip_persist;
-        if self_write.is_none()
-            && let Some((label, skip)) = super::take_self_text_fingerprint(fx_hash(text))
-        {
-            tracing::debug!(%label, skip, "剪贴板：标记 miss，内容指纹兜底命中自写入");
-            source_app = Some(label);
-            skip_persist = skip;
-        }
-        // 短窗口去重（0.8.7）：10 秒内同文本不重复记录。
-        // Ctrl+C 在部分应用（浏览器/编辑器）会连发多次 WM_CLIPBOARDUPDATE,不去重会看到
-        // 历史里同一条塞了 3~4 遍,后续 cleanup_excess 反而挤掉真正的旧条目。
-        let text_hash = fx_hash(text);
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        if let Ok(mut guard) = DEDUP_STATE.lock() {
-            if let Some((last_hash, last_ms)) = *guard
-                && last_hash == text_hash
-                && now_ms.saturating_sub(last_ms) < DEDUP_WINDOW_MS
+            tracing::trace!("剪贴板：文本仅空白,尝试其他格式");
+        } else {
+            // 0.25.27 兜底：标记 miss（一次写入双事件错位消费 / TTL 过期）时按内容
+            // 指纹识别自写入，命中则沿用该写入的标签与 skip 语义（见 mod.rs 模块注释）
+            let mut skip_persist = skip_persist;
+            if self_write.is_none()
+                && let Some((label, skip)) = super::take_self_text_fingerprint(fx_hash(text))
             {
-                tracing::debug!(
-                    len = text.chars().count(),
-                    "剪贴板：10s 内同文本重复,跳过入库"
-                );
+                tracing::debug!(%label, skip, "剪贴板：标记 miss，内容指纹兜底命中自写入");
+                source_app = Some(label);
+                skip_persist = skip;
+            }
+            // 短窗口去重（0.8.7）：10 秒内同文本不重复记录。
+            // Ctrl+C 在部分应用（浏览器/编辑器）会连发多次 WM_CLIPBOARDUPDATE,不去重会看到
+            // 历史里同一条塞了 3~4 遍,后续 cleanup_excess 反而挤掉真正的旧条目。
+            let text_hash = fx_hash(text);
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            if let Ok(mut guard) = DEDUP_STATE.lock() {
+                if let Some((last_hash, last_ms)) = *guard
+                    && last_hash == text_hash
+                    && now_ms.saturating_sub(last_ms) < DEDUP_WINDOW_MS
+                {
+                    tracing::debug!(
+                        len = text.chars().count(),
+                        "剪贴板：10s 内同文本重复,跳过入库"
+                    );
+                    return;
+                }
+                *guard = Some((text_hash, now_ms));
+            }
+            // 0.9.2.1：入库前先触发 hook,让 SearchService.snapshot 局部刷新 Clipboard 项
+            //（过滤 + 去重后触发,与真实入库同步;hook 侧再做 ContextConfig 门控与敏感应用
+            // 过滤,避免密码管理器 Ctrl+C 悄悄进 snapshot）。
+            super::notify_change(text);
+
+            // 0.17.9：自写入 skip_persist（历史回贴场景）跳过入库
+            if skip_persist {
+                tracing::trace!("剪贴板：自写入 skip_persist, 跳过文本入库");
                 return;
             }
-            *guard = Some((text_hash, now_ms));
-        }
-        // 0.9.2.1：入库前先触发 hook,让 SearchService.snapshot 局部刷新 Clipboard 项
-        //（过滤 + 去重后触发,与真实入库同步;hook 侧再做 ContextConfig 门控与敏感应用
-        // 过滤,避免密码管理器 Ctrl+C 悄悄进 snapshot）。
-        super::notify_change(text);
 
-        // 0.17.9：自写入 skip_persist（历史回贴场景）跳过入库
-        if skip_persist {
-            tracing::trace!("剪贴板：自写入 skip_persist, 跳过文本入库");
+            let preview = clipboard::make_preview(text);
+            let item = ClipboardItem {
+                id: clipboard::generate_id(),
+                preview: preview.clone(),
+                text: text.clone(),
+                created_at: now_ts(),
+                source_app,
+                hit_count: 0,
+            };
+            let pool = s.pool.clone();
+            let max_items = s.max_items.load(std::sync::atomic::Ordering::Relaxed);
+            tauri::async_runtime::spawn(async move {
+                let _order_guard = TEXT_PERSIST_LOCK.lock().await;
+                match clipboard::save_item(&pool, &item).await {
+                    Ok(_) => tracing::trace!(id = %item.id, preview = %preview, "剪贴板：已入库"),
+                    Err(e) => {
+                        if let Ok(mut guard) = DEDUP_STATE.lock()
+                            && *guard == Some((text_hash, now_ms))
+                        {
+                            *guard = None;
+                        }
+                        tracing::warn!(?e, "剪贴板 save_item 失败");
+                        return;
+                    }
+                }
+                let _ = clipboard::cleanup_excess(&pool, max_items).await;
+            });
             return;
         }
+    }
 
-        let Some(s) = state() else { return };
-        let preview = clipboard::make_preview(text);
-        let item = ClipboardItem {
-            id: clipboard::generate_id(),
-            preview: preview.clone(),
-            text: text.clone(),
-            created_at: now_ts(),
-            source_app,
-            hit_count: 0,
-        };
-        let pool = s.pool.clone();
-        let max_items = s.max_items.load(std::sync::atomic::Ordering::Relaxed);
+    // ── 图片采集（0.16.4）：无有效文本且读到 CF_DIB（截图、画图、浏览器复制图片等）──
+    // 0.26.9：图片与 HDROP 并存时（资源管理器复制图片文件）按图片条目采集，
+    // source_path 取 HDROP 首文件名；纯 HDROP（无 DIB）落文件分支。
+    if capture_images
+        && let Some(dib) = snap.dib
+    {
+        if skip_persist {
+            tracing::trace!("剪贴板：自写入 skip_persist, 跳过图片入库");
+            return;
+        }
+        let source_path = snap.hdrop_first_name;
+        let cache_pool = s.cache_pool.clone();
+        let max_image_items = s.max_image_items.load(std::sync::atomic::Ordering::Relaxed);
+        let image_id = clipboard_images::generate_image_id();
+        let created_at = now_ts();
         tauri::async_runtime::spawn(async move {
-            let _order_guard = TEXT_PERSIST_LOCK.lock().await;
-            match clipboard::save_item(&pool, &item).await {
-                Ok(_) => tracing::trace!(id = %item.id, preview = %preview, "剪贴板：已入库"),
+            let _order_guard = IMAGE_PROCESS_LOCK.lock().await;
+            let processed = tauri::async_runtime::spawn_blocking(move || {
+                let Some((bgra, width, height)) = decode_dib(&dib) else {
+                    return Err("CF_DIB 解码失败".to_string());
+                };
+                let png_data =
+                    bgra_to_png(&bgra, width, height).map_err(|e| format!("BGRA→PNG 编码失败: {e}"))?;
+                let thumb_data = make_thumbnail_png(&bgra, width, height).unwrap_or_else(|e| {
+                    tracing::debug!(?e, "剪贴板：缩略图生成失败,使用完整 PNG 兜底");
+                    png_data.clone()
+                });
+                Ok(ClipboardImage {
+                    id: image_id,
+                    sha256: compute_sha256(&png_data),
+                    png_blob: png_data,
+                    thumb_blob: thumb_data,
+                    width,
+                    height,
+                    created_at,
+                    source_app,
+                    source_path,
+                })
+            })
+            .await;
+            let image_item = match processed {
+                Ok(Ok(item)) => item,
+                Ok(Err(e)) => {
+                    tracing::debug!(error = %e, "剪贴板图片处理失败,跳过");
+                    return;
+                }
                 Err(e) => {
-                    if let Ok(mut guard) = DEDUP_STATE.lock()
-                        && *guard == Some((text_hash, now_ms))
-                    {
-                        *guard = None;
-                    }
-                    tracing::warn!(?e, "剪贴板 save_item 失败");
+                    tracing::warn!(?e, "剪贴板图片处理任务失败");
+                    return;
+                }
+            };
+            match clipboard_images::save_image(&cache_pool, &image_item).await {
+                Ok(_) => tracing::trace!(
+                    id = %image_item.id,
+                    w = image_item.width,
+                    h = image_item.height,
+                    "剪贴板：图片已入库"
+                ),
+                Err(e) => {
+                    tracing::warn!(?e, "剪贴板 save_image 失败");
                     return;
                 }
             }
-            let _ = clipboard::cleanup_excess(&pool, max_items).await;
+            let _ = clipboard_images::cleanup_excess_images(&cache_pool, max_image_items).await;
         });
         return;
     }
 
-    // ── 图片采集（0.16.4）──
-    // 文本读取失败 → 尝试 CF_DIB（截图、画图、浏览器复制图片等）
-    // P2-#20 fix: 检查 capture_images 配置，false 时跳过图片采集
-    let Some(s) = state() else { return };
-    if !s.capture_images.load(std::sync::atomic::Ordering::Relaxed) {
-        tracing::trace!("剪贴板：capture_images=false, 跳过图片采集");
+    // ── 文件采集（0.26.9）：无有效文本、无图片（或图片关闭）时读 CF_HDROP ──
+    // 文件夹也记录路径，不递归扫描；虚拟文件（仅 FileContents/FileGroupDescriptorW）
+    // 无 HDROP，天然不采集。
+    if !capture_files {
         return;
     }
-    if skip_persist {
-        tracing::trace!("剪贴板：自写入 skip_persist, 跳过图片入库");
-        return;
-    }
-    tracing::trace!("剪贴板：无文本,尝试读取图片 CF_DIB");
-
-    // 0.17.9：在同一 OpenClipboard 会话中读 CF_HDROP + CF_DIB
-    let (dib_data, source_path) = read_clipboard_dib_with_hdrop();
-    let Some(dib) = dib_data else {
-        tracing::trace!("剪贴板：无文本也无图片,跳过");
+    let Some(paths) = snap.file_list else {
+        tracing::trace!("剪贴板：无文本无图片无文件列表,跳过");
         return;
     };
-    let cache_pool = s.cache_pool.clone();
-    let max_image_items = s.max_image_items.load(std::sync::atomic::Ordering::Relaxed);
-    let image_id = clipboard_images::generate_image_id();
-    let created_at = now_ts();
+    // 指纹兜底：文件写回标记 miss 时按路径组合指纹识别，迟到事件不重复入库
+    let mut file_skip_persist = skip_persist;
+    if self_write.is_none()
+        && let Some((label, skip)) = super::take_self_text_fingerprint(fx_hash(&paths.join("\n")))
+    {
+        tracing::debug!(%label, skip, "剪贴板：文件标记 miss，组合指纹兜底命中自写入");
+        source_app = Some(label);
+        file_skip_persist = skip;
+    }
+    if file_skip_persist {
+        tracing::trace!("剪贴板：自写入 skip_persist, 跳过文件入库");
+        return;
+    }
+    let pool = s.pool.clone();
+    let max_file_items = s.max_file_items.load(std::sync::atomic::Ordering::Relaxed);
+    let path_count = paths.len();
+    let item = clipboard_files::ClipboardFileItem {
+        id: clipboard_files::generate_file_id(),
+        paths,
+        created_at: now_ts(),
+        source_app,
+    };
     tauri::async_runtime::spawn(async move {
-        let _order_guard = IMAGE_PROCESS_LOCK.lock().await;
-        let processed = tauri::async_runtime::spawn_blocking(move || {
-            let Some((bgra, width, height)) = decode_dib(&dib) else {
-                return Err("CF_DIB 解码失败".to_string());
-            };
-            let png_data =
-                bgra_to_png(&bgra, width, height).map_err(|e| format!("BGRA→PNG 编码失败: {e}"))?;
-            let thumb_data = make_thumbnail_png(&bgra, width, height).unwrap_or_else(|e| {
-                tracing::debug!(?e, "剪贴板：缩略图生成失败,使用完整 PNG 兜底");
-                png_data.clone()
-            });
-            Ok(ClipboardImage {
-                id: image_id,
-                sha256: compute_sha256(&png_data),
-                png_blob: png_data,
-                thumb_blob: thumb_data,
-                width,
-                height,
-                created_at,
-                source_app,
-                source_path,
-            })
-        })
-        .await;
-        let image_item = match processed {
-            Ok(Ok(item)) => item,
-            Ok(Err(e)) => {
-                tracing::debug!(error = %e, "剪贴板图片处理失败,跳过");
-                return;
-            }
-            Err(e) => {
-                tracing::warn!(?e, "剪贴板图片处理任务失败");
-                return;
-            }
-        };
-        match clipboard_images::save_image(&cache_pool, &image_item).await {
+        let _order_guard = FILE_PERSIST_LOCK.lock().await;
+        match clipboard_files::save_file(&pool, &item).await {
             Ok(_) => tracing::trace!(
-                id = %image_item.id,
-                w = image_item.width,
-                h = image_item.height,
-                "剪贴板：图片已入库"
+                id = %item.id,
+                count = path_count,
+                "剪贴板：文件条目已入库"
             ),
             Err(e) => {
-                tracing::warn!(?e, "剪贴板 save_image 失败");
+                tracing::debug!(error = %e, "剪贴板 save_file 失败");
                 return;
             }
         }
-        let _ = clipboard_images::cleanup_excess_images(&cache_pool, max_image_items).await;
+        clipboard_files::cleanup_excess_files(&pool, max_file_items).await;
     });
 }
 
 // ── 图片采集辅助函数（0.16.4）─────────────────────────────────────────────
 
-/// 在同一 OpenClipboard 会话中读 CF_HDROP（源文件名）+ CF_DIB（位图数据）。
+// ── 快照读取（0.26.9）─────────────────────────────────────────────────────
+
+/// 单次剪贴板快照：同一 OpenClipboard 会话内按「文本 → DIB（若开启）→ HDROP（若开启）」读取。
 ///
-/// **0.17.9**：从文件管理器复制图片文件时，剪贴板同时含 `CF_HDROP`（文件路径列表）
-/// + `CF_DIB`（位图）。在同一会话中读两者，避免二次 `OpenClipboard` 竞争。
-///
-/// 返回 `(dib_data, source_path)`，`source_path` 为首个文件的文件名（非完整路径）。
-fn read_clipboard_dib_with_hdrop() -> (Option<Vec<u8>>, Option<String>) {
+/// 文本有效（非空白）即不再读图片/文件（避免 Word 等场景无谓拷贝大 DIB）；
+/// 空白文本/格式缺失继续下一类。`hdrop_first_name` 仅在读到 DIB 时提取
+/// （图片条目的 source_path）；纯 HDROP 走 `file_list`。
+struct ClipboardSnapshot {
+    text: Option<String>,
+    dib: Option<Vec<u8>>,
+    hdrop_first_name: Option<String>,
+    file_list: Option<Vec<String>>,
+}
+
+fn read_clipboard_snapshot(capture_images: bool, capture_files: bool) -> ClipboardSnapshot {
     const MAX_ATTEMPTS: u32 = 5;
     const BACKOFF_MS: u64 = 8;
     for attempt in 0..MAX_ATTEMPTS {
         unsafe {
             if OpenClipboard(None).is_ok() {
-                let hdrop_name = read_hdrop_filename_inner();
-                let dib = read_dib_inner();
-                let _ = CloseClipboard();
-                if dib.is_some() {
-                    if attempt > 0 {
-                        tracing::debug!(attempt, "剪贴板图片读取重试成功");
+                let text = read_clipboard_inner();
+                let need_more = text.as_deref().is_none_or(|t| t.trim().is_empty());
+                let mut snap = ClipboardSnapshot {
+                    text,
+                    dib: None,
+                    hdrop_first_name: None,
+                    file_list: None,
+                };
+                if need_more && capture_images {
+                    snap.dib = read_dib_inner();
+                    if snap.dib.is_some() {
+                        snap.hdrop_first_name = read_hdrop_filename_inner();
                     }
-                    return (dib, hdrop_name);
                 }
-                return (None, None);
+                if need_more && snap.dib.is_none() && capture_files {
+                    snap.file_list = read_hdrop_file_list_inner();
+                }
+                let _ = CloseClipboard();
+                if attempt > 0 {
+                    tracing::debug!(attempt, "剪贴板快照读取重试成功");
+                }
+                return snap;
             }
         }
         if attempt + 1 < MAX_ATTEMPTS {
             std::thread::sleep(std::time::Duration::from_millis(BACKOFF_MS));
         }
     }
-    tracing::debug!("剪贴板图片 OpenClipboard 重试仍失败,放弃");
-    (None, None)
+    tracing::debug!("剪贴板快照 OpenClipboard 重试仍失败,放弃");
+    ClipboardSnapshot {
+        text: None,
+        dib: None,
+        hdrop_first_name: None,
+        file_list: None,
+    }
 }
 
 /// 从 `CF_HDROP` 读取首个文件的文件名（不含路径）。
@@ -373,6 +450,77 @@ unsafe fn read_hdrop_filename_inner() -> Option<String> {
         } else {
             Some(file_name)
         }
+    }
+}
+
+/// 从 `CF_HDROP` 读取全部路径（0.26.9）。需在 `OpenClipboard` 成功后调用。
+///
+/// **边界语义**：先查数量再分配；数量/单路径长度/合计 UTF-16 units 任一超限
+/// 或路径形态非法（相对路径、设备命名空间、无效编码）整条拒绝返回 `None`，
+/// 不保存截断后看似完整的列表。日志只记原因/索引/数量，不记路径原文。
+unsafe fn read_hdrop_file_list_inner() -> Option<Vec<String>> {
+    unsafe {
+        let handle = GetClipboardData(CF_HDROP.0.into()).ok()?;
+        let hdrop = HDROP(handle.0 as _);
+        // index = 0xFFFFFFFF → 返回文件数
+        let count = DragQueryFileW(hdrop, 0xFFFFFFFF, None);
+        if count == 0 {
+            return None;
+        }
+        if count as usize > dropfiles::MAX_PATHS {
+            tracing::debug!(
+                count,
+                limit = dropfiles::MAX_PATHS,
+                "CF_HDROP 路径数超限,整条跳过"
+            );
+            return None;
+        }
+        let mut paths = Vec::with_capacity(count as usize);
+        let mut total_units = 0usize;
+        for index in 0..count {
+            let path_len = DragQueryFileW(hdrop, index, None);
+            if path_len == 0 {
+                tracing::debug!(index, "CF_HDROP 路径长度查询失败,整条跳过");
+                return None;
+            }
+            if path_len as usize > dropfiles::MAX_PATH_UTF16_UNITS {
+                tracing::debug!(
+                    index,
+                    units = path_len,
+                    limit = dropfiles::MAX_PATH_UTF16_UNITS,
+                    "CF_HDROP 单路径超限,整条跳过"
+                );
+                return None;
+            }
+            total_units += path_len as usize;
+            if total_units > dropfiles::MAX_SNAPSHOT_UTF16_UNITS {
+                tracing::debug!(
+                    index,
+                    limit = dropfiles::MAX_SNAPSHOT_UTF16_UNITS,
+                    "CF_HDROP 合计载荷超限,整条跳过"
+                );
+                return None;
+            }
+            let mut buf = vec![0u16; (path_len as usize) + 1];
+            let copied = DragQueryFileW(hdrop, index, Some(&mut buf));
+            if copied != path_len {
+                tracing::debug!(index, "CF_HDROP 路径复制失败,整条跳过");
+                return None;
+            }
+            let path = match String::from_utf16(&buf[..copied as usize]) {
+                Ok(p) => p,
+                Err(_) => {
+                    tracing::debug!(index, "CF_HDROP 路径无效编码,整条跳过");
+                    return None;
+                }
+            };
+            if let Err(reject) = dropfiles::validate_single_path(&path) {
+                tracing::debug!(index, reason = reject.reason(), "CF_HDROP 路径形态非法,整条跳过");
+                return None;
+            }
+            paths.push(path);
+        }
+        Some(paths)
     }
 }
 
@@ -877,5 +1025,72 @@ pub(super) fn write_text_to_clipboard_raw(text: &str) -> Result<(), String> {
     }
 
     tracing::debug!(len = text.chars().count(), "文本已写入剪贴板");
+    Ok(())
+}
+
+/// 把文件路径列表写入系统剪贴板（CF_HDROP 格式，0.26.9）—— **raw 内核**（不打自写入标记）。
+///
+/// 载荷 = `DROPFILES` 头（fWide=1）+ 每路径 UTF-16 + NUL + 末尾额外 NUL（双 NUL 终止），
+/// 编码见 `dropfiles::encode_dropfiles`（纯函数，含编解码往返测试）。
+///
+/// 与 `write_text_to_clipboard_raw` 同模式：GlobalAlloc → GlobalLock → 写载荷 →
+/// EmptyClipboard → SetClipboardData(CF_HDROP)。**复制语义**：不继承剪切标记
+/// （DROPFILES 的 fNC/pt 保持默认），失败清理 GlobalFree，成对 CloseClipboard。
+pub(super) fn write_file_list_raw(paths: &[String]) -> Result<(), String> {
+    use windows::Win32::Foundation::{GlobalFree, HANDLE};
+    use windows::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    };
+    use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
+    use windows::Win32::System::Ole::CF_HDROP;
+
+    let units = dropfiles::encode_dropfiles(paths)?;
+    let byte_len = units.len() * 2;
+    if byte_len == 0 {
+        return Err("文件列表为空".into());
+    }
+
+    unsafe {
+        let hmem =
+            GlobalAlloc(GMEM_MOVEABLE, byte_len).map_err(|e| format!("GlobalAlloc 失败: {e}"))?;
+
+        // SetClipboardData 成功前所有权始终在调用方；任何 early return 必须 GlobalFree
+        let fill_result = (|| -> Result<(), String> {
+            let ptr = GlobalLock(hmem);
+            if ptr.is_null() {
+                return Err("GlobalLock 失败".into());
+            }
+            let byte_slice =
+                std::slice::from_raw_parts(units.as_ptr() as *const u8, byte_len);
+            std::ptr::copy_nonoverlapping(byte_slice.as_ptr(), ptr as *mut u8, byte_len);
+            let _ = GlobalUnlock(hmem);
+            Ok(())
+        })();
+
+        if let Err(e) = fill_result {
+            let _ = GlobalFree(Some(hmem));
+            return Err(e);
+        }
+
+        if let Err(e) = OpenClipboard(None) {
+            let _ = GlobalFree(Some(hmem));
+            return Err(format!("OpenClipboard 失败: {e}"));
+        }
+
+        let set_result: Result<(), String> = (|| {
+            let _ = EmptyClipboard();
+            SetClipboardData(CF_HDROP.0.into(), Some(HANDLE(hmem.0 as _)))
+                .map_err(|e| format!("SetClipboardData 失败: {e}"))?;
+            Ok(())
+        })();
+        let _ = CloseClipboard();
+
+        if let Err(e) = set_result {
+            let _ = GlobalFree(Some(hmem));
+            return Err(e);
+        }
+    }
+
+    tracing::debug!(count = paths.len(), "文件列表已写入剪贴板 (CF_HDROP)");
     Ok(())
 }

@@ -4,6 +4,7 @@
 
 pub mod ai_audit;
 pub mod clipboard;
+pub mod clipboard_files;
 pub mod clipboard_images;
 pub mod config;
 pub mod conversations;

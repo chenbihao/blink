@@ -833,6 +833,9 @@ impl RuleRouter {
         let (id, rank_score) = match origin {
             Some(SuggestionOrigin::Selection) => ("translate-selection", 0.92),
             Some(SuggestionOrigin::Clipboard) => ("translate-clipboard", 0.82),
+            // 0.26.10：历史条目显式询问不进入本路径（context 建议 origin 只来自
+            // AwarenessSource 映射），防御性兜底同 Selection 语义
+            Some(SuggestionOrigin::ClipboardItem) => ("translate-context", 0.92),
             None => ("translate-context", 0.92),
         };
         let when = best_ctx.when;

@@ -42,6 +42,7 @@ import {
     openContentEditor,
     pasteToInput,
     recordClipboardHit,
+    runBuiltinAction,
     searchClipboard,
     showStickyWindow
 } from "../shared/api.js";
@@ -53,7 +54,7 @@ import {showActionError} from "./action-error.js";
 import {findEditAction, resolveShortcutAction} from "./clipboard-shortcuts.js";
 import {KIND_ORDER, nextKind} from "./clipboard-kind.js";
 import * as inputState from "./input-state.js";
-import {entryRef, refFromLi, refFromKey, refKey, supportsTextOperation} from './clipboard-entry.js';
+import {entryRef, refFromLi, refFromKey, refKey, refsOfKind, supportsTextOperation} from './clipboard-entry.js';
 import {createClipboardBatch} from './clipboard-batch.js';
 
 // 0.20.1: 从 results.js 导入 setClipboardMode，进入/退出模式时设置标志。
@@ -140,12 +141,12 @@ export function clearSelection(task = null) {
     refreshSelectionCss();
 }
 
-/** 0.20.2: 刷新列表（右键删除后调用），维持当前页号。 */
-export function reloadList() {
+/** 刷新列表并维持当前页号；显式操作可强制绕过唤起短窗去重。 */
+export function reloadList({force = false} = {}) {
     // enter 首搜后短窗内跳过（0.24.7）：awareness-updated（选区提取完成 emit）
     // 经 retrigger 到这里，与 enter 的首搜重复——剪贴板模式不消费选区，
     // 这次重查纯浪费。右键删除刷新通常在 250ms 窗外，不受影响。
-    if (Date.now() - lastSearchAt < 250) return;
+    if (!force && Date.now() - lastSearchAt < 250) return;
     // 不清多选、不清 generation——只是刷新列表数据
     // 清防抖，直接重新搜索当前 query
     clearTimeout(timer);
@@ -604,10 +605,44 @@ export async function batchCopy(task = getSelectionSnapshot()) {
             if (!active || !selection.isCurrent(task) || !selection.isCopyStillValid(gen)) return;
             selection.complete(task); refreshSelectionCss();
             showFeedback(t('clipboard.image_copied'), {type: 'success'});
+            reloadList({force: true}); // 显式复制必须刷新置顶结果，不被唤起短窗去重拦截。
         } catch (e) { if (selection.isCurrent(task)) showActionError('copy_clipboard_image', e); }
         return;
     }
+    // 0.26.9：单选文件 = 写回 CF_HDROP（与 Enter 同语义，后端写回成功后隐藏主窗，
+    // 粘贴由用户手动执行）；纯文件多选 = 合并复制路径文本；含文件混选提示按类型操作。
+    if (task.refs.length === 1 && task.refs[0].kind === 'file') {
+        const gen = selection.beginCopy();
+        try {
+            await runBuiltinAction('copy_clipboard_files', {id: task.refs[0].id});
+            if (!active || !selection.isCurrent(task) || !selection.isCopyStillValid(gen)) return;
+            selection.complete(task); refreshSelectionCss();
+        } catch (e) { if (selection.isCurrent(task)) showActionError('copy_clipboard_files', e); }
+        return;
+    }
+    const fileRefs = refsOfKind(task.refs, 'file');
+    if (fileRefs.length) {
+        if (fileRefs.length !== task.refs.length) {
+            showFeedback(t('clipboard.choose_typed_action'), {type: 'info'});
+            return;
+        }
+        return batchCopyPaths(task);
+    }
     return batch.textOperation('copy', task);
+}
+/** 0.26.9：纯文件多选按当前列表顺序合并复制路径文本（每行一个，后端去重与 1MiB 计量）。 */
+export async function batchCopyPaths(task = getSelectionSnapshot()) {
+    if (!active || !selection.isCurrent(task) || task.revision !== selection.getSelectionRevision()) return;
+    const fileRefs = refsOfKind(task.refs, 'file');
+    if (!fileRefs.length) return;
+    const gen = selection.beginCopy();
+    try {
+        await runBuiltinAction('copy_clipboard_file_paths', {ids: fileRefs.map(ref => ref.id)});
+        if (!active || !selection.isCurrent(task) || !selection.isCopyStillValid(gen)) return;
+        selection.complete(task); refreshSelectionCss();
+        showFeedback(t('clipboard.file_paths_copied', {count: fileRefs.length}), {type: 'success', durationMs: 2000});
+        reload();
+    } catch (e) { if (selection.isCurrent(task)) showActionError('copy_clipboard_file_paths', e); }
 }
 export function batchPaste(task) { return batch.textOperation('paste', task); }
 export function batchEdit(task) { return batch.textOperation('edit', task); }

@@ -7,6 +7,15 @@ const MAX_PNG_BYTES: i64 = 32 * 1024 * 1024;
 const DECODE_BUDGET: u64 = 64 * 1024 * 1024;
 static PREVIEW_WORKERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
+/// 0.26.9：尝试进入共享图片解码额度（并发 2，忙即 None，不排队）。
+///
+/// 供文件预览/入库路径复用同一解码额度——文件内容读出后 try_acquire，
+/// 繁忙则立即释放缓冲返回 Busy，不排队持有完整文件。
+pub(crate) fn try_acquire_image_decode_slot(
+) -> Option<tokio::sync::SemaphorePermit<'static>> {
+    PREVIEW_WORKERS.try_acquire().ok()
+}
+
 pub async fn get_preview_by_id_global(id: &str) -> Option<Vec<u8>> {
     get_preview_by_id(super::POOL.get()?, id).await
 }

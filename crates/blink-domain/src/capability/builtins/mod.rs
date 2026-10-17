@@ -26,6 +26,8 @@
 //! - [`analyze_image_palette`] — 分析图片配色方案 → `Text{JSON}`（0.20.7）
 
 pub mod analyze_image_palette;
+pub mod copy_clipboard_file_paths;
+pub mod copy_clipboard_files;
 pub mod create_sticky;
 pub mod diagnostics;
 pub mod edit_clipboard_image;
@@ -51,6 +53,7 @@ pub mod read_clipboard_history_image;
 pub mod read_sticky;
 pub mod read_text_file;
 pub mod reveal_in_explorer;
+pub mod save_clipboard_file_as_image;
 pub mod screenshot;
 pub mod search_apps;
 pub mod search_clipboard_history;
@@ -161,5 +164,17 @@ mod tests {
             registry.get("transcribe_audio").is_some(),
             "transcribe_audio 应通过 inventory 注册"
         );
+    }
+
+    #[test]
+    fn phase_0_26_9_file_entry_capabilities_are_in_inventory() {
+        let registry = crate::capability::CapabilityRegistry::new();
+        for id in [
+            "copy_clipboard_files",
+            "copy_clipboard_file_paths",
+            "save_clipboard_file_as_image",
+        ] {
+            assert!(registry.get(id).is_some(), "{id} 应通过 inventory 注册");
+        }
     }
 }

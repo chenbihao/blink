@@ -119,6 +119,9 @@ pub enum SuggestionOrigin {
     Selection,
     /// 剪贴板文本（数据侧 `AwarenessSource::Clipboard`）
     Clipboard,
+    /// 0.26.10：剪贴板历史条目右键显式询问——仅标记历史来源供遥测区分，
+    /// 不进入 Coordinator（不按 `origin.is_some()` 判定环境建议、不参与双槽竞争）。
+    ClipboardItem,
 }
 
 /// 零 cost 转换：数据侧 `AwarenessSource` → 前端契约 `SuggestionOrigin`（0.8.3 收尾）。

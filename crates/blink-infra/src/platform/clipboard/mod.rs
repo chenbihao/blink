@@ -22,6 +22,9 @@ use crate::data::clipboard::ClipboardConfig;
 #[cfg(target_os = "windows")]
 mod windows;
 
+/// CF_HDROP（DROPFILES）编解码与路径载荷边界（0.26.9）——纯函数，跨平台可单测。
+pub mod dropfiles;
+
 pub(super) struct State {
     pool: SqlitePool,
     /// cache 库——clipboard_images 表所在（0.16.4 图片历史）。
@@ -32,6 +35,11 @@ pub(super) struct State {
     max_image_items: AtomicU32,
     /// 是否采集剪贴板图片（0.16.4）。false 时跳过 CF_DIB 采集。
     capture_images: AtomicBool,
+    /// 文件条目上限（0.26.9）。独立于文本/图片上限。
+    max_file_items: AtomicU32,
+    /// 是否采集剪贴板文件路径（0.26.9）。false 时跳过 CF_HDROP 采集，
+    /// 不删除已有历史，也不禁用已有条目的复制/预览。
+    capture_files: AtomicBool,
 }
 
 static STATE: OnceLock<State> = OnceLock::new();
@@ -276,6 +284,8 @@ pub fn start_listener(pool: SqlitePool, cache_pool: SqlitePool, cfg: ClipboardCo
         max_items: AtomicU32::new(cfg.max_items),
         max_image_items: AtomicU32::new(cfg.max_image_items),
         capture_images: AtomicBool::new(cfg.capture_images),
+        max_file_items: AtomicU32::new(cfg.max_file_items),
+        capture_files: AtomicBool::new(cfg.capture_files),
     });
     ACTIVE.store(cfg.enabled, Ordering::Relaxed);
     #[cfg(target_os = "windows")]
@@ -304,6 +314,8 @@ pub fn update_runtime_config(cfg: &ClipboardConfig) {
             .store(cfg.max_image_items, Ordering::Relaxed);
         s.capture_images
             .store(cfg.capture_images, Ordering::Relaxed);
+        s.max_file_items.store(cfg.max_file_items, Ordering::Relaxed);
+        s.capture_files.store(cfg.capture_files, Ordering::Relaxed);
     }
     set_active(cfg.enabled);
     tracing::debug!(
@@ -311,6 +323,8 @@ pub fn update_runtime_config(cfg: &ClipboardConfig) {
         max_items = cfg.max_items,
         max_image_items = cfg.max_image_items,
         capture_images = cfg.capture_images,
+        max_file_items = cfg.max_file_items,
+        capture_files = cfg.capture_files,
         blacklist_count = cfg.blacklist_keywords.len(),
         "剪贴板监听运行时配置已热更新"
     );
@@ -451,6 +465,31 @@ pub fn write_text_to_clipboard(text: &str, label: &str, skip_persist: bool) -> R
     });
     if result.is_ok() {
         record_self_text_fingerprint(windows::fx_hash(text), label, skip_persist);
+    }
+    result
+}
+
+/// 把文件路径列表写入系统剪贴板（CF_HDROP 格式，0.26.9）—— 打标外壳。
+///
+/// 写回按**复制语义**：不继承剪切标记或移动意图，不预检路径存在性；
+/// 历史路径已失效时仍可复制，目标应用决定如何处理。
+/// 成功后记录路径组合指纹（join 指纹，标记错位时防迟到事件重复入库）。
+#[cfg(target_os = "windows")]
+pub fn write_file_list_to_clipboard(
+    paths: &[String],
+    label: &str,
+    skip_persist: bool,
+) -> Result<(), String> {
+    let fingerprint_input = paths.join("\n");
+    let result = with_self_write_mark(label, skip_persist, || {
+        windows::write_file_list_raw(paths)
+    });
+    if result.is_ok() {
+        record_self_text_fingerprint(
+            windows::fx_hash(&fingerprint_input),
+            label,
+            skip_persist,
+        );
     }
     result
 }

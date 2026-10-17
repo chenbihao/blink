@@ -231,6 +231,31 @@ fn open_suggestion(
     }
 }
 
+/// 0.26.10：剪贴板历史条目显式派生的打开类候选（右键「智能操作」只读查询）。
+///
+/// 输入由领域查询服务按 `{kind, id}` 查库取得（文本用完整原文、文件用类型化
+/// 单路径），列表摘要/预览选区/当前系统剪贴板/query 都不能替代条目内容。
+///
+/// **豁免与拦截**：item 是用户显式指向——豁免 autosuggest/context 展示开关、
+/// context binding、fatigue、双槽数量与 query 路由竞争（不进入 Coordinator，
+/// 此处只产候选不参与展示管线）；`disabled_builtin_actions` 仍拦。
+/// 判定器自带长度上限（`is_url` 2048 / `is_file_path` 32767）先排除不可能
+/// 命中的长文本——不截断后把前缀误当完整 URL/路径。
+///
+/// 本函数纯字符串/类型派生，不查 DB、文件系统或能力运行状态。
+pub fn item_open_candidates(
+    content: &str,
+    action_disabled: &dyn Fn(&str) -> bool,
+) -> Vec<Suggestion> {
+    open_target_candidates(
+        content,
+        Some(SuggestionOrigin::ClipboardItem),
+        action_disabled,
+        // 显式询问不受环境 binding 约束（同 query 派生语义）
+        &|_: &str| false,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

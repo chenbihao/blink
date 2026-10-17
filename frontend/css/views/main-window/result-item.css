@@ -339,3 +339,23 @@ body.alt-active #results li .item-badge {
     vertical-align: middle;
     line-height: 1;
 }
+
+/* 0.26.9：剪贴板文件条目图标位——36px 圆角块与图片缩略图（.clip-thumb）同位，
+   内嵌 20px Lucide file-text（currentColor 跟随主题，零主题适配）。
+   列表不读文件内容、不查文件状态/图标——搜索/监听路径零文件 I/O。 */
+.app-icon.clip-file-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    border-radius: var(--radius-md);
+    background: var(--surface-2);
+    flex-shrink: 0;
+}
+
+.app-icon.clip-file-icon .icon {
+    width: 20px;
+    height: 20px;
+    color: var(--accent);
+}

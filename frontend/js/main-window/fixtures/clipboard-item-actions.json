@@ -1,0 +1,9 @@
+[
+  {
+    "kind": "openUrl",
+    "capabilityId": "open_url",
+    "args": {"url": "https://example.com/page"},
+    "target": "https://example.com/page",
+    "actionKey": "open-url-clipboard:t1"
+  }
+]

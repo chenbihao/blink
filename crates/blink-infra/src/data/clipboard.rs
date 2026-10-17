@@ -85,6 +85,13 @@ pub struct ClipboardConfig {
     /// 图片最大保留条数（0.16.4）。独立于文本 max_items。
     #[serde(default = "default_max_image_items")]
     pub max_image_items: u32,
+    /// 是否采集剪贴板文件路径（0.26.9）。false 时跳过 CF_HDROP 采集，
+    /// 不删除已有历史，也不禁用已有条目的复制/预览。
+    #[serde(default = "default_true")]
+    pub capture_files: bool,
+    /// 文件条目最大保留条数（0.26.9）。合法范围 [1, 10000]。
+    #[serde(default = "default_max_file_items")]
+    pub max_file_items: u32,
     /// 搜索候选池上限（0.19.15：性能可配置化）。
     ///
     /// 搜索时拉近 N 天的元数据做 fuzzy 匹配，N 由 `retention_days` 控制，
@@ -234,6 +241,9 @@ fn default_max_image_items() -> u32 {
     // 不跟文本 max_items 放大到万级（磁盘考量），但 200 太快耗尽。
     super::clipboard_images::DEFAULT_MAX_IMAGE_ITEMS
 }
+fn default_max_file_items() -> u32 {
+    super::clipboard_files::DEFAULT_MAX_FILE_ITEMS
+}
 
 impl Default for ClipboardConfig {
     fn default() -> Self {
@@ -248,6 +258,8 @@ impl Default for ClipboardConfig {
             capture_images: true,
             max_image_items: default_max_image_items(),
             candidate_limit: 500,
+            capture_files: true,
+            max_file_items: default_max_file_items(),
         }
     }
 }

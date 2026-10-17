@@ -16,17 +16,20 @@ export function refFromLi(li) {
 export function refsOfKind(refs, kind) { return refs.filter(ref => ref.kind === kind); }
 
 // 类型声明顺序也是菜单的固定类型顺序；未知类型不会落入文本执行路径。
+// 0.26.9：file 条目支持复制路径文本（copy_paths，多选合并）与删除；
+// 不提供 paste/edit/sticky/pin——文件内容不回贴、不上屏。
 const TYPE_OPERATIONS = Object.assign(Object.create(null), {
     text: ['copy', 'paste', 'edit', 'sticky', 'delete'],
     image: ['pin', 'delete'],
+    file: ['copy_paths', 'delete'],
 });
 export function selectionActions(refs) {
     const actions = [];
-    for (const id of ['copy', 'paste', 'edit', 'sticky', 'pin']) {
+    for (const id of ['copy', 'copy_paths', 'paste', 'edit', 'sticky', 'pin']) {
         const targets = refs.filter(ref => TYPE_OPERATIONS[ref.kind]?.includes(id));
         if (targets.length) actions.push({id, refs: targets, count: targets.length,
             shortcut: targets.length === refs.length
-                ? ({copy: 'Ctrl+C', paste: 'Enter', edit: 'Alt+E', sticky: 'Alt+S'}[id] || '') : ''});
+                ? ({copy: 'Ctrl+C', copy_paths: 'Ctrl+C', paste: 'Enter', edit: 'Alt+E', sticky: 'Alt+S'}[id] || '') : ''});
     }
     const deletable = refs.filter(ref => TYPE_OPERATIONS[ref.kind]?.includes('delete'));
     if (deletable.length) {

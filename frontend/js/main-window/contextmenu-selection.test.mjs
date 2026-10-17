@@ -136,8 +136,9 @@ test('单项文本/图片复制标注 Ctrl+C 并保留类型引用，普通搜�
     ]) {
         const h = await setup([ref]);
         const menu = h.open([action]);
-        assert.equal(menu[0].shortcut, 'Ctrl+C');
-        h.events.get('action')({payload: {actionId: 0, menuId: menu[0].menuId}});
+        const copyIndex = menu.findIndex(item => item.label === 'menu.copy');
+        assert.equal(menu[copyIndex].shortcut, 'Ctrl+C');
+        h.events.get('action')({payload: {actionId: copyIndex, menuId: menu[copyIndex].menuId, generation: menu[copyIndex].generation}});
         assert.deepEqual(JSON.parse(JSON.stringify(h.calls[0].data.clipboardRef)), ref);
         h.clipboardMode.isActive = () => false;
         assert.equal(h.open([action])[0].shortcut, undefined, '普通搜索中 Ctrl+C 仍用于输入框原生复制');
@@ -175,16 +176,18 @@ const imageActions = [{kind: 'run', runId: 'copy_clipboard_image', hint: 'menu.c
 const choose = (h, menu, label) => {
     const index = menu.findIndex(item => item.label === label);
     assert.ok(index >= 0, 'menu contains ' + label);
-    h.events.get('action')({payload: {actionId: index, menuId: menu[index].menuId}});
+    h.events.get('action')({payload: {actionId: index, menuId: menu[index].menuId, generation: menu[index].generation}});
 };
 
 test('文本预览复用单项菜单，选区只覆盖复制且不接管列表多选', async () => {
     const copied = [];
     const h = await setup([{kind: 'text', id: 'other'}, imageRef], {copyToClipboard: async text => copied.push(text)});
     const menu = h.openPreview(textRef, textActions, '所选片段\n');
+    // 0.26.10：预览右键按所属单项处理——顶部注入「正在识别操作」智能组占位
     assert.deepEqual(menu.filter(item => !item.separator).map(item => item.label),
-        ['menu.copySelection', 'menu.edit', 'menu.sticky', 'menu.delete']);
-    assert.equal(menu[0].shortcut, 'Ctrl+C');
+        ['menu.smart_loading', 'menu.copySelection', 'menu.edit', 'menu.sticky', 'menu.delete']);
+    assert.equal(menu[0].disabled, true, 'loading 项不可点击');
+    assert.equal(menu.find(item => item.label === 'menu.copySelection').shortcut, 'Ctrl+C');
     assert.equal(h.prepared.length, 0, 'preview does not mutate the list selection');
     h.holds[0].selectedText = 'changed selection';
     choose(h, menu, 'menu.copySelection');

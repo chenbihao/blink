@@ -11,6 +11,7 @@
 
 <script type="module">
     import {invoke, listen} from "./js/shared/tauri.js";
+    import {ensureSpriteLoaded, renderIcon} from "./js/shared/icon.js";
 
     /** 应用主题（后端已 resolve auto → light/dark，此处只设属性）。 */
     function applyTheme(theme) {
@@ -21,6 +22,7 @@
     /** 渲染菜单项（复用窗口时可反复调用）。 */
     function renderMenu(items) {
         displayedMenuId = items.find(item => item.menuId)?.menuId || '';
+        displayedGeneration = items.find(item => typeof item.generation === 'number')?.generation ?? null;
         const menuEl = document.getElementById('menu');
         menuEl.innerHTML = '';
         const fragment = document.createDocumentFragment();
@@ -32,7 +34,12 @@
                 return;
             }
             const row = document.createElement('div');
-            row.className = 'context-menu-item' + (item.danger ? ' danger' : '');
+            row.className = 'context-menu-item' + (item.danger ? ' danger' : '')
+                + (item.disabled ? ' disabled' : '');
+            // 0.26.10：智能操作项带 Lucide 图标（与 SuggestionBar 同图标集）
+            if (item.icon) {
+                try { row.appendChild(renderIcon(item.icon)); } catch { /* sprite 未就绪时退化为纯文本 */ }
+            }
             // 0.18.4：chord 项有 shortcut 字段时，拆成 label + shortcut 两个 span 渲染
             // 0.20.3：颜色项 shortcut 同行显示，用 has-subtext 标记等宽小号样式
             if (item.shortcut) {
@@ -52,10 +59,14 @@
                 row.textContent = item.label;
             }
             row.addEventListener('mousedown', () => {
+                if (item.disabled) return;
                 isClickingItem = true;
             });
             row.addEventListener('click', () => {
-                if (invoke) invoke('context_menu_action', {actionId: index, menuId: item.menuId});
+                if (item.disabled) return;
+                // 0.26.10：generation 随点击回传，旧内容上的点击由后端按代次拒绝
+                if (invoke) invoke('context_menu_action', {actionId: index, menuId: item.menuId,
+                    generation: typeof item.generation === 'number' ? item.generation : null});
                 isClickingItem = false;
             });
             fragment.appendChild(row);
@@ -71,6 +82,10 @@
 
     let isClickingItem = false;
     let displayedMenuId = '';
+    let displayedGeneration = null;
+
+    // Lucide sprite 按需注入（智能操作图标）；失败不阻塞菜单渲染
+    ensureSpriteLoaded?.().catch?.(() => {});
 
     // ── 初始渲染（从 URL 参数，首次创建窗口时）──
     const params = new URLSearchParams(window.location.search);

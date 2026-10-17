@@ -163,6 +163,7 @@ function placePanel() {
 export function bindClipboardPreview(li, ref) {
     if (ref?.kind === "text") bindPreview(li, {loadText: () => invoke("get_clipboard_text", {id: ref.id})});
     else if (ref?.kind === "image") bindPreview(li, {imageId: ref.id});
+    else if (ref?.kind === "file") bindPreview(li, {fileEntryId: ref.id});
 }
 
 /** Errors reuse the bounded, scrollable preview without any additional IPC. */
@@ -170,7 +171,7 @@ export function bindErrorPreview(li, text) {
     bindPreview(li, {loadText: () => text, isError: true});
 }
 
-function bindPreview(li, {loadText, isError = false, imageId}) {
+function bindPreview(li, {loadText, isError = false, imageId, fileEntryId}) {
     const leaveTrigger = () => {
         if (pendingAnchor === li) cancelShow();
         if (anchor !== li) return;
@@ -207,7 +208,7 @@ function bindPreview(li, {loadText, isError = false, imageId}) {
             anchorHovered = true;
             const token = revision;
             const view = ensurePanel();
-            view.textContent = t(imageId ? "clipboard.preview_image_loading" : "clipboard.preview_loading");
+            view.textContent = t(imageId || fileEntryId ? "clipboard.preview_image_loading" : "clipboard.preview_loading");
             view.scrollTop = 0;
             view.classList.remove("hidden");
             li.setAttribute("aria-describedby", view.id);
@@ -232,6 +233,46 @@ function bindPreview(li, {loadText, isError = false, imageId}) {
                 image.src = "http://blink-clipimg.localhost/preview/" + encodeURIComponent(imageId);
                 return;
             }
+            if (fileEntryId) {
+                // 0.26.9：文件条目——查库取路径列表；单路径尝试 /file-preview 图片，
+                // 失败/多文件回落为路径列表文本（多文件不逐个读取文件）。
+                try {
+                    const entry = await invoke("get_clipboard_file_entry", {id: fileEntryId});
+                    if (token !== revision || anchor !== li || !li.isConnected) return;
+                    const paths = Array.isArray(entry?.paths) ? entry.paths.filter(p => typeof p === "string") : null;
+                    if (!paths || !paths.length) {
+                        view.textContent = t("clipboard.preview_missing");
+                        placePanel();
+                        return;
+                    }
+                    if (paths.length === 1) {
+                        const image = document.createElement("img");
+                        previewImage = image;
+                        image.className = "clipboard-preview-image";
+                        image.alt = paths[0];
+                        image.decoding = "async";
+                        image.onload = () => {
+                            if (token !== revision || anchor !== li || !li.isConnected) return;
+                            view.classList.add("is-image-preview");
+                            view.replaceChildren(image);
+                            placePanel();
+                        };
+                        image.onerror = () => {
+                            if (token !== revision || anchor !== li || !li.isConnected) return;
+                            showFileFallback(view, paths, fileEntryId, token, li);
+                        };
+                        image.src = "http://blink-clipimg.localhost/file-preview/" + encodeURIComponent(fileEntryId);
+                        return;
+                    }
+                    view.textContent = paths.join("\n");
+                    placePanel();
+                } catch {
+                    if (token !== revision || anchor !== li || !li.isConnected) return;
+                    view.textContent = t("clipboard.preview_missing");
+                    placePanel();
+                }
+                return;
+            }
             try {
                 const text = await loadText();
                 if (token !== revision || anchor !== li || !li.isConnected) return;
@@ -251,4 +292,19 @@ function bindPreview(li, {loadText, isError = false, imageId}) {
     li.addEventListener("pointerdown", hideClipboardPreview);
     li.addEventListener("wheel", hideClipboardPreview);
     li.addEventListener("pointerleave", leaveTrigger);
+}
+
+/** 0.26.9：单文件图片预览失败的回落——取原因码分类提示 + 路径列表。 */
+async function showFileFallback(view, paths, entryId, token, li) {
+    view.classList.remove("is-image-preview");
+    let reason = "preview_unavailable";
+    try {
+        reason = await invoke("get_clipboard_file_preview_status", {id: entryId}) || reason;
+    } catch { /* 保留通用提示 */ }
+    if (token !== revision || anchor !== li || !li.isConnected) return;
+    const hint = t(`clipboard.file_preview_${reason}`);
+    // 未知原因码回落通用文案（i18n 缺 key 时 t 返回 key 本身，检测前缀）
+    const hintText = hint.startsWith("clipboard.") ? t("clipboard.file_preview_preview_unavailable") : hint;
+    view.textContent = paths.join("\n") + "\n\n" + hintText;
+    placePanel();
 }

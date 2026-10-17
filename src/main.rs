@@ -109,12 +109,58 @@ fn main() {
             });
         })
         // 自定义协议：http://blink-clipimg.localhost/<image-id>（0.16.4）——
-        // 列表缩略图；/preview/<id> 为停留后按需生成的有界大预览 PNG。
+        // 列表缩略图；/preview/<id> 为停留后按需生成的有界大预览 PNG；
+        // /file-preview/<条目id>（0.26.9）为文件条目单路径本地 PNG 的有界预览。
         .register_asynchronous_uri_scheme_protocol("blink-clipimg", |_ctx, request, responder| {
             let raw = request.uri().path().trim_start_matches('/').to_string();
             let preview = raw.starts_with("preview/");
-            let image_id = percent_decode(raw.strip_prefix("preview/").unwrap_or(&raw));
+            let file_preview = raw.starts_with("file-preview/");
+            let image_id = percent_decode(
+                raw.strip_prefix("file-preview/")
+                    .or_else(|| raw.strip_prefix("preview/"))
+                    .unwrap_or(&raw),
+            );
             tauri::async_runtime::spawn(async move {
+                // 文件条目预览：按 id 查 clipboard_files 并确认恰好单路径；
+                // 受限路径/非图片/繁忙/超时统一 404——前端 img onerror 后调
+                // get_clipboard_file_preview_status 取原因分类展示。
+                if file_preview {
+                    let pool = FILE_PREVIEW_POOL
+                        .get()
+                        .map(|p| p.clone());
+                    let outcome = match pool {
+                        Some(pool) => {
+                            crate::infra::data::clipboard_files::get_file_preview_png_by_id(
+                                &pool, &image_id,
+                            )
+                            .await
+                        }
+                        None => Err(
+                            crate::infra::data::clipboard_files::FilePreviewError::EntryMissing,
+                        ),
+                    };
+                    let response = match outcome {
+                        Ok(bytes) => tauri::http::Response::builder()
+                            .status(200)
+                            .header("Content-Type", "image/png")
+                            .header("Cache-Control", "no-store")
+                            .body(bytes)
+                            .unwrap(),
+                        Err(error) => {
+                            tracing::debug!(
+                                id = %image_id,
+                                reason = error.reason(),
+                                "blink-clipimg: 文件预览不可用"
+                            );
+                            tauri::http::Response::builder()
+                                .status(404)
+                                .body(Vec::new())
+                                .unwrap()
+                        }
+                    };
+                    responder.respond(response);
+                    return;
+                }
                 let thumb = if preview {
                     crate::infra::data::clipboard_images::get_preview_by_id_global(&image_id).await
                 } else {
@@ -314,6 +360,8 @@ fn main() {
 
             // 0.16.4：注册全局 cache pool（blink-clipimg 协议懒加载缩略图用）
             infra::data::clipboard_images::set_pool(pools.cache.clone());
+            // 0.26.9：注册全局 history pool（blink-clipimg /file-preview/<id> 用）
+            let _ = FILE_PREVIEW_POOL.set(pools.history.clone());
 
             // 初始化配置（配置库）
             let config_start = std::time::Instant::now();
@@ -1593,6 +1641,12 @@ app::commands::search_clipboard_history,
             app::commands::manage_clipboard_entries,
             app::commands::delete_clipboard_image,
             app::commands::clear_clipboard_history,
+            // 0.26.9 剪贴板文件条目
+            app::commands::get_clipboard_file_entry,
+            app::commands::get_clipboard_file_preview_status,
+            // 0.26.10 右键智能操作
+            app::commands::get_clipboard_item_actions,
+            app::commands::report_clipboard_item_action,
             app::commands::clear_clipboard_images,
             // 0.17.8: AI 权限记忆管理
             app::commands::clear_all_permission_memory,
@@ -1873,6 +1927,10 @@ fn open_about(app: &tauri::AppHandle) {
 
 /// 最小 percent-decode：还原前端 `encodeURIComponent` 编码的图标路径。
 /// 仅处理 `%XX`，非法序列原样保留。
+/// 0.26.9：blink-clipimg `/file-preview/<id>` 用的全局 history pool
+/// （clipboard_files 表所在库；setup 阶段注册）。
+static FILE_PREVIEW_POOL: std::sync::OnceLock<sqlx::SqlitePool> = std::sync::OnceLock::new();
+
 fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());

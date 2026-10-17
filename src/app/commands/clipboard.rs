@@ -359,6 +359,8 @@ pub async fn clear_clipboard_images(app: tauri::AppHandle) -> Result<(), String>
 pub async fn clear_clipboard_history(app: tauri::AppHandle) -> Result<(), String> {
     let pool = &app.state::<crate::infra::data::DbPools>().history;
     crate::infra::data::clipboard::clear_all(pool).await;
+    // 0.26.9：文件路径历史同属用户历史，随清空入口一并清（只删历史，不碰原文件）
+    crate::infra::data::clipboard_files::clear_all_files(pool).await;
     let _ = crate::infra::data::compact(pool).await; // VACUUM + WAL checkpoint 回收空间
     Ok(())
 }
@@ -369,16 +371,107 @@ pub async fn get_clipboard_stats(app: tauri::AppHandle) -> serde_json::Value {
     let pools = app.state::<crate::infra::data::DbPools>();
     let text_stats = crate::infra::data::clipboard::get_stats(&pools.history).await;
     let image_stats = crate::infra::data::clipboard_images::get_image_stats(&pools.cache).await;
-    // 合并文本和图片统计
+    let file_stats = crate::infra::data::clipboard_files::get_file_stats(&pools.history).await;
+    // 合并文本/图片/文件统计
     let mut stats = text_stats;
-    if let serde_json::Value::Object(ref mut map) = stats
-        && let serde_json::Value::Object(img_map) = image_stats
-    {
-        for (k, v) in img_map {
-            map.insert(k, v);
+    for merged in [image_stats, file_stats] {
+        if let serde_json::Value::Object(ref mut map) = stats
+            && let serde_json::Value::Object(src) = merged
+        {
+            for (k, v) in src {
+                map.insert(k, v);
+            }
         }
     }
     stats
+}
+
+/// 0.26.9：按 id 拉取文件条目的完整路径列表（悬浮预览展示用）。
+///
+/// 纯查库轻量入口；单路径条目的图片内容走 `blink-clipimg` 的
+/// `/file-preview/<id>` 协议，不在此返回文件内容。
+#[tauri::command]
+pub async fn get_clipboard_file_entry(
+    app: tauri::AppHandle,
+    id: String,
+) -> Result<Option<serde_json::Value>, String> {
+    let pool = &app.state::<crate::infra::data::DbPools>().history;
+    let item = crate::infra::data::clipboard_files::get_paths_by_id(pool, &id).await;
+    Ok(item.map(|item| {
+        serde_json::json!({
+            "id": item.id,
+            "paths": item.paths,
+            "file_count": item.paths.len(),
+        })
+    }))
+}
+
+/// 0.26.9：探测文件条目内容读取状态（前端 img 加载失败后取原因分类展示）。
+///
+/// 只查库 + 属性探测（不读内容、不解码）；探测走有界文件 I/O 通道，
+/// 忙时返回 `busy`。原因码与 `FilePreviewError::reason` 对齐。
+#[tauri::command]
+pub async fn get_clipboard_file_preview_status(
+    app: tauri::AppHandle,
+    id: String,
+) -> Result<String, String> {
+    let pool = &app.state::<crate::infra::data::DbPools>().history;
+    Ok(crate::infra::data::clipboard_files::probe_file_entry_status(pool, &id).await.to_string())
+}
+
+/// 0.26.10：按条目引用派生右键「智能操作」（只读查询，打开类 Kind 白名单）。
+///
+/// 输入类型化条目引用，后端查库取完整原文/单文件原始路径派生；不存在条目/
+/// 无适用操作返回空组。数据库故障返回结构化错误（不拿当前剪贴板兜底）。
+/// 执行仍复用 `run_builtin_action`（点击时 Registry 门禁重检）。
+#[tauri::command]
+pub async fn get_clipboard_item_actions(
+    app: tauri::AppHandle,
+    entry: ClipboardEntryRef,
+) -> Result<Vec<crate::domain::clipboard::item_actions::ClipboardItemAction>, CommandError> {
+    let pools = app.state::<crate::infra::data::DbPools>();
+    let registry = app
+        .state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>()
+        .inner()
+        .clone();
+    // 与建议侧/result 侧共享同源禁用列表（设置页保存热生效）
+    let disabled: Vec<String> = app
+        .try_state::<std::sync::Arc<crate::domain::search::SearchService>>()
+        .and_then(|service| service.disabled_builtin_actions_snapshot())
+        .unwrap_or_default();
+    let actions = crate::domain::clipboard::item_actions::clipboard_item_actions(
+        pools.inner(),
+        &registry,
+        &entry,
+        &disabled,
+    )
+    .await
+    .map_err(|detail| CommandError::new("database_error", detail, true))?;
+    tracing::debug!(
+        kind = ?entry.kind,
+        count = actions.len(),
+        "get_clipboard_item_actions: 派生完成"
+    );
+    Ok(actions)
+}
+
+/// 0.26.10：右键智能操作的采纳遥测（独立于双槽 impression/fatigue）。
+///
+/// 只记录 Kind/动作 id/结果，不记录完整 URL、路径、原文、条目 id 或文件名。
+#[tauri::command]
+pub fn report_clipboard_item_action(
+    kind: String,
+    capability_id: String,
+    outcome: String,
+) -> Result<(), String> {
+    tracing::info!(
+        origin = "ClipboardItem",
+        kind = %kind,
+        capability_id = %capability_id,
+        outcome = %outcome,
+        "clipboard item action adopted"
+    );
+    Ok(())
 }
 
 /// 0.16.4：将剪贴板图片写回系统剪贴板。
@@ -399,7 +492,12 @@ pub async fn copy_clipboard_image(app: tauri::AppHandle, image_id: String) -> Re
         .await
         .map_err(|e| e.to_string())?;
 
-    tracing::info!(id = %image_id, bytes = bytes_len, "剪贴板图片已写回系统剪贴板");
+    // HistoryRepost 跳过监听器重新采集以保留原始来源；成功后显式更新历史顺序。
+    let promoted = crate::infra::data::clipboard_images::promote_image(&pools.cache, &image_id)
+        .await
+        .map_err(|e| format!("图片已复制，但历史置顶失败: {e}"))?;
+
+    tracing::info!(id = %image_id, bytes = bytes_len, promoted, "剪贴板图片已写回系统剪贴板");
     Ok(())
 }
 

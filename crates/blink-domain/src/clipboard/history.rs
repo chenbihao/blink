@@ -7,6 +7,8 @@ use std::collections::HashSet;
 pub enum ClipboardEntryKind {
     Text,
     Image,
+    /// 文件路径条目（0.26.9）：路径列表存 `clipboard_files`，内容不入库。
+    File,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -41,7 +43,9 @@ pub fn validate_entries(entries: Vec<ClipboardEntryRef>) -> Result<Vec<Clipboard
     Ok(unique)
 }
 
-/// 两个独立用户数据库分别提交事务，跨库失败显式返回，不能报告整体回滚。
+/// 各独立用户数据库分别提交事务，跨库失败显式返回，不能报告整体回滚。
+///
+/// 0.26.9：文件条目（`clipboard_files`）与文本同在 history 库，但独立表独立事务。
 pub async fn delete_entries(
     pools: &blink_infra::data::DbPools,
     entries: Vec<ClipboardEntryRef>,
@@ -56,6 +60,11 @@ pub async fn delete_entries(
         .filter(|r| r.kind == ClipboardEntryKind::Image)
         .map(|r| r.id.as_str())
         .collect();
+    let files: Vec<&str> = entries
+        .iter()
+        .filter(|r| r.kind == ClipboardEntryKind::File)
+        .map(|r| r.id.as_str())
+        .collect();
     let text_error = blink_infra::data::clipboard::delete_items_by_ids(&pools.history, &texts)
         .await
         .err()
@@ -65,12 +74,17 @@ pub async fn delete_entries(
             .await
             .err()
             .map(|e| e.to_string());
+    let file_error = blink_infra::data::clipboard_files::delete_files_by_ids(&pools.history, &files)
+        .await
+        .err()
+        .map(|e| e.to_string());
     entries
         .into_iter()
         .map(|entry| {
             let error = match entry.kind {
                 ClipboardEntryKind::Text => text_error.clone(),
                 ClipboardEntryKind::Image => image_error.clone(),
+                ClipboardEntryKind::File => file_error.clone(),
             };
             ClipboardEntryOutcome {
                 entry,
@@ -134,6 +148,10 @@ mod tests {
             )
             .is_err()
         );
+        // 0.26.9：file 变体的 wire 形态（snake_case）
+        let file: ClipboardEntryRef =
+            serde_json::from_value(serde_json::json!({"kind":"file","id":"clipfile_1"})).unwrap();
+        assert_eq!(file.kind, ClipboardEntryKind::File);
         assert!(validate_entries(vec![]).is_err());
     }
 

@@ -10,7 +10,7 @@ export function createClipboardConfigWriter({onError}) {
         save(control) {
             const field = control.dataset.field;
             let value;
-            if (field === "search_enabled") value = control.checked;
+            if (field === "search_enabled" || field === "capture_files") value = control.checked;
             else if (field === "blacklist_keywords") value = control.value.split(",").map(s => s.trim()).filter(Boolean);
             else {
                 value = Number(control.value);

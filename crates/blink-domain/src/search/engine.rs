@@ -297,27 +297,45 @@ impl SearchItem {
             SearchAction::RunAction { id, arg } => {
                 // 0.16.4：剪贴板图片项的 run_id = "copy_clipboard_image"，
                 // arg = image_id。前端据此渲染缩略图。
+                // 0.26.9：剪贴板文件项的 run_id = "copy_clipboard_files"，arg = 条目 id。
                 let is_image = id == "copy_clipboard_image";
-                let lnk_path = if is_image {
+                let is_clip_file = id == "copy_clipboard_files";
+                let action_target = if is_image {
+                    // 图片项 arg 是裸 image_id 字符串
                     arg.as_ref()
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_default()
+                } else if is_clip_file {
+                    // 文件项 arg 是 Capability 形态 {id}
+                    arg.as_ref()
+                        .and_then(|v| v.get("id"))
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string())
                         .unwrap_or_default()
                 } else {
                     String::new() // Run 不使用 lnk_path
                 };
+                let clipboard_ref = if is_image && self.source == "clipboard" {
+                    Some(crate::clipboard::history::ClipboardEntryRef {
+                        kind: crate::clipboard::history::ClipboardEntryKind::Image,
+                        id: action_target.clone(),
+                    })
+                } else if is_clip_file && self.source == "clipboard" {
+                    Some(crate::clipboard::history::ClipboardEntryRef {
+                        kind: crate::clipboard::history::ClipboardEntryKind::File,
+                        id: action_target.clone(),
+                    })
+                } else {
+                    None
+                };
                 AppEntry {
                     name: self.title,
                     pinyin_name: String::new(),
                     pinyin_full: String::new(),
                     description: self.subtitle,
-                    clipboard_ref: (is_image && self.source == "clipboard").then(|| {
-                        crate::clipboard::history::ClipboardEntryRef {
-                            kind: crate::clipboard::history::ClipboardEntryKind::Image,
-                            id: lnk_path.clone(),
-                        }
-                    }),
-                    lnk_path,
+                    clipboard_ref,
+                    lnk_path: action_target,
                     is_calc: false,
                     score,
                     is_placeholder: false,

@@ -83,9 +83,13 @@ Hover over the **left third** of a text or image entry for about 350ms: text pre
 
 The preview aligns with both edges of the result row and loads content on demand. A 150ms delay after leaving lets you cross other entries and move into it to keep reading. Dragging a text selection outside the preview keeps it open until release, when the exit delay begins. Clicking or dragging an entry, scrolling the list, paging, or hiding the window dismisses it.
 
-Right-click inside the preview to use that entry’s single-item menu: copy, edit, pin as a sticky note, or delete for text; copy, pin, edit image, or delete for images. With text selected, Copy becomes “Copy selected text”; other actions still apply to the whole entry. Existing list selections do not expand the preview menu’s scope. The preview stays open while its menu is open, then resumes the 150ms exit delay. `Esc` closes the menu first.
+File entries use the same left-third hover preview: a single local PNG file shows the image directly; multi-file entries only list the stored paths (one per line, files are not read one by one); restricted sources such as network paths and cloud placeholders are saved as paths without reading content, and the preview explains why. File content is read live each time — no snapshot caching.
 
-Open with: `Alt+C` in the main window (or type `剪贴板` / `clip`). Text and images you copy are recorded in the background.
+Right-click inside the preview to use that entry’s single-item menu: copy, edit, pin as a sticky note, or delete for text; copy, pin, edit image, or delete for images; copy path list, save as image entry, or delete for files. With text selected, Copy becomes “Copy selected text”; other actions still apply to the whole entry. Existing list selections do not expand the preview menu’s scope. The preview stays open while its menu is open, then resumes the 150ms exit delay. `Esc` closes the menu first.
+
+Right-clicking a **single text or file entry** in clipboard mode inserts a “Detecting actions…” placeholder at the top of the menu, which is then updated in place with open-style actions: a full single URL → Open URL; a full absolute path or a single-file entry → Open path + Reveal in Explorer (all applicable items in that fixed order; folders included). Detection uses the entry’s **full content** — never the list summary or the current clipboard; plain text, multi-file entries, and images produce no such actions. A failed detection shows a non-clickable notice while copy/edit/delete stay available. Clicking runs the open-style capability (a stale target reports a clear error and never falls back to another target); right-click asking works even with suggestion bars disabled — except for actions you have disabled.
+
+Open with: `Alt+C` in the main window (or type `剪贴板` / `clip`). Text, images, and copied file paths are recorded in the background (files copied in Explorer are saved as path lists — **file content is never stored**; when image and file formats coexist, the entry is recorded as an image).
 
 | Operation | Trigger | Notes |
 |---|---|---|
@@ -96,6 +100,8 @@ Open with: `Alt+C` in the main window (or type `剪贴板` / `clip`). Text and i
 | Edit entry | `Alt+E` or right-click "Edit" | Opens the content editor; saving creates a new history entry |
 | Delete entry | `Alt+D`, the context menu's delete options, or bare `Delete` (with empty input) | Shortcuts delete the selection, or the highlighted entry if none; the context menu lets you choose the scope |
 | Image entry menu | Right-click an image item | Pin to desktop, or open the image editor directly (without overwriting the clipboard) |
+| File entry | `Enter` / double-click / `Alt+number` / single-select `Ctrl+C` | Writes the whole path list back to the clipboard as files; press `Ctrl+V` in the target app to paste. Replays use **copy semantics**; expired paths still copy |
+| File entry menu | Right-click a file item | "Copy path list" (original paths, one per line, as text); "Save as image entry" for a single local PNG (the original file entry is kept) |
 | Frequency weighting | On every paste / copy | The entry rises in the list — the more you use it, the easier to find |
 
 ### Multi-select and batch operations (build the habit)
@@ -107,7 +113,7 @@ Open with: `Alt+C` in the main window (or type `剪贴板` / `clip`). Text and i
 | Select all | `Ctrl+A` (with empty input) | Selects all currently loaded history entries, including images |
 | Batch copy / paste | `Ctrl+C` / `Enter` with text selected | Joins in selection order with newlines; saves the combination as one new history entry |
 | Merge & edit / note | `Alt+E` / `Alt+S` with text selected | Merge editing keeps the originals; note creation produces one note |
-| Actions by type | Right-click a selected entry in a mixed selection | Text copy / paste / edit / note come before image pinning; deletion always follows "Text only → Images only → All selected", regardless of selection order |
+| Actions by type | Right-click a selected entry in a mixed selection | Text copy / paste / edit / note come before "Copy selected file paths", then image pinning; deletion always follows "Text only → Images only → Files only → All selected", regardless of selection order |
 | Batch pin images | Select images, then right-click "Pin" | Opens images sequentially with offset positions, up to 16 per operation; a failed image does not stop the rest |
 | Batch delete | `Alt+D` / `Delete` with empty input | Deletes the selection, or the highlighted history entry if nothing is selected; failed entries stay selected with feedback |
 | Right-click selection | Right-click a selected / unselected entry | Keeps the selected group / selects that entry alone; blank space keeps the selection |
@@ -118,6 +124,8 @@ Open with: `Alt+C` in the main window (or type `剪贴板` / `clip`). Text and i
 - Multi-selection survives paging and list refreshes; it resets automatically when the window hides, so it never lingers by mistake.
 - With mixed selections, `Ctrl+C` / `Enter` / `Alt+E` / `Alt+S` ask you to choose a type from the context menu to avoid silently dropping images; a single image can still be copied.
 - Combination entries created by batch copy / paste **keep only the latest one per combination**, auto-pinned to top; repeated use never piles up.
+- `Ctrl+C` on a files-only selection merges the paths as text (in selection order, deduplicated); mixed selections containing files offer no cross-type paste — copy by type from the context menu. File entries appear only on the "All" tab.
+- File-path capture and its limit are configurable under "Settings → Chord → Clipboard history"; deleting a file entry removes only the history record and **never touches the original files on disk**.
 
 ---
 

@@ -24,3 +24,15 @@
 
 /* views */
 @import '../views/contextmenu.css';
+
+/* 0.26.10：智能操作 loading / 失败态——不可触发任何动作 */
+.context-menu-item.disabled {
+    opacity: 0.55;
+    cursor: default;
+    pointer-events: auto;
+}
+
+/* 禁用态不响应 hover 高亮（loading/失败/智能组识别中不可触发） */
+.context-menu-item.disabled:hover {
+    background: transparent;
+}

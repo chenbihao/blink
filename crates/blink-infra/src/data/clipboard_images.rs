@@ -11,6 +11,7 @@ use std::sync::OnceLock;
 
 mod preview;
 pub use preview::get_preview_by_id_global;
+pub(crate) use preview::try_acquire_image_decode_slot;
 
 /// 全局 cache pool（供 blink-clipimg 协议懒加载缩略图用，与 icon 模块同模式）。
 static POOL: OnceLock<SqlitePool> = OnceLock::new();
@@ -148,6 +149,20 @@ pub async fn save_image(pool: &SqlitePool, item: &ClipboardImage) -> Result<(), 
 
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// 历史图片复制成功后置顶：保留内容/来源，只更新复制时间和同秒排序身份。
+/// 与重复采集的“删旧留新”顺序一致，但不重新解码、写入 BLOB 或覆盖原始来源。
+/// 新 id 使同一秒内再次复制也排在该秒的新图片前面；旧引用由列表重查失效。
+pub async fn promote_image(pool: &SqlitePool, id: &str) -> Result<bool, String> {
+    let result = sqlx::query("UPDATE clipboard_images SET id = ?1, created_at = ?2 WHERE id = ?3")
+        .bind(generate_image_id())
+        .bind(chrono::Utc::now().timestamp())
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(result.rows_affected() > 0)
 }
 
 /// 查询最近的剪贴板图片条目（不含 BLOB，只元数据 + 缩略图）。
@@ -438,6 +453,56 @@ mod tests {
             source_app: source_app.map(|s| s.to_string()),
             source_path: None,
         }
+    }
+
+    #[tokio::test]
+    async fn history_image_copy_promotes_without_losing_content_or_source() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        init_db(&pool).await.unwrap();
+        let now = chrono::Utc::now().timestamp();
+        let mut original = img("clipimg_0", now - 60, Some("mspaint.exe"));
+        original.source_path = Some("original.png".into());
+        save_image(&pool, &original).await.unwrap();
+        save_image(&pool, &img("clipimg_1", now, Some("newer.exe")))
+            .await
+            .unwrap();
+
+        assert!(promote_image(&pool, &original.id).await.unwrap());
+        let images = query_recent_images(&pool, 10).await;
+        assert_eq!(images.len(), 2, "复制不增加历史条数");
+        let promoted = &images[0];
+        assert_eq!(promoted.source_app.as_deref(), Some("mspaint.exe"));
+        assert_eq!(promoted.source_path, original.source_path);
+        assert_eq!(promoted.thumb_blob, original.thumb_blob);
+        assert_eq!(
+            (promoted.width, promoted.height),
+            (original.width as i64, original.height as i64)
+        );
+        assert_eq!(
+            get_png_by_id(&pool, &promoted.id).await.unwrap(),
+            original.png_blob
+        );
+        let sha: String = sqlx::query_scalar("SELECT sha256 FROM clipboard_images WHERE id = ?1")
+            .bind(&promoted.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(sha, original.sha256);
+
+        // 不靠睡眠跨秒：每次复制也更新同秒 tie-break，重复复制仍只保留一项。
+        let previous_id = promoted.id.clone();
+        assert!(promote_image(&pool, "clipimg_1").await.unwrap());
+        let intervening = query_recent_image_list(&pool, 10).await;
+        assert_eq!(intervening[0].source_app.as_deref(), Some("newer.exe"));
+        assert!(promote_image(&pool, &previous_id).await.unwrap());
+        let repeated = query_recent_image_list(&pool, 10).await;
+        assert_eq!(repeated.len(), 2);
+        assert!(repeated[0].id > previous_id);
+        assert_eq!(repeated[0].source_app.as_deref(), Some("mspaint.exe"));
+        assert!(
+            !promote_image(&pool, "deleted").await.unwrap(),
+            "已删历史不重新创建"
+        );
     }
 
     /// 0.25.29：keyset 游标分页不重不漏 + LIKE 场景的游标下推。

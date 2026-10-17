@@ -287,6 +287,15 @@ impl SearchService {
         tracing::debug!(count = guard.len(), "内置动作 disable 列表已热更新");
     }
 
+    /// 0.26.10：禁用列表只读快照（`get_clipboard_item_actions` 派生过滤用，
+    /// 与建议侧/result 侧同源，设置页保存热生效）。
+    pub fn disabled_builtin_actions_snapshot(&self) -> Option<Vec<String>> {
+        self.disabled_builtin_actions
+            .read()
+            .ok()
+            .map(|guard| guard.clone())
+    }
+
     /// 更新 Suggestion 运行时配置（0.8.1 §2.5 建立，0.24.2 扩展 secondary 门槛）。
     /// 启动时读一次 SuggestionConfig 注入；设置页开关/滑块调整时命令层调此方法。
     /// 写共享 cell——`KeywordProducer` 侧同步生效。

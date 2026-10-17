@@ -1,7 +1,8 @@
 //! 独立右键菜单窗口 commands。
 
 use super::*;
-static ACTIVE_MENU_ID: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+/// 会话与内容代次原子更新；旧协议 None 也必须与当前 None 严格匹配。
+static ACTIVE_MENU: std::sync::Mutex<Option<(String, Option<u64>)>> = std::sync::Mutex::new(None);
 
 /// 显示右键菜单独立窗口（突破主窗口边界裁剪）。
 /// 复用已有窗口：首次创建，后续 hide → 更新数据 → show，避免重复创建 WebView2 的开销。
@@ -22,7 +23,26 @@ pub async fn show_context_menu(
         .and_then(|items| items.iter().find_map(|item| item.get("menuId")?.as_str()))
         .map(str::to_owned)
         .ok_or("右键菜单缺少会话标识")?;
-    *ACTIVE_MENU_ID.lock().map_err(|e| e.to_string())? = Some(menu_id.clone());
+    // 0.26.10：内容代次由前端管理（同 menuId 更新时递增）；后端只存取与校验
+    let generation = serde_json::from_str::<serde_json::Value>(&items)
+        .ok()
+        .and_then(|value| {
+            value.as_array().and_then(|items| {
+                items
+                    .iter()
+                    .find_map(|item| item.get("generation")?.as_u64())
+            })
+        });
+    {
+        let mut active = ACTIVE_MENU.lock().map_err(|e| e.to_string())?;
+        if let Some((id, previous)) = active.as_ref()
+            && id == &menu_id
+            && generation < *previous
+        {
+            return Ok(());
+        }
+        *active = Some((menu_id.clone(), generation));
+    }
     // 主题 resolve（auto → dark/light）
     let theme = {
         let pool = &app.state::<crate::infra::data::DbPools>().config;
@@ -43,7 +63,9 @@ pub async fn show_context_menu(
         }
     };
 
-    if ACTIVE_MENU_ID.lock().map_err(|e| e.to_string())?.as_deref() != Some(menu_id.as_str()) {
+    if ACTIVE_MENU.lock().map_err(|e| e.to_string())?.as_ref()
+        != Some(&(menu_id.clone(), generation))
+    {
         return Ok(());
     }
     // 多屏感知定位：Win32 直接拿光标物理坐标 + 目标屏 DPI 缩放 + 智能翻转
@@ -161,20 +183,21 @@ pub async fn hide_context_menu(
     app: tauri::AppHandle,
     menu_id: Option<String>,
 ) -> Result<(), String> {
-    hide_context_menu_window(&app, menu_id.as_deref(), true)
+    hide_context_menu_window(&app, menu_id.as_deref(), None, true).map(|_| ())
 }
 
 fn hide_context_menu_window(
     app: &tauri::AppHandle,
     menu_id: Option<&str>,
+    expected_generation: Option<Option<u64>>,
     notify_dismissal: bool,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let closed_menu_id = {
-        let mut active = ACTIVE_MENU_ID.lock().map_err(|e| e.to_string())?;
-        if menu_id.is_some_and(|id| active.as_deref() != Some(id)) {
-            return Ok(());
+        let mut active = ACTIVE_MENU.lock().map_err(|e| e.to_string())?;
+        if !matches_menu(active.as_ref(), menu_id, expected_generation) {
+            return Ok(false);
         }
-        active.take()
+        active.take().map(|(id, _)| id)
     };
     if let Some(win) = app.get_webview_window("context-menu") {
         // DWM Cloak 先行：瞬间消失无 fade 动画，避免截图时拍到右键窗口残影
@@ -196,7 +219,16 @@ fn hide_context_menu_window(
         )
         .map_err(|e| e.to_string())?;
     }
-    Ok(())
+    Ok(true)
+}
+
+fn matches_menu(
+    active: Option<&(String, Option<u64>)>,
+    menu_id: Option<&str>,
+    generation: Option<Option<u64>>,
+) -> bool {
+    menu_id.is_none_or(|id| active.is_some_and(|(current, _)| current == id))
+        && generation.is_none_or(|expected| active.is_some_and(|(_, current)| *current == expected))
 }
 
 /// Popup 窗口菜单项被点击 → 通知主窗口执行动作。
@@ -212,13 +244,13 @@ pub async fn context_menu_action(
     app: tauri::AppHandle,
     action_id: u32,
     menu_id: String,
+    generation: Option<u64>,
 ) -> Result<(), String> {
-    if ACTIVE_MENU_ID.lock().map_err(|e| e.to_string())?.as_deref() != Some(menu_id.as_str()) {
-        tracing::debug!("丢弃已失效的右键菜单回调");
+    // 校验与消费同一锁内完成；None 不能绕过已有代次。
+    if !hide_context_menu_window(&app, Some(&menu_id), Some(generation), false)? {
+        tracing::debug!("丢弃已失效或旧代次的右键菜单回调");
         return Ok(());
     }
-    // 1. 先隐藏 Popup 窗口，让主窗口有机会重回前台
-    hide_context_menu_window(&app, Some(&menu_id), false)?;
     // 2. 显式把主窗口置为前台并聚焦，保证 clipboard/execCommand 可用
     if let Some(main) = app.get_webview_window("main") {
         let _ = main.show();
@@ -227,8 +259,30 @@ pub async fn context_menu_action(
     // 3. 最后再通知前端执行动作
     app.emit(
         EventNames::CONTEXT_MENU_ACTION,
-        serde_json::json!({"actionId":action_id,"menuId":menu_id}),
+        serde_json::json!({"actionId":action_id,"menuId":menu_id,"generation":generation}),
     )
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::matches_menu;
+
+    #[test]
+    fn menu_click_requires_exact_session_and_generation() {
+        let active = ("menu".to_string(), Some(1));
+        assert!(matches_menu(Some(&active), Some("menu"), Some(Some(1))));
+        for generation in [None, Some(0), Some(2)] {
+            assert!(!matches_menu(Some(&active), Some("menu"), Some(generation)));
+        }
+        assert!(!matches_menu(Some(&active), Some("other"), Some(Some(1))));
+        assert!(!matches_menu(None, Some("menu"), Some(Some(1))));
+        let legacy = ("menu".to_string(), None);
+        assert!(matches_menu(Some(&legacy), Some("menu"), Some(None)));
+        assert!(
+            matches_menu(Some(&active), Some("menu"), None),
+            "取消只按会话匹配"
+        );
+    }
 }

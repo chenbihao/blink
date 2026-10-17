@@ -12,12 +12,19 @@ use tauri_plugin_dialog::DialogExt;
 pub async fn get_storage_info(app: tauri::AppHandle) -> serde_json::Value {
     let pools = app.state::<crate::infra::data::DbPools>();
 
-    // 历史库：history + clipboard_history 行数
+    // 历史库：history + clipboard_history + clipboard_files 行数
     let history_count = crate::infra::data::history::count(&pools.history).await;
     let clipboard_stats = crate::infra::data::clipboard::get_stats(&pools.history).await;
     let clipboard_count = clipboard_stats
         .get("total")
         .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    // 0.26.9：文件路径历史统计（条数 + 序列化载荷）
+    let clipboard_file_stats =
+        crate::infra::data::clipboard_files::get_file_stats(&pools.history).await;
+    let clipboard_file_count = clipboard_file_stats["file_count"].as_i64().unwrap_or(0);
+    let clipboard_file_payload_bytes = clipboard_file_stats["file_payload_bytes"]
+        .as_i64()
         .unwrap_or(0);
 
     // AI 库：ai_tool_audit 行数 + conversations/messages 行数
@@ -80,6 +87,8 @@ pub async fn get_storage_info(app: tauri::AppHandle) -> serde_json::Value {
                 "path": data_dir.join("blink_history.db").display().to_string(),
                 "history_count": history_count,
                 "clipboard_count": clipboard_count,
+                "clipboard_file_count": clipboard_file_count,
+                "clipboard_file_payload_bytes": clipboard_file_payload_bytes,
             },
             "ai": {
                 "name": "AI 库",

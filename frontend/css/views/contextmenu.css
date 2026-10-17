@@ -40,6 +40,14 @@ html, body {
     white-space: pre;
 }
 
+/* 0.26.10：智能操作项的 Lucide 图标——与 label 同行，accent 色跟主题 */
+.context-menu-item .icon {
+    width: 15px;
+    height: 15px;
+    flex-shrink: 0;
+    color: var(--accent);
+}
+
 .context-menu-item:hover {
     background: var(--surface);
 }

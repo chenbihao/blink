@@ -33,6 +33,10 @@ use blink_infra::data::clipboard::{
     query_recent_days_meta, query_recent_days_meta_after, query_recent_meta,
     query_recent_meta_after,
 };
+use blink_infra::data::clipboard_files::{
+    ClipboardFileMeta, ClipboardFileSearchRow, query_file_search_candidates,
+    query_recent_file_list, query_recent_file_list_after,
+};
 use blink_infra::data::clipboard_images::{
     ClipboardImageListItem, query_recent_image_list, query_recent_image_list_after,
     search_image_list, search_image_list_after,
@@ -64,8 +68,8 @@ const CANDIDATE_LIMIT_MAX: usize = 5000;
 /// 剪贴板模式类型筛选（0.25.23）。
 ///
 /// 文本与图片分表存储（`clipboard_history` / `clipboard_images`），筛选天然
-/// 下推为「跳过另一张表的查询」，无需按行过滤。文件/音频待采集支持后再加
-/// 变体（当前监听只收 CF_UNICODETEXT / CF_DIB）。
+/// 下推为「跳过另一张表的查询」，无需按行过滤。0.26.9 文件条目只在 All 混排
+/// 展示（`clipboard_files` 表），Text/Image 页签排除文件，本版不新增 Files 页签。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClipKind {
     All,
@@ -196,13 +200,13 @@ impl ClipboardEngine {
         let lang = self.language.read().unwrap().clone();
         let t0 = std::time::Instant::now();
 
-        // 并行查询文本元数据 + 图片元数据（两个不同的 SQLite pool，无竞争）。
-        // 不加载 text / thumb_blob——前端通过 get_clipboard_text / blink-clipimg 协议按需懒加载。
-        let (text_metas, image_items) = if arg.is_empty() {
-            // 最近历史场景：两条简单 LIMIT 查询并行（不含 text 列）
-            let t_text = std::time::Instant::now();
-            let t_img = std::time::Instant::now();
-            let (text, images) = tokio::join!(
+        // 并行查询文本 + 图片 + 文件元数据（pool 间无竞争；文件与文本同池但
+        // SQLite 串行排队即可，查询轻量）。不加载 text / thumb_blob / 全量路径数组——
+        // 前端通过 get_clipboard_text / blink-clipimg 协议按需懒加载。
+        // 0.26.9：文件条目（clipboard_files，history 库）只在 All 混排。
+        let (text_metas, image_items, file_metas) = if arg.is_empty() {
+            // 最近历史场景：三条简单 LIMIT 查询并行（不含 text 列）
+            let (text, images, files) = tokio::join!(
                 async {
                     if kind == ClipKind::Image {
                         Vec::new()
@@ -225,19 +229,31 @@ impl ClipboardEngine {
                             None => query_recent_image_list(&self.cache_pool, probe as i64).await,
                         }
                     }
+                },
+                async {
+                    if kind != ClipKind::All {
+                        Vec::new()
+                    } else {
+                        match &cursor {
+                            Some(c) => {
+                                query_recent_file_list_after(&self.pool, c, probe as i64).await
+                            }
+                            None => query_recent_file_list(&self.pool, probe as i64).await,
+                        }
+                    }
                 }
             );
             tracing::trace!(
                 text_count = text.len(),
                 image_count = images.len(),
-                text_ms = t_text.elapsed().as_millis() as u64,
-                image_ms = t_img.elapsed().as_millis() as u64,
+                file_count = files.len(),
                 elapsed_ms = t0.elapsed().as_millis() as u64,
                 "ClipboardEngine: 空查询 DB 并行完成"
             );
-            (text, images)
+            (text, images, files)
         } else {
-            // 搜索场景：文本 fuzzy（游标下推到候选池 SQL）+ 图片 SQL LIKE 并行
+            // 搜索场景：文本 fuzzy（游标下推到候选池 SQL）+ 图片 SQL LIKE +
+            // 文件有界候选窗口按各路径 fuzzy（不以 LIKE 丢弃非连续命中）并行
             let text_query = async {
                 match &cursor {
                     Some(c) => {
@@ -263,7 +279,7 @@ impl ClipboardEngine {
                     }
                 }
             };
-            let (text_metas, image_items) = tokio::join!(
+            let (text_metas, image_items, file_rows) = tokio::join!(
                 async {
                     if kind == ClipKind::Image {
                         Vec::new()
@@ -283,16 +299,31 @@ impl ClipboardEngine {
                             None => search_image_list(&self.cache_pool, arg, probe as i64).await,
                         }
                     }
+                },
+                async {
+                    if kind != ClipKind::All {
+                        Vec::new()
+                    } else {
+                        query_file_search_candidates(
+                            &self.pool,
+                            cursor.as_ref(),
+                            candidate_limit,
+                            retention_days,
+                        )
+                        .await
+                    }
                 }
             );
             // nucleo fuzzy match on preview（不含 text）；多拉 1 条探测 has_more
             let text_matched = fuzzy_match_metas(&text_metas, arg, probe);
-            (text_matched, image_items)
+            // 文件：候选数有界，匹配后取 probe，逐条解析即弃完整路径数组
+            let file_matched = fuzzy_match_files(file_rows, arg, probe);
+            (text_matched, image_items, file_matched)
         };
 
         let t1 = std::time::Instant::now();
 
-        // 合并文本 + 图片，按 (created_at, id 字符串) 倒序——与两表 SQL 的
+        // 合并文本 + 图片 + 文件，按 (created_at, id 字符串) 倒序——与各表 SQL 的
         // ORDER BY created_at DESC, id DESC 逐字对齐（keyset 不重不漏的前提）。
         let mut combined: Vec<(i64, String, ClipboardEntry)> = Vec::new();
         for meta in text_metas {
@@ -304,6 +335,9 @@ impl ClipboardEngine {
                 item.id.clone(),
                 ClipboardEntry::Image(item),
             ));
+        }
+        for meta in file_metas {
+            combined.push((meta.created_at, meta.id.clone(), ClipboardEntry::File(meta)));
         }
         combined.sort_by_key(|(created_at, id, _)| std::cmp::Reverse((*created_at, id.clone())));
 
@@ -346,6 +380,7 @@ impl ClipboardEngine {
                     to_search_item(meta, i, &lang, prefix)
                 }
                 ClipboardEntry::Image(meta) => to_image_search_item(meta, i, &lang),
+                ClipboardEntry::File(meta) => to_file_search_item(meta, i, &lang),
             })
             .collect();
         tracing::trace!(
@@ -442,10 +477,86 @@ fn to_search_item(
     }
 }
 
-/// 文本/图片条目的统一容器（合并排序用）。
+/// 文本/图片/文件条目的统一容器（合并排序用）。
 enum ClipboardEntry {
     Text(ClipboardMeta),
     Image(ClipboardImageListItem),
+    File(ClipboardFileMeta),
+}
+
+/// ClipboardFileMeta → SearchItem（0.26.9）。
+///
+/// - `title`：单文件用文件名；多文件「首文件名 +N」（数量语义与语言无关）
+/// - `subtitle` 「N 分钟前 · M 个文件 · 悬浮查看」（zh/en）
+/// - `action` = `RunAction { id: "copy_clipboard_files", arg: 条目id }`
+///   前端识别后走 `run_builtin_action` 写回 CF_HDROP（Capability 绑定条目引用，
+///   不接受 UI 任意路径列表）
+/// - `source` = "clipboard"（前端白名单已含）
+fn to_file_search_item(meta: ClipboardFileMeta, index: usize, lang: &str) -> SearchItem {
+    let title = if meta.file_count > 1 {
+        format!("{} +{}", meta.first_name, meta.file_count - 1)
+    } else {
+        meta.first_name.clone()
+    };
+    let subtitle = format_file_subtitle(&meta, lang);
+    let score = (0.9 - index as f32 * 0.02).max(0.5);
+
+    SearchItem {
+        id: format!("clipboard:{}", meta.id),
+        title,
+        subtitle: Some(subtitle),
+        score,
+        action: SearchAction::RunAction {
+            id: "copy_clipboard_files".into(),
+            // 参数为 Capability schema 最终形态（{id}）；前端通用 run 分支直接
+            // 走 run_builtin_action 写回 CF_HDROP
+            arg: Some(serde_json::json!({ "id": meta.id })),
+        },
+        source: "clipboard".into(),
+        score_detail: Some(format!("clipfile=0.9-{:.2}", index as f32 * 0.02)),
+        context_aware: false,
+        color_list_hex: None,
+    }
+}
+
+/// 文件条目副行「时间 · N 个文件 · 悬浮查看」（0.26.9）。
+fn format_file_subtitle(meta: &ClipboardFileMeta, lang: &str) -> String {
+    let now = chrono::Utc::now().timestamp();
+    let elapsed = (now - meta.created_at).max(0);
+    let is_zh = lang == "zh";
+    let time_desc = if elapsed < 60 {
+        if is_zh {
+            "刚刚".to_string()
+        } else {
+            "just now".to_string()
+        }
+    } else if elapsed < 3600 {
+        let n = elapsed / 60;
+        if is_zh {
+            format!("{n} 分钟前")
+        } else {
+            format!("{n} min ago")
+        }
+    } else if elapsed < 86400 {
+        let n = elapsed / 3600;
+        if is_zh {
+            format!("{n} 小时前")
+        } else {
+            format!("{n} h ago")
+        }
+    } else {
+        let n = elapsed / 86400;
+        if is_zh {
+            format!("{n} 天前")
+        } else {
+            format!("{n} d ago")
+        }
+    };
+    if is_zh {
+        format!("{} · {} 个文件 · 悬浮查看", time_desc, meta.file_count)
+    } else {
+        format!("{} · {} files · hover to view", time_desc, meta.file_count)
+    }
 }
 
 /// ClipboardImageListItem → SearchItem（0.16.4）。
@@ -561,8 +672,15 @@ fn format_image_subtitle(meta: &ClipboardImageListItem, lang: &str) -> String {
     // P3-#27 fix: zh/en 分支格式完全一样，消除死代码 if
     // 入库统一转 PNG（png_blob），后缀展示真实存储格式。图片预览提示常显（缩略图
     // 之外永远有更多可看）；文本侧由前端在标题溢出时才追加提示（0.26.8）。
-    let hint = if is_zh { "左侧悬浮查看图片" } else { "hover left for image" };
-    format!("{time_desc} · {}x{} · PNG · {hint}", meta.width, meta.height)
+    let hint = if is_zh {
+        "左侧悬浮查看图片"
+    } else {
+        "hover left for image"
+    };
+    format!(
+        "{time_desc} · {}x{} · PNG · {hint}",
+        meta.width, meta.height
+    )
 }
 
 /// 生成单行预览：换行符转为可见标记 ⏎（U+23CE），其余控制字符替换为空格，
@@ -685,6 +803,52 @@ fn fuzzy_match_metas(metas: &[ClipboardMeta], query: &str, limit: usize) -> Vec<
             .cmp(&a.created_at)
             .then_with(|| b.id.cmp(&a.id))
     });
+    matched.into_iter().take(limit).collect()
+}
+
+/// 文件候选按各路径做 fuzzy 匹配。
+///
+/// 候选窗口有界（`candidate_limit`）；此处逐条解析 `paths_json`、对每条
+/// 完整路径（含文件名）匹配，任一命中即保留，解析后即弃不常驻。
+/// 输入行已按时间倒序，take `limit` 即可。
+fn fuzzy_match_files(
+    rows: Vec<ClipboardFileSearchRow>,
+    query: &str,
+    limit: usize,
+) -> Vec<ClipboardFileMeta> {
+    use nucleo::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
+    use nucleo::{Config, Matcher, Utf32Str};
+
+    let query_lower = query.to_ascii_lowercase();
+    let mut matcher = Matcher::new(Config::DEFAULT);
+    let pattern = Pattern::new(
+        &query_lower,
+        CaseMatching::Smart,
+        Normalization::Smart,
+        AtomKind::Fuzzy,
+    );
+    let mut buf = Vec::new();
+
+    let matched: Vec<ClipboardFileMeta> = rows
+        .into_iter()
+        .filter_map(|row| {
+            let paths: Vec<String> = serde_json::from_str(&row.paths_json).ok()?;
+            let hit = paths.iter().any(|path| {
+                let haystack = Utf32Str::new(path, &mut buf);
+                pattern.score(haystack, &mut matcher).is_some()
+            });
+            if !hit {
+                return None;
+            }
+            Some(ClipboardFileMeta {
+                id: row.id,
+                file_count: row.file_count,
+                first_name: row.first_name,
+                created_at: row.created_at,
+                source_app: row.source_app,
+            })
+        })
+        .collect();
     matched.into_iter().take(limit).collect()
 }
 
@@ -811,7 +975,9 @@ mod tests {
             source_path: None,
         };
         assert!(format_image_subtitle(&meta, "zh").ends_with("800x600 · PNG · 左侧悬浮查看图片"));
-        assert!(format_image_subtitle(&meta, "en").ends_with("800x600 · PNG · hover left for image"));
+        assert!(
+            format_image_subtitle(&meta, "en").ends_with("800x600 · PNG · hover left for image")
+        );
     }
 
     #[test]
@@ -1080,6 +1246,94 @@ mod tests {
         }
 
         ClipboardEngine::new(text_pool, cache_pool)
+    }
+
+    /// 0.26.9：文件条目的 action 是 Capability 形态 `{id}`（前端通用 run 分支
+    /// 直接走 run_builtin_action），不能是裸字符串。
+    #[test]
+    fn to_file_search_item_uses_capability_arg_shape() {
+        let meta = ClipboardFileMeta {
+            id: "clipfile_1".into(),
+            file_count: 2,
+            first_name: "a.txt".into(),
+            created_at: chrono::Utc::now().timestamp(),
+            source_app: None,
+        };
+        let si = to_file_search_item(meta, 0, "zh");
+        assert!(matches!(
+            &si.action,
+            SearchAction::RunAction { id, arg: Some(serde_json::Value::Object(map)) }
+                if id == "copy_clipboard_files" && map.get("id").and_then(|v| v.as_str()) == Some("clipfile_1")
+        ));
+        assert_eq!(si.title, "a.txt +1", "多文件标题为首文件名 +N");
+    }
+
+    #[tokio::test]
+    async fn file_search_fuzzy_candidates_survive_nonmatching_rows_and_pagination() {
+        let engine = engine_with_mixed_data().await;
+        blink_infra::data::clipboard_files::init_db(&engine.pool)
+            .await
+            .unwrap();
+        let now = chrono::Utc::now().timestamp();
+        for (id, paths, at) in [
+            ("match-a", vec![r"C:\docs\foo_bar.txt".to_string()], now - 2),
+            (
+                "match-b",
+                vec![
+                    r"C:\first.txt".to_string(),
+                    r"C:\docs\feature_build_test.txt".to_string(),
+                ],
+                now - 3,
+            ),
+        ] {
+            blink_infra::data::clipboard_files::save_file(
+                &engine.pool,
+                &blink_infra::data::clipboard_files::ClipboardFileItem {
+                    id: id.into(),
+                    paths,
+                    created_at: at,
+                    source_app: None,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        // 命中条目位于单批 probe 之外，仍应从 candidate_limit 窗口找回。
+        for i in 0..12 {
+            blink_infra::data::clipboard_files::save_file(
+                &engine.pool,
+                &blink_infra::data::clipboard_files::ClipboardFileItem {
+                    id: format!("noise-{i}"),
+                    paths: vec![format!(r"C:\noise\item-{i}.png")],
+                    created_at: now + i,
+                    source_app: None,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let page = engine.search_page("fbt", ClipKind::All, None, 1).await;
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].id, "clipboard:match-a");
+        assert!(page.has_more);
+        let next = engine
+            .search_page("fbt", ClipKind::All, page.next_cursor, 1)
+            .await;
+        assert_eq!(next.items.len(), 1);
+        assert_eq!(next.items[0].id, "clipboard:match-b");
+        assert!(!next.has_more);
+        let path = engine
+            .search_page(r"C:\docs\foo_bar.txt", ClipKind::All, None, 2)
+            .await;
+        assert_eq!(path.items.len(), 1, "Windows 路径不受 JSON 反斜杠转义影响");
+        assert_eq!(path.items[0].id, "clipboard:match-a");
+        assert!(
+            engine
+                .search_page("fbt", ClipKind::Text, None, 2)
+                .await
+                .items
+                .is_empty()
+        );
     }
 
     fn is_image_item(item: &SearchItem) -> bool {

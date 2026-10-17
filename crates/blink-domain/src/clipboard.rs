@@ -5,6 +5,7 @@
 
 use sqlx::SqlitePool;
 pub mod history;
+pub mod item_actions;
 
 /// 剪贴板读取结果。图片优先，未读到图片时再读取文本。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +56,8 @@ pub enum ClipboardError {
     Platform { detail: String },
     #[error("图片不存在: {id}")]
     ImageNotFound { id: String },
+    #[error("剪贴板条目不存在: {id}")]
+    EntryNotFound { id: String },
     #[error("像素尺寸溢出: {width}x{height}x4")]
     PixelSizeOverflow { width: u32, height: u32 },
     #[error("像素长度不匹配: {actual} vs {expected} ({width}x{height}x4)")]
@@ -157,6 +160,26 @@ pub async fn write_bgra(
             label,
             skip_persist,
         )
+    })
+    .await
+    .map_err(task_error)?
+    .map_err(platform_error)
+}
+
+/// 写文件路径列表到系统剪贴板（CF_HDROP，0.26.9）。
+///
+/// **复制语义**：不继承剪切标记，不预检路径存在性；不发送粘贴键、不自动打开。
+/// 历史条目写回用 `HistoryRepost`（监听器跳过重复入库）。
+pub async fn write_file_list(
+    paths: Vec<String>,
+    source: ClipboardWriteSource,
+) -> Result<(), ClipboardError> {
+    if paths.is_empty() {
+        return Err(platform_error("文件列表为空".into()));
+    }
+    let (label, skip_persist) = source.marker();
+    tokio::task::spawn_blocking(move || {
+        blink_infra::platform::clipboard::write_file_list_to_clipboard(&paths, label, skip_persist)
     })
     .await
     .map_err(task_error)?

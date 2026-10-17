@@ -666,7 +666,7 @@ function setGlobalModeRadio(id, value) {
  * （max_items 10000 / max_image_items 1000 / retention_days 180）。
  */
 function renderClipboardDetail(cfg) {
-    cfg = cfg || {max_items: 10000, max_image_items: 1000, retention_days: 180, search_enabled: true, blacklist_keywords: []};
+    cfg = cfg || {max_items: 10000, max_image_items: 1000, max_file_items: 1000, capture_files: true, retention_days: 180, search_enabled: true, blacklist_keywords: []};
     const blacklist = Array.isArray(cfg.blacklist_keywords)
         ? cfg.blacklist_keywords.join(", ")
         : "";
@@ -682,6 +682,21 @@ function renderClipboardDetail(cfg) {
         <span class="field-hint-icon" title="${escapeAttr(t("chord.clipboard.max_image_items.hint"))}">ⓘ</span>
       </label>
       <input type="number" class="clip-field" data-field="max_image_items" min="10" max="10000" value="${cfg.max_image_items ?? 1000}" />
+    </div>
+    <div class="chord-field">
+      <label class="setting-label chord-field-label">${t("chord.clipboard.capture_files.label")}
+        <span class="field-hint-icon" title="${escapeAttr(t("chord.clipboard.capture_files.hint"))}">ⓘ</span>
+      </label>
+      <label class="switch switch-sm">
+        <input type="checkbox" class="clip-field" data-field="capture_files" ${cfg.capture_files !== false ? "checked" : ""} />
+        <span class="slider"></span>
+      </label>
+    </div>
+    <div class="chord-field">
+      <label class="setting-label chord-field-label">${t("chord.clipboard.max_file_items.label")}
+        <span class="field-hint-icon" title="${escapeAttr(t("chord.clipboard.max_file_items.hint"))}">ⓘ</span>
+      </label>
+      <input type="number" class="clip-field" data-field="max_file_items" min="1" max="10000" value="${cfg.max_file_items ?? 1000}" />
     </div>
     <div class="chord-field">
       <label class="setting-label chord-field-label">${t("chord.clipboard.retention_days.label")}
