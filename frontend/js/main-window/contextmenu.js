@@ -18,6 +18,7 @@ import {
     pinClipboardImage,
     resetItemHistory,
     runBuiltinAction,
+    saveClipboardFileAsImage,
     showStickyManager,
     showStickyWindow,
     triggerChord
@@ -678,13 +679,36 @@ function itemMenu(li, {selectedText = ""} = {}) {
         // 文件名只作菜单提示；点击后的后端按 magic 重检，伪装扩展名的 GIF 也拒绝入库。
         // 多文件标题带 +N，不匹配；GIF 不提供转成静态图片历史的入口。
         const fileName = li.querySelector(".item-name")?.textContent || "";
-        if (/\.(png|jpe?g|webp)$/i.test(fileName)) items.push({
-            label: t("menu.saveAsImage"),
-            run: () => {
-                runBuiltinAction("save_clipboard_file_as_image", {id: clipboardRef.id})
-                    .catch(e => showActionError("save_clipboard_file_as_image", e));
-            },
-        });
+        if (/\.(png|jpe?g|webp)$/i.test(fileName)) {
+            items.push({
+                label: t("menu.saveAsImage"),
+                run: () => {
+                    runBuiltinAction("save_clipboard_file_as_image", {id: clipboardRef.id})
+                        .catch(e => showActionError("save_clipboard_file_as_image", e));
+                },
+            });
+            for (const [label, action, open] of [
+                ["menu.saveAsImageAndPin", "pin_clipboard_image", id => pinClipboardImage(id)],
+                ["menu.saveAsImageAndEdit", "open_image_editor_from_history", id => openImageEditorFromHistory(id)],
+            ]) items.push({label: t(label), run: async () => {
+                let imageId;
+                try {
+                    imageId = await saveClipboardFileAsImage(clipboardRef.id);
+                } catch (e) {
+                    showActionError("save_clipboard_file_as_image", e);
+                    return;
+                }
+                try {
+                    await open(imageId);
+                    closeAfterOpen();
+                } catch (e) {
+                    const err = normalizeError(e);
+                    if (action === "open_image_editor_from_history" && err.code === "invalid_state"
+                        && err.detail?.reason === "already_active") closeAfterOpen();
+                    else showActionError(action, {...err, message: t("clipboard.saved_image_action_failed", {message: err.message})});
+                }
+            }});
+        }
     }
 
     if (clipboardRef && selectionActions([clipboardRef]).some(action => action.id === 'delete')) {

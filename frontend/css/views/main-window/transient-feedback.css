@@ -1,9 +1,9 @@
 /* ── TransientFeedback（#transient-feedback，0.24.4 §5.5）─────────────────── */
 /* loading/success/error 瞬态反馈：底部覆盖层，不占布局、不触发窗口 resize。
-   后到的反馈替换先到的（不叠加）。#app overflow:hidden 负责圆角裁切。 */
+   后到的反馈替换先到的（不叠加）。与预览同属 body，避免卡片层叠上下文遮挡。 */
 
 #transient-feedback {
-    position: absolute;
+    position: fixed;
     left: 0;
     right: 0;
     bottom: 0;
@@ -12,6 +12,7 @@
     font-size: var(--text-sm);
     background: var(--surface);
     border-top: 1px solid var(--surface-2);
+    border-radius: 0 0 var(--radius-lg) var(--radius-lg);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;

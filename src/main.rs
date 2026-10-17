@@ -154,6 +154,7 @@ fn main() {
                             );
                             tauri::http::Response::builder()
                                 .status(404)
+                                .header("Cache-Control", "no-store")
                                 .body(Vec::new())
                                 .unwrap()
                         }
@@ -177,6 +178,7 @@ fn main() {
                         tracing::debug!(id = %image_id, preview, "blink-clipimg: 图片不存在或无法预览，返回 404");
                         tauri::http::Response::builder()
                             .status(404)
+                            .header("Cache-Control", "no-store")
                             .body(Vec::new())
                             .unwrap()
                     }
@@ -1643,6 +1645,7 @@ app::commands::search_clipboard_history,
             app::commands::clear_clipboard_history,
             // 0.26.9 剪贴板文件条目
             app::commands::get_clipboard_file_entry,
+            app::commands::save_clipboard_file_image,
             app::commands::get_clipboard_file_preview_status,
             // 0.26.10 右键智能操作
             app::commands::get_clipboard_item_actions,

@@ -62,7 +62,9 @@ test('文件图片入库菜单支持静态格式，GIF 与多文件不提供入�
         ['picture.webp', true], ['animation.gif', false], ['animation.GIF', false],
         ['photo.png +1', false], ['document.pdf', false]]) {
         const menu = h.open([], name);
-        assert.equal(menu.some(item => item.label === 'menu.saveAsImage'), allowed, name);
+        for (const label of ['menu.saveAsImage', 'menu.saveAsImageAndPin', 'menu.saveAsImageAndEdit']) {
+            assert.equal(menu.some(item => item.label === label), allowed, name);
+        }
     }
 });
 
@@ -188,6 +190,60 @@ const choose = (h, menu, label) => {
     assert.ok(index >= 0, 'menu contains ' + label);
     h.events.get('action')({payload: {actionId: index, menuId: menu[index].menuId, generation: menu[index].generation}});
 };
+
+test('文件图片先入库，钉图和编辑使用返回的图片 ID，迟到完成不隐藏新选择', async () => {
+    for (const action of ['Pin', 'Edit']) {
+        const calls = [];
+        let finishSave;
+        const h = await setup([{kind: 'file', id: 'source-file'}], {
+            saveClipboardFileAsImage: id => {calls.push(['save', id]); return new Promise(resolve => {finishSave = resolve;});},
+            pinClipboardImage: async id => calls.push(['Pin', id]),
+            openImageEditorFromHistory: async id => calls.push(['Edit', id]),
+        });
+        choose(h, h.open([], 'photo.JPG'), 'menu.saveAsImageAnd' + action);
+        assert.deepEqual(calls, [['save', 'source-file']]);
+        h.refs = [{kind:'text', id:'new-selection'}];
+        finishSave('committed-image');
+        await new Promise(resolve => setImmediate(resolve));
+        assert.deepEqual(calls, [['save', 'source-file'], [action, 'committed-image']]);
+        assert.equal(h.calls.length, 0, 'new selection stays visible');
+    }
+});
+
+test('文件图片入库失败不接续操作，后续失败明确保留已保存的图片', async () => {
+    for (const saveFails of [true, false]) {
+        const errors = [], opened = [];
+        const h = await setup([{kind:'file', id:'file'}], {
+            saveClipboardFileAsImage: async () => {if (saveFails) throw 'save failed'; return 'saved-image';},
+            pinClipboardImage: async id => {opened.push(id); throw 'pin failed';},
+            normalizeError: e => ({code:'invalid_state', message:e}),
+            showActionError: (action, error) => errors.push([action,error]),
+        });
+        choose(h, h.open([], 'photo.png'), 'menu.saveAsImageAndPin');
+        await new Promise(resolve => setImmediate(resolve));
+        assert.deepEqual(opened, saveFails ? [] : ['saved-image']);
+        assert.equal(errors.length, 1);
+        assert.equal(errors[0][0], saveFails ? 'save_clipboard_file_as_image' : 'pin_clipboard_image');
+        if (!saveFails) assert.equal(errors[0][1].message, 'clipboard.saved_image_action_failed');
+        assert.equal(h.calls.length,0);
+    }
+});
+
+test('文件图片接续成功关闭原主窗，已有编辑器仍沿用激活行为', async () => {
+    for (const action of ['Pin', 'Edit', 'EditBusy']) {
+        const opened = [];
+        const h = await setup([{kind:'file', id:'file'}], {
+            saveClipboardFileAsImage: async () => 'saved-image',
+            pinClipboardImage: async id => opened.push(id),
+            openImageEditorFromHistory: async id => {opened.push(id); if (action === 'EditBusy') throw 'busy';},
+            normalizeError: () => ({code:'invalid_state', detail:{reason:'already_active'}}),
+        });
+        choose(h, h.open([], 'photo.webp'), 'menu.saveAsImageAnd' + (action === 'Pin' ? 'Pin' : 'Edit'));
+        await new Promise(resolve => setImmediate(resolve));
+        assert.deepEqual(opened, ['saved-image']);
+        assert.deepEqual(h.calls.map(call => call.id), ['hide']);
+    }
+});
 
 test('文本预览复用单项菜单，选区只覆盖复制且不接管列表多选', async () => {
     const copied = [];

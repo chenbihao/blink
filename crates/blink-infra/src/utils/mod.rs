@@ -2,6 +2,7 @@
 
 pub mod fs;
 pub mod http_log;
+pub(crate) mod image_metadata;
 pub mod logging;
 pub mod mirrors;
 pub mod paths;

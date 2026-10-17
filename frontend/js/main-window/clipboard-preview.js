@@ -156,13 +156,18 @@ function placePanel() {
     const rect = anchor.getBoundingClientRect();
     const width = Math.max(1, Math.min(rect.width, window.innerWidth - 16));
     panel.style.width = `${width}px`;
-    const maxHeight = Math.max(1, Math.min(260, window.innerHeight - 16));
+    const maxHeight = previewHeight(window.innerHeight, panel.classList.contains("is-image-preview"));
     panel.style.maxHeight = `${maxHeight}px`;
     panel.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - width - 8))}px`;
     const height = panel.getBoundingClientRect().height;
     const below = rect.bottom + 6;
     const top = below + height <= window.innerHeight - 8 ? below : rect.top - height - 6;
     panel.style.top = `${Math.max(8, Math.min(top, window.innerHeight - height - 8))}px`;
+}
+
+/** Image previews use more of the viewport; text keeps its compact scrolling panel. */
+export function previewHeight(viewportHeight, image = false) {
+    return Math.max(1, Math.min(viewportHeight - 16, image ? Math.max(260, Math.round(viewportHeight * 0.75)) : 260));
 }
 
 /** Fetch full text only after hover; stale responses never replace another entry's preview. */
@@ -234,8 +239,8 @@ function bindPreview(li, {loadText, isError = false, imageId, fileEntryId}) {
                     view.textContent = t("clipboard.preview_missing");
                     placePanel();
                 };
-                // 原图直出使用独立缓存版本，避免沿用旧版本一小时内的 1024px 预览。
-                image.src = "http://blink-clipimg.localhost/preview/" + encodeURIComponent(imageId) + "?v=original";
+                // 隔离旧缩小图与旧像素预算拒绝响应的缓存。
+                image.src = "http://blink-clipimg.localhost/preview/" + encodeURIComponent(imageId) + "?v=native";
                 return;
             }
             if (fileEntryId) {
@@ -271,7 +276,7 @@ function bindPreview(li, {loadText, isError = false, imageId, fileEntryId}) {
                             if (token !== revision || anchor !== li || !li.isConnected) return;
                             showFileFallback(view, paths, fileEntryId, token, li);
                         };
-                        image.src = "http://blink-clipimg.localhost/file-preview/" + encodeURIComponent(fileEntryId);
+                        image.src = "http://blink-clipimg.localhost/file-preview/" + encodeURIComponent(fileEntryId) + "?v=native";
                         return;
                     }
                     view.textContent = paths.join("\n");
@@ -308,7 +313,7 @@ function showImage(view, image) {
     view.classList.add("is-image-preview");
     const width = Math.max(1, Math.min(anchor.getBoundingClientRect().width, window.innerWidth - 16) - 26);
     imageViewer = createClipboardImageViewer(image, {
-        width, maxHeight: Math.max(1, Math.min(260, window.innerHeight - 16) - 52),
+        width, maxHeight: Math.max(1, previewHeight(window.innerHeight, true) - 52),
         onDragStart() {draggingImage = true; cancelShow(); cancelHide(); view.focus({preventScroll: true});},
         onDragEnd() {draggingImage = false; if (!panelHovered && !anchorHovered) scheduleHide();},
     });
@@ -325,6 +330,12 @@ async function showFileFallback(view, paths, entryId, token, li) {
         if (reason === "ok") reason = "decode_failed"; // 文件头通过但 WebView 拒绝像素数据。
     } catch { /* 保留通用提示 */ }
     if (token !== revision || anchor !== li || !li.isConnected) return;
+    // 普通文件只展示路径；不把「没有图片预览能力」当作文件错误。
+    if (reason === "not_image") {
+        view.textContent = paths.join("\n");
+        placePanel();
+        return;
+    }
     const hint = t(`clipboard.file_preview_${reason}`);
     // 未知原因码回落通用文案（i18n 缺 key 时 t 返回 key 本身，检测前缀）
     const hintText = hint.startsWith("clipboard.") ? t("clipboard.file_preview_preview_unavailable") : hint;

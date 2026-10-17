@@ -4,8 +4,6 @@ use image::{DynamicImage, ImageDecoder, ImageFormat};
 use std::io::Cursor;
 
 const MAX_ANIMATION_FRAMES: usize = 200;
-const MAX_ANIMATION_BYTES: u64 = 256 * 1024 * 1024;
-const PREVIEW_PIXEL_BUDGET: u64 = 128 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum FileImageFormat {
@@ -57,20 +55,24 @@ fn limits() -> image::Limits {
     limits.max_alloc = Some(DECODE_BUDGET);
     limits
 }
-fn check_pixels(width: u32, height: u32, decoder_bytes: u64) -> Result<(), FilePreviewError> {
-    check_pixel_budget(width, height, decoder_bytes, DECODE_BUDGET)
-}
-fn check_pixel_budget(
+pub(super) fn check_pixels(
     width: u32,
     height: u32,
     decoder_bytes: u64,
-    budget: u64,
 ) -> Result<(), FilePreviewError> {
     let rgba_bytes = u64::from(width)
         .checked_mul(u64::from(height))
         .and_then(|n| n.checked_mul(4))
         .ok_or(FilePreviewError::PixelBudget)?;
-    if width == 0 || height == 0 || rgba_bytes.max(decoder_bytes) > budget {
+    if width == 0 || height == 0 || rgba_bytes.max(decoder_bytes) > DECODE_BUDGET {
+        tracing::debug!(
+            width,
+            height,
+            rgba_bytes,
+            decoder_bytes,
+            max_bytes = DECODE_BUDGET,
+            "图片转存解码预算超限"
+        );
         return Err(FilePreviewError::PixelBudget);
     }
     Ok(())
@@ -91,10 +93,19 @@ pub(super) fn validate(
         let decoder = image_webp::WebPDecoder::new(Cursor::new(bytes))
             .map_err(|e| FilePreviewError::Decode(e.to_string()))?;
         let (width, height) = decoder.dimensions();
-        check_pixel_budget(width, height, 0, PREVIEW_PIXEL_BUDGET)?;
         if decoder.is_animated() {
-            check_animation_budget(width, height, decoder.num_frames() as usize)?;
+            check_animation_frames(decoder.num_frames() as usize)?;
         }
+        return Ok(ValidatedImage {
+            width,
+            height,
+            image: None,
+        });
+    }
+    if preview {
+        let (width, height) =
+            crate::utils::image_metadata::preview_dimensions(bytes, format.image_format())
+                .map_err(decode_error)?;
         return Ok(ValidatedImage {
             width,
             height,
@@ -109,21 +120,9 @@ pub(super) fn validate(
         }
     }
     let mut reader = image::ImageReader::with_format(Cursor::new(bytes), format.image_format());
-    let mut reader_limits = limits();
-    if preview {
-        reader_limits.max_alloc = Some(PREVIEW_PIXEL_BUDGET);
-    }
-    reader.limits(reader_limits);
+    reader.limits(limits());
     let mut decoder = reader.into_decoder().map_err(decode_error)?;
     let (width, height) = decoder.dimensions();
-    if preview {
-        check_pixel_budget(width, height, decoder.total_bytes(), PREVIEW_PIXEL_BUDGET)?;
-        return Ok(ValidatedImage {
-            width,
-            height,
-            image: None,
-        });
-    }
     check_pixels(width, height, decoder.total_bytes())?;
     let orientation = decoder.orientation().map_err(decode_error)?;
     let mut image = DynamicImage::from_decoder(decoder).map_err(decode_error)?;
@@ -136,13 +135,8 @@ pub(super) fn validate(
     })
 }
 
-fn check_animation_budget(width: u32, height: u32, count: usize) -> Result<(), FilePreviewError> {
-    check_pixel_budget(width, height, 0, PREVIEW_PIXEL_BUDGET)?;
-    let bytes = u64::from(width) * u64::from(height) * 4;
-    if count == 0
-        || count > MAX_ANIMATION_FRAMES
-        || bytes.saturating_mul(count as u64) > MAX_ANIMATION_BYTES
-    {
+fn check_animation_frames(count: usize) -> Result<(), FilePreviewError> {
+    if count == 0 || count > MAX_ANIMATION_FRAMES {
         return Err(FilePreviewError::AnimationBudget);
     }
     Ok(())
@@ -156,21 +150,15 @@ fn validate_gif_headers(bytes: &[u8]) -> Result<ValidatedImage, FilePreviewError
         .read_info(Cursor::new(bytes))
         .map_err(|e| FilePreviewError::Decode(e.to_string()))?;
     let (width, height) = (u32::from(decoder.width()), u32::from(decoder.height()));
-    check_pixel_budget(width, height, 0, PREVIEW_PIXEL_BUDGET)?;
     let mut count = 0;
     // next_frame_info 跳过 LZW 像素解码，仍扫描每帧边界/颜色表/数据块。
-    while let Some(frame) = decoder
+    while decoder
         .next_frame_info()
         .map_err(|e| FilePreviewError::Decode(e.to_string()))?
+        .is_some()
     {
         count += 1;
-        check_pixel_budget(
-            u32::from(frame.width),
-            u32::from(frame.height),
-            0,
-            PREVIEW_PIXEL_BUDGET,
-        )?;
-        check_animation_budget(width, height, count)?;
+        check_animation_frames(count)?;
     }
     if count == 0 {
         return Err(FilePreviewError::AnimationBudget);
@@ -236,7 +224,7 @@ mod tests {
             validate(&gif(MAX_ANIMATION_FRAMES + 1), FileImageFormat::Gif, true),
             Err(FilePreviewError::AnimationBudget)
         ));
-        assert!(check_pixels(8192, 2049, 0).is_err());
+        assert!(check_pixels(8192, 8193, 0).is_err());
         assert!(check_pixels(12, 8, DECODE_BUDGET + 1).is_err());
         assert!(check_pixels(u32::MAX, u32::MAX, 0).is_err());
     }
@@ -257,20 +245,15 @@ mod tests {
     }
 
     #[test]
-    fn preview_and_import_have_separate_pixel_budgets() {
-        assert!(check_pixel_budget(2459, 12448, 0, PREVIEW_PIXEL_BUDGET).is_ok());
-        assert!(matches!(
-            check_pixels(2459, 12448, 0),
-            Err(FilePreviewError::PixelBudget)
-        ));
-        assert!(matches!(
-            check_pixel_budget(8192, 4097, 0, PREVIEW_PIXEL_BUDGET),
-            Err(FilePreviewError::PixelBudget)
-        ));
-        assert!(matches!(
-            check_animation_budget(8192, 4096, 3),
-            Err(FilePreviewError::AnimationBudget)
-        ));
+    fn preview_accepts_large_canvas_while_import_keeps_pixel_budget() {
+        assert!(check_pixels(2459, 12448, 0).is_ok());
+        assert!(check_pixels(5437, 8467, 0).is_ok());
+        // A static GIF on a large canvas must not be rejected by estimated RGBA memory.
+        let mut source = gif(1);
+        source[6..8].copy_from_slice(&5437u16.to_le_bytes());
+        source[8..10].copy_from_slice(&8467u16.to_le_bytes());
+        assert!(validate(&source, FileImageFormat::Gif, true).is_ok());
+        assert!(check_animation_frames(0).is_err());
     }
 
     #[test]

@@ -11,9 +11,10 @@
 //!   释放（permit 移入 blocking 闭包），不把超时当底层 I/O 已取消。
 //!
 //! **内容边界**：原文件最多 32MiB（读取用上限+1 再核验，防属性检查后变大）。
-//! 文件预览只检查头部/动画结构，按 RGBA 估算最多 128MiB；返回原始字节，
-//! 由 WebView 解码，不在 Rust 展开像素、缩放或重编码。转存保持 64MiB 解码预算。
-//! GIF 与动态 WebP 只预览，限制帧数/累计像素，不转成静态图片历史。
+//! 文件预览只检查头部/动画结构，不按估算 RGBA 内存拒绝；返回原始字节，
+//! 由 WebView 解码，不在 Rust 展开像素、缩放或重编码。转存单任务执行，
+//! PNG 优先逐行生成小图并保留原字节，其余路径完整解码，上限 256MiB。
+//! GIF 与动态 WebP 只预览，限制帧数，不转成静态图片历史。
 //! 每次读取反映当前文件内容，不按条目 id 永久缓存。
 
 use sqlx::SqlitePool;
@@ -23,16 +24,19 @@ use std::time::Duration;
 use crate::platform::fs_guard::{DenyReason, open_content_file};
 
 mod formats;
+mod png_import;
 use formats::FileImageFormat;
 
 /// 原文件大小上限（32MiB）。
 const MAX_SOURCE_BYTES: u64 = 32 * 1024 * 1024;
-/// 解码分配预算（64MiB）。
-const DECODE_BUDGET: u64 = 64 * 1024 * 1024;
+/// 转存像素/解码分配上限，与编辑器单张 RGBA 预算对齐；不代表进程峰值。
+const DECODE_BUDGET: u64 = 256 * 1024 * 1024;
 /// 等待文件 I/O 结果的上限；超时停止等待（额度随任务结束释放）。
 const IO_WAIT_TIMEOUT: Duration = Duration::from_secs(1);
 /// 文件 I/O 独立通道：最多 2 个实际在途任务，无等待队列。
 static FILE_IO_WORKERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+/// 转存不并行展开多张大图；超时/调用方退出后由实际 blocking 任务释放。
+static IMPORT_WORKER: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
 #[cfg(test)]
 const PNG_MAGIC: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
@@ -52,9 +56,9 @@ pub enum FilePreviewError {
     NotImage,
     /// GIF/动画仅供原格式预览，不可转存为静态 PNG。
     PreviewOnly,
-    /// 预览或转存像素预算超限。
+    /// 转存时的像素预算超限（预览不以此拒绝）。
     PixelBudget,
-    /// 动画帧数或累计像素预算超限。
+    /// 动画帧数超限。
     AnimationBudget,
     /// 文件超过 32MiB 或读取中变大。
     TooLarge,
@@ -174,12 +178,22 @@ async fn read_file_image(
     if !preview && format == FileImageFormat::Gif {
         return Err(FilePreviewError::PreviewOnly);
     }
+    let import_permit = if preview {
+        None
+    } else {
+        Some(
+            IMPORT_WORKER
+                .try_acquire()
+                .map_err(|_| FilePreviewError::Busy)?,
+        )
+    };
 
     // 共享图片解码额度（与 DB 图片预览同池）：try_acquire，繁忙立即放弃缓冲
     let decode_permit = crate::data::clipboard_images::try_acquire_image_decode_slot()
         .ok_or(FilePreviewError::Busy)?;
     let decode_task = tokio::task::spawn_blocking(move || {
         let _hold = decode_permit;
+        let _import_hold = import_permit;
         decode_file_image(bytes, format, preview)
     });
     match decode_task.await {
@@ -250,6 +264,24 @@ fn decode_file_image(
     preview: bool,
 ) -> Result<PreparedFileImage, FilePreviewError> {
     let started = std::time::Instant::now();
+    if !preview && format == FileImageFormat::Png {
+        if let Some((width, height, thumbnail_png)) = png_import::thumbnail(&bytes)? {
+            tracing::debug!(
+                width,
+                height,
+                bytes = bytes.len(),
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "文件 PNG 转存完成（逐行缩略图，保留原字节）"
+            );
+            return Ok(PreparedFileImage {
+                bytes,
+                mime_type: "image/png",
+                width,
+                height,
+                thumbnail_png: Some(thumbnail_png),
+            });
+        }
+    }
     let validated = formats::validate(&bytes, format, preview)?;
     let (width, height) = (validated.width, validated.height);
     if preview {
@@ -271,6 +303,13 @@ fn decode_file_image(
     let decoded = validated.image.ok_or(FilePreviewError::PreviewOnly)?;
     let thumbnail_png = Some(encode_thumbnail_png(&decoded).map_err(FilePreviewError::Decode)?);
     let bytes = encode_full_png(decoded).map_err(FilePreviewError::Decode)?;
+    tracing::debug!(
+        width,
+        height,
+        bytes = bytes.len(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "文件图片转存完成（完整解码）"
+    );
     Ok(PreparedFileImage {
         bytes,
         mime_type: "image/png",
@@ -376,7 +415,8 @@ mod tests {
         );
         assert!(decoded.thumbnail_png.is_none());
         assert_eq!(&decoded.bytes[..8], PNG_MAGIC.as_slice());
-        let imported = decode_file_image(bytes, FileImageFormat::Png, false).unwrap();
+        let imported = decode_file_image(bytes.clone(), FileImageFormat::Png, false).unwrap();
+        assert_eq!(imported.bytes, bytes, "普通 PNG 转存逐字节保留原文件");
         assert_eq!((imported.width, imported.height), (2048, 512));
         let png = image::load_from_memory(&imported.bytes).unwrap();
         assert_eq!(png.to_rgba8().get_pixel(1500, 400).0, [10, 90, 160, 255]);
@@ -526,11 +566,11 @@ mod tests {
             Err(FilePreviewError::PreviewOnly)
         ));
 
-        // 状态查询必须报告实际像素预算，不能只因文件可打开就返回 ok。
-        gif[6..8].copy_from_slice(&u16::MAX.to_le_bytes());
-        gif[8..10].copy_from_slice(&u16::MAX.to_le_bytes());
+        // 常见长图不能因为估算 RGBA 超过 128MiB 就无法预览。
+        gif[6..8].copy_from_slice(&5437u16.to_le_bytes());
+        gif[8..10].copy_from_slice(&8467u16.to_le_bytes());
         std::fs::write(&path, &gif).unwrap();
-        assert_eq!(probe_file_entry_status(&pool, "f1").await, "pixel_budget");
+        assert_eq!(probe_file_entry_status(&pool, "f1").await, "ok");
 
         // 替换为非图片内容 → NotImage（每次读取反映当前文件内容，不缓存）
         std::fs::write(&path, b"plain text bytes").unwrap();

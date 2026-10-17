@@ -8,7 +8,8 @@
 
 use crate::capability::{
     AiDefault, Capability, CapabilityError, CapabilityPolicy, CapabilityResult, CapabilitySchema,
-    ConfirmationPolicy, DangerClass, InvokeContext, McpDefault, OriginSet, RuntimeRequirement,
+    ConfirmationPolicy, DangerClass, InvokeContext, ItemResult, McpDefault, OriginSet,
+    RuntimeRequirement,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -86,10 +87,10 @@ impl Capability for SaveClipboardFileAsImage {
                             "GIF 或动画图片仅支持预览，不能存为图片条目".into()
                         }
                         blink_infra::data::clipboard_files::FilePreviewError::PixelBudget => {
-                            "图片像素数量超过转存上限".into()
+                            "图片展开后超过 256MiB 转存上限".into()
                         }
                         blink_infra::data::clipboard_files::FilePreviewError::AnimationBudget => {
-                            "动画帧数或累计像素超过预览上限".into()
+                            "动画帧数超过预览上限".into()
                         }
                         blink_infra::data::clipboard_files::FilePreviewError::TooLarge => {
                             "文件超过 32MiB 上限".into()
@@ -172,8 +173,15 @@ impl Capability for SaveClipboardFileAsImage {
             h = image.height,
             "文件图片已入库（保留原文件条目）"
         );
-        Ok(CapabilityResult::Done {
-            summary: format!("已存为图片条目（{}x{}）", image.width, image.height),
+        Ok(CapabilityResult::Items {
+            items: vec![ItemResult {
+                data: json!({"image_id": image.id}),
+                desc: Some(format!(
+                    "已存为图片条目（{}x{}）",
+                    image.width, image.height
+                )),
+                actions: vec![],
+            }],
         })
     }
 }

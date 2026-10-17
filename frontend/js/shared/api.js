@@ -53,6 +53,11 @@ export function runBuiltinAction(id, arg) {
     return invoke("run_builtin_action", {id, arg: arg ?? null});
 }
 
+/** Save a file image and return its exact history ID for a following pin/edit operation. */
+export function saveClipboardFileAsImage(id) {
+    return invoke("save_clipboard_file_image", {id});
+}
+
 // 0.17.6: trigger_ai / confirm_ai_action 已删除，主窗口 AI 改走 ChatService。
 // 以下 chat_* 命令与对话窗口共用同一套 ChatService。
 

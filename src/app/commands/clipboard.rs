@@ -53,6 +53,103 @@ pub async fn manage_clipboard_entries(
     }
 }
 
+/// UI continuation adapter: return the committed identity without hiding the main window.
+#[tauri::command]
+pub async fn save_clipboard_file_image(
+    app: tauri::AppHandle,
+    id: String,
+) -> Result<String, CommandError> {
+    let env = app
+        .state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
+        .inner()
+        .clone();
+    let registry = app.state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>();
+    let ctx = crate::domain::capability::InvokeContext {
+        env: env.as_ref(),
+        origin: crate::domain::capability::InvocationOrigin::LocalSurface,
+        runtime: crate::domain::capability::RuntimeCapabilities {
+            surface: Some(env.as_ref()),
+            main_process: true,
+            desktop_session: true,
+        },
+        deadline: None,
+    };
+    let result = registry
+        .invoke(
+            "save_clipboard_file_as_image",
+            serde_json::json!({"id": id}),
+            &ctx,
+        )
+        .await?;
+    saved_file_image_id(result)
+}
+
+fn saved_file_image_id(
+    result: crate::domain::capability::CapabilityResult,
+) -> Result<String, CommandError> {
+    if let crate::domain::capability::CapabilityResult::Items { items } = result {
+        if items.len() == 1 {
+            if let Some(id) = items[0]
+                .data
+                .get("image_id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| !id.is_empty())
+            {
+                return Ok(id.to_owned());
+            }
+        }
+    }
+    Err(CommandError::new(
+        "internal",
+        "图片入库未返回有效条目 ID",
+        false,
+    ))
+}
+
+#[cfg(test)]
+mod file_image_result_tests {
+    use super::*;
+    use crate::domain::capability::{CapabilityResult, ItemResult};
+
+    #[test]
+    fn continuation_requires_one_exact_committed_image_id() {
+        let result = |values: Vec<serde_json::Value>| CapabilityResult::Items {
+            items: values
+                .into_iter()
+                .map(|data| ItemResult {
+                    data,
+                    desc: None,
+                    actions: vec![],
+                })
+                .collect(),
+        };
+        assert_eq!(
+            saved_file_image_id(result(vec![
+                serde_json::json!({"image_id":"committed-image"})
+            ]))
+            .unwrap(),
+            "committed-image"
+        );
+        for data in [
+            vec![],
+            vec![serde_json::json!({"image_id":""})],
+            vec![serde_json::json!({"id":"file-id"})],
+            vec![
+                serde_json::json!({"image_id":"a"}),
+                serde_json::json!({"image_id":"b"}),
+            ],
+        ] {
+            assert!(saved_file_image_id(result(data)).is_err());
+        }
+        assert!(
+            saved_file_image_id(CapabilityResult::Done {
+                summary: "saved".into()
+            })
+            .is_err()
+        );
+    }
+}
+
 async fn manage_legacy_entries(
     app: tauri::AppHandle,
     operation: &str,

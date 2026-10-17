@@ -92,11 +92,9 @@
 
     <!-- ResultFooter（0.24.4 §5.5）：结果导航/动作/分页 + 空 query 闲置态 Chord 一行提示 -->
     <div id="statusbar"></div>
-
-    <!-- TransientFeedback（0.24.4 §5.5）：loading/success/error 瞬态反馈，
-         底部覆盖层不占布局。transient-feedback.js 投影。 -->
-    <div class="hidden" id="transient-feedback"></div>
 </div>
+<!-- 与悬浮预览处于同一层级，避免被 #app 的 backdrop-filter stacking context 压住。 -->
+<div class="hidden" id="transient-feedback"></div>
 <script src="js/main-window/main.js" type="module"></script>
 </body>
 </html>

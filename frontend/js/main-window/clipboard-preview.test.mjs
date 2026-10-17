@@ -3,7 +3,14 @@ import {test} from "node:test";
 import {TestElement} from "../settings/tabs/weather-settings-test-helpers.mjs";
 
 globalThis.window ??= {};
-const {bindClipboardPreview, bindErrorPreview, hideClipboardPreview, getClipboardPreviewContext, holdClipboardPreview} = await import("./clipboard-preview.js");
+const {bindClipboardPreview, bindErrorPreview, hideClipboardPreview, getClipboardPreviewContext, holdClipboardPreview, previewHeight} = await import("./clipboard-preview.js");
+
+test("image preview height adapts to the viewport while text stays compact", () => {
+    for (const [viewport, expected] of [[400,300], [640,480], [1000,750], [200,184], [16,1]]) {
+        assert.equal(previewHeight(viewport, true), expected);
+        assert.equal(previewHeight(viewport), Math.max(1, Math.min(260, viewport - 16)));
+    }
+});
 
 test("clipboard hover lazily shows full text and rejects stale entry responses", async (t) => {
     t.mock.timers.enable({apis:["setTimeout"]});
@@ -159,12 +166,15 @@ test("clipboard hover lazily shows full text and rejects stale entry responses",
     t.mock.timers.tick(1);
     assert.equal(panel.classList.contains("hidden"), false, "image shares the text left-third trigger");
     const image = previewImageForTest();
-    assert.equal(image.src, "http://blink-clipimg.localhost/preview/picture?v=original", "原图预览不命中旧的缩小图缓存");
+    assert.equal(image.src, "http://blink-clipimg.localhost/preview/picture?v=native", "原图预览不命中旧的缩小图及预算拒绝缓存");
     assert.equal(image.alt, "image", "preview image keeps the thumbnail alt");
     const staleLoad = image.onload;
+    image.naturalHeight = 2400;
     image.onload();
     assert.equal(panel.children[0].children[0].children[0], image);
     assert.equal(panel.classList.contains("is-image-preview"), true);
+    assert.equal(panel.style.maxHeight, "300px");
+    assert.equal(panel.children[0].children[0].style.height, "248px", "long images use the adaptive height including footer space");
     await imageRow.fire("pointerleave");
     t.mock.timers.tick(100);
     await panel.fire("pointerenter");
@@ -214,7 +224,7 @@ test("clipboard hover lazily shows full text and rejects stale entry responses",
     assert.equal(context.isCurrent(),false,"closing invalidates the menu's anchor snapshot");
     assert.equal(getClipboardPreviewContext(previewTarget),null);
 
-    let fileStatus = "pixel_budget";
+    let fileStatus = "animation_budget";
     const filePath = "C:\\pictures\\large.jpg";
     window.__TAURI__ = {core:{invoke:async (command) => {
         if (command === "get_clipboard_file_entry") return {paths:[filePath]};
@@ -261,10 +271,19 @@ test("clipboard hover lazily shows full text and rejects stale entry responses",
     };
     await openFilePreview();
     assert.ok(panel.textContent.startsWith(filePath));
-    assert.ok(panel.textContent.includes("128MiB"),"backend budget rejection has a specific explanation");
+    assert.ok(panel.textContent.includes("200"),"backend animation rejection has a specific explanation");
     fileStatus = "ok";
     await openFilePreview();
     assert.ok(panel.textContent.includes("解码失败"),"WebView rejection after successful preflight is not reported as ok");
+    fileStatus = "not_image";
+    await openFilePreview();
+    assert.equal(panel.textContent, filePath, "ordinary unsupported files show only their path, without an image-format error");
+    for (const [reason, hint] of [["missing", "不存在"], ["unc", "网络路径"], ["decode_failed", "解码失败"]]) {
+        fileStatus = reason;
+        await openFilePreview();
+        assert.ok(panel.textContent.startsWith(filePath));
+        assert.ok(panel.textContent.includes(hint), "specific failures remain visible: " + reason);
+    }
 
     // A delayed failure explanation must not replace a different preview.
     let resolveStatus;
@@ -277,7 +296,7 @@ test("clipboard hover lazily shows full text and rejects stale entry responses",
     await newErrorRow.fire("pointermove",{clientX:50});
     t.mock.timers.tick(350);
     for (let i=0;i<5;i++) await Promise.resolve();
-    resolveStatus("pixel_budget");
+    resolveStatus("animation_budget");
     for (let i=0;i<5;i++) await Promise.resolve();
     assert.equal(panel.textContent,"new preview");
 

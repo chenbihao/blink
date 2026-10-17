@@ -1,9 +1,9 @@
 //! 悬浮预览校验后直出原始 PNG，列表缩略图保持原有轻量路径。
 use sqlx::SqlitePool;
+#[cfg(test)]
 use std::io::Cursor;
 
 const MAX_PNG_BYTES: i64 = 32 * 1024 * 1024;
-const DECODE_BUDGET: u64 = 64 * 1024 * 1024;
 static PREVIEW_WORKERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
 /// 0.26.9：尝试进入共享图片解码额度（并发 2，忙即 None，不排队）。
@@ -19,7 +19,7 @@ pub async fn get_preview_by_id_global(id: &str) -> Option<Vec<u8>> {
 }
 
 async fn get_preview_by_id(pool: &SqlitePool, id: &str) -> Option<Vec<u8>> {
-    // 先限并发再读取 BLOB，限制并发原图解码与临时内存。
+    // 先限并发再读取 BLOB，限制原始字节与元数据解析的临时内存。
     let _permit = PREVIEW_WORKERS.acquire().await.ok()?;
     let source = sqlx::query_scalar::<_, Vec<u8>>(
         "SELECT png_blob FROM clipboard_images WHERE id = ?1 AND LENGTH(png_blob) <= ?2",
@@ -44,16 +44,12 @@ async fn get_preview_by_id(pool: &SqlitePool, id: &str) -> Option<Vec<u8>> {
 
 fn prepare_preview(source: Vec<u8>) -> image::ImageResult<Vec<u8>> {
     let started = std::time::Instant::now();
-    let mut reader = image::ImageReader::with_format(Cursor::new(&source), image::ImageFormat::Png);
-    let mut limits = image::Limits::default();
-    limits.max_alloc = Some(DECODE_BUDGET);
-    reader.limits(limits);
-    let image = reader.decode()?;
-    // 解码只用于校验损坏数据与像素内存预算；显示复用原始字节，避免二次采样/编码。
+    let (width, height) =
+        crate::utils::image_metadata::preview_dimensions(&source, image::ImageFormat::Png)?;
     tracing::trace!(
         bytes = source.len(),
-        width = image.width(),
-        height = image.height(),
+        width,
+        height,
         elapsed_ms = started.elapsed().as_millis() as u64,
         "剪贴板图片预览校验完成"
     );
@@ -85,12 +81,10 @@ mod tests {
     }
 
     #[test]
-    fn preview_rejects_images_over_decode_budget() {
-        // 压缩后很小的纯色 PNG 也必须遵守解码后的像素内存上限。
-        assert!(matches!(
-            prepare_preview(png(8192, 2049)),
-            Err(image::ImageError::Limits(_))
-        ));
+    fn preview_accepts_compressed_png_above_old_pixel_memory_gates() {
+        let original = png(8192, 4097); // RGBA 超过旧 64MiB/128MiB 门槛。
+        assert!(original.len() < 4 * 1024 * 1024);
+        assert_eq!(prepare_preview(original.clone()).unwrap(), original);
     }
     #[tokio::test]
     async fn preview_reads_original_and_missing_id_is_empty() {
