@@ -26,7 +26,12 @@ test("clipboard hover lazily shows full text and rejects stale entry responses",
         view.replaceChildren = (...children) => {view.children = children; view.textContent = "";};
         view.getBoundingClientRect = () => ({left:10,top:10,bottom:35,height:80,width:300});
         view.focus = () => {document.activeElement = view;};
-        if (tag === "img") createdImages.push(view);
+        view.setPointerCapture = () => {};
+        if (tag === "img") {
+            view.naturalWidth = 1200;
+            view.naturalHeight = 800;
+            createdImages.push(view);
+        }
         return view;
     };
     globalThis.document = {
@@ -154,11 +159,11 @@ test("clipboard hover lazily shows full text and rejects stale entry responses",
     t.mock.timers.tick(1);
     assert.equal(panel.classList.contains("hidden"), false, "image shares the text left-third trigger");
     const image = previewImageForTest();
-    assert.equal(image.src, "http://blink-clipimg.localhost/preview/picture");
+    assert.equal(image.src, "http://blink-clipimg.localhost/preview/picture?v=original", "原图预览不命中旧的缩小图缓存");
     assert.equal(image.alt, "image", "preview image keeps the thumbnail alt");
     const staleLoad = image.onload;
     image.onload();
-    assert.equal(panel.children[0], image);
+    assert.equal(panel.children[0].children[0].children[0], image);
     assert.equal(panel.classList.contains("is-image-preview"), true);
     await imageRow.fire("pointerleave");
     t.mock.timers.tick(100);
@@ -208,4 +213,89 @@ test("clipboard hover lazily shows full text and rejects stale entry responses",
     assert.equal(panel.classList.contains("hidden"),true);
     assert.equal(context.isCurrent(),false,"closing invalidates the menu's anchor snapshot");
     assert.equal(getClipboardPreviewContext(previewTarget),null);
+
+    let fileStatus = "pixel_budget";
+    const filePath = "C:\\pictures\\large.jpg";
+    window.__TAURI__ = {core:{invoke:async (command) => {
+        if (command === "get_clipboard_file_entry") return {paths:[filePath]};
+        assert.equal(command,"get_clipboard_file_preview_status");
+        return fileStatus;
+    }}};
+    const fileRow = element();
+    bindClipboardPreview(fileRow,{kind:"file",id:"large-file"});
+    let finishMetadata;
+    window.__TAURI__.core.invoke = async (command, args) => {
+        assert.equal(command,"get_clipboard_file_entry");
+        if (args.includeMetadata) return new Promise(resolve => {finishMetadata = resolve;});
+        return {paths:[filePath]};
+    };
+    await fileRow.fire("pointermove",{clientX:50});
+    t.mock.timers.tick(350);
+    for (let i=0;i<5;i++) await Promise.resolve();
+    assert.equal(finishMetadata,undefined,"size probing does not delay first image paint");
+    previewImageForTest().onload();
+    const fileCaption = panel.children[0].children[1];
+    finishMetadata({size_bytes:4117749});
+    for (let i=0;i<5;i++) await Promise.resolve();
+    assert.ok(fileCaption.textContent.includes("3.9 MB"));
+    hideClipboardPreview();
+
+    await fileRow.fire("pointermove",{clientX:50});
+    t.mock.timers.tick(350);
+    for (let i=0;i<5;i++) await Promise.resolve();
+    previewImageForTest().onload();
+    const staleCaption = panel.children[0].children[1];
+    hideClipboardPreview();
+    finishMetadata({size_bytes:4117749});
+    for (let i=0;i<5;i++) await Promise.resolve();
+    assert.ok(!staleCaption.textContent.includes("MB"),"late metadata cannot update a closed viewer");
+    window.__TAURI__.core.invoke = async command => command === "get_clipboard_file_entry"
+        ? {paths:[filePath]} : fileStatus;
+    const openFilePreview = async () => {
+        hideClipboardPreview();
+        await fileRow.fire("pointermove",{clientX:50});
+        t.mock.timers.tick(350);
+        for (let i=0;i<5;i++) await Promise.resolve();
+        previewImageForTest().onerror();
+        for (let i=0;i<5;i++) await Promise.resolve();
+    };
+    await openFilePreview();
+    assert.ok(panel.textContent.startsWith(filePath));
+    assert.ok(panel.textContent.includes("128MiB"),"backend budget rejection has a specific explanation");
+    fileStatus = "ok";
+    await openFilePreview();
+    assert.ok(panel.textContent.includes("解码失败"),"WebView rejection after successful preflight is not reported as ok");
+
+    // A delayed failure explanation must not replace a different preview.
+    let resolveStatus;
+    window.__TAURI__.core.invoke = async (command) => command === "get_clipboard_file_entry"
+        ? {paths:[filePath]} : new Promise(resolve => {resolveStatus = resolve;});
+    await openFilePreview();
+    hideClipboardPreview();
+    const newErrorRow = element();
+    bindErrorPreview(newErrorRow,"new preview");
+    await newErrorRow.fire("pointermove",{clientX:50});
+    t.mock.timers.tick(350);
+    for (let i=0;i<5;i++) await Promise.resolve();
+    resolveStatus("pixel_budget");
+    for (let i=0;i<5;i++) await Promise.resolve();
+    assert.equal(panel.textContent,"new preview");
+
+    hideClipboardPreview();
+    await imageRow.fire("pointermove",{clientX:50});
+    t.mock.timers.tick(350);
+    previewImageForTest().onload();
+    const viewport = panel.children[0].children[0];
+    await viewport.fire("wheel",{deltaY:-400,clientX:150,clientY:50});
+    await viewport.fire("pointerdown",{button:0,pointerId:1,clientX:150,clientY:50});
+    await imageRow.fire("pointerleave");
+    await panel.fire("pointerleave");
+    await first.fire("pointermove",{clientX:50,buttons:1});
+    t.mock.timers.tick(500);
+    assert.ok(!panel.classList.contains("hidden"),"dragging outside the preview retains the image and blocks crossed rows");
+    await viewport.fire("pointercancel",{pointerId:1});
+    t.mock.timers.tick(149);
+    assert.ok(!panel.classList.contains("hidden"));
+    t.mock.timers.tick(1);
+    assert.ok(panel.classList.contains("hidden"),"cancellation restores the normal exit buffer");
 });

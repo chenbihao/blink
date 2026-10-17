@@ -118,6 +118,8 @@ let currentMenuId = '';
 /** 0.26.10：当前菜单内容代次（同 menuId 原地更新时递增；null = 初始内容）。 */
 let currentGeneration = null;
 let releasePreview;
+let initialMenuTimer;
+const SMART_FIRST_PAINT_DELAY = 32;
 let menuSerial = 0;
 /** 菜单内容代次计数器——跨菜单会话单调递增，更新与点击竞争由此区分。 */
 let menuGeneration = 0;
@@ -185,8 +187,16 @@ export function init() {
         currentItems = items;
         if (preview) releasePreview = holdClipboardPreview(preview);
 
-        showItemsPopup(items);
-        if (smartSession) updateSmartActions(smartSession);
+        if (smartSession) {
+            // 快速 DB 派生只展示最终内容；慢查询最多等一小帧预算，基础操作随后可用。
+            initialMenuTimer = setTimeout(() => {
+                initialMenuTimer = undefined;
+                if (isSmartSessionCurrent(smartSession)) showItemsPopup(currentItems);
+            }, SMART_FIRST_PAINT_DELAY);
+            updateSmartActions(smartSession);
+        } else {
+            showItemsPopup(items);
+        }
     });
 
     // ESC 关闭
@@ -326,6 +336,8 @@ async function updateSmartActions(session) {
         failed = true;
     }
     if (!isSmartSessionCurrent(session)) return;
+    clearTimeout(initialMenuTimer);
+    initialMenuTimer = undefined;
 
     let group;
     if (failed) {
@@ -393,6 +405,8 @@ function close() {
 }
 
 function clearCurrentMenu() {
+    clearTimeout(initialMenuTimer);
+    initialMenuTimer = undefined;
     currentMenuId = "";
     currentItems = [];
     currentGeneration = null;
@@ -661,7 +675,10 @@ function itemMenu(li, {selectedText = ""} = {}) {
                     .catch(e => showActionError("copy_clipboard_file_paths", e));
             },
         });
-        items.push({
+        // 文件名只作菜单提示；点击后的后端按 magic 重检，伪装扩展名的 GIF 也拒绝入库。
+        // 多文件标题带 +N，不匹配；GIF 不提供转成静态图片历史的入口。
+        const fileName = li.querySelector(".item-name")?.textContent || "";
+        if (/\.(png|jpe?g|webp)$/i.test(fileName)) items.push({
             label: t("menu.saveAsImage"),
             run: () => {
                 runBuiltinAction("save_clipboard_file_as_image", {id: clipboardRef.id})

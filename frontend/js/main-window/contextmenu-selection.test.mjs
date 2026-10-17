@@ -31,19 +31,19 @@ async function setup(initialRefs, overrides = {}) {
         getLang: () => 'zh', parseColor: () => null, resultsEl: {contains: () => true}, queryEl: {},
         activateItem: data => calls.push({id: 'activate', data}),
         hideWindow: () => calls.push({id: 'hide'}),
-        console, Promise, Math, Date, JSON,
+        console, Promise, Math, Date, JSON, setTimeout, clearTimeout,
         ...overrides,
     });
     vm.runInContext(source, context); context.init(); await Promise.resolve();
     return {
         calls, events, ipc, clipboardMode, prepared, holds, releases,
         set refs(value) {refs = value; revision++;},
-        open(actions = []) {
+        open(actions = [], name = '') {
             const ref = refs[0];
             const li = {dataset: {source: 'clipboard', clipboardKind: ref.kind, clipboardId: ref.id, actions: JSON.stringify(actions)},
-                closest() {return this;}, querySelector: () => null};
+                closest() {return this;}, querySelector: selector => selector === '.item-name' ? {textContent: name} : null};
             events.get('contextmenu')({target: li, preventDefault() {}});
-            return JSON.parse(ipc.filter(call => call.command === 'show_context_menu').at(-1).args.items);
+            return JSON.parse(vm.runInContext('JSON.stringify(currentItems)', context));
         },
         openPreview(ref, actions, selectedText = '', isCurrent = () => true) {
             const li = {isConnected: true,
@@ -51,10 +51,20 @@ async function setup(initialRefs, overrides = {}) {
                 querySelector: () => null};
             const target = {previewContext: {anchor: li, selectedText, isCurrent}, closest: () => null};
             events.get('contextmenu')({target, preventDefault() {}});
-            return JSON.parse(ipc.filter(call => call.command === 'show_context_menu').at(-1).args.items);
+            return JSON.parse(vm.runInContext('JSON.stringify(currentItems)', context));
         },
     };
 }
+
+test('文件图片入库菜单支持静态格式，GIF 与多文件不提供入口', async () => {
+    const h = await setup([{kind: 'file', id: 'image-file'}]);
+    for (const [name, allowed] of [['picture.png', true], ['photo.JPG', true], ['photo.jpeg', true],
+        ['picture.webp', true], ['animation.gif', false], ['animation.GIF', false],
+        ['photo.png +1', false], ['document.pdf', false]]) {
+        const menu = h.open([], name);
+        assert.equal(menu.some(item => item.label === 'menu.saveAsImage'), allowed, name);
+    }
+});
 
 test('错误行与悬浮全文的右键菜单复制完整快照，列表刷新不改变复制内容', async () => {
     const copied = [];
@@ -256,11 +266,12 @@ test('预览菜单取消、失败与过期回调正确释放对应会话', async
     });
     failed.events.get('contextmenu')({preventDefault() {}, target: {
         closest: () => null, previewContext: {anchor: {
+            isConnected: true,
             dataset: {clipboardKind: 'text', clipboardId: textRef.id, actions: JSON.stringify(textActions)},
             querySelector: () => null,
         }, selectedText: '', isCurrent: () => true},
     }});
-    await Promise.resolve(); await Promise.resolve();
+    await new Promise(resolve => setImmediate(resolve));
     assert.equal(failed.releases.length, 1, 'popup failure must not leave the hover permanently held');
 });
 

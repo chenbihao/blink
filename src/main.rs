@@ -109,8 +109,8 @@ fn main() {
             });
         })
         // 自定义协议：http://blink-clipimg.localhost/<image-id>（0.16.4）——
-        // 列表缩略图；/preview/<id> 为停留后按需生成的有界大预览 PNG；
-        // /file-preview/<条目id>（0.26.9）为文件条目单路径本地 PNG 的有界预览。
+        // 列表缩略图；/preview/<id> 为校验后直出的原始 PNG；
+        // /file-preview/<条目id> 为单文件 PNG/JPEG/GIF/WebP 原格式预览。
         .register_asynchronous_uri_scheme_protocol("blink-clipimg", |_ctx, request, responder| {
             let raw = request.uri().path().trim_start_matches('/').to_string();
             let preview = raw.starts_with("preview/");
@@ -130,7 +130,7 @@ fn main() {
                         .map(|p| p.clone());
                     let outcome = match pool {
                         Some(pool) => {
-                            crate::infra::data::clipboard_files::get_file_preview_png_by_id(
+                            crate::infra::data::clipboard_files::get_file_preview_by_id(
                                 &pool, &image_id,
                             )
                             .await
@@ -140,11 +140,11 @@ fn main() {
                         ),
                     };
                     let response = match outcome {
-                        Ok(bytes) => tauri::http::Response::builder()
+                        Ok(preview) => tauri::http::Response::builder()
                             .status(200)
-                            .header("Content-Type", "image/png")
+                            .header("Content-Type", preview.mime_type)
                             .header("Cache-Control", "no-store")
-                            .body(bytes)
+                            .body(preview.bytes)
                             .unwrap(),
                         Err(error) => {
                             tracing::debug!(

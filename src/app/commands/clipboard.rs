@@ -388,27 +388,35 @@ pub async fn get_clipboard_stats(app: tauri::AppHandle) -> serde_json::Value {
 
 /// 0.26.9：按 id 拉取文件条目的完整路径列表（悬浮预览展示用）。
 ///
-/// 纯查库轻量入口；单路径条目的图片内容走 `blink-clipimg` 的
+/// 默认纯查库；include_metadata 仅在图片展示后按需探测单文件大小。
+/// 单路径条目的图片内容走 `blink-clipimg` 的
 /// `/file-preview/<id>` 协议，不在此返回文件内容。
 #[tauri::command]
 pub async fn get_clipboard_file_entry(
     app: tauri::AppHandle,
     id: String,
+    include_metadata: Option<bool>,
 ) -> Result<Option<serde_json::Value>, String> {
     let pool = &app.state::<crate::infra::data::DbPools>().history;
     let item = crate::infra::data::clipboard_files::get_paths_by_id(pool, &id).await;
+    let size_bytes = if include_metadata.unwrap_or(false) {
+        crate::infra::data::clipboard_files::get_file_size_by_id(pool, &id).await.ok()
+    } else {
+        None
+    };
     Ok(item.map(|item| {
         serde_json::json!({
             "id": item.id,
             "paths": item.paths,
             "file_count": item.paths.len(),
+            "size_bytes": size_bytes,
         })
     }))
 }
 
 /// 0.26.9：探测文件条目内容读取状态（前端 img 加载失败后取原因分类展示）。
 ///
-/// 只查库 + 属性探测（不读内容、不解码）；探测走有界文件 I/O 通道，
+/// 查库 + 有界内容读取/元数据校验（不展开像素）；探测走有界文件 I/O 通道，
 /// 忙时返回 `busy`。原因码与 `FilePreviewError::reason` 对齐。
 #[tauri::command]
 pub async fn get_clipboard_file_preview_status(

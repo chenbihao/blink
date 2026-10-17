@@ -1,5 +1,7 @@
 /** 中文字典。扁平点分 key，与 en.js 必须对齐。 */
 export const zh = {
+    "clipboard.preview_file_size": "文件大小 {size}",
+    "clipboard.preview_image_controls": "滚轮缩放 · 拖动平移 · 双击复位",
     "weather.region_auto": "自动（按和风行政区信息）",
 
     "menu.copyError": "复制错误信息",
@@ -25,9 +27,11 @@ export const zh = {
     "clipboard.file_preview_reparse_remote": "链接指向远程目标，仅保存路径",
     "clipboard.file_preview_unknown_reparse": "特殊链接路径，仅保存路径",
     "clipboard.file_preview_device_path": "设备路径不可读取",
-    "clipboard.file_preview_not_image": "不是支持的图片文件（仅 PNG）",
+    "clipboard.file_preview_not_image": "不是支持的图片文件（PNG、JPEG、GIF、WebP）",
     "clipboard.file_preview_too_large": "文件超过 32MiB 上限",
     "clipboard.file_preview_decode_failed": "图片解码失败",
+    "clipboard.file_preview_pixel_budget": "图片像素过大（预览像素内存上限 128MiB）",
+    "clipboard.file_preview_animation_budget": "动画超过 200 帧或累计像素预算 256MiB",
     "clipboard.file_preview_multi": "多个文件，仅显示路径列表",
     "clipboard.file_preview_ok": "可预览",
 

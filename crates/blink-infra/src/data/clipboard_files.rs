@@ -15,8 +15,8 @@ use crate::platform::clipboard::dropfiles;
 
 mod preview;
 pub use preview::{
-    DecodedFileImage, FilePreviewError, encode_full_png, encode_thumbnail_png,
-    get_file_preview_png_by_id, make_thumbnail_from_png_bytes, probe_file_entry_status,
+    DecodedFileImage, FileImagePreview, FilePreviewError, encode_full_png, encode_thumbnail_png,
+    get_file_preview_by_id, get_file_size_by_id, make_thumbnail_from_png_bytes, probe_file_entry_status,
     read_file_image_by_id,
 };
 

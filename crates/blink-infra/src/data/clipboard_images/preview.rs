@@ -1,8 +1,7 @@
-//! 悬浮预览从原图生成，列表缩略图保持原有轻量路径。
+//! 悬浮预览校验后直出原始 PNG，列表缩略图保持原有轻量路径。
 use sqlx::SqlitePool;
 use std::io::Cursor;
 
-const PREVIEW_EDGE: u32 = 1024;
 const MAX_PNG_BYTES: i64 = 32 * 1024 * 1024;
 const DECODE_BUDGET: u64 = 64 * 1024 * 1024;
 static PREVIEW_WORKERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
@@ -11,8 +10,7 @@ static PREVIEW_WORKERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_n
 ///
 /// 供文件预览/入库路径复用同一解码额度——文件内容读出后 try_acquire，
 /// 繁忙则立即释放缓冲返回 Busy，不排队持有完整文件。
-pub(crate) fn try_acquire_image_decode_slot(
-) -> Option<tokio::sync::SemaphorePermit<'static>> {
+pub(crate) fn try_acquire_image_decode_slot() -> Option<tokio::sync::SemaphorePermit<'static>> {
     PREVIEW_WORKERS.try_acquire().ok()
 }
 
@@ -31,10 +29,10 @@ async fn get_preview_by_id(pool: &SqlitePool, id: &str) -> Option<Vec<u8>> {
     .fetch_optional(pool)
     .await
     .ok()??;
-    match tokio::task::spawn_blocking(move || make_preview(&source)).await {
+    match tokio::task::spawn_blocking(move || prepare_preview(source)).await {
         Ok(Ok(png)) => Some(png),
         Ok(Err(error)) => {
-            tracing::debug!(%error, "剪贴板悬浮图片无法生成预览");
+            tracing::debug!(%error, "剪贴板悬浮图片无法通过校验");
             None
         }
         Err(error) => {
@@ -44,22 +42,22 @@ async fn get_preview_by_id(pool: &SqlitePool, id: &str) -> Option<Vec<u8>> {
     }
 }
 
-fn make_preview(source: &[u8]) -> image::ImageResult<Vec<u8>> {
-    let mut reader = image::ImageReader::with_format(Cursor::new(source), image::ImageFormat::Png);
+fn prepare_preview(source: Vec<u8>) -> image::ImageResult<Vec<u8>> {
+    let started = std::time::Instant::now();
+    let mut reader = image::ImageReader::with_format(Cursor::new(&source), image::ImageFormat::Png);
     let mut limits = image::Limits::default();
     limits.max_alloc = Some(DECODE_BUDGET);
     reader.limits(limits);
     let image = reader.decode()?;
-    // Triangle 滤波：截图里的文字在 thumbnail 的快速整数采样下会发糊，
-    // 双线性缩放在同等预算下明显更清晰，代价只在生成路径（不在列表热路径）。
-    let image = if image.width().max(image.height()) > PREVIEW_EDGE {
-        image.resize(PREVIEW_EDGE, PREVIEW_EDGE, image::imageops::FilterType::Triangle)
-    } else {
-        image
-    };
-    let mut bytes = Cursor::new(Vec::new());
-    image.write_to(&mut bytes, image::ImageFormat::Png)?;
-    Ok(bytes.into_inner())
+    // 解码只用于校验损坏数据与像素内存预算；显示复用原始字节，避免二次采样/编码。
+    tracing::trace!(
+        bytes = source.len(),
+        width = image.width(),
+        height = image.height(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "剪贴板图片预览校验完成"
+    );
+    Ok(source)
 }
 
 #[cfg(test)]
@@ -73,19 +71,26 @@ mod tests {
         bytes.into_inner()
     }
     #[test]
-    fn preview_preserves_aspect_alpha_and_small_images() {
-        for (width, height, expected) in [
-            (2048, 512, (1024, 256)),
-            (512, 2048, (256, 1024)),
-            (80, 40, (80, 40)),
-        ] {
-            let bytes = make_preview(&png(width, height)).unwrap();
+    fn preview_preserves_original_png_dimensions_and_alpha() {
+        for (width, height) in [(2048, 512), (512, 2048), (80, 40)] {
+            let original = png(width, height);
+            let bytes = prepare_preview(original.clone()).unwrap();
+            assert_eq!(bytes, original, "悬浮预览必须逐字节保留原 PNG");
             assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
             let image = image::load_from_memory(&bytes).unwrap().into_rgba8();
-            assert_eq!(image.dimensions(), expected);
+            assert_eq!(image.dimensions(), (width, height));
             assert_eq!(image.get_pixel(0, 0).0[3], 100);
         }
-        assert!(make_preview(b"invalid PNG").is_err());
+        assert!(prepare_preview(b"invalid PNG".to_vec()).is_err());
+    }
+
+    #[test]
+    fn preview_rejects_images_over_decode_budget() {
+        // 压缩后很小的纯色 PNG 也必须遵守解码后的像素内存上限。
+        assert!(matches!(
+            prepare_preview(png(8192, 2049)),
+            Err(image::ImageError::Limits(_))
+        ));
     }
     #[tokio::test]
     async fn preview_reads_original_and_missing_id_is_empty() {
@@ -93,9 +98,10 @@ mod tests {
         super::super::init_db(&pool).await.unwrap();
         let source = png(1600, 400);
         sqlx::query("INSERT INTO clipboard_images(id, png_blob, thumb_blob, width, height, sha256, created_at) VALUES ('image', ?1, ?2, 1600, 400, 'hash', 1)")
-            .bind(source).bind(png(256, 64)).execute(&pool).await.unwrap();
+            .bind(&source).bind(png(256, 64)).execute(&pool).await.unwrap();
         let bytes = get_preview_by_id(&pool, "image").await.unwrap();
-        assert_eq!(image::load_from_memory(&bytes).unwrap().width(), 1024);
+        assert_eq!(bytes, source, "从数据库读取原图而非列表缩略图");
+        assert_eq!(image::load_from_memory(&bytes).unwrap().width(), 1600);
         assert!(get_preview_by_id(&pool, "missing").await.is_none());
     }
 }

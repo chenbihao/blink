@@ -1377,10 +1377,23 @@ unsafe fn clamp_hwnd_to_work_area(hwnd: HWND) {
 ///
 /// - `css_w/h`：菜单的 CSS 像素尺寸（前端估算值，会按目标屏 DPI 缩放）
 pub fn clamp_context_menu(css_w: f64, css_h: f64) -> (i32, i32, u32, u32) {
+    clamp_context_menu_at(css_w, css_h, None)
+}
+
+/// 同菜单更新保持窗口原点；仅在工作区边缘钳制，不随移动后的鼠标重新定位/翻转。
+pub fn clamp_context_menu_at(
+    css_w: f64,
+    css_h: f64,
+    origin: Option<(i32, i32)>,
+) -> (i32, i32, u32, u32) {
     unsafe {
         // 光标物理坐标（进程需 DPI-aware，Tauri 默认 PerMonitorV2 已满足）
         let mut pt = POINT { x: 0, y: 0 };
-        let _ = GetCursorPos(&mut pt);
+        if let Some((x, y)) = origin {
+            pt = POINT { x, y };
+        } else {
+            let _ = GetCursorPos(&mut pt);
+        }
         let screen_x = pt.x;
         let screen_y = pt.y;
         let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
@@ -1414,12 +1427,12 @@ pub fn clamp_context_menu(css_w: f64, css_h: f64) -> (i32, i32, u32, u32) {
         // 智能翻转：右/下空间不够时，菜单显示在光标左/上方（老 0.5.3+ 前端行为）
         //   贴边 clamp 会让菜单紧贴屏幕右/下边缘，视觉上像是"卡住"了。
         let margin = 4;
-        let prefer_x = if screen_x + phys_w + margin > work.right {
+        let prefer_x = if origin.is_none() && screen_x + phys_w + margin > work.right {
             (screen_x - phys_w).max(work.left + margin)
         } else {
             screen_x
         };
-        let prefer_y = if screen_y + phys_h + margin > work.bottom {
+        let prefer_y = if origin.is_none() && screen_y + phys_h + margin > work.bottom {
             (screen_y - phys_h).max(work.top + margin)
         } else {
             screen_y

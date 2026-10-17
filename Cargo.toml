@@ -156,7 +156,7 @@ kaldi-native-fbank = "0.1"
 # 锁定版本 0.9.2（spike onnx-spike/followup/decision.md §2.1 验证通过）
 oar-ocr = { version = "=0.9.2", default-features = false, features = ["simd"] }
 # image: PNG 解码（0.22.8 ONNX OCR executor 需要将 PNG bytes 解码为 RgbImage 传给 oar-ocr）
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 # sherpa-onnx 引擎通过 Windows 自带 tar.exe 解压 .tar.bz2，无需额外 Rust 依赖
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",

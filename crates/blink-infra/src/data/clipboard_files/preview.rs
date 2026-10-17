@@ -10,9 +10,10 @@
 //! - 等待结果上限 1 秒：超时只表示本次停止等待，工作额度随实际任务结束才
 //!   释放（permit 移入 blocking 闭包），不把超时当底层 I/O 已取消。
 //!
-//! **解码边界**：原文件最多 32MiB（读取用上限+1 再核验，防属性检查后变大）、
-//! 64MiB 解码预算、最长边 1024px、Triangle 滤波、小图不放大；magic 检测结果
-//! 必须在当前构建可解码格式白名单内（image crate 仅启用 png feature → PNG）。
+//! **内容边界**：原文件最多 32MiB（读取用上限+1 再核验，防属性检查后变大）。
+//! 文件预览只检查头部/动画结构，按 RGBA 估算最多 128MiB；返回原始字节，
+//! 由 WebView 解码，不在 Rust 展开像素、缩放或重编码。转存保持 64MiB 解码预算。
+//! GIF 与动态 WebP 只预览，限制帧数/累计像素，不转成静态图片历史。
 //! 每次读取反映当前文件内容，不按条目 id 永久缓存。
 
 use sqlx::SqlitePool;
@@ -21,8 +22,9 @@ use std::time::Duration;
 
 use crate::platform::fs_guard::{DenyReason, open_content_file};
 
-/// 预览最长边（px），与 DB 图片预览一致。
-const PREVIEW_EDGE: u32 = 1024;
+mod formats;
+use formats::FileImageFormat;
+
 /// 原文件大小上限（32MiB）。
 const MAX_SOURCE_BYTES: u64 = 32 * 1024 * 1024;
 /// 解码分配预算（64MiB）。
@@ -32,7 +34,7 @@ const IO_WAIT_TIMEOUT: Duration = Duration::from_secs(1);
 /// 文件 I/O 独立通道：最多 2 个实际在途任务，无等待队列。
 static FILE_IO_WORKERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
-/// PNG magic（当前构建唯一可解码格式——image crate 仅启用 png feature）。
+#[cfg(test)]
 const PNG_MAGIC: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 
 /// 文件内容读取结果分类。
@@ -46,8 +48,14 @@ pub enum FilePreviewError {
     Timeout,
     /// 受限路径：仅保存路径，未读取内容。
     Denied(DenyReason),
-    /// 非 PNG（magic 白名单外）。
+    /// 非支持的图片（magic 白名单外）。
     NotImage,
+    /// GIF/动画仅供原格式预览，不可转存为静态 PNG。
+    PreviewOnly,
+    /// 预览或转存像素预算超限。
+    PixelBudget,
+    /// 动画帧数或累计像素预算超限。
+    AnimationBudget,
     /// 文件超过 32MiB 或读取中变大。
     TooLarge,
     /// 读取/解码失败（损坏、超大尺寸等）。
@@ -63,13 +71,16 @@ impl FilePreviewError {
             FilePreviewError::Timeout => "timeout",
             FilePreviewError::Denied(reason) => reason.reason(),
             FilePreviewError::NotImage => "not_image",
+            FilePreviewError::PreviewOnly => "preview_only",
+            FilePreviewError::PixelBudget => "pixel_budget",
+            FilePreviewError::AnimationBudget => "animation_budget",
             FilePreviewError::TooLarge => "too_large",
             FilePreviewError::Decode(_) => "decode_failed",
         }
     }
 }
 
-/// 解码后的文件图片（预览 PNG 与入库共用同一读取/解码服务）。
+/// 入库图片固定为 PNG，保持图片历史的现有格式契约。
 pub struct DecodedFileImage {
     pub png: Vec<u8>,
     pub width: u32,
@@ -77,16 +88,50 @@ pub struct DecodedFileImage {
     pub thumbnail_png: Option<Vec<u8>>,
 }
 
-/// 按条目 id 读取并解码单路径文件为预览 PNG（`/file-preview/<id>` 协议消费）。
+pub struct FileImagePreview {
+    pub bytes: Vec<u8>,
+    pub mime_type: &'static str,
+}
+
+struct PreparedFileImage {
+    bytes: Vec<u8>,
+    mime_type: &'static str,
+    width: u32,
+    height: u32,
+    thumbnail_png: Option<Vec<u8>>,
+}
+
+/// 按条目 id 校验单文件，按原格式直出预览（`/file-preview/<id>` 协议消费）。
 ///
 /// 查库确认恰好单路径；多文件条目返回 `EntryMissing`（前端展示路径列表，
 /// 不逐个读取文件）。请求不携带自由路径。
-pub async fn get_file_preview_png_by_id(
+pub async fn get_file_preview_by_id(
     pool: &SqlitePool,
     id: &str,
-) -> Result<Vec<u8>, FilePreviewError> {
+) -> Result<FileImagePreview, FilePreviewError> {
     let decoded = read_file_image(pool, id, true).await?;
-    Ok(decoded.png)
+    Ok(FileImagePreview {
+        bytes: decoded.bytes,
+        mime_type: decoded.mime_type,
+    })
+}
+
+/// 悬浮后按需读取单文件大小；不读内容，不扫描目录，沿用路径防护与 I/O 额度。
+pub async fn get_file_size_by_id(pool: &SqlitePool, id: &str) -> Result<u64, FilePreviewError> {
+    let item = super::get_paths_by_id(pool, id)
+        .await
+        .ok_or(FilePreviewError::EntryMissing)?;
+    let [path] = item.paths.as_slice() else {
+        return Err(FilePreviewError::EntryMissing);
+    };
+    let path = path.clone();
+    file_io(&FILE_IO_WORKERS, IO_WAIT_TIMEOUT, move || {
+        let file = open_content_file(&path).map_err(FilePreviewError::Denied)?;
+        file.metadata()
+            .map(|metadata| metadata.len())
+            .map_err(|_| FilePreviewError::Denied(DenyReason::Missing))
+    })
+    .await
 }
 
 /// 按条目 id 读取文件为解码图片（预览与「存为图片条目」共用）。
@@ -97,14 +142,20 @@ pub async fn read_file_image_by_id(
     pool: &SqlitePool,
     id: &str,
 ) -> Result<DecodedFileImage, FilePreviewError> {
-    read_file_image(pool, id, false).await
+    let decoded = read_file_image(pool, id, false).await?;
+    Ok(DecodedFileImage {
+        png: decoded.bytes,
+        width: decoded.width,
+        height: decoded.height,
+        thumbnail_png: decoded.thumbnail_png,
+    })
 }
 
 async fn read_file_image(
     pool: &SqlitePool,
     id: &str,
     preview: bool,
-) -> Result<DecodedFileImage, FilePreviewError> {
+) -> Result<PreparedFileImage, FilePreviewError> {
     let item = super::get_paths_by_id(pool, id)
         .await
         .ok_or(FilePreviewError::EntryMissing)?;
@@ -119,8 +170,9 @@ async fn read_file_image(
         read_bounded(&path)
     })
     .await?;
-    if bytes.is_empty() || bytes.get(..8) != Some(PNG_MAGIC.as_slice()) {
-        return Err(FilePreviewError::NotImage);
+    let format = FileImageFormat::detect(&bytes)?;
+    if !preview && format == FileImageFormat::Gif {
+        return Err(FilePreviewError::PreviewOnly);
     }
 
     // 共享图片解码额度（与 DB 图片预览同池）：try_acquire，繁忙立即放弃缓冲
@@ -128,13 +180,13 @@ async fn read_file_image(
         .ok_or(FilePreviewError::Busy)?;
     let decode_task = tokio::task::spawn_blocking(move || {
         let _hold = decode_permit;
-        decode_file_png(&bytes, preview)
+        decode_file_image(bytes, format, preview)
     });
     match decode_task.await {
         Ok(Ok(decoded)) => Ok(decoded),
         Ok(Err(error)) => {
-            tracing::debug!(%error, "文件图片解码失败");
-            Err(FilePreviewError::Decode(error))
+            tracing::debug!(reason = error.reason(), error = ?error, "文件图片校验失败");
+            Err(error)
         }
         Err(error) => {
             tracing::warn!(%error, "文件图片解码任务失败");
@@ -191,69 +243,61 @@ fn read_limited(reader: impl Read, limit: u64) -> Result<Vec<u8>, FilePreviewErr
     Ok(bytes)
 }
 
-/// 原图解码/编码共用边界，仅预览缩放至 1024px；入库保持原尺寸。
-///
-/// 入口已做 magic 白名单校验（仅 PNG），此处固定按 PNG 解码。
-fn decode_file_png(bytes: &[u8], preview: bool) -> Result<DecodedFileImage, String> {
-    let mut reader = image::ImageReader::with_format(Cursor::new(bytes), image::ImageFormat::Png);
-    reader.limits({
-        let mut limits = image::Limits::default();
-        limits.max_alloc = Some(DECODE_BUDGET);
-        limits
-    });
-    let decoded = reader.decode().map_err(|e| format!("decode failed: {e}"))?;
-    let (width, height) = (decoded.width(), decoded.height());
-    let image = if preview && width.max(height) > PREVIEW_EDGE {
-        decoded.resize(
-            PREVIEW_EDGE,
-            PREVIEW_EDGE,
-            image::imageops::FilterType::Triangle,
-        )
-    } else {
-        decoded
-    };
-    let (out_w, out_h) = (image.width(), image.height());
-    let thumbnail_png = if preview {
-        None
-    } else {
-        Some(encode_thumbnail_png(&image)?)
-    };
-    let png = encode_full_png(image)?;
-    Ok(DecodedFileImage {
-        png,
-        width: out_w,
-        height: out_h,
+/// 预览保留原格式；静态文件入库转 PNG，EXIF 方向在转存时归一。
+fn decode_file_image(
+    bytes: Vec<u8>,
+    format: FileImageFormat,
+    preview: bool,
+) -> Result<PreparedFileImage, FilePreviewError> {
+    let started = std::time::Instant::now();
+    let validated = formats::validate(&bytes, format, preview)?;
+    let (width, height) = (validated.width, validated.height);
+    if preview {
+        tracing::trace!(
+            bytes = bytes.len(),
+            width,
+            height,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "文件图片预览校验完成"
+        );
+        return Ok(PreparedFileImage {
+            bytes,
+            mime_type: format.mime_type(),
+            width,
+            height,
+            thumbnail_png: None,
+        });
+    }
+    let decoded = validated.image.ok_or(FilePreviewError::PreviewOnly)?;
+    let thumbnail_png = Some(encode_thumbnail_png(&decoded).map_err(FilePreviewError::Decode)?);
+    let bytes = encode_full_png(decoded).map_err(FilePreviewError::Decode)?;
+    Ok(PreparedFileImage {
+        bytes,
+        mime_type: "image/png",
+        width,
+        height,
         thumbnail_png,
     })
 }
 
-/// 探测条目的内容读取可用性（前端 img 加载失败后调 status 查询消费）。
-///
-/// 只做查库 + 属性探测（不读内容、不解码），探测同样走文件 I/O 通道。
+/// 预览失败后返回真实的元数据校验原因；共用有界读取，不展开像素。
 pub async fn probe_file_entry_status(pool: &SqlitePool, id: &str) -> &'static str {
     let item = match super::get_paths_by_id(pool, id).await {
         Some(item) => item,
         None => return FilePreviewError::EntryMissing.reason(),
     };
-    let [single] = item.paths.as_slice() else {
+    if item.paths.len() != 1 {
         return "multi";
-    };
-    let path = single.clone();
-    match file_io(&FILE_IO_WORKERS, IO_WAIT_TIMEOUT, move || {
-        open_content_file(&path)
-            .map(|_| ())
-            .map_err(FilePreviewError::Denied)
-    })
-    .await
-    {
-        Ok(()) => "ok",
+    }
+    match get_file_preview_by_id(pool, id).await {
+        Ok(_) => "ok",
         Err(error) => error.reason(),
     }
 }
 
 /// 入库用的完整 PNG 编码（不缩放；输出上限 32MiB，不以解码预算冒充输出上限）。
 ///
-/// 入库保留解码原图尺寸；只有预览路径应用 1024px 缩放。
+/// 入库保留解码原图尺寸；悬浮预览直接使用原文件字节，不调用此编码路径。
 pub fn encode_full_png(image: image::DynamicImage) -> Result<Vec<u8>, String> {
     let mut out = BoundedPngWriter {
         inner: Cursor::new(Vec::new()),
@@ -318,18 +362,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn decode_preview_png_resizes_and_keeps_small() {
+    fn preview_returns_original_png_and_import_keeps_full_resolution() {
         let mut bytes = Cursor::new(Vec::new());
         image::RgbaImage::from_pixel(2048, 512, image::Rgba([10, 90, 160, 255]))
             .write_to(&mut bytes, image::ImageFormat::Png)
             .unwrap();
         let bytes = bytes.into_inner();
-        let decoded = decode_file_png(&bytes, true).unwrap();
-        assert_eq!((decoded.width, decoded.height), (1024, 256));
-        assert_eq!(&decoded.png[..8], PNG_MAGIC.as_slice());
-        let imported = decode_file_png(&bytes, false).unwrap();
+        let decoded = decode_file_image(bytes.clone(), FileImageFormat::Png, true).unwrap();
+        assert_eq!((decoded.width, decoded.height), (2048, 512));
+        assert_eq!(
+            decoded.bytes, bytes,
+            "预览逐字节直出原 PNG，不缩放或重新编码"
+        );
+        assert!(decoded.thumbnail_png.is_none());
+        assert_eq!(&decoded.bytes[..8], PNG_MAGIC.as_slice());
+        let imported = decode_file_image(bytes, FileImageFormat::Png, false).unwrap();
         assert_eq!((imported.width, imported.height), (2048, 512));
-        let png = image::load_from_memory(&imported.png).unwrap();
+        let png = image::load_from_memory(&imported.bytes).unwrap();
         assert_eq!(png.to_rgba8().get_pixel(1500, 400).0, [10, 90, 160, 255]);
         let thumb = image::load_from_memory(imported.thumbnail_png.as_ref().unwrap()).unwrap();
         assert_eq!((thumb.width(), thumb.height()), (256, 64));
@@ -338,7 +387,9 @@ mod tests {
     #[test]
     fn decode_preview_png_rejects_non_png_magic_early() {
         // magic 白名单在 read_file_image_by_id 内校验；此处验证解码失败路径
-        assert!(decode_file_png(b"not a png at all", true).is_err());
+        assert!(
+            decode_file_image(b"not a png at all".to_vec(), FileImageFormat::Png, true).is_err()
+        );
     }
 
     #[test]
@@ -348,6 +399,29 @@ mod tests {
         assert_eq!(FilePreviewError::NotImage.reason(), "not_image");
         assert_eq!(FilePreviewError::TooLarge.reason(), "too_large");
         assert_eq!(FilePreviewError::Denied(DenyReason::Unc).reason(), "unc");
+    }
+
+    #[test]
+    fn original_format_preview_and_png_import_are_separate() {
+        for format in [
+            image::ImageFormat::Png,
+            image::ImageFormat::Jpeg,
+            image::ImageFormat::WebP,
+        ] {
+            let mut bytes = Cursor::new(Vec::new());
+            image::RgbImage::from_pixel(12, 8, image::Rgb([40, 80, 120]))
+                .write_to(&mut bytes, format)
+                .unwrap();
+            let bytes = bytes.into_inner();
+            let detected = FileImageFormat::detect(&bytes).unwrap();
+            let preview = decode_file_image(bytes.clone(), detected, true).unwrap();
+            assert_eq!(preview.bytes, bytes);
+            assert_eq!(preview.mime_type, detected.mime_type());
+            let imported = decode_file_image(bytes, detected, false).unwrap();
+            assert_eq!(&imported.bytes[..8], PNG_MAGIC);
+            assert_eq!(imported.mime_type, "image/png");
+            assert!(imported.thumbnail_png.is_some());
+        }
     }
 
     #[tokio::test]
@@ -372,6 +446,14 @@ mod tests {
         ));
         assert_eq!(probe_file_entry_status(&pool, "multi").await, "multi");
         assert_eq!(probe_file_entry_status(&pool, "missing").await, "missing");
+        assert!(matches!(
+            get_file_size_by_id(&pool, "multi").await,
+            Err(FilePreviewError::EntryMissing)
+        ));
+        assert!(matches!(
+            get_file_size_by_id(&pool, "missing").await,
+            Err(FilePreviewError::EntryMissing)
+        ));
     }
 
     /// 真实临时 PNG 文件的预览闭环（受限路径防御允许本地盘符）。
@@ -390,7 +472,8 @@ mod tests {
         image::RgbaImage::from_pixel(2048, 512, image::Rgba([1, 2, 3, 255]))
             .write_to(&mut bytes, image::ImageFormat::Png)
             .unwrap();
-        std::fs::write(&path, bytes.into_inner()).unwrap();
+        let original = bytes.into_inner();
+        std::fs::write(&path, &original).unwrap();
         let path_str = path.to_string_lossy().into_owned();
 
         let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
@@ -409,17 +492,54 @@ mod tests {
 
         let decoded = read_file_image_by_id(&pool, "f1").await.unwrap();
         assert_eq!((decoded.width, decoded.height), (2048, 512));
-        let preview = get_file_preview_png_by_id(&pool, "f1").await.unwrap();
-        let preview = image::load_from_memory(&preview).unwrap();
-        assert_eq!((preview.width(), preview.height()), (1024, 256));
+        let preview = get_file_preview_by_id(&pool, "f1").await.unwrap();
+        assert_eq!(preview.mime_type, "image/png");
+        assert_eq!(preview.bytes, original, "文件预览端到端保留原始 PNG");
+        assert_eq!(
+            get_file_size_by_id(&pool, "f1").await.unwrap(),
+            original.len() as u64
+        );
+        let preview = image::load_from_memory(&preview.bytes).unwrap();
+        assert_eq!((preview.width(), preview.height()), (2048, 512));
         assert_eq!(probe_file_entry_status(&pool, "f1").await, "ok");
 
-        // 替换为非 PNG 内容 → NotImage（每次读取反映当前文件内容，不缓存）
+        // 名叫 .png 的 GIF 仍按真实内容预览，并拒绝静态入库。
+        let mut gif = Vec::new();
+        {
+            let mut encoder = image::codecs::gif::GifEncoder::new(&mut gif);
+            encoder
+                .encode_frames((0..2).map(|i| {
+                    image::Frame::new(image::RgbaImage::from_pixel(
+                        2,
+                        2,
+                        image::Rgba([i, 80, 120, 255]),
+                    ))
+                }))
+                .unwrap();
+        }
+        std::fs::write(&path, &gif).unwrap();
+        let preview = get_file_preview_by_id(&pool, "f1").await.unwrap();
+        assert_eq!(preview.mime_type, "image/gif");
+        assert_eq!(preview.bytes, gif, "保留 GIF 全部动画字节");
+        assert!(matches!(
+            read_file_image_by_id(&pool, "f1").await,
+            Err(FilePreviewError::PreviewOnly)
+        ));
+
+        // 状态查询必须报告实际像素预算，不能只因文件可打开就返回 ok。
+        gif[6..8].copy_from_slice(&u16::MAX.to_le_bytes());
+        gif[8..10].copy_from_slice(&u16::MAX.to_le_bytes());
+        std::fs::write(&path, &gif).unwrap();
+        assert_eq!(probe_file_entry_status(&pool, "f1").await, "pixel_budget");
+
+        // 替换为非图片内容 → NotImage（每次读取反映当前文件内容，不缓存）
         std::fs::write(&path, b"plain text bytes").unwrap();
+        assert_eq!(get_file_size_by_id(&pool, "f1").await.unwrap(), 16);
         assert!(matches!(
             read_file_image_by_id(&pool, "f1").await,
             Err(FilePreviewError::NotImage)
         ));
+        assert_eq!(probe_file_entry_status(&pool, "f1").await, "not_image");
         // 删除文件 → Missing
         let _ = std::fs::remove_file(&path);
         assert!(matches!(

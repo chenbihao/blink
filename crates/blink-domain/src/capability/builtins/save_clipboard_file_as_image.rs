@@ -1,4 +1,4 @@
-//! 0.26.9：「存为图片条目」——把单文件 PNG 条目读取/解码后按现有图片历史
+//! 「存为图片条目」——把单文件 PNG/JPEG/静态 WebP 读取/解码后按现有图片历史
 //! 路径入库（转 PNG + 256 缩略图 + sha256 去重 + `max_image_items` 容量清理）。
 //!
 //! 以用户点击触发校验（打开菜单时不读取文件）；读取/解码与预览共用服务
@@ -30,7 +30,7 @@ impl Capability for SaveClipboardFileAsImage {
     fn schema(&self) -> CapabilitySchema {
         CapabilitySchema {
             name: self.id().into(),
-            description: "Save a single-file PNG clipboard entry into clipboard image history"
+            description: "Save a single PNG/JPEG/static WebP file entry into PNG image history (GIF is preview-only)"
                 .into(),
             parameters: json!({"type":"object","properties":{
                 "id":{"type":"string","description":"clipboard_files 条目 id（须恰好单路径）"}},
@@ -80,7 +80,16 @@ impl Capability for SaveClipboardFileAsImage {
                             format!("受限来源（{}），仅保存路径，未读取内容", reason.reason())
                         }
                         blink_infra::data::clipboard_files::FilePreviewError::NotImage => {
-                            "不是支持的图片文件（仅 PNG）".into()
+                            "不是支持的图片文件（PNG、JPEG、WebP）".into()
+                        }
+                        blink_infra::data::clipboard_files::FilePreviewError::PreviewOnly => {
+                            "GIF 或动画图片仅支持预览，不能存为图片条目".into()
+                        }
+                        blink_infra::data::clipboard_files::FilePreviewError::PixelBudget => {
+                            "图片像素数量超过转存上限".into()
+                        }
+                        blink_infra::data::clipboard_files::FilePreviewError::AnimationBudget => {
+                            "动画帧数或累计像素超过预览上限".into()
                         }
                         blink_infra::data::clipboard_files::FilePreviewError::TooLarge => {
                             "文件超过 32MiB 上限".into()

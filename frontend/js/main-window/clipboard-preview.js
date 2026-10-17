@@ -1,5 +1,6 @@
 import {invoke} from "../shared/tauri.js";
 import {t} from "../i18n/index.js";
+import {createClipboardImageViewer} from "./clipboard-image-viewer.js";
 
 let panel;
 let anchor;
@@ -7,6 +8,8 @@ let revision = 0;
 let showTimer;
 let hideTimer;
 let previewImage;
+let imageViewer;
+let draggingImage = false;
 let pendingAnchor;
 let panelHovered = false;
 let anchorHovered = false;
@@ -35,6 +38,10 @@ function cancelHide() {
 function closePanel() {
     revision++;
     cancelHide();
+    imageViewer?.dispose(); // Releasing capture may schedule an exit buffer; cancel it below.
+    imageViewer = null;
+    draggingImage = false;
+    cancelHide();
     anchor?.removeAttribute("aria-describedby");
     anchor = null;
     menuHold = null;
@@ -55,7 +62,7 @@ function closePanel() {
 }
 
 function scheduleHide() {
-    if (menuHold || selectingText || hideTimer !== undefined) return;
+    if (menuHold || selectingText || draggingImage || hideTimer !== undefined) return;
     // Closing the visible panel must not cancel another row's pending hover.
     hideTimer = setTimeout(closePanel, HIDE_DELAY);
 }
@@ -151,7 +158,6 @@ function placePanel() {
     panel.style.width = `${width}px`;
     const maxHeight = Math.max(1, Math.min(260, window.innerHeight - 16));
     panel.style.maxHeight = `${maxHeight}px`;
-    panel.style.setProperty("--preview-image-height", `${Math.max(1, maxHeight - 22)}px`);
     panel.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - width - 8))}px`;
     const height = panel.getBoundingClientRect().height;
     const below = rect.bottom + 6;
@@ -179,7 +185,7 @@ function bindPreview(li, {loadText, isError = false, imageId, fileEntryId}) {
         scheduleHide();
     };
     const onPointer = event => {
-        if (menuHold || selectingText) return;
+        if (menuHold || selectingText || draggingImage) return;
         // 文本与图片统一左侧三分之一触发，右侧保留给点击/拖选等列表操作。
         const rect = li.getBoundingClientRect();
         const inTrigger = Number.isFinite(event.clientX) && event.clientX >= rect.left
@@ -221,16 +227,15 @@ function bindPreview(li, {loadText, isError = false, imageId, fileEntryId}) {
                 image.decoding = "async";
                 image.onload = () => {
                     if (token !== revision || anchor !== li || !li.isConnected) return;
-                    view.classList.add("is-image-preview");
-                    view.replaceChildren(image);
-                    placePanel();
+                    showImage(view, image);
                 };
                 image.onerror = () => {
                     if (token !== revision || anchor !== li || !li.isConnected) return;
                     view.textContent = t("clipboard.preview_missing");
                     placePanel();
                 };
-                image.src = "http://blink-clipimg.localhost/preview/" + encodeURIComponent(imageId);
+                // 原图直出使用独立缓存版本，避免沿用旧版本一小时内的 1024px 预览。
+                image.src = "http://blink-clipimg.localhost/preview/" + encodeURIComponent(imageId) + "?v=original";
                 return;
             }
             if (fileEntryId) {
@@ -253,9 +258,14 @@ function bindPreview(li, {loadText, isError = false, imageId, fileEntryId}) {
                         image.decoding = "async";
                         image.onload = () => {
                             if (token !== revision || anchor !== li || !li.isConnected) return;
-                            view.classList.add("is-image-preview");
-                            view.replaceChildren(image);
-                            placePanel();
+                            showImage(view, image);
+                            // Size is lazy and does not delay the image's first paint or enter search.
+                            const viewer = imageViewer;
+                            invoke("get_clipboard_file_entry", {id: fileEntryId, includeMetadata: true})
+                                .then(metadata => {
+                                    if (token !== revision || anchor !== li || !li.isConnected) return;
+                                    if (Number.isFinite(metadata?.size_bytes)) viewer.setFileSize(metadata.size_bytes);
+                                }).catch(() => {});
                         };
                         image.onerror = () => {
                             if (token !== revision || anchor !== li || !li.isConnected) return;
@@ -294,12 +304,25 @@ function bindPreview(li, {loadText, isError = false, imageId, fileEntryId}) {
     li.addEventListener("pointerleave", leaveTrigger);
 }
 
+function showImage(view, image) {
+    view.classList.add("is-image-preview");
+    const width = Math.max(1, Math.min(anchor.getBoundingClientRect().width, window.innerWidth - 16) - 26);
+    imageViewer = createClipboardImageViewer(image, {
+        width, maxHeight: Math.max(1, Math.min(260, window.innerHeight - 16) - 52),
+        onDragStart() {draggingImage = true; cancelShow(); cancelHide(); view.focus({preventScroll: true});},
+        onDragEnd() {draggingImage = false; if (!panelHovered && !anchorHovered) scheduleHide();},
+    });
+    view.replaceChildren(imageViewer.root);
+    placePanel();
+}
+
 /** 0.26.9：单文件图片预览失败的回落——取原因码分类提示 + 路径列表。 */
 async function showFileFallback(view, paths, entryId, token, li) {
     view.classList.remove("is-image-preview");
     let reason = "preview_unavailable";
     try {
         reason = await invoke("get_clipboard_file_preview_status", {id: entryId}) || reason;
+        if (reason === "ok") reason = "decode_failed"; // 文件头通过但 WebView 拒绝像素数据。
     } catch { /* 保留通用提示 */ }
     if (token !== revision || anchor !== li || !li.isConnected) return;
     const hint = t(`clipboard.file_preview_${reason}`);

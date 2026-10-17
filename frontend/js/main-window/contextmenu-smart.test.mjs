@@ -57,7 +57,7 @@ function setup({refs = [{kind: 'text', id: 't1'}], itemActions = null} = {}) {
         activateItem: data => calls.push({id: 'activate', data}),
         showActionError: () => calls.push({id: 'error'}),
         hideWindow: () => {},
-        console, Promise, Math, Date, JSON,
+        console, Promise, Math, Date, JSON, setTimeout, clearTimeout,
     });
     vm.runInContext(source, context);
     context.init();
@@ -81,20 +81,16 @@ function setup({refs = [{kind: 'text', id: 't1'}], itemActions = null} = {}) {
     };
 }
 
-test('单项文本菜单顶部先显示 loading，结果回流后更新同一菜单', async () => {
+test('快速识别只弹出一次最终菜单，省去 loading 闪动', async () => {
     const h = setup({itemActions: [
         {kind: 'openUrl', capabilityId: 'open_url', args: {url: 'https://example.com'}, target: 'https://example.com', actionKey: 'k1'},
         {kind: 'revealInExplorer', capabilityId: 'reveal_in_explorer', args: {path: 'C:\\a'}, target: 'C:\\a', actionKey: 'k2'},
     ]});
     h.openSingle();
-    const initial = h.menus().at(-1);
-    assert.equal(initial[0].label, 'menu.smart_loading');
-    assert.equal(initial[0].disabled, true);
-    assert.ok(initial[0].menuId, 'loading 项已绑定会话');
-    assert.equal(initial[0].generation, 0, '初始内容也携带代次');
+    assert.equal(h.menus().length, 0, '快速识别预算内不先显示 loading');
     assert.equal(h.refs.length, 1, '真实右键准备已选中单项');
-    assert.equal(initial.find(item => item.label === 'menu.copy').menuId, initial[0].menuId);
     await h.flush();
+    assert.equal(h.menus().length, 1);
     const updated = h.menus().at(-1);
     assert.equal(updated[0].label, 'suggestionbar.openUrl_with:https://example.com');
     assert.equal(updated[0].icon, 'globe');
@@ -103,6 +99,36 @@ test('单项文本菜单顶部先显示 loading，结果回流后更新同一菜
     assert.equal(updated[1].icon, 'folder-search');
     // 基础菜单保留且同步代次
     assert.equal(updated.find(item => item.label === 'menu.copy').generation, 1);
+});
+
+test('慢识别 32ms 后提供基础菜单，结果仍更新同一会话', async t => {
+    t.mock.timers.enable({apis:['setTimeout']});
+    let finish;
+    const h = setup({itemActions: () => new Promise(resolve => {finish = resolve;})});
+    h.openSingle();
+    t.mock.timers.tick(31);
+    assert.equal(h.menus().length, 0);
+    t.mock.timers.tick(1);
+    const initial = h.menus()[0];
+    assert.equal(initial[0].label, 'menu.smart_loading');
+    assert.ok(initial.some(item => item.label === 'menu.copy'));
+    finish(rustActions);
+    await h.flush();
+    assert.equal(h.menus().length, 2);
+    assert.equal(h.menus()[1][0].menuId, initial[0].menuId);
+});
+
+test('首屏等待期间取消菜单，定时器和迟到结果均不能重开', async t => {
+    t.mock.timers.enable({apis:['setTimeout']});
+    let finish;
+    const h = setup({itemActions: () => new Promise(resolve => {finish = resolve;})});
+    h.openSingle();
+    await Promise.resolve(); // Secondary-window listeners register asynchronously.
+    h.events.get('hidden')();
+    t.mock.timers.tick(100);
+    finish(rustActions);
+    await h.flush();
+    assert.equal(h.menus().length,0);
 });
 
 test('空组移除 loading 分组，还原纯基础菜单', async () => {
@@ -142,11 +168,10 @@ test('旧代次点击被拒绝，不按新数组位置执行另一操作', async
         {kind: 'openUrl', capabilityId: 'open_url', args: {url: 'https://a'}, target: 'https://a', actionKey: 'k'},
     ]});
     h.openSingle();
-    const initial = h.menus().at(-1);
     await h.flush();
     const updated = h.menus().at(-1);
     // 旧数字代次、空代次、缺失代次都不能按更新后的下标执行。
-    for (const generation of [initial[0].generation, null, undefined]) {
+    for (const generation of [0, null, undefined]) {
         h.events.get('action')({payload: {actionId: 0, menuId: updated[0].menuId, generation}});
     }
     assert.equal(h.calls.length, 0, '旧代次点击不执行新位置的动作');
@@ -182,7 +207,7 @@ test('菜单切换条目后，旧查询结果不更新新会话', async () => {
         runBuiltinAction: async () => {}, t: key => key, getLang: () => 'zh',
         parseColor: () => null, resultsEl: {contains: () => true}, queryEl: {},
         activateItem: () => {}, showActionError: () => {}, hideWindow: () => {},
-        console, Promise, Math, Date, JSON,
+        console, Promise, Math, Date, JSON, setTimeout, clearTimeout,
     });
     vm.runInContext(source, context);
     context.init();
@@ -195,11 +220,8 @@ test('菜单切换条目后，旧查询结果不更新新会话', async () => {
     resolveFirst();
     await new Promise(resolve => setImmediate(resolve));
     const shows = ipc.filter(call => call.command === 'show_context_menu').map(call => JSON.parse(call.args.items));
-    // t1 初始 + t2 初始 + t2 自身空组还原 = 3 次；t1 的迟到结果不得产生任何后续更新
-    assert.equal(shows.length, 3, '旧会话结果不重开/不更新新菜单');
-    const t1MenuId = shows[0][0].menuId;
-    const t2MenuId = shows[1][0].menuId;
-    assert.notEqual(t1MenuId, t2MenuId);
+    assert.equal(shows.length, 1, '旧会话及 loading 不闪现，只有 t2 最终菜单');
+    const t2MenuId = shows[0][0].menuId;
     assert.ok(shows.at(-1).every(item => item.menuId === t2MenuId),
         '最终菜单只属于 t2 会话（t1 的 loading 项不回流）');
     assert.ok(!shows.at(-1).some(item => item.label === 'menu.smart_loading'),
@@ -216,13 +238,18 @@ test('多选接管与图片条目不注入智能组', async () => {
     assert.ok(!h.ipc.some(call => call.command === 'get_clipboard_item_actions'));
 });
 
-test('初始编辑点击与双动作组更新竞争时不误执行复制', async () => {
-    const h = setup({itemActions: [
+test('初始编辑点击与双动作组更新竞争时不误执行复制', async t => {
+    t.mock.timers.enable({apis:['setTimeout']});
+    let finish;
+    const h = setup({itemActions: () => new Promise(resolve => {finish = resolve;})});
+    const actions = [
         {kind: 'openPath', capabilityId: 'open_path', args: {path: 'C:\\dir'}, target: 'C:\\dir'},
         {kind: 'revealInExplorer', capabilityId: 'reveal_in_explorer', args: {path: 'C:\\dir'}, target: 'C:\\dir'},
-    ]});
+    ];
     h.openSingle();
+    t.mock.timers.tick(32);
     const initial = h.menus().at(-1), edit = initial.findIndex(item => item.label === 'menu.edit');
+    finish(actions);
     await h.flush();
     const updated = h.menus().at(-1);
     assert.equal(updated[edit].label, 'menu.copy', '插入动作使旧下标指向另一操作');
@@ -242,7 +269,7 @@ test('查询回流及点击均拒绝已改变的选择快照', async () => {
     pending.refs = [{kind: 'text', id: 'new'}];
     finish(rustActions);
     await pending.flush();
-    assert.equal(pending.menus().length, 1, '锚点仍连接也不能回写旧选择');
+    assert.equal(pending.menus().length, 0, '锚点仍连接也不能回写旧选择');
 
     const clicked = setup({itemActions: rustActions});
     clicked.openSingle(); await clicked.flush();

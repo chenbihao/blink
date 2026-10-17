@@ -1,5 +1,7 @@
 /** English dictionary. Flat dotted keys, must align with zh.js. */
 export const en = {
+    "clipboard.preview_file_size": "File size {size}",
+    "clipboard.preview_image_controls": "Scroll to zoom · Drag to pan · Double-click to reset",
     "weather.region_auto": "Automatic (QWeather administrative data)",
 
     "menu.copyError": "Copy error message",
@@ -25,9 +27,11 @@ export const en = {
     "clipboard.file_preview_reparse_remote": "Link targets a remote location; path saved only",
     "clipboard.file_preview_unknown_reparse": "Special link path saved without reading",
     "clipboard.file_preview_device_path": "Device path is not readable",
-    "clipboard.file_preview_not_image": "Not a supported image file (PNG only)",
+    "clipboard.file_preview_not_image": "Not a supported image file (PNG, JPEG, GIF, WebP)",
     "clipboard.file_preview_too_large": "File exceeds the 32MiB limit",
     "clipboard.file_preview_decode_failed": "Image decode failed",
+    "clipboard.file_preview_pixel_budget": "Image exceeds the 128MiB preview pixel budget",
+    "clipboard.file_preview_animation_budget": "Animation exceeds 200 frames or the 256MiB cumulative pixel budget",
     "clipboard.file_preview_multi": "Multiple files; showing the path list",
     "clipboard.file_preview_ok": "Previewable",
 

@@ -33,7 +33,7 @@ pub async fn show_context_menu(
                     .find_map(|item| item.get("generation")?.as_u64())
             })
         });
-    {
+    let is_update = {
         let mut active = ACTIVE_MENU.lock().map_err(|e| e.to_string())?;
         if let Some((id, previous)) = active.as_ref()
             && id == &menu_id
@@ -41,8 +41,10 @@ pub async fn show_context_menu(
         {
             return Ok(());
         }
+        let is_update = active.as_ref().is_some_and(|(id, _)| id == &menu_id);
         *active = Some((menu_id.clone(), generation));
-    }
+        is_update
+    };
     // 主题 resolve（auto → dark/light）
     let theme = {
         let pool = &app.state::<crate::infra::data::DbPools>().config;
@@ -66,6 +68,37 @@ pub async fn show_context_menu(
     if ACTIVE_MENU.lock().map_err(|e| e.to_string())?.as_ref()
         != Some(&(menu_id.clone(), generation))
     {
+        return Ok(());
+    }
+    if is_update
+        && let Some(win) = app.get_webview_window("context-menu")
+        && win.is_visible().unwrap_or(false)
+        && let Ok(origin) = win.outer_position()
+    {
+        let (x, y, w, h) = crate::infra::platform::window::clamp_context_menu_at(
+            width,
+            height,
+            Some((origin.x, origin.y)),
+        );
+        crate::infra::platform::window::set_context_menu_payload(items.clone(), theme.clone());
+        let theme_js = serde_json::to_string(&theme).map_err(|e| e.to_string())?;
+        win.eval(&format!(
+            "window.__renderContextMenu && window.__renderContextMenu({items}, {theme_js})"
+        ))
+        .map_err(|e| e.to_string())?;
+        if let Ok(hwnd) = win.hwnd() {
+            crate::infra::platform::window::place_at_physical(
+                windows::Win32::Foundation::HWND(hwnd.0 as _),
+                x,
+                y,
+                w,
+                h,
+            );
+        } else {
+            win.set_size(tauri::PhysicalSize::new(w, h))
+                .map_err(|e| e.to_string())?;
+        }
+        tracing::trace!(generation, x, y, w, h, "右键菜单原地更新");
         return Ok(());
     }
     // 多屏感知定位：Win32 直接拿光标物理坐标 + 目标屏 DPI 缩放 + 智能翻转

@@ -24,7 +24,6 @@
         displayedMenuId = items.find(item => item.menuId)?.menuId || '';
         displayedGeneration = items.find(item => typeof item.generation === 'number')?.generation ?? null;
         const menuEl = document.getElementById('menu');
-        menuEl.innerHTML = '';
         const fragment = document.createDocumentFragment();
         items.forEach((item, index) => {
             if (item.separator) {
@@ -71,7 +70,7 @@
             });
             fragment.appendChild(row);
         });
-        menuEl.appendChild(fragment);
+        menuEl.replaceChildren(fragment);
     }
 
     /** 后端复用窗口时通过 eval 直接调用此入口（emit 在隐藏态会被 WebView2 丢弃）。 */
