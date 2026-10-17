@@ -3,6 +3,7 @@ import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
 import * as selectionState from './clipboard-selection.js';
 import * as entryModel from './clipboard-entry.js';
+import {KIND_ORDER, nextKind} from './clipboard-kind.js';
 import {createClipboardBatch} from './clipboard-batch.js';
 const selection = {...selectionState,
     toggleSelection: id => selectionState.toggleSelection(entryModel.refKey({kind: 'text', id})),
@@ -34,7 +35,8 @@ function setup() {
     const noop = () => {};
     const queryEl = {value: '', placeholder: '', focus: noop};
     const context = vm.createContext({
-        listNavigation: {reset: () => {}},
+        listNavigation: {reset: () => {}}, KIND_ORDER, nextKind,
+        inputState: {isAltDown: () => false},
         queryEl, resultsEl: {querySelectorAll: () => lis}, selection: selectionState, parseColor,
         ...entryModel,
         createClipboardBatch: deps => createClipboardBatch({...deps,
@@ -134,8 +136,42 @@ function setup() {
     assert.equal(h.renders.at(-1)[0].source, 'color');
     h.context.setKind('image');
     assert.equal(h.requests.at(-1).kind, 'image');
+    h.context.setKind('file');
+    assert.equal(h.requests.at(-1).kind, 'file', '文件筛选中的颜色字面量也走历史查询');
     h.context.setKind('text');
     assert.equal(h.renders.at(-1)[0].source, 'color', '类型切换复用颜色字面量逻辑');
+}
+{
+    const h = setup();
+    h.input('needle');
+    selection.toggleSelection('old');
+    h.context.setKind('file');
+    assert.equal(h.requests.at(-1).query, 'needle', '切换文件筛选保留当前搜索词');
+    assert.equal(h.requests.at(-1).kind, 'file');
+    assert.equal(h.requests.at(-1).cursor, undefined, '切换筛选回到首批');
+    assert.equal(selection.hasSelection(), false, '切换筛选清空旧选择');
+    const fileCursor = {created_at: 100, id: 'file-1'};
+    const fileEntry = {clipboard_ref: {kind: 'file', id: 'file-1'}, name: 'file'};
+    h.loaded = [fileEntry]; h.nearTail = true;
+    h.requests[0].resolve({entries: [{name: 'old'}]});
+    h.requests.at(-1).resolve({entries: [fileEntry], has_more: true, next_cursor: fileCursor});
+    await flush();
+    assert.equal(h.renders.length, 1, '文件筛选拒绝之前全部分类的迟到响应');
+    assert.equal(h.renders[0][0].clipboard_ref.kind, 'file');
+    const append = h.requests.at(-1);
+    assert.equal(append.kind, 'file', '追加分页延续文件筛选');
+    assert.deepEqual(append.cursor, fileCursor);
+
+    const tab = shiftKey => h.context.handleKeydown({key: 'Tab', shiftKey, preventDefault() {}});
+    assert.equal(tab(false), true);
+    assert.equal(h.requests.at(-1).kind, 'all', '文件后 Tab 回绕到全部');
+    append.resolve({entries: [{clipboard_ref: {kind: 'file', id: 'old-file-page'}}]});
+    await flush();
+    assert.equal(h.appends.length, 0, '切换分类后文件追加的迟到响应失效');
+    assert.equal(tab(true), true);
+    assert.equal(h.requests.at(-1).kind, 'file', '全部前 Shift+Tab 回绕到文件');
+    h.context.reset(); h.context.enter();
+    assert.equal(h.requests.at(-1).kind, 'all', '重新进入剪贴板默认全部');
 }
 {
     const h = setup();

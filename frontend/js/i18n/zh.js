@@ -1508,6 +1508,7 @@ export const zh = {
     "clipboard.kind_all": "全部",
     "clipboard.kind_text": "文本",
     "clipboard.kind_image": "图片",
+    "clipboard.kind_file": "文件",
     "clipboard.selected_count": "已选择 {count} 段文本",
     "clipboard.loading_count": "正在加载 {count} 项…",
     "clipboard.copied_count": "已复制 {count} 段文本",

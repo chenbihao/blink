@@ -1512,6 +1512,7 @@ export const en = {
     "clipboard.kind_all": "All",
     "clipboard.kind_text": "Text",
     "clipboard.kind_image": "Images",
+    "clipboard.kind_file": "Files",
     "clipboard.selected_count": "Selected {count} items",
     "clipboard.loading_count": "Loading {count} items…",
     "clipboard.copied_count": "Copied {count} items",

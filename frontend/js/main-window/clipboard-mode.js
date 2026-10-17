@@ -62,7 +62,7 @@ import {createClipboardBatch} from './clipboard-batch.js';
 /** 当前是否处于剪贴板模式。 */
 let active = false;
 
-/** 0.25.23: 当前类型筛选（"all" | "text" | "image"，Tab/Shift+Tab 循环）。 */
+/** 当前类型筛选（"all" | "text" | "image" | "file"，Tab/Shift+Tab 循环）。 */
 let kind = "all";
 
 /** 原始 placeholder（退出时恢复）。 */
@@ -87,6 +87,7 @@ const KIND_LABEL_KEYS = {
     all: "clipboard.kind_all",
     text: "clipboard.kind_text",
     image: "clipboard.kind_image",
+    file: "clipboard.kind_file",
 };
 
 /** 0.20.2: 上次搜索的 trim 后 query——避免相同 query 重复搜索导致光标重置。 */
@@ -346,8 +347,8 @@ export function handleInput(value, {force = false, immediate = false} = {}) {
     seq++;
 
     // 0.20.3：颜色字面量优先——在剪贴板模式中输入颜色也立即返回颜色结果。
-    // 0.25.23：图片筛选下颜色项无意义（不是剪贴板历史），跳过降级走常规过滤。
-    const colorResult = kind === "image" ? null : parseColor(q);
+    // 图片/文件筛选只展示对应历史，颜色字面量快捷结果限于全部/文本。
+    const colorResult = kind === "all" || kind === "text" ? parseColor(q) : null;
     if (colorResult) {
         // 构造与 ColorEngine 一致的颜色 AppEntry
         const entry = {

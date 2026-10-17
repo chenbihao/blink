@@ -1,10 +1,10 @@
 //! 剪贴板模式类型筛选纯逻辑（0.25.23）。
 //!
 //! 只管循环顺序与合法性，不碰 DOM/IPC——可单测（clipboard-kind.test.mjs）。
-//! 文件/音频待采集支持（CF_HDROP 独立监听）后再进 KIND_ORDER。
+//! 文件采集已支持 CF_HDROP；按历史条目类型筛选，不按扩展名重新分类。
 
 /** Tab 循环顺序（Tab 前进 / Shift+Tab 后退）。 */
-export const KIND_ORDER = ["all", "text", "image"];
+export const KIND_ORDER = ["all", "text", "image", "file"];
 
 /** 是否合法 kind 值。 */
 export function isValidKind(kind) {

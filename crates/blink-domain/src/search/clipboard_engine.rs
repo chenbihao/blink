@@ -67,14 +67,14 @@ const CANDIDATE_LIMIT_MAX: usize = 5000;
 
 /// 剪贴板模式类型筛选（0.25.23）。
 ///
-/// 文本与图片分表存储（`clipboard_history` / `clipboard_images`），筛选天然
-/// 下推为「跳过另一张表的查询」，无需按行过滤。0.26.9 文件条目只在 All 混排
-/// 展示（`clipboard_files` 表），Text/Image 页签排除文件，本版不新增 Files 页签。
+/// 文本、图片与文件分表存储，筛选下推为「只查询选中的表」，无需按行过滤。
+/// 文件按条目身份分类：文件路径文本仍为 Text，文件条目中的 PNG 仍为 File。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClipKind {
     All,
     Text,
     Image,
+    File,
 }
 
 impl ClipKind {
@@ -83,6 +83,7 @@ impl ClipKind {
         match raw {
             Some("text") => Self::Text,
             Some("image") => Self::Image,
+            Some("file") => Self::File,
             _ => Self::All,
         }
     }
@@ -203,12 +204,12 @@ impl ClipboardEngine {
         // 并行查询文本 + 图片 + 文件元数据（pool 间无竞争；文件与文本同池但
         // SQLite 串行排队即可，查询轻量）。不加载 text / thumb_blob / 全量路径数组——
         // 前端通过 get_clipboard_text / blink-clipimg 协议按需懒加载。
-        // 0.26.9：文件条目（clipboard_files，history 库）只在 All 混排。
+        // 文件条目（clipboard_files，history 库）在 All 混排或 File 独立查询。
         let (text_metas, image_items, file_metas) = if arg.is_empty() {
             // 最近历史场景：三条简单 LIMIT 查询并行（不含 text 列）
             let (text, images, files) = tokio::join!(
                 async {
-                    if kind == ClipKind::Image {
+                    if !matches!(kind, ClipKind::All | ClipKind::Text) {
                         Vec::new()
                     } else {
                         match &cursor {
@@ -218,7 +219,7 @@ impl ClipboardEngine {
                     }
                 },
                 async {
-                    if kind == ClipKind::Text {
+                    if !matches!(kind, ClipKind::All | ClipKind::Image) {
                         Vec::new()
                     } else {
                         match &cursor {
@@ -231,7 +232,7 @@ impl ClipboardEngine {
                     }
                 },
                 async {
-                    if kind != ClipKind::All {
+                    if !matches!(kind, ClipKind::All | ClipKind::File) {
                         Vec::new()
                     } else {
                         match &cursor {
@@ -281,14 +282,14 @@ impl ClipboardEngine {
             };
             let (text_metas, image_items, file_rows) = tokio::join!(
                 async {
-                    if kind == ClipKind::Image {
+                    if !matches!(kind, ClipKind::All | ClipKind::Text) {
                         Vec::new()
                     } else {
                         text_query.await
                     }
                 },
                 async {
-                    if kind == ClipKind::Text {
+                    if !matches!(kind, ClipKind::All | ClipKind::Image) {
                         Vec::new()
                     } else {
                         match &cursor {
@@ -301,7 +302,7 @@ impl ClipboardEngine {
                     }
                 },
                 async {
-                    if kind != ClipKind::All {
+                    if !matches!(kind, ClipKind::All | ClipKind::File) {
                         Vec::new()
                     } else {
                         query_file_search_candidates(
@@ -1173,13 +1174,14 @@ mod tests {
         assert_eq!(ClipKind::parse(None), ClipKind::All);
         assert_eq!(ClipKind::parse(Some("text")), ClipKind::Text);
         assert_eq!(ClipKind::parse(Some("image")), ClipKind::Image);
+        assert_eq!(ClipKind::parse(Some("file")), ClipKind::File);
     }
 
     #[test]
     fn clip_kind_parse_unknown_falls_back_to_all() {
         // 脏参数不丢结果：未知值/空串/大小写不一律回落 All
         assert_eq!(ClipKind::parse(Some("")), ClipKind::All);
-        assert_eq!(ClipKind::parse(Some("file")), ClipKind::All);
+        assert_eq!(ClipKind::parse(Some("audio")), ClipKind::All);
         assert_eq!(ClipKind::parse(Some("TEXT")), ClipKind::All);
     }
 
@@ -1312,21 +1314,21 @@ mod tests {
             .await
             .unwrap();
         }
-        let page = engine.search_page("fbt", ClipKind::All, None, 1).await;
-        assert_eq!(page.items.len(), 1);
-        assert_eq!(page.items[0].id, "clipboard:match-a");
-        assert!(page.has_more);
-        let next = engine
-            .search_page("fbt", ClipKind::All, page.next_cursor, 1)
-            .await;
-        assert_eq!(next.items.len(), 1);
-        assert_eq!(next.items[0].id, "clipboard:match-b");
-        assert!(!next.has_more);
-        let path = engine
-            .search_page(r"C:\docs\foo_bar.txt", ClipKind::All, None, 2)
-            .await;
-        assert_eq!(path.items.len(), 1, "Windows 路径不受 JSON 反斜杠转义影响");
-        assert_eq!(path.items[0].id, "clipboard:match-a");
+        for kind in [ClipKind::All, ClipKind::File] {
+            let page = engine.search_page("fbt", kind, None, 1).await;
+            assert_eq!(page.items.len(), 1);
+            assert_eq!(page.items[0].id, "clipboard:match-a");
+            assert!(page.has_more);
+            let next = engine.search_page("fbt", kind, page.next_cursor, 1).await;
+            assert_eq!(next.items.len(), 1);
+            assert_eq!(next.items[0].id, "clipboard:match-b");
+            assert!(!next.has_more);
+            let path = engine
+                .search_page(r"C:\docs\foo_bar.txt", kind, None, 2)
+                .await;
+            assert_eq!(path.items.len(), 1, "Windows 路径不受 JSON 反斜杠转义影响");
+            assert_eq!(path.items[0].id, "clipboard:match-a");
+        }
         assert!(
             engine
                 .search_page("fbt", ClipKind::Text, None, 2)
@@ -1334,6 +1336,75 @@ mod tests {
                 .items
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn file_kind_filters_by_entry_type_and_pages_without_duplicates() {
+        let engine = engine_with_mixed_data().await;
+        blink_infra::data::clipboard_files::init_db(&engine.pool)
+            .await
+            .unwrap();
+        // 已有文本/图片命中 needle，但文件表为空时文件筛选必须为空。
+        for query in ["", "needle"] {
+            let empty = engine.search_page(query, ClipKind::File, None, 1).await;
+            assert!(empty.items.is_empty());
+            assert!(!empty.has_more);
+            assert!(empty.next_cursor.is_none());
+        }
+        let now = chrono::Utc::now().timestamp();
+        for (id, paths) in [
+            ("clipfile_9", vec![r"C:\needle.png".into()]),
+            ("clipfile_2", vec![r"C:\needle-folder".into()]),
+            (
+                "clipfile_10",
+                vec![r"C:\other.txt".into(), r"C:\needle.txt".into()],
+            ),
+        ] {
+            blink_infra::data::clipboard_files::save_file(
+                &engine.pool,
+                &blink_infra::data::clipboard_files::ClipboardFileItem {
+                    id: id.into(),
+                    paths,
+                    created_at: now,
+                    source_app: None,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        for (query, text_count, image_count) in [("", 2, 2), ("needle", 1, 1)] {
+            for (kind, count) in [
+                (ClipKind::All, text_count + image_count + 3),
+                (ClipKind::Text, text_count),
+                (ClipKind::Image, image_count),
+            ] {
+                assert_eq!(
+                    engine.search_page(query, kind, None, 20).await.items.len(),
+                    count
+                );
+            }
+            let mut ids = Vec::new();
+            let mut cursor = None;
+            for batch in 0..3 {
+                let page = engine.search_page(query, ClipKind::File, cursor, 1).await;
+                assert_eq!(page.items.len(), 1, "文件筛选每批只返回一个文件条目");
+                assert!(matches!(&page.items[0].action,
+                    SearchAction::RunAction { id, .. } if id == "copy_clipboard_files"));
+                ids.push(page.items[0].id.clone());
+                assert_eq!(page.has_more, batch < 2);
+                assert_eq!(page.next_cursor.is_some(), batch < 2);
+                cursor = page.next_cursor;
+            }
+            assert_eq!(
+                ids,
+                [
+                    "clipboard:clipfile_9",
+                    "clipboard:clipfile_2",
+                    "clipboard:clipfile_10"
+                ],
+                "PNG、目录、多文件都按文件身份返回，同秒游标按字符串序不重不漏"
+            );
+        }
     }
 
     fn is_image_item(item: &SearchItem) -> bool {

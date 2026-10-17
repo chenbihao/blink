@@ -94,9 +94,9 @@ Open with: `Alt+C` in the main window (or type `剪贴板` / `clip`). Text, imag
 | Operation | Trigger | Notes |
 |---|---|---|
 | Filter | Just type | Fuzzy-search your clipboard history |
-| Type filter | Top "All / Text / Image" chips, or cycle with `Tab` / `Shift+Tab` | Switching type clears the multi-selection |
-| Copy entry | Select one entry and press `Ctrl+C`, or right-click "Copy" | Works for text and images; the single-entry context menu shows `Ctrl+C` |
-| Paste out | `Enter` / double-click / `Alt+number` | Text is really pasted into the focused-before-summon window's input box (falls back to copy when the target isn't an input box); images go back to the clipboard |
+| Type filter | Top "All / Text / Images / Files" chips, or cycle with `Tab` / `Shift+Tab` | Switching keeps the query, clears the selection, and returns to the first page; each visit starts on "All" |
+| Copy entry | Select one entry and press `Ctrl+C`; text/images also offer right-click "Copy" | Supports text, images, and files; paste copied files manually at the destination |
+| Paste out | `Enter` / double-click / `Alt+number` | Text is really pasted into the focused-before-summon window's input box (falls back to copy when the target isn't an input box); images and files go to the clipboard for manual pasting |
 | Edit entry | `Alt+E` or right-click "Edit" | Opens the content editor; saving creates a new history entry |
 | Delete entry | `Alt+D`, the context menu's delete options, or bare `Delete` (with empty input) | Shortcuts delete the selection, or the highlighted entry if none; the context menu lets you choose the scope |
 | Image entry menu | Right-click an image item | Pin to desktop, or open the image editor directly (without overwriting the clipboard) |
@@ -124,7 +124,8 @@ Open with: `Alt+C` in the main window (or type `剪贴板` / `clip`). Text, imag
 - Multi-selection survives paging and list refreshes; it resets automatically when the window hides, so it never lingers by mistake.
 - With mixed selections, `Ctrl+C` / `Enter` / `Alt+E` / `Alt+S` ask you to choose a type from the context menu to avoid silently dropping images; a single image can still be copied.
 - Combination entries created by batch copy / paste **keep only the latest one per combination**, auto-pinned to top; repeated use never piles up.
-- `Ctrl+C` on a files-only selection merges the paths as text (in selection order, deduplicated); mixed selections containing files offer no cross-type paste — copy by type from the context menu. File entries appear only on the "All" tab.
+- Selecting multiple file entries and pressing `Ctrl+C` merges their paths as text (in selection order, deduplicated); mixed selections containing files offer no cross-type paste — copy by type from the context menu. File entries appear on "All" and "Files", where you can search by filename or path.
+- Filters follow the stored entry type: paths copied as text belong to "Text"; files, folders, and multi-file groups belong to "Files". A PNG recorded as a file entry stays in "Files". "Save as image entry" creates separate history under "Images" and keeps the original file entry.
 - File-path capture and its limit are configurable under "Settings → Chord → Clipboard history"; deleting a file entry removes only the history record and **never touches the original files on disk**.
 
 ---
