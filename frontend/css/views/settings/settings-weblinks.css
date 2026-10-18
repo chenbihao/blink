@@ -1,0 +1,100 @@
+/* ── 快捷超链设置（0.26.12 WebEngine） ─────────────────────────────────────
+   行布局：图标 | 名称 + 触发词徽章 + URL | 开关 | 编辑 | 删除。
+   颜色全走主题变量，圆角/过渡沿用既有档位。 */
+
+.weblinks-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xs, 4px);
+}
+
+.weblinks-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm, 8px);
+    padding: var(--space-sm, 8px) var(--space-md, 12px);
+    border: 1px solid var(--border, var(--surface0, #313244));
+    border-radius: var(--radius-md, 6px);
+    transition: border-color var(--transition-base, 0.15s);
+}
+
+.weblinks-row:hover {
+    border-color: var(--accent, #89b4fa);
+}
+
+.weblinks-row-disabled .weblinks-row-name,
+.weblinks-row-disabled .weblinks-row-url {
+    opacity: 0.55;
+}
+
+.weblinks-row-icon {
+    display: inline-flex;
+    color: var(--accent, #89b4fa);
+    flex-shrink: 0;
+}
+
+.weblinks-row-main {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm, 8px);
+    flex: 1;
+    min-width: 0;
+}
+
+.weblinks-row-name {
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.weblinks-keyword-badge {
+    flex-shrink: 0;
+    padding: 1px 8px;
+    border-radius: var(--radius-sm, 4px);
+    border: 1px solid var(--border, var(--surface0, #313244));
+    background: var(--surface0, #313244);
+    color: var(--subtext0, #a6adc8);
+    font-size: 0.85em;
+    white-space: nowrap;
+}
+
+.weblinks-row-url {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    opacity: 0.6;
+    font-size: 0.9em;
+}
+
+.weblinks-empty {
+    opacity: 0.6;
+    padding: var(--space-md, 12px) 0;
+}
+
+.weblinks-editor {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm, 8px);
+    margin-top: var(--space-md, 12px);
+    padding: var(--space-md, 12px);
+    border: 1px solid var(--border, var(--surface0, #313244));
+    border-radius: var(--radius-md, 6px);
+}
+
+.weblinks-editor-actions {
+    display: flex;
+    gap: var(--space-sm, 8px);
+    justify-content: flex-end;
+}
+
+.weblinks-error {
+    margin: var(--space-sm, 8px) 0 0;
+    color: var(--red, #f38ba8);
+    white-space: pre-line;
+}
+
+/* 冲突/非法 keyword 的输入框红边（保留原边框宽度避免布局跳动） */
+.weblinks-input-error {
+    border-color: var(--red, #f38ba8) !important;
+}

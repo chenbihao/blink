@@ -87,6 +87,7 @@ mod tests {
             disabled_builtin_actions: &[],
             disabled_context_bindings: &[],
             language: "zh",
+            takeover_keyword: None,
         };
         // 0.14.7 W1: 改用 #[tokio::test]，domain 不再依赖 tauri runtime
         engine.search(q, &ctx).await

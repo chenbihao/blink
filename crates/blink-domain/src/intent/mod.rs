@@ -267,6 +267,10 @@ pub enum Route {
         engine_id: String,
         /// 传给 engine 的参数（无参 → None，带参 → UserExplicit）。
         arg: ExecArg,
+        /// 命中的触发词原文（0.26.12）。多 keyword 引擎（如 weblinks 一表多词）
+        /// 无法从剥离后的 arg 反推命中词，经此字段下传（`QueryContext::takeover_keyword`）；
+        /// 单 keyword 引擎（如剪贴板）不消费，None/Some 均不影响其行为。
+        keyword: Option<String>,
     },
     /// AI 前缀触发（0.9.x）：用户输入 "ai xxx" 直接进入 AI 模式。
     ///
@@ -282,6 +286,13 @@ pub enum Route {
 }
 
 // ── Trait ─────────────────────────────────────────────────
+
+/// keyword 占用者（0.26.12 weblinks 冲突校验：`RuleRouter::keyword_owner` 返回）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeywordOwner {
+    Engine(String),
+    Plugin(String),
+}
 
 /// 单次查询的共享上下文。0.4 仅 history + snapshot;P3 VectorRouter/AIRouter 扩展时用上。
 #[allow(dead_code)] // 0.4+ 意图路由扩展时启用
@@ -508,9 +519,10 @@ impl RuleRouter {
     /// 注入本体 engine keyword 规则（0.8.5 §6.4）。
     ///
     /// 由 `main.rs` 启动时调用（build_default_registry 同类工作，只不过针对 engine）。
-    /// engine keyword 表运行时不变（engine 由本体编译期决定），无需 remove/热更新方法。
+    /// 0.26.12 起 engine keyword 表运行时可变（weblinks 用户表随配置热更新）：
+    /// 变化时由调用方重注入覆盖；用户清空/全部禁用时注入空 keywords 表（等效不再命中）。
     ///
-    /// 重复注入同 engine_id 覆盖前值（防单测/重复 setup 泄漏，同 `apply_context_disable_list`）。
+    /// 重复注入同 engine_id 覆盖前值（热更新语义；同 `apply_context_disable_list`）。
     pub fn add_engine_rule(&self, engine_id: String, keywords: Vec<String>) {
         let mut rules = self.engine_rules.write().unwrap();
         rules.retain(|r| r.engine_id != engine_id);
@@ -518,6 +530,42 @@ impl RuleRouter {
             engine_id,
             keywords,
         });
+    }
+
+    /// 查询 keyword 的现有占用者（0.26.12 weblinks 冲突校验）。
+    ///
+    /// 依次查 engine 规则表与插件 keyword 规则表（trim + 大小写不敏感完整相等）；
+    /// regex 规则不参与（无 keyword 概念）。`exclude_engine` 排除指定 engine——
+    /// weblinks 重注册/重校验时自身旧规则仍在表中，需排除后再判占用。
+    pub fn keyword_owner(
+        &self,
+        keyword: &str,
+        exclude_engine: Option<&str>,
+    ) -> Option<KeywordOwner> {
+        let kw = keyword.trim();
+        if kw.is_empty() {
+            return None;
+        }
+        for rule in self.engine_rules.read().unwrap().iter() {
+            if Some(rule.engine_id.as_str()) == exclude_engine {
+                continue;
+            }
+            if rule
+                .keywords
+                .iter()
+                .any(|k| k.trim().eq_ignore_ascii_case(kw))
+            {
+                return Some(KeywordOwner::Engine(rule.engine_id.clone()));
+            }
+        }
+        for rule in self.rules.read().unwrap().iter() {
+            if let RuleKind::Keyword(k) = &rule.kind
+                && k.trim().eq_ignore_ascii_case(kw)
+            {
+                return Some(KeywordOwner::Plugin(rule.plugin_id.clone()));
+            }
+        }
+        None
     }
 
     /// 从 manifest 注入 Context 规则（0.8.2 §3.4）。
@@ -672,6 +720,7 @@ impl IntentRouter for RuleRouter {
             return Route::EngineTakeover {
                 engine_id: hit.0,
                 arg: hit.1,
+                keyword: Some(hit.2),
             };
         }
 
@@ -1407,8 +1456,10 @@ fn resolve_surface(declared: Surface, mt: &MatchType, takeover_enabled: bool) ->
 ///   （engine 场景无 UX 教学诉求，首拼弱信号价值不大）
 /// - 单条 EngineRule 携带多触发词，一次遍历取第一命中
 ///
-/// 返回 `(engine_id, ExecArg)`：无参 → ExecArg::None；带参 → ExecArg::UserExplicit。
-fn match_engine_keyword(q: &str, rules: &[EngineRule]) -> Option<(String, ExecArg)> {
+/// 返回 `(engine_id, ExecArg, 命中 keyword)`：无参 → ExecArg::None；带参 →
+/// ExecArg::UserExplicit。0.26.12 起回传命中词原文（注册词原样，非 query 输入
+/// 形式）——weblinks 等多 keyword 引擎据此定位条目。
+fn match_engine_keyword(q: &str, rules: &[EngineRule]) -> Option<(String, ExecArg, String)> {
     if q.is_empty() {
         return None;
     }
@@ -1418,7 +1469,7 @@ fn match_engine_keyword(q: &str, rules: &[EngineRule]) -> Option<(String, ExecAr
             let kw_lower = kw.to_ascii_lowercase();
             // Exact
             if q_lower == kw_lower {
-                return Some((rule.engine_id.clone(), ExecArg::None));
+                return Some((rule.engine_id.clone(), ExecArg::None, kw.clone()));
             }
             // Prefix + 空格分隔的参数
             let mut with_space = kw_lower.clone();
@@ -1430,7 +1481,7 @@ fn match_engine_keyword(q: &str, rules: &[EngineRule]) -> Option<(String, ExecAr
                 } else {
                     ExecArg::UserExplicit(arg.to_string())
                 };
-                return Some((rule.engine_id.clone(), exec_arg));
+                return Some((rule.engine_id.clone(), exec_arg, kw.clone()));
             }
         }
     }
@@ -1604,7 +1655,7 @@ mod tests {
         let route = run_route(&r, "剪贴板").await;
         assert!(matches!(
             &route,
-            Route::EngineTakeover { engine_id, arg }
+            Route::EngineTakeover { engine_id, arg, .. }
                 if engine_id == "clipboard" && matches!(arg, ExecArg::None)
         ));
     }
@@ -1616,7 +1667,7 @@ mod tests {
         let route = run_route(&r, "剪贴板 hello").await;
         assert!(matches!(
             &route,
-            Route::EngineTakeover { engine_id, arg }
+            Route::EngineTakeover { engine_id, arg, .. }
                 if engine_id == "clipboard"
                     && matches!(arg, ExecArg::UserExplicit(s) if s == "hello")
         ));
@@ -1629,7 +1680,7 @@ mod tests {
         let route = run_route(&r, "CLIP world").await;
         assert!(matches!(
             &route,
-            Route::EngineTakeover { engine_id, arg }
+            Route::EngineTakeover { engine_id, arg, .. }
                 if engine_id == "clipboard"
                     && matches!(arg, ExecArg::UserExplicit(s) if s == "world")
         ));

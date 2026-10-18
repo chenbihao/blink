@@ -754,6 +754,7 @@ mod tests {
             disabled_builtin_actions: &[],
             disabled_context_bindings: &[],
             language: "zh",
+            takeover_keyword: None,
         }
     }
 
@@ -911,6 +912,7 @@ mod tests {
             disabled_builtin_actions: &disabled,
             disabled_context_bindings: &[],
             language: "zh",
+            takeover_keyword: None,
         };
 
         // "设置" 原本匹配 open_settings；被 disable 后不召回
@@ -1044,6 +1046,7 @@ mod tests {
             disabled_builtin_actions: &[],
             disabled_context_bindings: &disabled_ctx,
             language: "zh",
+            takeover_keyword: None,
         };
 
         // keyword "打开链接" 本会命中 open_url，但 context 被 binding 禁用 → 门禁挡下
@@ -1068,6 +1071,7 @@ mod tests {
             disabled_builtin_actions: &[],
             disabled_context_bindings: &disabled_ctx,
             language: "zh",
+            takeover_keyword: None,
         };
 
         let items = engine.search("打开链接", &ctx).await;

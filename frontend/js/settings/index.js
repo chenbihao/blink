@@ -17,6 +17,7 @@ import {createConfigLoadNotice} from "../shared/config-load-notice.js";
 import {initGeneralTab, applyGeneralConfig} from "./tabs/general.js";
 import {initHotkeyTab, applyHotkeyConfig} from "./tabs/hotkey.js";
 import {initEnginesTab} from "./tabs/engines.js";
+import {initWeblinksTab} from "./tabs/weblinks.js";
 import {initPluginsTab} from "./tabs/plugins.js";
 import {initCapabilitiesTab} from "./tabs/capabilities.js";
 import {initNetworkTab} from "./tabs/network.js";
@@ -668,6 +669,7 @@ async function initializeSettings() {
         initGeneralTab(cfg);
         initHotkeyTab(cfg);
         initEnginesTab(cfg);
+        initWeblinksTab();
         initPluginsTab(cfg);
         initCapabilitiesTab();
         initNetworkTab(cfg);

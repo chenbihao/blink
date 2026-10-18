@@ -105,6 +105,9 @@ pub enum EngineConfigUpdate {
     StartMenu(crate::config::StartMenuConfig),
     Calc(crate::config::CalcConfig),
     File(crate::config::FileSearchConfig),
+    /// 0.26.12：快捷超链。engine 配置更新只覆盖内存快照；
+    /// keyword 规则重注册由 app 层另行调用 `register_weblinks_rules`。
+    WebLinks(crate::config::WebLinksConfig),
 }
 
 pub struct SearchService {
@@ -401,7 +404,7 @@ impl SearchService {
     }
 
     /// 更新指定引擎的配置（运行时热更新）。
-    /// 支持的 engine_id: "start_menu", "calc", "file"
+    /// 支持的 engine_id: "start_menu", "calc", "file", "weblinks"
     pub async fn update_engine_config(&self, engine_id: &str, config: EngineConfigUpdate) {
         if let EngineConfigUpdate::StartMenu(cfg) = &config {
             for engine in &self.sync_engines {
@@ -444,6 +447,15 @@ impl SearchService {
                             tracing::debug!(engine = engine_id, "FileEngine 配置已热更新");
                         }
                     }
+                    EngineConfigUpdate::WebLinks(cfg) => {
+                        if let Some(web) = engine
+                            .as_any()
+                            .downcast_ref::<super::weblinks_engine::WebEngine>()
+                        {
+                            web.update_config(cfg);
+                            tracing::debug!(engine = engine_id, "WebEngine 配置已热更新");
+                        }
+                    }
                 }
                 return;
             }
@@ -482,6 +494,7 @@ impl SearchService {
                     disabled_builtin_actions: &disabled,
                     disabled_context_bindings: &disabled_ctx,
                     language: &language,
+                    takeover_keyword: None,
                 };
                 let items = engine.search(query, &search_ctx).await;
                 all.extend(items);
@@ -551,6 +564,7 @@ impl SearchService {
                                 disabled_builtin_actions: &disabled,
                                 disabled_context_bindings: &disabled_ctx,
                                 language: &language,
+                                takeover_keyword: None,
                             };
                             engine.search(arg, &search_ctx).await
                         };
@@ -626,12 +640,19 @@ impl SearchService {
         let disabled = self.disabled_builtin_actions.read().unwrap().clone();
         let disabled_ctx = self.disabled_context_bindings.read().unwrap().clone();
         let language = self.language.read().unwrap().clone();
+        // 0.26.12：EngineTakeover 命中的触发词经 QueryContext 下传——多 keyword
+        // 引擎（weblinks）据此定位条目；Mixed/AiTrigger 恒 None。
+        let takeover_keyword = match &route {
+            Route::EngineTakeover { keyword, .. } => keyword.clone(),
+            _ => None,
+        };
         let search_ctx = QueryContext {
             history: &history,
             snapshot: &snapshot,
             disabled_builtin_actions: &disabled,
             disabled_context_bindings: &disabled_ctx,
             language: &language,
+            takeover_keyword: takeover_keyword.as_deref(),
         };
 
         // Suggestion（0.24.2 §3.7：编排顺序即防环——Route 先算、Coordinator 后算，
@@ -643,7 +664,7 @@ impl SearchService {
         // 按 Route 分派到四个 executor（0.8.6 §8.2.1 拆 God Method）
         let entries = match route {
             Route::Takeover { plugin_id, arg, .. } => self.exec_takeover(plugin_id, arg, seq),
-            Route::EngineTakeover { engine_id, arg } => {
+            Route::EngineTakeover { engine_id, arg, .. } => {
                 self.exec_engine_takeover(engine_id, arg, &search_ctx).await
             }
             // AI 前缀触发：只产 Suggestion，让前端 Ghost + Tab 触发。
@@ -1135,6 +1156,7 @@ impl SearchService {
                         disabled_builtin_actions: &[],
                         disabled_context_bindings: &[],
                         language: "zh",
+                        takeover_keyword: None,
                     };
                     let items = engine.search(&q, &ctx).await;
                     if seq == latest_seq.load(Ordering::SeqCst) && !items.is_empty() {

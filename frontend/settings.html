@@ -27,6 +27,7 @@
         <div class="sidebar-group">
             <span class="group-title" data-i18n="sidebar.group.functionality">功能</span>
             <button class="tab" data-i18n="tab.engines" data-tab="engines">引擎</button>
+            <button class="tab" data-i18n="tab.weblinks" data-tab="weblinks">超链</button>
             <button class="tab" data-i18n="tab.plugins" data-tab="plugins">插件</button>
             <button class="tab" data-i18n="tab.chord" data-tab="chord">Chord 交互</button>
             <button class="tab" data-i18n="tab.capabilities" data-tab="capabilities">全部能力管理</button>
@@ -616,6 +617,53 @@
                     </div>
                 </div>
             </section>
+        </div>
+
+        <!-- 快捷超链（0.26.12 WebEngine） -->
+        <div class="panel" id="weblinks">
+            <h2 data-i18n="panel.weblinks">快捷超链</h2>
+            <p class="panel-lede" data-i18n="weblinks.lede">自管直达站点与搜索引擎：主窗口输入触发词直达，或「触发词 + 空格 + 内容」搜索。</p>
+
+            <div class="extension-card">
+                <div class="extension-header">
+                    <div class="extension-icon">
+                        <svg aria-hidden="true" class="icon">
+                            <use href="#icon-external-link"/>
+                        </svg>
+                    </div>
+                    <div class="extension-info">
+                        <h3 data-i18n="weblinks.title">超链与搜索引擎</h3>
+                        <p class="extension-desc" data-i18n="weblinks.desc">URL 模板含 {query} 即搜索型；直达型还会在常规搜索中按名称与触发词召回。</p>
+                    </div>
+                    <button class="btn" id="weblinks-add" data-i18n="weblinks.add" type="button">添加</button>
+                </div>
+
+                <div class="extension-body">
+                    <div id="weblinks-list" class="weblinks-list"></div>
+
+                    <form class="weblinks-editor hidden" id="weblinks-editor" autocomplete="off">
+                        <div class="setting-row">
+                            <label class="setting-label" data-i18n="weblinks.field.name">名称</label>
+                            <input class="input-wide" id="weblinks-f-name" maxlength="40" required type="text"/>
+                        </div>
+                        <div class="setting-row">
+                            <label class="setting-label" data-i18n="weblinks.field.keyword">触发词</label>
+                            <input class="input-wide" id="weblinks-f-keyword" maxlength="20" required type="text"/>
+                        </div>
+                        <div class="setting-row">
+                            <label class="setting-label" data-i18n="weblinks.field.url">URL 模板</label>
+                            <input class="input-wide" id="weblinks-f-url" maxlength="500" required
+                                   placeholder="https://example.com/search?q={query}" type="url"/>
+                        </div>
+                        <div class="weblinks-editor-actions">
+                            <button class="btn" data-i18n="weblinks.save" id="weblinks-save" type="submit">保存</button>
+                            <button class="btn" data-i18n="weblinks.cancel" id="weblinks-cancel" type="button">取消</button>
+                        </div>
+                    </form>
+
+                    <p class="weblinks-error hidden" id="weblinks-error"></p>
+                </div>
+            </div>
         </div>
 
         <!-- 插件 -->

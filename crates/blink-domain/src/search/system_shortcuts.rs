@@ -84,6 +84,7 @@ mod tests {
             disabled_builtin_actions: &[],
             disabled_context_bindings: &[],
             language: "zh",
+            takeover_keyword: None,
         };
         let result = engine.search("编辑账户的环境变量", &ctx).await.remove(0);
         assert!(result.score > 1.0);

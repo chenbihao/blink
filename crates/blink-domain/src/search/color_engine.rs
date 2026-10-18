@@ -91,6 +91,7 @@ mod tests {
             disabled_builtin_actions: &[],
             disabled_context_bindings: &[],
             language: "zh",
+            takeover_keyword: None,
         }
     }
 

@@ -205,6 +205,11 @@ mod mock_slow_engine;
 mod start_menu_engine;
 pub mod system_entries;
 mod system_shortcuts;
+mod weblinks_engine;
+pub use weblinks_engine::{
+    KeywordConflict, KeywordConflictKind, WebEngine, ENGINE_ID as WEBLINKS_ENGINE_ID,
+    validate_keywords,
+};
 use builtin_engine::BuiltinEngine;
 use color_engine::ColorEngine;
 // BuiltinActionInfo + list_builtin_actions 由 commands::list_builtin_actions 用（设置页）。
@@ -227,11 +232,13 @@ use system_shortcuts::SystemShortcutEngine;
 mod service;
 pub use service::{EngineConfigUpdate, SearchResponse, SearchService};
 
-/// 引擎配置集合（三层独立控制）。
+/// 引擎配置集合（各层独立控制）。
 pub struct EngineConfigs {
     pub start_menu: crate::config::StartMenuConfig,
     pub file: crate::config::FileSearchConfig,
     pub calc: crate::config::CalcConfig,
+    /// 0.26.12：快捷超链（WebEngine）。
+    pub weblinks: crate::config::WebLinksConfig,
 }
 
 /// 构造引擎列表(sync: builtin + calc + clipboard + start_menu;async: file)。
@@ -253,6 +260,8 @@ pub fn build_engines(
         std::sync::Arc::new(ColorEngine::new()),
         // ClipboardEngine（0.8.5 §6.4，keyword 剪贴板/clip 触发展开历史）
         std::sync::Arc::new(ClipboardEngine::new(pool, cache_pool)),
+        // WebEngine（0.26.12，超链直达混排 + keyword 触发搜索）
+        std::sync::Arc::new(WebEngine::with_config(configs.weblinks)),
         // StartMenuEngine（可配置）
         std::sync::Arc::new(StartMenuEngine::with_config(configs.start_menu.clone())),
         // SystemShortcutEngine（常用入口与可选自动发现）
@@ -285,6 +294,38 @@ pub fn register_engine_rules(router: &crate::intent::RuleRouter) {
             .map(|s| s.to_string())
             .collect(),
     );
+}
+
+/// 注册 weblinks engine 的 keyword 规则（0.26.12）。
+///
+/// 启动与配置热更新共用：`validate_keywords` 已在保存时拒绝冲突，但运行期插件
+/// trigger 变化可能后来占用——此处对仍冲突的 keyword `warn` 跳过并返回，调用方
+/// 可据此提示。排除 weblinks 自身旧规则（重注册时表内残留）。
+pub fn register_weblinks_rules(
+    router: &crate::intent::RuleRouter,
+    config: &crate::config::WebLinksConfig,
+) -> Vec<String> {
+    let mut keywords = Vec::new();
+    let mut skipped = Vec::new();
+    for entry in config.entries.iter().filter(|e| e.enabled) {
+        let kw = entry.keyword.trim();
+        if kw.is_empty() {
+            continue;
+        }
+        // 表内去重：同 keyword 保留首条（校验层保存时拒绝，这里只防脏数据）
+        if keywords.iter().any(|k: &String| k.eq_ignore_ascii_case(kw)) {
+            tracing::warn!(keyword = kw, id = %entry.id, "weblinks 表内 keyword 重复，仅注册首条");
+            continue;
+        }
+        if let Some(owner) = router.keyword_owner(kw, Some(weblinks_engine::ENGINE_ID)) {
+            tracing::warn!(keyword = kw, owner = ?owner, id = %entry.id, "weblinks keyword 冲突，跳过注册");
+            skipped.push(kw.to_string());
+            continue;
+        }
+        keywords.push(kw.to_string());
+    }
+    router.add_engine_rule(weblinks_engine::ENGINE_ID.to_string(), keywords);
+    skipped
 }
 
 // 通用逻辑

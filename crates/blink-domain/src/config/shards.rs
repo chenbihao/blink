@@ -346,6 +346,106 @@ impl Default for FileSearchConfig {
     }
 }
 
+// ── WebLinksConfig（0.26.12）──────────────────────────────────────────────────
+
+/// 单条超链/搜索引擎条目（0.26.12）。
+///
+/// 是否搜索型由 `url_template` 含 `{query}` 推导（无独立字段）：搜索型只在
+/// keyword 触发时出现，直达型额外参与 Mixed 混排召回。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WebLinkEntry {
+    /// 稳定 id（新增时生成，编辑保持不变；SearchItem 去重键用它）。
+    pub id: String,
+    /// 显示名（参与混排 fuzzy 与拼音首字母召回）。
+    pub name: String,
+    /// 触发词：`<keyword>` 出占位/直达项，`<keyword> <arg>` 前缀搜索。
+    /// 不含空白、非保留前缀 `ai`、不与 engine/插件触发词冲突（保存时校验，
+    /// 加载时 warn 跳过——运行期插件 trigger 变化可能后来占用）。
+    pub keyword: String,
+    /// URL 模板；每个 `{query}` 替换为 UTF-8 percent-encoding 后的参数。
+    pub url_template: String,
+    /// 条目开关；false 不注册 keyword、不参与混排。
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+/// 快捷超链配置分片（WebEngine，0.26.12）。
+///
+/// `seeded` 区分「从未生成默认表」与「用户清空」——启动时 `seeded=false` 写入
+/// 种子表并置 true（仿 0.21.10 `exposure_seeded`），此后用户清空不会回生默认表。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebLinksConfig {
+    #[serde(default)]
+    pub entries: Vec<WebLinkEntry>,
+    #[serde(default)]
+    pub seeded: bool,
+}
+
+impl Default for WebLinksConfig {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            seeded: false,
+        }
+    }
+}
+
+impl ConfigKey for WebLinksConfig {
+    const KEY: &'static str = "app.weblinks";
+}
+
+impl WebLinksConfig {
+    /// 首次种子表。Google 收录但默认禁用——默认网络环境可达性不稳定，
+    /// 收录可自行启用而非缺席（2026-10 定案）。
+    pub fn seed() -> Self {
+        fn entry(id: &str, name: &str, keyword: &str, url: &str, enabled: bool) -> WebLinkEntry {
+            WebLinkEntry {
+                id: id.to_string(),
+                name: name.to_string(),
+                keyword: keyword.to_string(),
+                url_template: url.to_string(),
+                enabled,
+            }
+        }
+        Self {
+            entries: vec![
+                entry("bing", "Bing", "bing", "https://www.bing.com/search?q={query}", true),
+                entry("baidu", "百度", "bd", "https://www.baidu.com/s?wd={query}", true),
+                entry("github", "GitHub", "gh", "https://github.com", true),
+                entry(
+                    "bilibili",
+                    "Bilibili",
+                    "bili",
+                    "https://search.bilibili.com/all?keyword={query}",
+                    true,
+                ),
+                entry(
+                    "zhihu",
+                    "知乎",
+                    "zh",
+                    "https://www.zhihu.com/search?type=content&q={query}",
+                    true,
+                ),
+                entry(
+                    "wikipedia",
+                    "Wikipedia",
+                    "wiki",
+                    "https://en.wikipedia.org/w/index.php?search={query}",
+                    true,
+                ),
+                entry(
+                    "google",
+                    "Google",
+                    "g",
+                    "https://www.google.com/search?q={query}",
+                    false,
+                ),
+            ],
+            seeded: true,
+        }
+    }
+}
+
 // ── ContextConfig ─────────────────────────────────────────────────────────────
 
 /// Context 层配置：控制唤起时的环境采集行为。

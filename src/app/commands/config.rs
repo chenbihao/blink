@@ -41,6 +41,8 @@ pub async fn get_config(app: tauri::AppHandle) -> Result<serde_json::Value, Stri
 ///
 /// **引擎配置**：`file_search` / `start_menu_config` / `calc_config` / `global_proxy`
 ///
+/// **快捷超链（0.26.12）**：`weblinks` —— WebLinksConfig 分片（保存时 keyword 冲突校验）
+///
 /// **插件配置**：`plugin_config`
 ///
 /// **Context 配置**：`context_config`
@@ -56,14 +58,15 @@ pub async fn set_config(
     set_config_value(app, key, value, expected)
         .await
         .map_err(|message| {
-            let code = [
-                "config_conflict",
-                "autostart_failed",
-                "autostart_restore_failed",
-                "secret_read_failed",
-                "secret_write_failed",
-                "secret_restore_failed",
-            ]
+        let code = [
+            "config_conflict",
+            "autostart_failed",
+            "autostart_restore_failed",
+            "secret_read_failed",
+            "secret_write_failed",
+            "secret_restore_failed",
+            "keyword_conflict",
+        ]
             .into_iter()
             .find(|code| message == *code || message.starts_with(&format!("{code}:")))
             .unwrap_or("config_update_failed");
@@ -415,6 +418,45 @@ async fn set_config_value(
             engine.update_global_proxy(proxy).await;
             tracing::info!(has_http, has_https, "全局代理配置已更新");
         }
+        // ── 快捷超链（0.26.12 WebEngine）─────────────────────────────────
+        "weblinks" => {
+            let cfg: crate::app::config::WebLinksConfig =
+                serde_json::from_value(value).map_err(|e| e.to_string())?;
+            // 保存时冲突校验：表内重复/保留前缀/既有 engine 与插件触发词。
+            // 校验失败整体拒绝并回传全量冲突（前端逐条标红），不落库。
+            let router = app.state::<std::sync::Arc<crate::domain::intent::RuleRouter>>();
+            if let Err(conflicts) = crate::domain::search::validate_keywords(&cfg.entries, &|kw| {
+                router.keyword_owner(
+                    kw,
+                    Some(crate::domain::search::WEBLINKS_ENGINE_ID),
+                )
+            }) {
+                let detail =
+                    serde_json::to_string(&conflicts).unwrap_or_else(|_| "[]".to_string());
+                return Err(format!("keyword_conflict: {detail}"));
+            }
+            crate::app::config::ConfigStore::set(pool, &cfg).await?;
+            if let Some(ss) =
+                app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>()
+            {
+                ss.update_engine_config(
+                    "weblinks",
+                    crate::domain::search::EngineConfigUpdate::WebLinks(cfg.clone()),
+                )
+                .await;
+            }
+            // 重注册覆盖旧规则（含清空场景注入空表）；保存时已校验，此处冲突仅剩
+            // 运行期插件 trigger 变化的窗口，warn 跳过。
+            let skipped = crate::domain::search::register_weblinks_rules(&router, &cfg);
+            if !skipped.is_empty() {
+                tracing::warn!(?skipped, "weblinks keyword 与现有触发词冲突，已跳过注册");
+            }
+            tracing::info!(
+                entries = cfg.entries.len(),
+                enabled = cfg.entries.iter().filter(|e| e.enabled).count(),
+                "快捷超链配置已更新"
+            );
+        }
 
         // ── 插件配置 ──────────────────────────────────────────────────────
         "plugin_config" => {
@@ -574,6 +616,7 @@ async fn set_config_value(
             Some("app.appearance")
         }
         "start_menu_config" => Some("engine:start_menu"),
+        "weblinks" => Some("app.weblinks"),
         "hotkey" | "tap_threshold" | "grace_period" => Some("app.hotkey"),
         "chord_toggles" | "chord_bindings" => Some("app.chord"),
         "disabled_builtin_actions" | "disabled_context_bindings" | "disabled_chord_actions" => {

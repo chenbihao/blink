@@ -597,6 +597,33 @@ fn main() {
                 router.reload_plugin_triggers(plugin.id(), &effective_triggers);
             }
 
+            // 0.26.12：快捷超链配置。`seeded=false`（从未生成）写入种子表并置位；
+            // 用户清空（seeded=true + 空表）不会回生。分片损坏时空表启动、不覆盖
+            // 存储值（weblinks 是用户自建数据，损坏不丢原件）。注册放在插件规则
+            // 注入之后——engine 路由优先级与注册顺序无关，后注入只为冲突校验能
+            // 覆盖插件触发词；运行期残留冲突 warn 跳过。
+            let mut weblinks_config = match tauri::async_runtime::block_on(
+                domain::config::store::ConfigStore::get_checked::<domain::config::shards::WebLinksConfig>(&pools.config),
+            ) {
+                Ok(cfg) => cfg,
+                Err(e) => {
+                    tracing::warn!(error = %e, "weblinks 配置分片损坏，空表启动（不覆盖存储值）");
+                    domain::config::shards::WebLinksConfig { entries: Vec::new(), seeded: true }
+                }
+            };
+            if !weblinks_config.seeded {
+                weblinks_config = domain::config::shards::WebLinksConfig::seed();
+                if let Err(e) = tauri::async_runtime::block_on(
+                    domain::config::store::ConfigStore::set(&pools.config, &weblinks_config),
+                ) {
+                    tracing::warn!(error = %e, "weblinks 种子表写入失败（不影响本次会话）");
+                }
+            }
+            let skipped = domain::search::register_weblinks_rules(&router, &weblinks_config);
+            if !skipped.is_empty() {
+                tracing::warn!(?skipped, "weblinks keyword 与现有触发词冲突，已跳过注册");
+            }
+
             // 构造三层搜索引擎配置（应用搜索 / 文件搜索 / 计算器）
             let start_menu_config = tauri::async_runtime::block_on(app::config::get_start_menu_config(&pools.config));
             let file_config = tauri::async_runtime::block_on(app::config::get_file_search_config(&pools.config));
@@ -606,6 +633,7 @@ fn main() {
                 file_search = file_config.enabled,
                 data_source = %file_config.data_source,
                 calc = calc_config.enabled,
+                weblinks = weblinks_config.entries.len(),
                 "搜索引擎配置"
             );
 
@@ -614,6 +642,7 @@ fn main() {
                 start_menu: start_menu_config,
                 file: file_config,
                 calc: calc_config,
+                weblinks: weblinks_config,
             };
             let search_service = std::sync::Arc::new(domain::search::SearchService::new(
                 domain_env.clone() as std::sync::Arc<dyn domain::event::EventPort>,

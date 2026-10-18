@@ -592,9 +592,17 @@ function createItem(app, i) {
         li.appendChild(badge);
     }
 
+    // 0.26.12：超链/搜索引擎条目——Lucide external-link 占位。lnk_path 是 URL，
+    // 走 blink-icon 协议提取不到本地图标，须在此短路。
+    if (app.source === "weblinks") {
+        const iconWrap = document.createElement("span");
+        iconWrap.className = "app-icon clip-file-icon";
+        iconWrap.appendChild(renderIcon("external-link", {ariaLabel: "超链条目"}));
+        li.appendChild(iconWrap);
+    }
     // 0.26.9：剪贴板文件条目——Lucide file-text 占位（列表不读文件内容、
     // 不查文件状态/图标/内容；多文件副行数量由后端展示）。
-    if (clipboardRef?.kind === "file") {
+    else if (clipboardRef?.kind === "file") {
         const iconWrap = document.createElement("span");
         iconWrap.className = "app-icon clip-file-icon";
         iconWrap.appendChild(renderIcon("file-text", {ariaLabel: "文件条目"}));

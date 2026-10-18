@@ -61,6 +61,7 @@ Every Chord action can be remapped in Settings and promoted to a **global hotkey
 | Command mode | Start input with `>` | Exclusive mode; `Enter` runs the command in a terminal; `Backspace` past `>` exits |
 | Calculator | Just type an expression | An `= result` item appears; `Enter` copies the result |
 | Clipboard recall | Type `剪贴板` / `clip` / `jtb` | Opens the clipboard history without `Alt+C` |
+| Web links | Type `gh` to open; `bing keywords` to search | Your own sites and search engines: direct links open on keyword, search templates take keyword + space + query. Manage the list in Settings → Web Links; keyword conflicts are rejected inline |
 | Idle context suggestions | Summon after copying a URL / after selecting text anywhere | The suggestion bar offers "open link / ask AI / translate selection", labeled with where the content came from |
 | Context menu | Right-click anywhere | Cut/copy/paste/select all, Chord shortcuts, create a sticky note from the search text, note manager, settings, exit |
 | Result item menu | Right-click a result entry | Open containing folder, copy path / file name, open shortcut target, reset that entry's launch-frequency stats, and more |
@@ -71,6 +72,7 @@ Every Chord action can be remapped in Settings and promoted to a **global hotkey
 | Trick | Trigger | Notes |
 |---|---|---|
 | Color detection | Type `#fff`, `rgb(...)`, `hsl(...)` | A color swatch item appears; `Enter` copies HEX; right-click for HEX/RGB/HSL or pin it as a sticky note |
+| Custom search shortcuts | `bing rust generics` | Any URL template containing `{query}` in Settings → Web Links works this way; direct links are also recalled in normal search by name, keyword, or pinyin initials |
 | Promote AI thread | Press `Alt+Q` again inside AI mode | Exports the temporary conversation from the main window into a persistent one and opens the chat window |
 | AI dictation guard | Hold `Alt+Space` and speak in AI mode | The transcript only fills the input box, **never auto-sends**; confirm, then `Enter` |
 | Modifier protection | Press `Alt` / `F1`-`F12` in the main window | Won't trigger the system menu bar or freeze the window — safe to hold `Alt` while reading keycap hints |

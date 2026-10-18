@@ -382,6 +382,9 @@ pub struct QueryContext<'a> {
     /// 界面语言（BCP-47 tag，如 "zh-CN" / "en-US"）。0.17.1：`SystemShortcutEngine`
     /// 按此选择中/英文显示名。其他引擎不消费此字段。
     pub language: &'a str,
+    /// EngineTakeover 命中的触发词原文（0.26.12）。仅 `Route::EngineTakeover`
+    /// 分派时为 Some——多 keyword 引擎（weblinks）据此定位条目；Mixed 路径恒 None。
+    pub takeover_keyword: Option<&'a str>,
 }
 
 /// 搜索引擎:一路召回源。

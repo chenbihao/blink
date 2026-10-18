@@ -221,6 +221,7 @@ fn run_search(handle: &tauri::AppHandle, query: &str, json: bool) -> i32 {
                 start_menu: Default::default(),
                 file: Default::default(),
                 calc: Default::default(),
+                weblinks: Default::default(),
             },
             pools.history.clone(),
             pools.cache.clone(),
@@ -245,6 +246,7 @@ fn run_search(handle: &tauri::AppHandle, query: &str, json: bool) -> i32 {
                     disabled_builtin_actions: &disabled,
                     disabled_context_bindings: &[],
                     language: "zh",
+                    takeover_keyword: None,
                 };
                 engine.search(query, &ctx).await
             }
