@@ -743,6 +743,15 @@ pub async fn probe_everything(port: u16) -> bool {
     }
 }
 
+/// 书签引擎状态（0.26.13 设置页：条目数/截断/扫描中）。只读，无副作用。
+#[tauri::command]
+pub fn get_bookmarks_status(
+    app: tauri::AppHandle,
+) -> Option<crate::domain::search::bookmark_engine::BookmarkStatus> {
+    app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>()
+        .and_then(|ss| ss.bookmarks_status())
+}
+
 /// 禁用/恢复某个默认触发词。
 #[tauri::command]
 pub async fn toggle_default_trigger(

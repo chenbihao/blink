@@ -108,6 +108,9 @@ pub enum EngineConfigUpdate {
     /// 0.26.12：快捷超链。engine 配置更新只覆盖内存快照；
     /// keyword 规则重注册由 app 层另行调用 `register_weblinks_rules`。
     WebLinks(crate::config::WebLinksConfig),
+    /// 0.26.13：浏览器书签。keyword 规则重注册由 app 层另行调用
+    /// `register_bookmark_rules`；扫描相关字段变化由 engine 自行强制重扫。
+    Bookmarks(crate::config::BookmarksConfig),
 }
 
 pub struct SearchService {
@@ -404,7 +407,7 @@ impl SearchService {
     }
 
     /// 更新指定引擎的配置（运行时热更新）。
-    /// 支持的 engine_id: "start_menu", "calc", "file", "weblinks"
+    /// 支持的 engine_id: "start_menu", "calc", "file", "weblinks", "bookmarks"
     pub async fn update_engine_config(&self, engine_id: &str, config: EngineConfigUpdate) {
         if let EngineConfigUpdate::StartMenu(cfg) = &config {
             for engine in &self.sync_engines {
@@ -454,6 +457,15 @@ impl SearchService {
                         {
                             web.update_config(cfg);
                             tracing::debug!(engine = engine_id, "WebEngine 配置已热更新");
+                        }
+                    }
+                    EngineConfigUpdate::Bookmarks(cfg) => {
+                        if let Some(bm) = engine
+                            .as_any()
+                            .downcast_ref::<super::bookmark_engine::BookmarkEngine>()
+                        {
+                            bm.update_config(cfg);
+                            tracing::debug!(engine = engine_id, "BookmarkEngine 配置已热更新");
                         }
                     }
                 }
@@ -510,6 +522,18 @@ impl SearchService {
                 .downcast_ref::<super::system_shortcuts::SystemShortcutEngine>()
                 .map(|e| e.entries.clone())
         })
+    }
+
+    /// 书签引擎状态投影（0.26.13 设置页：条目数/截断/扫描中）。无引擎实例返回 None。
+    pub fn bookmarks_status(&self) -> Option<super::bookmark_engine::BookmarkStatus> {
+        self.sync_engines
+            .iter()
+            .find_map(|engine| {
+                engine
+                    .as_any()
+                    .downcast_ref::<super::bookmark_engine::BookmarkEngine>()
+            })
+            .map(|e| e.status())
     }
     pub fn resolve_system_entry(&self, id: &str) -> Option<super::system_entries::Entry> {
         self.system_entries()?.resolve(id)

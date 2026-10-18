@@ -23,11 +23,13 @@ export function initEnginesTab(cfg) {
     initApplicationSearch();
     initCalcConfig();
     initFileSearchConfig();
+    initBookmarksConfig();
     initScriptRuntime();
     // 状态徽章文本是 JS 动态生成（状态结果 → i18n key），applyI18n 扫不到，
     // 语言切换时通过 i18n 订阅自行刷新
     onLangChange(() => {
         refreshEverythingBadgeText();
+        refreshBookmarksBadgeText();
         refreshScriptRuntimeBadgeText("python");
         refreshScriptRuntimeBadgeText("node");
     });
@@ -181,6 +183,178 @@ export function refreshEverythingBadgeText() {
                 statusEl.dataset.badgeState === "failed" ? "engine.status.failed" :
                     "engine.status.probing";
     statusEl.textContent = t(key);
+}
+
+// ── 浏览器书签（BookmarkEngine，0.26.13）──────────────────────────────────
+//
+// 数据分片 app.bookmarks（读 get_config_section / 写 saveConfig("bookmarks")）。
+// 保存时后端做 keyword 冲突校验（与 weblinks 同套），冲突拒绝并回传结构化
+// conflict——前端解析后标红 keyword 输入框。索引状态经 get_bookmarks_status 只读查询。
+
+/** 后端冲突 kind → i18n key（与 weblinks.conflict.* 复用同一组文案）。 */
+function describeBookmarkConflict(conflict) {
+    const kind = t(`weblinks.conflict.${conflict.kind}`);
+    const owner = conflict.owner ? ` (${conflict.owner})` : "";
+    return `${conflict.keyword}: ${kind}${owner}`;
+}
+
+/** 解析后端 keyword_conflict 错误 → conflict 对象；非该类错误返回 null。 */
+function parseBookmarkConflictError(error) {
+    const message = typeof error === "string" ? error : String(error?.message ?? "");
+    const marker = "keyword_conflict:";
+    const idx = message.indexOf(marker);
+    if (idx < 0) return null;
+    try {
+        const parsed = JSON.parse(message.slice(idx + marker.length).trim());
+        return Array.isArray(parsed) ? parsed[0] ?? null : null;
+    } catch {
+        return null;
+    }
+}
+
+/** 索引状态徽章（条目数 / 扫描中 / 已禁用 / 截断提示）。 */
+function renderBookmarksStatus() {
+    const statusEl = document.getElementById("bookmarks-status");
+    if (!statusEl) return;
+    invoke("get_bookmarks_status").then((st) => {
+        if (!st) {
+            statusEl.dataset.badgeState = "off";
+            statusEl.textContent = t("engine.bookmarks.status.off");
+            statusEl.className = "status-badge status-unavailable";
+            return;
+        }
+        if (st.scanning) {
+            statusEl.dataset.badgeState = "scanning";
+            statusEl.textContent = t("engine.bookmarks.status.scanning");
+            statusEl.className = "status-badge status-unknown";
+            return;
+        }
+        statusEl.dataset.badgeState = "ready";
+        statusEl.dataset.entries = st.entries;
+        statusEl.dataset.truncated = st.truncated ? "1" : "0";
+        statusEl.className = "status-badge " + (st.entries > 0 ? "status-available" : "status-unavailable");
+        refreshBookmarksBadgeText();
+    }).catch((e) => console.error("get_bookmarks_status failed:", e));
+}
+
+/** 徽章文本刷新（语言切换 / 状态更新共用）。 */
+export function refreshBookmarksBadgeText() {
+    const statusEl = document.getElementById("bookmarks-status");
+    if (!statusEl) return;
+    const state = statusEl.dataset.badgeState;
+    if (state === "off") {
+        statusEl.textContent = t("engine.bookmarks.status.off");
+    } else if (state === "scanning") {
+        statusEl.textContent = t("engine.bookmarks.status.scanning");
+    } else if (state === "ready") {
+        const count = Number(statusEl.dataset.entries || 0);
+        statusEl.textContent = count > 0
+            ? t("engine.bookmarks.status.ready", {count})
+            : t("engine.bookmarks.status.empty");
+        if (statusEl.dataset.truncated === "1") {
+            statusEl.title = t("engine.bookmarks.status.truncated_hint");
+        } else {
+            statusEl.removeAttribute("title");
+        }
+    }
+}
+
+/**
+ * 初始化书签配置：加载分片 + 状态，任一控件变更即保存（触发词回车确认）
+ */
+function initBookmarksConfig() {
+    const enabledEl = document.getElementById("bookmarks-enabled");
+    const keywordEl = document.getElementById("bookmarks-keyword");
+    const mixEl = document.getElementById("bookmarks-mix");
+    const browserEls = ["chrome", "edge", "brave"].map(
+        (b) => document.getElementById(`bookmarks-browser-${b}`),
+    );
+    const errorEl = document.getElementById("bookmarks-error");
+
+    let config = null;
+    let saveChain = Promise.resolve();
+
+    function showError(lines) {
+        if (!lines.length) {
+            errorEl.classList.add("hidden");
+            errorEl.textContent = "";
+            return;
+        }
+        errorEl.classList.remove("hidden");
+        errorEl.textContent = lines.join("\n");
+    }
+
+    function collect() {
+        return {
+            enabled: enabledEl?.checked ?? true,
+            keyword: (keywordEl?.value || "").trim(),
+            mix_into_global: mixEl?.checked ?? false,
+            browsers: browserEls
+                .map((el, i) => (el?.checked ? ["chrome", "edge", "brave"][i] : null))
+                .filter(Boolean),
+            max_entries: config?.max_entries ?? 50000,
+        };
+    }
+
+    /** 串行化保存；冲突标红 keyword，失败展示错误。 */
+    function persist() {
+        const value = collect();
+        const pending = saveChain.then(async () => {
+            await saveConfig("bookmarks", value);
+        }).catch(async (error) => {
+            console.error("[bookmarks] save failed:", error);
+            const conflict = parseBookmarkConflictError(error);
+            showError(conflict ? [describeBookmarkConflict(conflict)] : [t("engine.bookmarks.error.save_failed")]);
+            if (conflict) keywordEl?.classList.add("bookmarks-input-error");
+            await load();
+            throw error;
+        });
+        saveChain = pending.catch(() => {});
+        return pending;
+    }
+
+    async function load() {
+        let raw = null;
+        try {
+            raw = await invoke("get_config_section", {key: "app.bookmarks"});
+        } catch (error) {
+            console.error("[bookmarks] load failed:", error);
+        }
+        // null / 损坏 → 默认（后端启动已写默认分片，null 仅异常窗口出现）
+        config = raw && typeof raw === "object" ? raw : {browsers: ["chrome", "edge", "brave"]};
+        if (enabledEl) enabledEl.checked = config.enabled !== false;
+        if (keywordEl) keywordEl.value = config.keyword || "bm";
+        if (mixEl) mixEl.checked = config.mix_into_global === true;
+        for (const [i, b] of ["chrome", "edge", "brave"].entries()) {
+            const el = browserEls[i];
+            if (el) el.checked = !Array.isArray(config.browsers) || config.browsers.length === 0
+                || config.browsers.includes(b);
+        }
+        renderBookmarksStatus();
+    }
+
+    [enabledEl, mixEl, ...browserEls].forEach((el) => {
+        el?.addEventListener("change", () => {
+            keywordEl?.classList.remove("bookmarks-input-error");
+            showError([]);
+            persist().then(renderBookmarksStatus).catch(() => {});
+        });
+    });
+    // 触发词：blur / 回车确认（输入中途不逐键保存）
+    keywordEl?.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+            e.preventDefault();
+            keywordEl.blur();
+        }
+    });
+    keywordEl?.addEventListener("blur", () => {
+        if (!config || (keywordEl.value || "").trim() === (config.keyword || "bm")) return;
+        keywordEl.classList.remove("bookmarks-input-error");
+        showError([]);
+        persist().catch(() => {});
+    });
+
+    load();
 }
 
 // ── 脚本运行时（Blink 托管，0.25.20 取代系统解释器探测）──────────────────

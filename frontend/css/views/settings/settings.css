@@ -2722,3 +2722,28 @@ input.has-secret-hint::placeholder {
     border-radius: var(--radius-sm);
     margin: 0;
 }
+
+/* ── 浏览器书签（0.26.13 BookmarkEngine，engines tab）──────────────────── */
+
+.bookmarks-browser-toggles {
+    display: flex;
+    gap: 18px;
+    flex-wrap: wrap;
+}
+
+.checkbox-inline {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+}
+
+.bookmarks-error {
+    margin: var(--space-sm, 8px) 0 0;
+    color: var(--red, #f38ba8);
+    white-space: pre-line;
+}
+
+.bookmarks-input-error {
+    border-color: var(--red, #f38ba8) !important;
+}

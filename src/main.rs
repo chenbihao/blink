@@ -624,6 +624,21 @@ fn main() {
                 tracing::warn!(?skipped, "weblinks keyword 与现有触发词冲突，已跳过注册");
             }
 
+            // 0.26.13：浏览器书签配置。分片损坏时默认配置启动、不覆盖存储值
+            //（与 weblinks 同策略，注册放最后承接冲突校验）。
+            let bookmarks_config =
+                match tauri::async_runtime::block_on(domain::config::store::ConfigStore::get_checked::<domain::config::shards::BookmarksConfig>(&pools.config)) {
+                    Ok(cfg) => cfg,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "bookmarks 配置分片损坏，默认配置启动（不覆盖存储值）");
+                        domain::config::shards::BookmarksConfig::default()
+                    }
+                };
+            let skipped = domain::search::register_bookmark_rules(&router, &bookmarks_config);
+            if !skipped.is_empty() {
+                tracing::warn!(?skipped, "bookmarks keyword 与现有触发词冲突，已跳过注册");
+            }
+
             // 构造三层搜索引擎配置（应用搜索 / 文件搜索 / 计算器）
             let start_menu_config = tauri::async_runtime::block_on(app::config::get_start_menu_config(&pools.config));
             let file_config = tauri::async_runtime::block_on(app::config::get_file_search_config(&pools.config));
@@ -634,6 +649,8 @@ fn main() {
                 data_source = %file_config.data_source,
                 calc = calc_config.enabled,
                 weblinks = weblinks_config.entries.len(),
+                bookmarks = bookmarks_config.enabled,
+                bookmarks_keyword = %bookmarks_config.keyword,
                 "搜索引擎配置"
             );
 
@@ -643,6 +660,7 @@ fn main() {
                 file: file_config,
                 calc: calc_config,
                 weblinks: weblinks_config,
+                bookmarks: bookmarks_config,
             };
             let search_service = std::sync::Arc::new(domain::search::SearchService::new(
                 domain_env.clone() as std::sync::Arc<dyn domain::event::EventPort>,
@@ -1640,6 +1658,7 @@ app::commands::generate_palette_schemes,
             app::commands::refresh_system_entries,
             app::commands::get_calc_config,
             app::commands::probe_everything,
+            app::commands::get_bookmarks_status,
             app::commands::get_engine_config,
             app::commands::get_plugins,
             app::commands::get_plugin_secret_hint,

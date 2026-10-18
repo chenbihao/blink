@@ -420,6 +420,64 @@
                 </div>
             </div>
 
+            <!-- 浏览器书签（BookmarkEngine，0.26.13） -->
+            <div class="extension-card">
+                <div class="extension-header">
+                    <div class="extension-icon">
+                        <svg aria-hidden="true" class="icon">
+                            <use href="#icon-bookmark"/>
+                        </svg>
+                    </div>
+                    <div class="extension-info">
+                        <h3 data-i18n="engine.bookmarks.title">浏览器书签</h3>
+                        <p class="extension-desc" data-i18n="engine.bookmarks.desc">读取 Chrome / Edge /
+                            Brave 书签建本地索引，主窗口触发词直达搜索</p>
+                    </div>
+                    <label class="switch">
+                        <input checked id="bookmarks-enabled" type="checkbox"/>
+                        <span class="slider"></span>
+                    </label>
+                </div>
+
+                <div class="extension-body">
+                    <div class="setting-row">
+                        <label class="setting-label" data-i18n="engine.bookmarks.status.label">索引状态</label>
+                        <span class="status-badge status-unknown" id="bookmarks-status">…</span>
+                    </div>
+                    <div class="setting-row">
+                        <label class="setting-label" data-i18n="engine.bookmarks.keyword.label">触发词<span
+                                class="field-hint-icon" data-i18n-title="engine.bookmarks.keyword.hint">ⓘ</span></label>
+                        <input id="bookmarks-keyword" maxlength="20" style="width: 140px" type="text"/>
+                    </div>
+                    <div class="setting-row">
+                        <label class="setting-label" data-i18n="engine.bookmarks.mix.label">参与常规混排<span
+                                class="field-hint-icon" data-i18n-title="engine.bookmarks.mix.hint">ⓘ</span></label>
+                        <label class="switch">
+                            <input id="bookmarks-mix" type="checkbox"/>
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+                    <div class="setting-row">
+                        <label class="setting-label" data-i18n="engine.bookmarks.browsers.label">浏览器</label>
+                        <div class="bookmarks-browser-toggles">
+                            <label class="checkbox-inline">
+                                <input checked id="bookmarks-browser-chrome" type="checkbox"/>
+                                <span data-i18n="engine.bookmarks.browsers.chrome">Chrome</span>
+                            </label>
+                            <label class="checkbox-inline">
+                                <input checked id="bookmarks-browser-edge" type="checkbox"/>
+                                <span data-i18n="engine.bookmarks.browsers.edge">Edge</span>
+                            </label>
+                            <label class="checkbox-inline">
+                                <input checked id="bookmarks-browser-brave" type="checkbox"/>
+                                <span data-i18n="engine.bookmarks.browsers.brave">Brave</span>
+                            </label>
+                        </div>
+                    </div>
+                    <p class="bookmarks-error hidden" id="bookmarks-error"></p>
+                </div>
+            </div>
+
             <!-- 计算器（CalcEngine） -->
             <div class="extension-card">
                 <div class="extension-header">

@@ -43,6 +43,8 @@ pub async fn get_config(app: tauri::AppHandle) -> Result<serde_json::Value, Stri
 ///
 /// **快捷超链（0.26.12）**：`weblinks` —— WebLinksConfig 分片（保存时 keyword 冲突校验）
 ///
+/// **浏览器书签（0.26.13）**：`bookmarks` —— BookmarksConfig 分片（保存时 keyword 冲突校验）
+///
 /// **插件配置**：`plugin_config`
 ///
 /// **Context 配置**：`context_config`
@@ -458,6 +460,44 @@ async fn set_config_value(
             );
         }
 
+        // ── 浏览器书签（0.26.13 BookmarkEngine）───────────────────────────
+        "bookmarks" => {
+            let cfg: crate::app::config::BookmarksConfig =
+                serde_json::from_value(value).map_err(|e| e.to_string())?;
+            // 保存时冲突校验：空/保留前缀/既有 engine 与插件触发词。
+            // 校验失败整体拒绝并回传冲突（前端标红 keyword 输入框），不落库。
+            let router = app.state::<std::sync::Arc<crate::domain::intent::RuleRouter>>();
+            if let Err(conflict) = crate::domain::search::validate_bookmark_keyword(&cfg.keyword, &|kw| {
+                router.keyword_owner(kw, Some(crate::domain::search::BOOKMARKS_ENGINE_ID))
+            }) {
+                let detail =
+                    serde_json::to_string(std::slice::from_ref(&conflict)).unwrap_or_else(|_| "[]".to_string());
+                return Err(format!("keyword_conflict: {detail}"));
+            }
+            crate::app::config::ConfigStore::set(pool, &cfg).await?;
+            if let Some(ss) =
+                app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>()
+            {
+                ss.update_engine_config(
+                    "bookmarks",
+                    crate::domain::search::EngineConfigUpdate::Bookmarks(cfg.clone()),
+                )
+                .await;
+            }
+            // 重注册覆盖旧规则（含禁用/清空场景注入空表）。
+            let skipped = crate::domain::search::register_bookmark_rules(&router, &cfg);
+            if !skipped.is_empty() {
+                tracing::warn!(?skipped, "bookmarks keyword 与现有触发词冲突，已跳过注册");
+            }
+            tracing::info!(
+                enabled = cfg.enabled,
+                keyword = %cfg.keyword,
+                mix_into_global = cfg.mix_into_global,
+                browsers = cfg.browsers.len(),
+                "浏览器书签配置已更新"
+            );
+        }
+
         // ── 插件配置 ──────────────────────────────────────────────────────
         "plugin_config" => {
             let v: crate::app::config::PluginConfigUpdate =
@@ -617,6 +657,7 @@ async fn set_config_value(
         }
         "start_menu_config" => Some("engine:start_menu"),
         "weblinks" => Some("app.weblinks"),
+        "bookmarks" => Some("app.bookmarks"),
         "hotkey" | "tap_threshold" | "grace_period" => Some("app.hotkey"),
         "chord_toggles" | "chord_bindings" => Some("app.chord"),
         "disabled_builtin_actions" | "disabled_context_bindings" | "disabled_chord_actions" => {

@@ -196,6 +196,7 @@ pub use scorer::{
 
 // 具体引擎
 mod builtin_engine;
+pub mod bookmark_engine;
 pub mod calc;
 mod calc_engine;
 pub(crate) mod clipboard_engine;
@@ -206,6 +207,9 @@ mod start_menu_engine;
 pub mod system_entries;
 mod system_shortcuts;
 mod weblinks_engine;
+pub use bookmark_engine::{
+    BookmarkEngine, BookmarkStatus, ENGINE_ID as BOOKMARKS_ENGINE_ID, validate_keyword as validate_bookmark_keyword,
+};
 pub use weblinks_engine::{
     KeywordConflict, KeywordConflictKind, WebEngine, ENGINE_ID as WEBLINKS_ENGINE_ID,
     validate_keywords,
@@ -239,6 +243,8 @@ pub struct EngineConfigs {
     pub calc: crate::config::CalcConfig,
     /// 0.26.12：快捷超链（WebEngine）。
     pub weblinks: crate::config::WebLinksConfig,
+    /// 0.26.13：浏览器书签（BookmarkEngine）。
+    pub bookmarks: crate::config::BookmarksConfig,
 }
 
 /// 构造引擎列表(sync: builtin + calc + clipboard + start_menu;async: file)。
@@ -262,6 +268,8 @@ pub fn build_engines(
         std::sync::Arc::new(ClipboardEngine::new(pool, cache_pool)),
         // WebEngine（0.26.12，超链直达混排 + keyword 触发搜索）
         std::sync::Arc::new(WebEngine::with_config(configs.weblinks)),
+        // BookmarkEngine（0.26.13，浏览器书签 keyword 独占 + 可选混排）
+        std::sync::Arc::new(bookmark_engine::BookmarkEngine::with_config(configs.bookmarks)),
         // StartMenuEngine（可配置）
         std::sync::Arc::new(StartMenuEngine::with_config(configs.start_menu.clone())),
         // SystemShortcutEngine（常用入口与可选自动发现）
@@ -325,6 +333,32 @@ pub fn register_weblinks_rules(
         keywords.push(kw.to_string());
     }
     router.add_engine_rule(weblinks_engine::ENGINE_ID.to_string(), keywords);
+    skipped
+}
+
+/// 注册 bookmarks engine 的 keyword 规则（0.26.13，与 weblinks 同模式）。
+///
+/// 启动与配置热更新共用：保存时 `validate_bookmark_keyword` 已拒绝冲突，
+/// 运行期插件 trigger 变化的残留冲突 warn 跳过。禁用/清空 keyword 时注入
+/// 空表（等效不再命中 EngineTakeover）。
+pub fn register_bookmark_rules(
+    router: &crate::intent::RuleRouter,
+    config: &crate::config::BookmarksConfig,
+) -> Vec<String> {
+    let mut keywords = Vec::new();
+    let mut skipped = Vec::new();
+    if config.enabled {
+        let kw = config.keyword.trim();
+        if !kw.is_empty() {
+            if let Some(owner) = router.keyword_owner(kw, Some(bookmark_engine::ENGINE_ID)) {
+                tracing::warn!(keyword = kw, owner = ?owner, "bookmarks keyword 冲突，跳过注册");
+                skipped.push(kw.to_string());
+            } else {
+                keywords.push(kw.to_string());
+            }
+        }
+    }
+    router.add_engine_rule(bookmark_engine::ENGINE_ID.to_string(), keywords);
     skipped
 }
 

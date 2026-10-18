@@ -222,6 +222,7 @@ fn run_search(handle: &tauri::AppHandle, query: &str, json: bool) -> i32 {
                 file: Default::default(),
                 calc: Default::default(),
                 weblinks: Default::default(),
+                bookmarks: Default::default(),
             },
             pools.history.clone(),
             pools.cache.clone(),

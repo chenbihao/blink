@@ -20,7 +20,7 @@ import {renderIcon} from "../shared/icon.js";
 import {createSwatch, getColorPayload, isColorEntry, parse as parseColor} from "../shared/color.js";
 import * as clipboardMode from "./clipboard-mode.js";
 import {entryRef, refKey, refFromLi} from './clipboard-entry.js';
-import {bindClipboardPreview, bindErrorPreview, hideClipboardPreview} from "./clipboard-preview.js";
+import {bindClipboardPreview, bindErrorPreview, bindTextPreview, hideClipboardPreview} from "./clipboard-preview.js";
 import {t} from "../i18n/index.js";
 
 // 0.17.6: showAiConfirm / getAiConfirmData / updateAiStream 已删除。
@@ -505,6 +505,13 @@ function createItem(app, i) {
         li.dataset.clipboardId = clipboardRef.id;
         bindClipboardPreview(li, clipboardRef);
     }
+    // 0.26.13：书签条目——悬浮复用文本型预览面板（完整标题/URL/文件夹路径）。
+    // 预览内容在结果里已有，不发起 IPC。
+    if (app.source === "bookmarks") {
+        bindTextPreview(li, () => [app.name, app.description, app.lnk_path]
+            .filter(Boolean)
+            .join("\n"));
+    }
     // 0.16.4：图片项标记（右键菜单钉图用）
     if (app.is_image) {
         li.dataset.isImage = "true";
@@ -598,6 +605,13 @@ function createItem(app, i) {
         const iconWrap = document.createElement("span");
         iconWrap.className = "app-icon clip-file-icon";
         iconWrap.appendChild(renderIcon("external-link", {ariaLabel: "超链条目"}));
+        li.appendChild(iconWrap);
+    }
+    // 0.26.13：书签条目——Lucide bookmark 占位（同 weblinks：lnk_path 是 URL）。
+    else if (app.source === "bookmarks") {
+        const iconWrap = document.createElement("span");
+        iconWrap.className = "app-icon clip-file-icon";
+        iconWrap.appendChild(renderIcon("bookmark", {ariaLabel: "书签条目"}));
         li.appendChild(iconWrap);
     }
     // 0.26.9：剪贴板文件条目——Lucide file-text 占位（列表不读文件内容、

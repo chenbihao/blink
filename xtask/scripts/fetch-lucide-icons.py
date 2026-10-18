@@ -48,6 +48,7 @@ ICON_LIST = [
     "file-text",        # open_logs 📄
     "folder-open",      # open_data_dir 🗂️
     "external-link",    # open_url 🔗
+    "bookmark",         # 浏览器书签条目（0.26.13 BookmarkEngine，列表占位 + 设置页 card）
     "folder",           # open_path 📁 / 文件搜索 (settings.html)
     "folder-search",    # reveal_in_explorer 🔍
 

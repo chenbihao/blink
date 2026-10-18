@@ -446,6 +446,62 @@ impl WebLinksConfig {
     }
 }
 
+// ── BookmarksConfig（0.26.13）─────────────────────────────────────────────────
+
+/// 浏览器书签配置分片（BookmarkEngine，0.26.13）。
+///
+/// 书签属敏感数据：v1 只服务本地搜索，不注册 Capability、不进 AI/MCP 出口。
+/// `keyword` 触发词独占（`bm rust`）；`mix_into_global` 默认关——书签量大，
+/// 混排会淹没常规应用结果，开启后仅最近 `MIXED_PREFILTER_POOL` 条参与召回。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BookmarksConfig {
+    /// 引擎总开关；false 不注册 keyword、不扫描、不混排。
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// 独占触发词（默认 `bm`）。不含空白、非保留前缀 `ai`、不与 engine/插件
+    /// 触发词冲突（保存时校验，加载时 warn 跳过注册）。
+    #[serde(default = "default_bookmark_keyword")]
+    pub keyword: String,
+    /// 参与常规混排（默认关，2026-10-18 定案）。热切换即时生效——
+    /// `takeover_only()` 读运行时快照。
+    #[serde(default)]
+    pub mix_into_global: bool,
+    /// 启用的 Chromium 系浏览器（`chrome` / `edge` / `brave`，仅根目录不同）。
+    #[serde(default = "default_bookmark_browsers")]
+    pub browsers: Vec<String>,
+    /// 内存索引条目上限（超出截断 + 日志 + 设置页提示）。默认 50k。
+    #[serde(default = "default_bookmark_max_entries")]
+    pub max_entries: u32,
+}
+
+impl Default for BookmarksConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            keyword: default_bookmark_keyword(),
+            mix_into_global: false,
+            browsers: default_bookmark_browsers(),
+            max_entries: default_bookmark_max_entries(),
+        }
+    }
+}
+
+impl ConfigKey for BookmarksConfig {
+    const KEY: &'static str = "app.bookmarks";
+}
+
+fn default_bookmark_keyword() -> String {
+    "bm".to_string()
+}
+
+fn default_bookmark_browsers() -> Vec<String> {
+    vec!["chrome".to_string(), "edge".to_string(), "brave".to_string()]
+}
+
+fn default_bookmark_max_entries() -> u32 {
+    50_000
+}
+
 // ── ContextConfig ─────────────────────────────────────────────────────────────
 
 /// Context 层配置：控制唤起时的环境采集行为。
@@ -804,6 +860,26 @@ mod tests {
     fn suggestion_config_empty_json_defaults() {
         let c: SuggestionConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(c, SuggestionConfig::default());
+    }
+
+    /// 0.26.13：旧分片（无 bookmarks 字段）反序列化必须得到 `bm` 默认触发词、
+    /// 混排默认关、三浏览器默认启用；显式 false/空表保持用户选择。
+    #[test]
+    fn bookmarks_config_legacy_json_keeps_defaults() {
+        let legacy = r#"{"enabled":true,"keyword":"shuqian"}"#;
+        let c: BookmarksConfig = serde_json::from_str(legacy).unwrap();
+        assert_eq!(c.keyword, "shuqian");
+        assert!(!c.mix_into_global, "混排默认关");
+        assert_eq!(c.browsers, ["chrome", "edge", "brave"]);
+        assert_eq!(c.max_entries, 50_000);
+
+        let empty: BookmarksConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(empty.keyword, "bm");
+        assert!(empty.enabled);
+
+        let cleared = r#"{"browsers":["edge"]}"#;
+        let c: BookmarksConfig = serde_json::from_str(cleared).unwrap();
+        assert_eq!(c.browsers, ["edge"]);
     }
 
     /// 0.25.14：旧分片（无 preselection_cutout 字段）反序列化必须默认开启挖洞，

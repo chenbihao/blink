@@ -182,6 +182,16 @@ export function bindErrorPreview(li, text) {
     bindPreview(li, {loadText: () => text, isError: true});
 }
 
+/**
+ * 0.26.13：静态文本预览（书签条目等非剪贴板来源）——内容在结果数据里已有，
+ * 不发起 IPC；复用文本面板的停留/离开/钳制行为。
+ * @param {HTMLLIElement} li 结果行
+ * @param {() => string} loadText 返回完整文本（同步）
+ */
+export function bindTextPreview(li, loadText) {
+    bindPreview(li, {loadText});
+}
+
 function bindPreview(li, {loadText, isError = false, imageId, fileEntryId}) {
     const leaveTrigger = () => {
         if (pendingAnchor === li) cancelShow();
