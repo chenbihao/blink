@@ -25,11 +25,13 @@ export function initEnginesTab(cfg) {
     initFileSearchConfig();
     initBookmarksConfig();
     initScriptRuntime();
+    initManagedEverything();
     // 状态徽章文本是 JS 动态生成（状态结果 → i18n key），applyI18n 扫不到，
     // 语言切换时通过 i18n 订阅自行刷新
     onLangChange(() => {
         refreshEverythingBadgeText();
         refreshBookmarksBadgeText();
+        refreshManagedEverythingBadgeText();
         refreshScriptRuntimeBadgeText("python");
         refreshScriptRuntimeBadgeText("node");
     });
@@ -47,19 +49,23 @@ async function loadEngineConfig() {
         const dataSource = fileSearch.data_source || "auto";
         const port = fileSearch.everything_port || 80;
         const maxResults = fileSearch.max_results || 20;
+        const managedPort = fileSearch.managed_everything_port || 52819;
 
         const enabledEl = document.getElementById("file-search-enabled");
         const dataSourceEl = document.getElementById("file-search-data-source");
         const portEl = document.getElementById("everything-port");
         const maxResultsEl = document.getElementById("everything-max-results");
+        const managedPortEl = document.getElementById("managed-everything-port");
 
         if (enabledEl) enabledEl.checked = enabled;
         if (dataSourceEl) dataSourceEl.value = dataSource;
         if (portEl) portEl.value = port;
         if (maxResultsEl) maxResultsEl.value = maxResults;
+        if (managedPortEl) managedPortEl.value = managedPort;
+        updateUserEverythingRowsVisible(dataSource);
 
-        // 页面加载后自动探测一次（非 local 模式）
-        if (dataSource !== "local") {
+        // 页面加载后自动探测一次（auto/everything 模式；managed-only 不用用户实例）
+        if (dataSource !== "local" && dataSource !== "managed") {
             setTimeout(probeEverythingStatus, 500);
         }
     } catch (e) {
@@ -103,8 +109,9 @@ function initFileSearchConfig() {
     const dataSourceEl = document.getElementById("file-search-data-source");
     const portEl = document.getElementById("everything-port");
     const maxResultsEl = document.getElementById("everything-max-results");
+    const managedPortEl = document.getElementById("managed-everything-port");
 
-    [enabledEl, dataSourceEl, portEl, maxResultsEl].forEach((el) => {
+    [enabledEl, dataSourceEl, portEl, maxResultsEl, managedPortEl].forEach((el) => {
         el?.addEventListener("change", saveFileSearchConfig);
     });
 }
@@ -112,17 +119,30 @@ function initFileSearchConfig() {
 /**
  * 保存文件搜索配置（校验端口 + saveConfig + 视需重探）
  */
+/** managed-only 模式下用户实例两行（状态/端口）无意义，整组隐藏。 */
+function updateUserEverythingRowsVisible(dataSource) {
+    const rows = document.getElementById("user-everything-rows");
+    if (rows) rows.style.display = dataSource === "managed" ? "none" : "";
+}
+
 async function saveFileSearchConfig() {
     const enabled = document.getElementById("file-search-enabled")?.checked ?? true;
     const dataSource = document.getElementById("file-search-data-source")?.value || "auto";
     const port = parseInt(document.getElementById("everything-port")?.value, 10);
     const maxResults = parseInt(document.getElementById("everything-max-results")?.value, 10) || 20;
+    const managedPort = parseInt(document.getElementById("managed-everything-port")?.value, 10) || 52819;
 
     if (!Number.isFinite(port) || port < 1 || port > 65535) {
         // 用户还在输入中（例如清空端口再输），静默跳过；等输到合法值再自动保存
         console.warn("[engines] file-search port invalid, skip auto-save:", port);
         return;
     }
+    if (!Number.isFinite(managedPort) || managedPort < 1 || managedPort > 65535) {
+        console.warn("[engines] managed port invalid, skip auto-save:", managedPort);
+        return;
+    }
+
+    updateUserEverythingRowsVisible(dataSource);
 
     try {
         await saveConfig("file_search", {
@@ -130,8 +150,9 @@ async function saveFileSearchConfig() {
             data_source: dataSource,
             everything_port: port,
             max_results: maxResults,
+            managed_everything_port: managedPort,
         });
-        if (dataSource !== "local") {
+        if (dataSource !== "local" && dataSource !== "managed") {
             probeEverythingStatus();
         }
     } catch (e) {
@@ -141,7 +162,8 @@ async function saveFileSearchConfig() {
 }
 
 /**
- * 探测 Everything 状态
+ * 探测 Everything 状态（0.26.14 统一面）：live 探测你的 Everything 端口，
+ * 随后拉取统一状态（用户实例 + 托管实例）刷新两枚徽章。
  */
 async function probeEverythingStatus() {
     const statusEl = document.getElementById("everything-status");
@@ -153,26 +175,53 @@ async function probeEverythingStatus() {
     statusEl.dataset.badgeState = "probing";
 
     try {
-        const available = await invoke("probe_everything", {port});
-        if (available) {
-            statusEl.textContent = t("engine.status.available");
-            statusEl.className = "status-badge status-available";
-            statusEl.dataset.badgeState = "available";
-        } else {
-            statusEl.textContent = t("engine.status.unavailable");
-            statusEl.className = "status-badge status-unavailable";
-            statusEl.dataset.badgeState = "unavailable";
-        }
+        await invoke("probe_everything", {port});
     } catch (e) {
-        statusEl.textContent = t("engine.status.failed");
-        statusEl.className = "status-badge status-unavailable";
-        statusEl.dataset.badgeState = "failed";
         console.error("probe_everything failed:", e);
+        statusEl.dataset.badgeState = "failed";
     }
+    await refreshFileSearchStatus();
 }
 
 /**
- * 刷新 Everything 徽章文本（语言切换时）
+ * 拉取统一状态并渲染两枚徽章（0.26.14：一次 invoke，用户实例取引擎内存态，
+ * 不做 live 探测——live 探测只在「重新探测」按钮里发生）。
+ */
+async function refreshFileSearchStatus() {
+    let payload = null;
+    try {
+        payload = await invoke("get_file_search_status");
+    } catch (e) {
+        console.error("get_file_search_status failed:", e);
+        return;
+    }
+    renderFileSearchStatus(payload);
+}
+
+/**
+ * 渲染统一状态 payload：
+ * { userPort, userAvailable(null|bool), installed, running, port, version, lastError, restartBackoffMs }
+ */
+function renderFileSearchStatus(payload) {
+    if (!payload) return;
+    // ── 你的 Everything ──
+    const userEl = document.getElementById("everything-status");
+    if (userEl) {
+        if (payload.userAvailable === true) {
+            userEl.dataset.badgeState = "available";
+        } else if (payload.userAvailable === false) {
+            userEl.dataset.badgeState = "unavailable";
+        } else {
+            userEl.dataset.badgeState = "unprobed";
+        }
+        refreshEverythingBadgeText();
+    }
+    // ── 内置搜索引擎（托管）──
+    renderManagedEverything(payload);
+}
+
+/**
+ * 刷新用户 Everything 徽章文本（语言切换/状态更新共用）。
  */
 export function refreshEverythingBadgeText() {
     const statusEl = document.getElementById("everything-status");
@@ -181,8 +230,15 @@ export function refreshEverythingBadgeText() {
         statusEl.dataset.badgeState === "available" ? "engine.status.available" :
             statusEl.dataset.badgeState === "unavailable" ? "engine.status.unavailable" :
                 statusEl.dataset.badgeState === "failed" ? "engine.status.failed" :
-                    "engine.status.probing";
+                    statusEl.dataset.badgeState === "unprobed" ? "engine.status.unprobed" :
+                        "engine.status.probing";
     statusEl.textContent = t(key);
+    statusEl.className =
+        statusEl.dataset.badgeState === "available"
+            ? "status-badge status-available"
+            : statusEl.dataset.badgeState === "unprobed"
+                ? "status-badge status-unknown"
+                : "status-badge status-unavailable";
 }
 
 // ── 浏览器书签（BookmarkEngine，0.26.13）──────────────────────────────────
@@ -553,4 +609,224 @@ function initScriptRuntime() {
     });
 
     refreshScriptRuntimeStatus();
+}
+
+// ── 内置搜索引擎（Blink 托管 Everything，0.26.14）────────────────────────
+//
+// 状态徽章/安装按钮/进度条与脚本运行时同构；实例启停与 UAC 服务安装为
+// 本区块独有。进度经 EVENTS.MANAGED_RUNTIME_INSTALL 事件推送。
+
+/** 渲染托管 Everything 状态徽章与安装按钮态。 */
+function renderManagedEverything(st) {
+    const statusEl = document.getElementById("managed-everything-status");
+    const actionEl = document.getElementById("managed-everything-action");
+    if (!statusEl) return;
+    // 后端 #[serde(flatten)]：runtime 字段直接平铺在 st 上
+    const r = st;
+    if (r?.running) {
+        statusEl.dataset.badgeState = "running";
+        statusEl.dataset.port = r.port ?? "";
+    } else if (r?.installed) {
+        statusEl.dataset.badgeState = "installed";
+        delete statusEl.dataset.port;
+    } else {
+        statusEl.dataset.badgeState = "not_installed";
+        delete statusEl.dataset.port;
+    }
+    statusEl.dataset.version = r?.version || "";
+    statusEl.title = r?.lastError || "";
+    refreshManagedEverythingBadgeText();
+    if (actionEl && !actionEl.dataset.busy) {
+        actionEl.dataset.installed = r?.installed ? "1" : "0";
+        actionEl.textContent = r?.installed
+            ? t("engine.managed.uninstall")
+            : t("engine.managed.install");
+    }
+}
+
+/** 徽章文本刷新（语言切换/状态更新共用）。 */
+export function refreshManagedEverythingBadgeText() {
+    const statusEl = document.getElementById("managed-everything-status");
+    if (!statusEl) return;
+    const state = statusEl.dataset.badgeState;
+    const version = statusEl.dataset.version || "";
+    if (state === "running") {
+        statusEl.textContent = t("engine.managed.status.running", {
+            port: statusEl.dataset.port || "?",
+        });
+        statusEl.className = "status-badge status-available";
+    } else if (state === "installed") {
+        statusEl.textContent = t("engine.managed.status.installed", {version});
+        statusEl.className = "status-badge status-unknown";
+    } else if (state === "installing") {
+        statusEl.textContent = t("engine.managed.status.installing");
+        statusEl.className = "status-badge status-unknown";
+    } else {
+        statusEl.textContent = t("engine.managed.status.not_installed");
+        statusEl.className = "status-badge status-unavailable";
+    }
+}
+
+async function refreshManagedEverythingStatus() {
+    await refreshFileSearchStatus();
+}
+
+/** 下载进度条（downloaded 为 null 时隐藏）。 */
+function renderManagedProgress(downloaded, total) {
+    const wrap = document.getElementById("managed-everything-progress");
+    if (!wrap) return;
+    const fill = wrap.querySelector(".download-progress__fill");
+    const text = wrap.querySelector(".download-progress__text");
+    if (downloaded === null || downloaded === undefined) {
+        wrap.hidden = true;
+        return;
+    }
+    wrap.hidden = false;
+    const percent = progressPercent(downloaded, total);
+    fill.classList.toggle("download-progress__fill--indeterminate", percent === null);
+    fill.style.width = percent === null ? "" : `${percent}%`;
+    if (text) {
+        text.textContent = total
+            ? `${formatBytes(downloaded)} / ${formatBytes(total)} · ${percent ?? "--"}%`
+            : formatBytes(downloaded);
+    }
+}
+
+/** 安装进度事件（stage 机：downloading/extracting/verifying/promoting/done/failed）。 */
+function handleManagedInstallEvent(payload) {
+    const {stage, downloaded, total, message} = payload || {};
+    const actionEl = document.getElementById("managed-everything-action");
+    const statusEl = document.getElementById("managed-everything-status");
+
+    if (stage === "downloading" && downloaded !== undefined) {
+        if (actionEl) {
+            actionEl.dataset.busy = "1";
+            actionEl.disabled = true;
+            actionEl.textContent = t("engine.managed.installing");
+        }
+        renderManagedProgress(downloaded, total ?? null);
+        return;
+    }
+    if (["extracting", "verifying", "promoting"].includes(stage)) {
+        renderManagedProgress(null);
+        if (statusEl) {
+            statusEl.dataset.badgeState = "installing";
+            statusEl.className = "status-badge status-unknown";
+            statusEl.textContent = t(`engine.script_runtime.stage.${stage}`);
+        }
+        return;
+    }
+    if (stage === "done") {
+        renderManagedProgress(null);
+        if (actionEl) {
+            delete actionEl.dataset.busy;
+            actionEl.disabled = false;
+        }
+        refreshManagedEverythingStatus();
+        return;
+    }
+    if (stage === "failed") {
+        renderManagedProgress(null);
+        if (actionEl) {
+            delete actionEl.dataset.busy;
+            actionEl.disabled = false;
+        }
+        if (statusEl) {
+            statusEl.dataset.badgeState = "not_installed";
+            statusEl.className = "status-badge status-unavailable";
+            statusEl.textContent = t("engine.managed.install_failed", {
+                message: message || "unknown",
+            });
+            statusEl.title = message || "";
+        }
+    }
+}
+
+/** 初始化托管 Everything 区块。 */
+function initManagedEverything() {
+    // 周期轮询（3s，仅设置窗口存活期间；统一状态一次 invoke 覆盖两枚徽章，
+    // 用户实例徽章取引擎内存态不做 live 探测——live 探测归「重新探测」按钮）
+    setInterval(refreshFileSearchStatus, 3000);
+
+    document.getElementById("managed-everything-action")?.addEventListener("click", async (e) => {
+        const btn = e.currentTarget;
+        const installed = btn.dataset.installed === "1";
+        try {
+            if (installed) {
+                const ok = await confirmDialog(t("engine.managed.uninstall_confirm"), {
+                    title: t("engine.managed.uninstall"), kind: "warning",
+                });
+                if (!ok) return;
+                await invoke("uninstall_managed_everything");
+            } else {
+                btn.dataset.busy = "1";
+                btn.disabled = true;
+                btn.textContent = t("engine.managed.installing");
+                await invoke("install_managed_everything");
+            }
+            refreshManagedEverythingStatus();
+        } catch (err) {
+            console.error("managed everything action failed:", err);
+            delete btn.dataset.busy;
+            btn.disabled = false;
+            messageDialog(String(err?.message || err), {title: t("common.error"), kind: "error"});
+            refreshManagedEverythingStatus();
+        }
+    });
+
+    // 启动并测试（长预算等待就绪）／停止实例
+    document.getElementById("managed-everything-start")?.addEventListener("click", async () => {
+        const statusEl = document.getElementById("managed-everything-status");
+        if (statusEl) {
+            statusEl.dataset.badgeState = "installing";
+            statusEl.className = "status-badge status-unknown";
+            statusEl.textContent = t("engine.managed.status.starting");
+        }
+        try {
+            await invoke("start_managed_everything");
+        } catch (err) {
+            messageDialog(String(err?.message || err), {title: t("common.error"), kind: "error"});
+        }
+        refreshManagedEverythingStatus();
+    });
+    document.getElementById("managed-everything-stop")?.addEventListener("click", async () => {
+        const statusEl = document.getElementById("managed-everything-status");
+        if (statusEl) {
+            statusEl.dataset.badgeState = "installed";
+            statusEl.dataset.version = statusEl.dataset.version || "";
+            refreshManagedEverythingBadgeText();
+        }
+        try {
+            await invoke("stop_managed_everything");
+        } catch (err) {
+            console.error("stop managed everything failed:", err);
+        }
+        refreshManagedEverythingStatus();
+    });
+
+    // UAC 服务安装：仅发起提权请求；安装后提示重启实例
+    document.getElementById("managed-everything-service")?.addEventListener("click", async (e) => {
+        const btn = e.currentTarget;
+        const ok = await confirmDialog(t("engine.managed.service.confirm"), {
+            title: t("engine.managed.service.label"), kind: "warning",
+        });
+        if (!ok) return;
+        btn.disabled = true;
+        try {
+            await invoke("install_everything_service");
+            messageDialog(t("engine.managed.service.installed_hint"), {
+                title: t("engine.managed.service.label"), kind: "info",
+            });
+        } catch (err) {
+            messageDialog(String(err?.message || err), {
+                title: t("common.error"), kind: "error",
+            });
+        }
+        btn.disabled = false;
+    });
+
+    listen(EVENTS.MANAGED_RUNTIME_INSTALL, (event) => {
+        handleManagedInstallEvent(event.payload);
+    });
+    refreshManagedEverythingStatus();
 }

@@ -743,6 +743,19 @@ pub async fn probe_everything(port: u16) -> bool {
     }
 }
 
+/// 文件搜索数据源统一状态（0.26.14：用户 Everything + 托管实例一次返回；
+/// 设置页单一次拉取，live 探测用户端口仍走 `probe_everything`）。
+#[tauri::command]
+pub async fn get_file_search_status(
+    app: tauri::AppHandle,
+) -> Option<crate::domain::search::FileSearchStatus> {
+    let ss = app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>();
+    match ss {
+        Some(ss) => ss.file_search_status().await,
+        None => None,
+    }
+}
+
 /// 书签引擎状态（0.26.13 设置页：条目数/截断/扫描中）。只读，无副作用。
 #[tauri::command]
 pub fn get_bookmarks_status(

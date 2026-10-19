@@ -167,6 +167,7 @@ export const EVENTS = Object.freeze({
      *   "promoting"|"done"|"failed", downloaded?, total?, message? }
      */
     SCRIPT_INTERPRETER_INSTALL: 'blink://script-interpreter-install',
+    MANAGED_RUNTIME_INSTALL: 'blink://managed-runtime-install',
 
     // ── 便签（0.16.7）──
     STICKY_CREATED: 'blink://sticky-created',

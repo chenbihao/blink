@@ -128,3 +128,50 @@ pub fn scan_uwp_apps() -> Vec<(String, String)> {
 pub fn scan_uwp_apps() -> Vec<(String, String)> {
     Vec::new()
 }
+
+/// 以管理员权限运行指定程序（UAC 提权，0.26.14）。
+///
+/// ShellExecuteW verb="runas"：弹 UAC 确认框，用户同意后以提升权限启动；
+/// 拒绝时返回 `Cancelled`。用于 Everything 服务的显式安装
+/// （`everything.exe -instance blink -install-service`）——**只在用户显式
+/// 点击设置页按钮时调用**，绝不在后台静默提权。
+///
+/// 返回 `Ok(())` 仅表示提权请求已受理（ShellExecuteAsync 语义），安装是否
+/// 成功由用户侧 UAC 与服务安装结果决定，调用方不据此断言服务已装好。
+#[cfg(target_os = "windows")]
+pub fn run_elevated(exe: &std::path::Path, args: &str) -> Result<(), String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let exe_w: Vec<u16> = exe
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let args_w: Vec<u16> = args.encode_utf16().chain(std::iter::once(0)).collect();
+    let verb_w: Vec<u16> = "runas\0".encode_utf16().collect();
+
+    // ShellExecuteW 返回值 > 32 表示成功（Win32 惯例）。
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            PCWSTR(verb_w.as_ptr()),
+            PCWSTR(exe_w.as_ptr()),
+            PCWSTR(args_w.as_ptr()),
+            None,
+            SW_SHOWNORMAL,
+        )
+    };
+    if result.0 as usize > 32 {
+        Ok(())
+    } else {
+        // SE_ERR_ACCESSDENIED(5) 之外的常见失败：用户取消 UAC 通常表现为 5。
+        Err(format!("ShellExecuteW runas 失败（code={}）", result.0 as i32))
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn run_elevated(_exe: &std::path::Path, _args: &str) -> Result<(), String> {
+    Err("run_elevated 仅支持 Windows".to_string())
+}

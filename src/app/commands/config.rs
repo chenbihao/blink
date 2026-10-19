@@ -357,8 +357,22 @@ async fn set_config_value(
 
         // ── 引擎配置 ──────────────────────────────────────────────────────
         "file_search" => {
+            // 补丁合并（0.26.14）：前端只提交 enabled/data_source/everything_port/
+            // max_results 四个字段，local_* 与 managed_* 不在 UI 内管理——
+            // 整结构覆盖会把它们重置为默认值，改为按 key 覆盖存储对象。
+            let stored: serde_json::Value =
+                crate::app::config::get_engine_config(pool, "file_search")
+                    .await
+                    .or_else(|| serde_json::to_value(crate::app::config::FileSearchConfig::default()).ok())
+                    .unwrap_or(serde_json::Value::Null);
+            let mut merged = stored;
+            if let (Some(dst), Some(src)) = (merged.as_object_mut(), value.as_object()) {
+                for (key, field) in src {
+                    dst.insert(key.clone(), field.clone());
+                }
+            }
             let fs: crate::app::config::FileSearchConfig =
-                serde_json::from_value(value).map_err(|e| e.to_string())?;
+                serde_json::from_value(merged).map_err(|e| e.to_string())?;
             crate::app::config::update_file_search(pool, fs.clone()).await?;
             if let Some(ss) =
                 app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>()

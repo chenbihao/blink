@@ -308,8 +308,10 @@ impl ConfigKey for CalcConfig {
 /// 文件搜索配置（FileEngine）。
 ///
 /// 数据源模式 `data_source`：
-/// - `"auto"`（默认）：优先 Everything，不可用时降级本地扫描
-/// - `"everything"`：只用 Everything HTTP，不可用则无文件结果
+/// - `"auto"`（默认）：用户 Everything HTTP → 托管 Everything 实例（0.26.14，
+///   按需懒启动）→ 降级本地扫描
+/// - `"everything"`：只用用户 Everything HTTP，不可用则无文件结果
+/// - `"managed"`：只用 blink 托管的 Everything 实例（0.26.14）
 /// - `"local"`：只用本地目录扫描，不尝试 Everything
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileSearchConfig {
@@ -329,6 +331,13 @@ pub struct FileSearchConfig {
     pub local_cache_ttl_sec: u64,
     #[serde(default = "default_local_max_results")]
     pub local_max_results: u32,
+    /// 0.26.14：`auto` 链中启用托管 Everything 实例（用户未装 Everything 时
+    /// 设置页一键下载受管 1.4 便携版）。默认开——链路仍先探测用户实例。
+    #[serde(default = "default_true")]
+    pub managed_everything_enabled: bool,
+    /// 0.26.14：托管实例偏好端口（占用时向上扫描 20 个）。
+    #[serde(default = "default_managed_everything_port")]
+    pub managed_everything_port: u16,
 }
 
 impl Default for FileSearchConfig {
@@ -342,6 +351,8 @@ impl Default for FileSearchConfig {
             local_max_depth: 3,
             local_cache_ttl_sec: 300,
             local_max_results: 50,
+            managed_everything_enabled: true,
+            managed_everything_port: default_managed_everything_port(),
         }
     }
 }
@@ -712,6 +723,10 @@ fn default_local_cache_ttl() -> u64 {
 
 fn default_local_max_results() -> u32 {
     50
+}
+
+fn default_managed_everything_port() -> u16 {
+    52819
 }
 
 // ── AiPermissionConfig（0.17.8）──────────────────────────────────────────────────

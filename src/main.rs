@@ -1043,6 +1043,8 @@ fn main() {
             // 0.25.20：清扫脚本解释器孤儿 staging（上次安装中断的残留；
             // 独立线程，不阻塞主链路）
             app::commands::startup_sweep();
+            // 0.26.14：清扫托管 Everything 运行时孤儿 staging
+            app::commands::managed_runtime_startup_sweep();
 
             // 0.22.3: 构造进程级 EngineManager（全进程唯一实例）
             //
@@ -1678,6 +1680,13 @@ app::commands::generate_palette_schemes,
             app::commands::script_interpreters_status,
             app::commands::install_script_interpreter,
             app::commands::uninstall_script_interpreter,
+            // 0.26.14：托管 Everything 运行时
+            app::commands::get_file_search_status,
+            app::commands::install_managed_everything,
+            app::commands::uninstall_managed_everything,
+            app::commands::start_managed_everything,
+            app::commands::stop_managed_everything,
+            app::commands::install_everything_service,
             app::commands::open_file_dialog,
             app::commands::pick_directory_dialog,
 app::commands::get_clipboard_history,
@@ -1942,6 +1951,21 @@ app::commands::repair_local_engine,
                             mcp.stop_all(),
                         ).await;
                     });
+                }
+
+                // 0.26.14：终止托管 Everything 实例（Child 句柄 kill——内核级
+                // 身份校验，不存在 PID 复用误杀；instance 守卫防重复）。
+                if let Some(ss) = _app
+                    .try_state::<std::sync::Arc<crate::domain::search::SearchService>>()
+                {
+                    if let Some(rt) = ss.everything_runtime() {
+                        tauri::async_runtime::block_on(async {
+                            let _ = tokio::time::timeout(
+                                std::time::Duration::from_secs(3),
+                                rt.stop(),
+                            ).await;
+                        });
+                    }
                 }
 
                 // 0.19.13: 关闭 MCP Server HTTP listener，释放端口

@@ -217,6 +217,10 @@ impl EventNames {
     /// 后端按 chunk 节流上报）；`failed` 携带 `message`（错误摘要）。
     pub const SCRIPT_INTERPRETER_INSTALL: &str = "blink://script-interpreter-install";
 
+    /// 托管外部运行时（0.26.14 Everything）安装进度。payload 与脚本解释器
+    /// 同构：`{ kind: "everything", stage, downloaded?, total?, message? }`。
+    pub const MANAGED_RUNTIME_INSTALL: &str = "blink://managed-runtime-install";
+
     // ── 便签（0.16.7-0.16.10）──
     /// 便签被创建。payload: `{ stickyId }`
     pub const STICKY_CREATED: &str = "blink://sticky-created";

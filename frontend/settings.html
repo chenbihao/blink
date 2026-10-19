@@ -370,20 +370,25 @@
                             <option data-i18n="engine.file_search.data_source.everything" value="everything">仅
                                 Everything
                             </option>
+                            <option data-i18n="engine.file_search.data_source.managed" value="managed">仅内置搜索引擎
+                            </option>
                             <option data-i18n="engine.file_search.data_source.local" value="local">仅本地扫描</option>
                         </select>
                     </div>
 
-                    <!-- Everything 配置（非 local 模式时显示） -->
+                    <!-- Everything 数据源统一状态区（0.26.14：用户实例 + 托管实例一个状态面） -->
                     <div id="everything-config">
+                        <h4 class="managed-everything-title" data-i18n="engine.everything.section.title">Everything 数据源状态</h4>
+                        <p class="extension-desc" data-i18n="engine.everything.section.desc">自动模式按「你的 Everything → 内置搜索引擎（托管）→ 本地扫描」取第一个可用来源；内置引擎未安装时可一键下载受管的 Everything 1.4 便携版（专属回环实例，约 35MB/25 万文件，独立进程）。</p>
+                        <div id="user-everything-rows">
                         <div class="setting-row">
-                            <label class="setting-label" data-i18n="engine.everything.status.label">状态</label>
+                            <label class="setting-label" data-i18n="engine.everything.user.label">你的 Everything</label>
                             <span class="status-badge status-unknown" data-i18n="engine.status.probing"
                                   id="everything-status">探测中…</span>
                             <button class="btn-small" data-i18n="engine.probe" id="probe-everything">重新探测</button>
                         </div>
                         <div class="setting-row">
-                            <label class="setting-label" data-i18n="engine.everything.port.label">HTTP 端口<span
+                            <label class="setting-label" data-i18n="engine.everything.port.label">你的 Everything HTTP 端口<span
                                     class="field-hint-icon"
                                     data-i18n-title="engine.everything.port.hint">ⓘ</span></label>
                             <div class="number-input-wrapper">
@@ -398,6 +403,49 @@
                                     </button>
                                 </div>
                             </div>
+                        </div>
+                        </div>
+                        <div class="setting-row">
+                            <label class="setting-label" data-i18n="engine.everything.managed.label">内置搜索引擎（托管）</label>
+                            <span class="status-badge status-unknown" id="managed-everything-status">…</span>
+                            <button class="btn-small" id="managed-everything-action">安装</button>
+                        </div>
+                        <div class="setting-row">
+                            <label class="setting-label" data-i18n="engine.everything.managed_port.label">托管实例端口<span
+                                    class="field-hint-icon"
+                                    data-i18n-title="engine.everything.managed_port.hint">ⓘ</span></label>
+                            <div class="number-input-wrapper">
+                                <input id="managed-everything-port" max="65535" min="1" type="number" value="52819"/>
+                                <div class="number-spinner">
+                                    <button aria-label="增加" class="spinner-up" data-i18n-aria-label="spinner.increase"
+                                            type="button">▲
+                                    </button>
+                                    <button aria-label="减少" class="spinner-down"
+                                            data-i18n-aria-label="spinner.decrease"
+                                            type="button">▼
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="download-progress" hidden id="managed-everything-progress">
+                            <div class="download-progress__bar">
+                                <div class="download-progress__fill"></div>
+                            </div>
+                            <span class="download-progress__text"></span>
+                        </div>
+                        <div class="setting-row">
+                            <label class="setting-label" data-i18n="engine.managed.instance.label">托管实例</label>
+                            <button class="btn-small" data-i18n="engine.managed.instance.start" id="managed-everything-start" type="button">启动并测试
+                            </button>
+                            <button class="btn-small" data-i18n="engine.managed.instance.stop" id="managed-everything-stop" type="button">停止实例
+                            </button>
+                        </div>
+                        <div class="setting-row">
+                            <label class="setting-label" data-i18n="engine.managed.service.label">实时索引服务<span
+                                    class="field-hint-icon" data-i18n-title="engine.managed.service.hint">ⓘ</span></label>
+                            <button class="btn-small" data-i18n="engine.managed.service.install"
+                                    id="managed-everything-service" type="button">安装服务（UAC）
+                            </button>
                         </div>
                         <div class="setting-row">
                             <label class="setting-label" data-i18n="engine.everything.max_results.label">最大结果数<span
@@ -447,7 +495,7 @@
                     <div class="setting-row">
                         <label class="setting-label" data-i18n="engine.bookmarks.keyword.label">触发词<span
                                 class="field-hint-icon" data-i18n-title="engine.bookmarks.keyword.hint">ⓘ</span></label>
-                        <input id="bookmarks-keyword" maxlength="20" style="width: 140px" type="text"/>
+                        <input class="input-wide" id="bookmarks-keyword" maxlength="20" type="text"/>
                     </div>
                     <div class="setting-row">
                         <label class="setting-label" data-i18n="engine.bookmarks.mix.label">参与常规混排<span
@@ -2781,6 +2829,11 @@
             <div class="setting-row">
                 <label class="setting-label" data-i18n="about.license.label">许可</label>
                 <span class="value" id="about-license">—</span>
+            </div>
+            <!-- 0.26.14：内置搜索引擎（Everything）随应用分发，按其许可要求附声明 -->
+            <div class="setting-row">
+                <label class="setting-label" data-i18n="about.license.third_party.label">第三方组件</label>
+                <span class="value" data-i18n="about.license.third_party">内置搜索引擎 Everything（voidtools）以 MIT 许可分发，含 PCRE（BSD-3-Clause）组件</span>
             </div>
             <div class="setting-row">
                 <label class="setting-label" data-i18n="about.repository.label">仓库</label>

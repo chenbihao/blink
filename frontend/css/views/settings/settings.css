@@ -2747,3 +2747,58 @@ input.has-secret-hint::placeholder {
 .bookmarks-input-error {
     border-color: var(--red, #f38ba8) !important;
 }
+
+/* ── 内置搜索引擎（0.26.14 托管 Everything，engines tab 文件搜索卡片内）── */
+
+.managed-everything-title {
+    margin: var(--space-md, 16px) 0 var(--space-xs, 4px);
+    font-size: var(--font-size-sm, 13px);
+    font-weight: 600;
+}
+
+/* 浏览器开关自定义复选框（与 AI 能力复选框同视觉；原生 checkbox 不合主题） */
+.bookmarks-browser-toggles .checkbox-inline {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+    font-size: var(--text-sm);
+}
+
+.bookmarks-browser-toggles .checkbox-inline input[type="checkbox"] {
+    appearance: none;
+    display: grid;
+    place-content: center;
+    width: 16px;
+    height: 16px;
+    margin: 0;
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    cursor: pointer;
+    transition: background var(--transition-base), border-color var(--transition-base);
+}
+
+.bookmarks-browser-toggles .checkbox-inline input[type="checkbox"]::after {
+    content: "";
+    width: 8px;
+    height: 4px;
+    border-left: 2px solid var(--bg);
+    border-bottom: 2px solid var(--bg);
+    transform: rotate(-45deg) scale(0);
+    transition: transform var(--transition-fast);
+}
+
+.bookmarks-browser-toggles .checkbox-inline input[type="checkbox"]:checked {
+    border-color: var(--accent);
+    background: var(--accent);
+}
+
+.bookmarks-browser-toggles .checkbox-inline input[type="checkbox"]:checked::after {
+    transform: rotate(-45deg) scale(1);
+}
+
+.bookmarks-browser-toggles .checkbox-inline input[type="checkbox"]:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+    outline-offset: 2px;
+}

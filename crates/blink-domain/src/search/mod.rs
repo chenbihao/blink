@@ -201,6 +201,7 @@ pub mod calc;
 mod calc_engine;
 pub(crate) mod clipboard_engine;
 mod color_engine;
+pub mod everything_runtime;
 pub mod file_engine;
 mod mock_slow_engine;
 mod start_menu_engine;
@@ -234,7 +235,7 @@ use system_shortcuts::SystemShortcutEngine;
 
 // 多路搜索服务:路由 + 融合 + 渐进式调度
 mod service;
-pub use service::{EngineConfigUpdate, SearchResponse, SearchService};
+pub use service::{EngineConfigUpdate, FileSearchStatus, SearchResponse, SearchService};
 
 /// 引擎配置集合（各层独立控制）。
 pub struct EngineConfigs {

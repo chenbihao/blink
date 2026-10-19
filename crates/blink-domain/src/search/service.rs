@@ -100,6 +100,20 @@ struct ResultsPayload {
     items: Vec<AppEntry>,
 }
 
+/// 文件搜索数据源统一状态（设置页一次拉取：用户实例 + 托管实例）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileSearchStatus {
+    /// 托管实例快照（installed/running/port/version/lastError/restartBackoffMs）。
+    #[serde(flatten)]
+    pub managed: super::everything_runtime::RuntimeSnapshot,
+    /// 用户 Everything 的 HTTP 端口（当前配置）。
+    pub user_port: u16,
+    /// 用户实例可用性：None = 未探测；Some(true/false) = 最近探测结果
+    /// （live 探测由 `probe_everything` 显式触发，此处只读引擎内存态）。
+    pub user_available: Option<bool>,
+}
+
 /// 引擎配置更新枚举（用于运行时热更新）。
 pub enum EngineConfigUpdate {
     StartMenu(crate::config::StartMenuConfig),
@@ -534,6 +548,31 @@ impl SearchService {
                     .downcast_ref::<super::bookmark_engine::BookmarkEngine>()
             })
             .map(|e| e.status())
+    }
+
+    /// 托管 Everything 实例治理器（0.26.14：退出清理/设置页状态/启停共用）。
+    /// 无 FileEngine 实例返回 None（理论不可达——build_engines 恒创建）。
+    pub fn everything_runtime(&self) -> Option<super::everything_runtime::EverythingRuntime> {
+        self.async_engines.iter().find_map(|engine| {
+            engine
+                .as_any()
+                .downcast_ref::<super::file_engine::FileEngine>()
+                .map(|fe| fe.everything_runtime().clone())
+        })
+    }
+
+    /// 文件搜索数据源统一状态（0.26.14：设置页单一次拉取——用户实例 + 托管
+    /// 实例 + 当前 data_source，替代分散的探测/状态接口）。
+    pub async fn file_search_status(&self) -> Option<FileSearchStatus> {
+        let engine = self.async_engines.iter().find_map(|e| {
+            e.as_any().downcast_ref::<super::file_engine::FileEngine>()
+        })?;
+        let (port, available) = engine.user_everything_state().await;
+        Some(FileSearchStatus {
+            managed: engine.everything_runtime().snapshot(),
+            user_port: port,
+            user_available: available,
+        })
     }
     pub fn resolve_system_entry(&self, id: &str) -> Option<super::system_entries::Entry> {
         self.system_entries()?.resolve(id)
