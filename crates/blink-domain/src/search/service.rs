@@ -553,6 +553,12 @@ impl SearchService {
             .map(|e| e.status())
     }
 
+    pub fn refresh_bookmarks(&self) -> Option<super::bookmark_engine::BookmarkStatus> {
+        self.sync_engines.iter().find_map(|engine| {
+            engine.as_any().downcast_ref::<super::bookmark_engine::BookmarkEngine>()
+        }).map(|engine| engine.refresh_now())
+    }
+
     /// 托管 Everything 实例治理器（0.26.14：退出清理/设置页状态/启停共用）。
     /// 无 FileEngine 实例返回 None（理论不可达——build_engines 恒创建）。
     pub fn everything_runtime(&self) -> Option<super::everything_runtime::EverythingRuntime> {

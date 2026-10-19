@@ -372,6 +372,19 @@
                         <button class="btn-small" data-i18n="engine.probe" id="probe-everything" type="button">重新探测</button>
                     </div>
 
+                    <div class="setting-row" hidden id="managed-everything-port-row">
+                        <label class="setting-label" data-i18n="engine.managed.port.label" for="managed-everything-port">内置引擎端口<span
+                                class="field-hint-icon" data-i18n-title="engine.file_search.managed_port_hint">ⓘ</span></label>
+                        <div class="number-input-wrapper">
+                            <input id="managed-everything-port" min="1" max="65535" type="number" value="52819"/>
+                            <div class="number-spinner">
+                                <button aria-label="增加" class="spinner-up" data-i18n-aria-label="spinner.increase" type="button">▲</button>
+                                <button aria-label="减少" class="spinner-down" data-i18n-aria-label="spinner.decrease" type="button">▼</button>
+                            </div>
+                        </div>
+                        <span class="status-badge status-unknown" id="managed-everything-port-status">…</span>
+                    </div>
+
                     <div class="setting-row" hidden id="file-search-managed-row">
                         <label class="setting-label" data-i18n="engine.file_search.managed_row">内置搜索引擎</label>
                         <button class="btn-small" id="file-search-managed-action" type="button"></button>
@@ -422,8 +435,10 @@
 
                 <div class="extension-body">
                     <div class="setting-row">
-                        <label class="setting-label" data-i18n="engine.bookmarks.status.label">索引状态</label>
+                        <label class="setting-label" data-i18n="engine.bookmarks.status.label">索引状态<span
+                                class="field-hint-icon" data-i18n-title="engine.bookmarks.refresh_hint">ⓘ</span></label>
                         <span class="status-badge status-unknown" id="bookmarks-status">…</span>
+                        <button class="btn-small" data-i18n="engine.bookmarks.refresh" disabled id="bookmarks-refresh" type="button">立即刷新</button>
                     </div>
                     <div class="setting-row">
                         <label class="setting-label" data-i18n="engine.bookmarks.keyword.label">触发词<span

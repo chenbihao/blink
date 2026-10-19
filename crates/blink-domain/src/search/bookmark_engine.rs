@@ -148,10 +148,18 @@ pub fn parse_bookmarks_json(
     profile: &str,
     max_entries: usize,
 ) -> ParsedBookmarks {
-    let value: serde_json::Value = serde_json::from_str(json).unwrap_or(serde_json::Value::Null);
-    let Some(roots) = value["roots"].as_object() else {
-        return ParsedBookmarks { entries: Vec::new(), truncated: false };
-    };
+    parse_bookmarks_json_checked(json, browser, profile, max_entries)
+        .unwrap_or(ParsedBookmarks { entries: Vec::new(), truncated: false })
+}
+
+fn parse_bookmarks_json_checked(
+    json: &str,
+    browser: &str,
+    profile: &str,
+    max_entries: usize,
+) -> Option<ParsedBookmarks> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    let roots = value["roots"].as_object()?;
     let prefix = format!("{browser}/{profile}/");
     let mut out = Vec::new();
     let mut remaining = max_entries;
@@ -163,7 +171,7 @@ pub fn parse_bookmarks_json(
             collect_children(root, &mut folder, &prefix, &mut remaining, &mut overflow, &mut out);
         }
     }
-    ParsedBookmarks { entries: out, truncated: overflow }
+    Some(ParsedBookmarks { entries: out, truncated: overflow })
 }
 
 // ── Provider：浏览器数据源 ────────────────────────────────────────────────────
@@ -245,6 +253,7 @@ pub struct BookmarkScan {
     pub entries: Vec<BookmarkEntry>,
     pub fingerprints: Vec<FileFingerprint>,
     pub truncated: bool,
+    pub failed_files: usize,
 }
 
 /// 书签数据源抽象（Firefox places.sqlite 拷贝只读方案留后续子版本）。
@@ -302,13 +311,14 @@ impl BookmarkProvider for ChromiumJsonProvider {
             .iter()
             .flat_map(|b| browser_bookmark_files(&self.base, b))
             .collect();
-        let fingerprints: Vec<FileFingerprint> =
+        let mut fingerprints: Vec<FileFingerprint> =
             files.iter().map(|(_, _, fp)| fp.clone()).collect();
         if !force && !fingerprints_changed(&fingerprints, cached) {
             return None;
         }
         let mut entries = Vec::new();
         let mut truncated = false;
+        let mut failed_files = 0;
         for (browser, profile, fp) in &files {
             if entries.len() >= max_entries {
                 truncated = true;
@@ -320,18 +330,25 @@ impl BookmarkProvider for ChromiumJsonProvider {
                 Err(error) => {
                     // 按 profile 降级跳过：单文件读失败不影响其他 profile。
                     tracing::warn!(path = %path.display(), %error, "书签文件读取失败，该 profile 跳过");
+                    fingerprints.retain(|f| f.path != fp.path);
+                    failed_files += 1;
                     continue;
                 }
             };
             let budget = max_entries - entries.len();
-            let parsed = parse_bookmarks_json(&json, browser, profile, budget);
+            let Some(parsed) = parse_bookmarks_json_checked(&json, browser, profile, budget) else {
+                tracing::warn!(path = %path.display(), "书签文件内容无效，保留重试资格");
+                fingerprints.retain(|f| f.path != fp.path);
+                failed_files += 1;
+                continue;
+            };
             truncated |= parsed.truncated;
             entries.extend(parsed.entries);
         }
         if truncated {
             tracing::warn!(count = entries.len(), max = max_entries, "书签条目达上限，超出部分截断");
         }
-        Some(BookmarkScan { entries, fingerprints, truncated })
+        Some(BookmarkScan { entries, fingerprints, truncated, failed_files })
     }
 }
 
@@ -381,6 +398,7 @@ struct IndexState {
     entries: Vec<BookmarkEntry>,
     fingerprints: Vec<FileFingerprint>,
     truncated: bool,
+    failed_files: usize,
 }
 
 struct ScanWork {
@@ -393,9 +411,11 @@ struct ScanWork {
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BookmarkStatus {
+    pub enabled: bool,
     pub entries: usize,
     pub truncated: bool,
     pub scanning: bool,
+    pub failed_files: usize,
 }
 
 #[derive(Clone)]
@@ -453,13 +473,23 @@ impl BookmarkEngine {
 
     /// 设置页状态投影（只读，无副作用）。
     pub fn status(&self) -> BookmarkStatus {
+        let enabled = self.config.read().unwrap().enabled;
         let work = self.work.read().unwrap();
         let cache = self.cache.read().unwrap();
         BookmarkStatus {
+            enabled,
             entries: cache.entries.len(),
             truncated: cache.truncated,
             scanning: work.building,
+            failed_files: cache.failed_files,
         }
+    }
+
+    /// 用户显式刷新：强制重读；在途时合并成一次续扫，旧索引仍可供搜索。
+    pub fn refresh_now(&self) -> BookmarkStatus {
+        self.work.write().unwrap().force = true;
+        self.refresh();
+        self.status()
     }
 
     /// 首扫 + 周期复查（`SearchService::start` 调用；IO 不进 startup 计量）。
@@ -534,6 +564,7 @@ impl BookmarkEngine {
                 cache.entries = scan.entries;
                 cache.fingerprints = scan.fingerprints;
                 cache.truncated = scan.truncated;
+                cache.failed_files = scan.failed_files;
             }
         }
         stale || state.force
@@ -921,17 +952,18 @@ mod tests {
         // chrome Default 5 条 + edge Default 5 条；Profile 1 损坏降级为 0 条
         assert_eq!(scan.entries.len(), 10);
         assert!(!scan.truncated);
-        // 指纹记录存在的文件（损坏文件同样有指纹——指纹跟文件身份，不跟内容可解析性）
-        assert_eq!(scan.fingerprints.len(), 3);
+        // 只确认成功读取的指纹，损坏文件保留周期重试资格。
+        assert_eq!(scan.fingerprints.len(), 2);
+        assert_eq!(scan.failed_files, 1);
         // 条目 id 前缀带浏览器与 profile
         assert!(scan.entries.iter().all(|e| e.id.starts_with("chrome/Default/")
             || e.id.starts_with("edge/Default/")));
 
-        // 指纹未变 → None（周期复查短路，不重解析）
+        // 即使指纹未变化，仍重试此前失败的文件。
         assert!(
             provider
                 .scan_if_changed(&["chrome".into(), "edge".into()], &scan.fingerprints, false, 100)
-                .is_none()
+                .is_some()
         );
 
         // 条目上限跨浏览器累计
@@ -960,6 +992,28 @@ mod tests {
             Some(PathBuf::from("C:/x/BraveSoftware/Brave-Browser/User Data"))
         );
         assert_eq!(browser_user_data_dir(base, "firefox"), None);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn locked_bookmark_file_is_retried_after_unlock_without_metadata_change() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let profile = dir.path().join("Google/Chrome/User Data/Default");
+        std::fs::create_dir_all(&profile).unwrap();
+        let path = profile.join("Bookmarks");
+        std::fs::write(&path, SAMPLE_BOOKMARKS).unwrap();
+        let held = std::fs::OpenOptions::new().read(true).share_mode(0).open(&path).unwrap();
+        let provider = ChromiumJsonProvider::with_base(dir.path().to_path_buf());
+        let browsers = vec!["chrome".into()];
+        let failed = provider.scan_if_changed(&browsers, &[], true, 100).unwrap();
+        assert_eq!(failed.failed_files, 1);
+        assert!(failed.fingerprints.is_empty());
+        drop(held);
+        let recovered = provider.scan_if_changed(&browsers, &failed.fingerprints, false, 100).unwrap();
+        assert_eq!(recovered.failed_files, 0);
+        assert_eq!(recovered.entries.len(), 5);
+        assert!(provider.scan_if_changed(&browsers, &recovered.fingerprints, false, 100).is_none());
     }
 
     // ── 指纹与重扫触发 ───────────────────────────────────────────────────
@@ -1151,6 +1205,7 @@ mod tests {
                 entries: self.entries.clone(),
                 fingerprints: vec![FileFingerprint { path: "x".into(), mtime_ms: 1, size: 1 }],
                 truncated: false,
+                failed_files: 0,
             })
         }
     }
@@ -1179,6 +1234,34 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert_eq!(*provider.scanned.read().unwrap(), 1, "指纹未变不重扫");
+        assert!(e.refresh_now().scanning);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while e.status().scanning { tokio::task::yield_now().await; }
+        }).await.expect("强制扫描应完成");
+        assert_eq!(*provider.scanned.read().unwrap(), 2, "手动刷新绕过指纹短路");
+        assert_eq!(e.status().entries, 1);
+    }
+
+    #[tokio::test]
+    async fn manual_refresh_while_scanning_merges_and_disabled_refresh_does_not_scan() {
+        let provider = Arc::new(CheckableProvider {
+            entries: vec![entry("0", "A", "https://a.test", "", 1)],
+            scanned: Arc::new(RwLock::new(0)),
+        });
+        let engine = BookmarkEngine::with_provider(BookmarksConfig::default(), provider.clone());
+        engine.work.write().unwrap().building = true;
+        for _ in 0..4 { assert!(engine.refresh_now().scanning); }
+        assert_eq!(*provider.scanned.read().unwrap(), 0);
+        assert!(engine.finish(0, None), "请求合并为一次续扫");
+        engine.refresh();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while engine.status().scanning { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        assert_eq!(*provider.scanned.read().unwrap(), 1);
+        engine.update_config(BookmarksConfig { enabled: false, ..Default::default() });
+        assert!(!engine.refresh_now().enabled);
+        assert!(!engine.status().scanning);
+        assert_eq!(*provider.scanned.read().unwrap(), 1);
     }
 
     #[tokio::test]
@@ -1194,6 +1277,7 @@ mod tests {
             entries: vec![entry("x", "old", "https://old.test", "", 1)],
             fingerprints: vec![],
             truncated: false,
+            failed_files: 0,
         };
         assert!(e.finish(0, Some(stale_scan)), "generation 过期返回 stale");
         assert_eq!(e.status().entries, 0, "过期结果不入索引");
@@ -1207,7 +1291,7 @@ mod tests {
         assert_eq!(e.status().entries, 0);
         let old_scan = BookmarkScan {
             entries: vec![entry("old", "Old browser", "https://old.test", "", 1)],
-            fingerprints: vec![], truncated: false,
+            fingerprints: vec![], truncated: false, failed_files: 0,
         };
         assert!(e.finish(0, Some(old_scan)), "真实配置更新会使旧扫描作废并要求续扫");
         assert_eq!(e.status().entries, 0);

@@ -146,7 +146,7 @@ impl FileEngine {
             user_source,
             client: super::file_source::http_client(),
             fallback_cache: Arc::new(Mutex::new(FallbackCache::new(cache_ttl))),
-            runtime: EverythingRuntime::new(),
+            runtime: EverythingRuntime::shared(),
         }
     }
 
@@ -228,13 +228,9 @@ impl FileEngine {
         if available != Some(true) {
             return None;
         }
-        let result = tokio::time::timeout(
-            Duration::from_millis(80),
-            self.everything_http_query(port, query, max_results),
-        )
-        .await
-        .ok()
-        .flatten();
+        // 此引擎在 Async 通道，不占首批结果。查询使用 HTTP 客户端的有界预算，
+        // 不把一个正常但超过 80ms 的复杂查询误判成来源失效并缓存 30 秒。
+        let result = self.everything_http_query(port, query, max_results).await;
         self.user_source.record_query(port, result.is_some()).await;
         result
     }
@@ -750,6 +746,38 @@ impl SearchEngine for FileEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn slow_healthy_user_queries_keep_source_available() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                stream.read(&mut request).await.unwrap();
+                // 超过旧 80ms 限制，但仍在真实 HTTP 查询预算内。
+                tokio::time::sleep(Duration::from_millis(120)).await;
+                let body = r#"{"totalResults":1,"results":[{"name":"needle.txt","path":"C:\\fixture"}]}"#;
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let engine = FileEngine::with_config(FileSearchConfig {
+            everything_port: port, managed_everything_enabled: false, local_dirs: vec![],
+            ..Default::default()
+        });
+        engine.user_source.record_query(port, true).await;
+        for _ in 0..2 {
+            let hits = tokio::time::timeout(Duration::from_secs(2), engine.search_with_metadata("needle"))
+                .await.expect("查询必须有界");
+            assert_eq!(hits.len(), 1);
+            assert_eq!(hits[0].item.title, "needle.txt");
+            assert_eq!(engine.user_everything_state().await.1, Some(true));
+        }
+        tokio::time::timeout(Duration::from_secs(2), server).await.unwrap().unwrap();
+    }
 
     #[test]
     fn managed_http_is_not_reported_as_an_external_everything() {

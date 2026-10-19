@@ -112,6 +112,8 @@ struct State {
 }
 
 struct Inner {
+    /// 独占命名实例的进程租约；CLI/另一个 Blink 进程不得回收活跃持有者。
+    owner_lease: std::sync::Mutex<Option<std::fs::File>>,
     /// 仅串行化启动前的孤儿恢复，不占用 stop()/状态读取所需的 state 锁。
     start_gate: tokio::sync::Mutex<()>,
     /// 串行化 spawn 决策/状态翻转（锁内零长等待，见模块注释锁纪律）。
@@ -140,12 +142,21 @@ impl Default for EverythingRuntime {
 }
 
 impl EverythingRuntime {
+    /// 同一进程的搜索、Capability 与设置共用一个命名实例控制器。
+    /// `new()` 保留给隔离测试；业务入口不得另建同名实例的所有权状态。
+    pub(super) fn shared() -> Self {
+        static RUNTIME: std::sync::LazyLock<EverythingRuntime> =
+            std::sync::LazyLock::new(EverythingRuntime::new);
+        RUNTIME.clone()
+    }
+
     pub fn new() -> Self {
         let version = managed_runtime::lock_entry(KIND_EVERYTHING)
             .map(|e| e.version)
             .unwrap_or_default();
         Self {
             inner: Arc::new(Inner {
+                owner_lease: std::sync::Mutex::new(None),
                 start_gate: tokio::sync::Mutex::new(()),
                 state: tokio::sync::Mutex::new(State {
                     instance: None,
@@ -222,7 +233,14 @@ impl EverythingRuntime {
             if let Some(exe) = managed_runtime::resolve(KIND_EVERYTHING) {
                 #[cfg(windows)]
                 {
+                    let inner = self.inner.clone();
                     let recovery = tokio::task::spawn_blocking(move || {
+                        let mut lease = inner.owner_lease.lock().unwrap();
+                        if lease.is_none() {
+                            *lease = Some(managed_runtime::acquire_instance_lease(KIND_EVERYTHING)
+                                .map_err(|error| error.to_string())?);
+                        }
+                        drop(lease);
                         // Everything 1.4 SDK 的命名 IPC 窗口与退出命令。
                         blink_infra::platform::process::reclaim_named_window_process(
                             &format!("EVERYTHING_TASKBAR_NOTIFICATION_({INSTANCE_NAME})"),
@@ -656,6 +674,14 @@ fn merge_instance_ini(existing: &str, port: u16) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_handles_have_one_lifecycle_owner() {
+        let first = EverythingRuntime::shared();
+        let second = EverythingRuntime::shared();
+        assert!(Arc::ptr_eq(&first.inner, &second.inner));
+        assert!(!Arc::ptr_eq(&first.inner, &EverythingRuntime::new().inner));
+    }
 
     #[tokio::test]
     async fn stop_does_not_wait_for_start_recovery_gate_or_allow_queued_spawn() {

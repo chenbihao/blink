@@ -720,6 +720,16 @@ mod system_entry_dispatch_tests {
         }
         require_async(refresh_system_entries);
     }
+
+    #[test]
+    fn bookmark_refresh_ipc_must_return_a_send_future() {
+        fn require_async<F>(_command: impl FnOnce(tauri::AppHandle) -> F)
+        where
+            F: std::future::Future<Output = Option<crate::domain::search::bookmark_engine::BookmarkStatus>> + Send,
+        {
+        }
+        require_async(refresh_bookmarks);
+    }
 }
 
 /// 获取计算器配置。
@@ -757,6 +767,16 @@ pub fn get_bookmarks_status(
 ) -> Option<crate::domain::search::bookmark_engine::BookmarkStatus> {
     app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>()
         .and_then(|ss| ss.bookmarks_status())
+}
+
+/// 显式强制重读书签；仅启动后台工作，查询状态仍由只读接口提供。
+#[tauri::command]
+pub async fn refresh_bookmarks(
+    app: tauri::AppHandle,
+) -> Option<crate::domain::search::bookmark_engine::BookmarkStatus> {
+    tracing::debug!("书签手动刷新请求");
+    app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>()
+        .and_then(|ss| ss.refresh_bookmarks())
 }
 
 /// 禁用/恢复某个默认触发词。

@@ -43,6 +43,8 @@ pub enum ManagedRuntimeError {
     UnknownKind(String),
     #[error("该运行时正在安装中")]
     AlreadyInstalling,
+    #[error("另一个 Blink 进程正在管理托管实例，当前进程不会接管")]
+    InstanceBusy,
     #[error("下载失败: {0}")]
     Download(String),
     #[error("SHA-256 校验失败: 期望 {expected}, 实际 {actual}")]
@@ -64,6 +66,7 @@ impl ManagedRuntimeError {
             Self::LockParse(_) => "managed_runtime_lock_parse",
             Self::UnknownKind(_) => "managed_runtime_unknown_kind",
             Self::AlreadyInstalling => "managed_runtime_already_installing",
+            Self::InstanceBusy => "managed_runtime_instance_busy",
             Self::Download(_) => "managed_runtime_download",
             Self::ChecksumMismatch { .. } => "managed_runtime_checksum_mismatch",
             Self::InstallFailed(_) => "managed_runtime_install",
@@ -141,6 +144,24 @@ pub fn resolve(kind: &str) -> Option<PathBuf> {
     let entry = lock_entry(kind).ok()?;
     let exe = root().join(entry.artifact_id()).join(&entry.exe_relpath);
     exe.is_file().then_some(exe)
+}
+
+/// 生命周期租约放在 artifact 外，卸载该版本时仍保有互斥。
+/// 内核在持有者退出（包括崩溃）时释放锁，避免 CLI 把活跃 GUI 实例认成孤儿。
+pub fn acquire_instance_lease(kind: &str) -> Result<std::fs::File, ManagedRuntimeError> {
+    lock_entry(kind)?;
+    std::fs::create_dir_all(root())?;
+    acquire_instance_lease_at(&root().join(format!(".{kind}-instance.lock")))
+}
+
+fn acquire_instance_lease_at(path: &Path) -> Result<std::fs::File, ManagedRuntimeError> {
+    let file = std::fs::OpenOptions::new()
+        .read(true).write(true).create(true).truncate(false).open(path)?;
+    file.try_lock().map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => ManagedRuntimeError::InstanceBusy,
+        std::fs::TryLockError::Error(error) => ManagedRuntimeError::Io(error),
+    })?;
+    Ok(file)
 }
 
 /// 安装内状态（设置页展示，只读）。
@@ -570,6 +591,16 @@ pub fn sweep_staging() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn instance_lease_refuses_another_owner_and_releases_on_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("instance.lock");
+        let first = acquire_instance_lease_at(&path).unwrap();
+        assert!(matches!(acquire_instance_lease_at(&path), Err(ManagedRuntimeError::InstanceBusy)));
+        drop(first);
+        let _next = acquire_instance_lease_at(&path).expect("内核释放租约后可恢复孤儿");
+    }
 
     #[test]
     fn embedded_lock_parses_with_everything_entry() {

@@ -48,11 +48,8 @@ export function initManagedEnginesTab() {
 }
 
 let lastFileSearchStatus = null;
-let lastFileSearchCfg = null;
 let fileStatusRevision = 0;
 let fileSaveChain = Promise.resolve();
-/** 端口行当前绑定对象：user=已有 Everything；managed=内置引擎（托管）。 */
-let portRowMode = "user";
 
 /**
  * 加载并回填搜索引擎配置（应用搜索 / 文件搜索 / 计算器）
@@ -62,17 +59,18 @@ async function loadEngineConfig() {
     // 文件搜索
     try {
         const fileSearch = await invoke("get_engine_config", {engineId: "file_search"});
-        lastFileSearchCfg = fileSearch;
         const enabled = fileSearch.enabled !== false;
         const port = fileSearch.everything_port || 80;
         const maxResults = fileSearch.max_results || 20;
 
         const enabledEl = document.getElementById("file-search-enabled");
         const portEl = document.getElementById("everything-port");
+        const managedPortEl = document.getElementById("managed-everything-port");
         const maxResultsEl = document.getElementById("everything-max-results");
 
         if (enabledEl) enabledEl.checked = enabled;
         if (portEl) portEl.value = port;
+        if (managedPortEl) managedPortEl.value = fileSearch.managed_everything_port || 52819;
         if (maxResultsEl) maxResultsEl.value = maxResults;
 
         refreshFileSearchStatus();
@@ -117,42 +115,32 @@ function initFileSearchConfig() {
 
     const enabledEl = document.getElementById("file-search-enabled");
     const portEl = document.getElementById("everything-port");
+    const managedPortEl = document.getElementById("managed-everything-port");
     const maxResultsEl = document.getElementById("everything-max-results");
 
-    [enabledEl, portEl, maxResultsEl].forEach((el) => {
+    [enabledEl, portEl, managedPortEl, maxResultsEl].forEach((el) => {
         el?.addEventListener("change", saveFileSearchConfig);
     });
 }
 
-async function saveFileSearchConfig() {
+async function saveFileSearchConfig(event) {
     const enabled = document.getElementById("file-search-enabled")?.checked ?? true;
-    const port = parseInt(document.getElementById("everything-port")?.value, 10);
     const maxResults = parseInt(document.getElementById("everything-max-results")?.value, 10) || 20;
-
-    if (!Number.isFinite(port) || port < 1 || port > 65535) {
-        // 用户还在输入中（例如清空端口再输），静默跳过；等输到合法值再自动保存
-        console.warn("[engines] file-search port invalid, skip auto-save:", port);
-        return;
-    }
-
-    // 端口行跟随当前引擎（0.26.15）：托管模式写 managed_everything_port（下次启动
-    // 实例生效），用户模式写 everything_port；补丁合并下未提交的键保持存储值不动
     const patch = {enabled, data_source: "auto", max_results: maxResults};
-    if (portRowMode === "managed") {
-        patch.managed_everything_port = port;
-    } else {
-        patch.everything_port = port;
+    // 编辑对象由控件身份决定，连接状态刷新不能改变正在保存的端口归属。
+    const targetId = event?.currentTarget?.id;
+    if (targetId === "everything-port" || targetId === "managed-everything-port") {
+        const port = Number(document.getElementById(targetId).value);
+        if (!Number.isInteger(port) || port < 1 || port > 65535) return;
+        patch[targetId === "everything-port" ? "everything_port" : "managed_everything_port"] = port;
     }
 
     try {
         const pending = fileSaveChain.then(() => saveConfig("file_search", patch));
         fileSaveChain = pending.catch(() => {});
         await pending;
-        if (portRowMode === "managed") {
-            refreshFileSearchStatus();
-        } else {
-            probeEverythingStatus();
-        }
+        if (targetId === "everything-port") await probeEverythingStatus();
+        else await refreshFileSearchStatus();
     } catch (e) {
         console.error("update_file_search failed:", e);
         messageDialog(t("common.save_failed_msg", {err: e}), {title: t("common.error"), kind: "error"});
@@ -211,79 +199,33 @@ function renderFileSearchStatus(payload) {
 }
 
 /**
- * 端口行跟随当前引擎（0.26.15 调优）：用户 Everything 在线 → 绑定用户端口；
- * 否则已装内置引擎 → 绑定托管端口（运行中回填实际端口，编辑写入
- * managed_everything_port，下次启动实例生效）；两者皆无 → 用户端口。
+ * 两个端口各有固定入口：探测/轮询只刷新状态，不重写用户正在编辑的偏好。
  */
 function renderPortRow(payload) {
-    const mode = payload?.userAvailable === true ? "user" : (payload?.installed ? "managed" : "user");
-    const label = document.getElementById("everything-port-label");
-    const input = document.getElementById("everything-port");
-    const hint = document.getElementById("everything-port-hint-icon");
-    if (!label || !input) return;
-
-    if (mode !== portRowMode) {
-        portRowMode = mode;
-        // label 内含 ⓘ 子元素，须按 applyI18n 同款只更新首个文本节点
-        const labelKey = mode === "managed" ? "engine.managed.port.label" : "engine.everything.port.label";
-        label.dataset.i18n = labelKey;
-        const textNode = [...label.childNodes].find((n) => n.nodeType === Node.TEXT_NODE);
-        if (textNode) textNode.textContent = t(labelKey);
-        else label.insertBefore(document.createTextNode(t(labelKey)), label.firstChild);
-        if (hint) {
-            const hintKey = mode === "managed"
-                ? "engine.file_search.managed_port_hint" : "engine.file_search.port_hint";
-            hint.dataset.i18nTitle = hintKey;
-            hint.title = t(hintKey);
-        }
-        input.value = mode === "managed"
-            ? (payload.running && payload.port) || lastFileSearchCfg?.managed_everything_port || 52819
-            : (lastFileSearchCfg?.everything_port || 80);
-    } else if (mode === "managed" && payload.running && payload.port
-        && document.activeElement !== input) {
-        // 实例重启换端口（占用向上扫描）后回填实际端口；不覆盖输入中的编辑
-        input.value = payload.port;
+    const managedRow = document.getElementById("managed-everything-port-row");
+    if (managedRow) managedRow.hidden = !payload.installed;
+    const managedBadge = document.getElementById("managed-everything-port-status");
+    if (managedBadge) {
+        managedBadge.textContent = payload.running
+            ? t("engine.managed.status.running", {port: payload.port})
+            : t("engine.managed.status.installed", {version: payload.version || ""});
+        managedBadge.className = "status-badge " + (payload.running ? "status-available" : "status-unknown");
     }
-
-    // 徽章跟随绑定对象：托管模式显示托管状态，用户模式显示探测态
     const badge = document.getElementById("everything-status");
     if (badge) {
-        if (mode === "managed") {
-            badge.dataset.managedPort = "1";
-            badge.dataset.badgeState = payload.running ? "managed_running" : "managed_installed";
-            badge.dataset.version = payload.version || "";
-        } else {
-            delete badge.dataset.managedPort;
-            if (payload.userProbing) {
-                badge.dataset.badgeState = "probing";
-            } else if (payload.userAvailable === true) {
-                badge.dataset.badgeState = "available";
-            } else if (payload.userAvailable === false) {
-                badge.dataset.badgeState = "unavailable";
-            } else {
-                badge.dataset.badgeState = "unprobed";
-            }
-        }
+        badge.dataset.badgeState = payload.userProbing ? "probing"
+            : payload.userAvailable === true ? "available"
+                : payload.userAvailable === false ? "unavailable" : "unprobed";
         refreshEverythingBadgeText();
     }
 }
 
 /**
- * 刷新端口行徽章文本（语言切换/状态更新共用；托管模式显示托管状态）。
+ * 刷新用户实例端口徽章文本（语言切换/状态更新共用）。
  */
 export function refreshEverythingBadgeText() {
     const statusEl = document.getElementById("everything-status");
     if (!statusEl) return;
-    if (statusEl.dataset.managedPort) {
-        if (statusEl.dataset.badgeState === "managed_running") {
-            statusEl.textContent = t("engine.managed.port_status.running");
-            statusEl.className = "status-badge status-available";
-        } else {
-            statusEl.textContent = t("engine.managed.status.installed", {version: statusEl.dataset.version || ""});
-            statusEl.className = "status-badge status-unknown";
-        }
-        return;
-    }
     const key =
         statusEl.dataset.badgeState === "available" ? "engine.status.available" :
             statusEl.dataset.badgeState === "unavailable" ? "engine.status.unavailable" :
@@ -327,28 +269,69 @@ function parseBookmarkConflictError(error) {
 }
 
 /** 索引状态徽章（条目数 / 扫描中 / 已禁用 / 截断提示）。 */
-function renderBookmarksStatus() {
+let bookmarksStatusRevision = 0;
+let lastBookmarksStatus = null;
+let bookmarksRefreshPending = false;
+
+function applyBookmarksStatus(st) {
     const statusEl = document.getElementById("bookmarks-status");
     if (!statusEl) return;
-    invoke("get_bookmarks_status").then((st) => {
-        if (!st) {
-            statusEl.dataset.badgeState = "off";
-            statusEl.textContent = t("engine.bookmarks.status.off");
-            statusEl.className = "status-badge status-unavailable";
-            return;
+    lastBookmarksStatus = st;
+    const refreshButton = document.getElementById("bookmarks-refresh");
+    if (refreshButton) refreshButton.disabled = bookmarksRefreshPending || !st?.enabled || st.scanning;
+    statusEl.removeAttribute("title");
+    if (!st?.enabled) {
+        statusEl.dataset.badgeState = "off";
+        statusEl.textContent = t("engine.bookmarks.status.off");
+        statusEl.className = "status-badge status-unavailable";
+        return;
+    }
+    if (st.scanning) {
+        statusEl.dataset.badgeState = "scanning";
+        statusEl.textContent = t("engine.bookmarks.status.scanning");
+        statusEl.className = "status-badge status-unknown";
+        return;
+    }
+    statusEl.dataset.badgeState = "ready";
+    statusEl.dataset.entries = st.entries;
+    statusEl.dataset.truncated = st.truncated ? "1" : "0";
+    statusEl.dataset.failedFiles = st.failedFiles || 0;
+    statusEl.className = "status-badge " + (st.failedFiles ? "status-unknown"
+        : st.entries > 0 ? "status-available" : "status-unavailable");
+    refreshBookmarksBadgeText();
+}
+
+async function renderBookmarksStatus() {
+    if (bookmarksRefreshPending) return;
+    const revision = ++bookmarksStatusRevision;
+    try {
+        const status = await invoke("get_bookmarks_status");
+        if (revision === bookmarksStatusRevision) applyBookmarksStatus(status);
+    } catch (error) {
+        console.error("get_bookmarks_status failed:", error);
+    }
+}
+
+async function refreshBookmarksNow() {
+    if (bookmarksRefreshPending || lastBookmarksStatus?.scanning || !lastBookmarksStatus?.enabled) return;
+    bookmarksRefreshPending = true;
+    applyBookmarksStatus(lastBookmarksStatus);
+    const revision = ++bookmarksStatusRevision;
+    try {
+        const status = await invoke("refresh_bookmarks");
+        if (revision === bookmarksStatusRevision) applyBookmarksStatus(status);
+    } catch (error) {
+        console.error("refresh_bookmarks failed:", error);
+        const statusEl = document.getElementById("bookmarks-status");
+        if (revision === bookmarksStatusRevision && statusEl) {
+            statusEl.dataset.badgeState = "failed";
+            refreshBookmarksBadgeText();
         }
-        if (st.scanning) {
-            statusEl.dataset.badgeState = "scanning";
-            statusEl.textContent = t("engine.bookmarks.status.scanning");
-            statusEl.className = "status-badge status-unknown";
-            return;
-        }
-        statusEl.dataset.badgeState = "ready";
-        statusEl.dataset.entries = st.entries;
-        statusEl.dataset.truncated = st.truncated ? "1" : "0";
-        statusEl.className = "status-badge " + (st.entries > 0 ? "status-available" : "status-unavailable");
-        refreshBookmarksBadgeText();
-    }).catch((e) => console.error("get_bookmarks_status failed:", e));
+    } finally {
+        bookmarksRefreshPending = false;
+        const button = document.getElementById("bookmarks-refresh");
+        if (button) button.disabled = !lastBookmarksStatus?.enabled || lastBookmarksStatus.scanning;
+    }
 }
 
 /** 徽章文本刷新（语言切换 / 状态更新共用）。 */
@@ -362,7 +345,8 @@ export function refreshBookmarksBadgeText() {
         statusEl.textContent = t("engine.bookmarks.status.scanning");
     } else if (state === "ready") {
         const count = Number(statusEl.dataset.entries || 0);
-        statusEl.textContent = count > 0
+        const failed = Number(statusEl.dataset.failedFiles || 0);
+        statusEl.textContent = failed ? t("engine.bookmarks.status.partial", {count, failed}) : count > 0
             ? t("engine.bookmarks.status.ready", {count})
             : t("engine.bookmarks.status.empty");
         if (statusEl.dataset.truncated === "1") {
@@ -370,6 +354,9 @@ export function refreshBookmarksBadgeText() {
         } else {
             statusEl.removeAttribute("title");
         }
+    } else if (state === "failed") {
+        statusEl.textContent = t("engine.bookmarks.error.refresh_failed");
+        statusEl.className = "status-badge status-unavailable";
     }
 }
 
@@ -384,6 +371,11 @@ function initBookmarksConfig() {
         (b) => document.getElementById(`bookmarks-browser-${b}`),
     );
     const errorEl = document.getElementById("bookmarks-error");
+    document.getElementById("bookmarks-refresh")?.addEventListener("click", refreshBookmarksNow);
+    // 查询只读状态，首扫/配置重扫/手动重扫的完成结果都会自动回填。
+    setInterval(() => {
+        if (!document.hidden && document.querySelector("#engines.active")) void renderBookmarksStatus();
+    }, 3000);
 
     let config = null;
     let saveChain = Promise.resolve();
