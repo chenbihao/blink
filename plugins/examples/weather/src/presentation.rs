@@ -7,6 +7,7 @@ use crate::conditions::wmo_description;
 use crate::model::{CurrentWeather, DailyWeather, ProviderCondition, WeatherSnapshot};
 use crate::protocol::{PluginAction, PluginItem};
 use crate::settings::TemperatureUnit;
+use chrono::{Datelike, NaiveDate};
 use serde_json::{Value, json};
 
 /// 归因链接的显示来源名。
@@ -64,6 +65,30 @@ fn wind(value: Option<f64>) -> String {
     value
         .map(|v| format!("{v:.0}km/h"))
         .unwrap_or_else(|| "未知".into())
+}
+
+fn daily_date_label(value: &str) -> String {
+    let Ok(date) = NaiveDate::parse_from_str(value, "%Y-%m-%d") else {
+        return value.to_owned();
+    };
+    let weekday = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+        [date.weekday().num_days_from_monday() as usize];
+    format!("{value} · {weekday}")
+}
+
+fn daily_summary(day: &Value) -> String {
+    format!(
+        "{} {} {}～{} · 降水概率 {} · 最大风速 {}",
+        day["date"].as_str().unwrap_or(""),
+        day["condition"].as_str().unwrap_or("未知"),
+        day["temp_min"].as_str().unwrap_or("未知"),
+        day["temp_max"].as_str().unwrap_or("未知"),
+        day["precip_prob"].as_str().unwrap_or("未知"),
+        day["wind_max"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("未知")
+    )
 }
 
 /// Format provider time in its own offset; never reinterpret it in the PC's timezone.
@@ -171,18 +196,8 @@ pub fn render(snapshot: &WeatherSnapshot, unit: TemperatureUnit) -> (Vec<PluginI
         copy.push_str(&format!("\n当前天气有效时间：{}", display_time(time)));
     }
     for day in &daily {
-        copy.push_str(&format!(
-            "\n{} {} {}～{} · 降水概率 {} · 最大风速 {}",
-            day["date"].as_str().unwrap_or(""),
-            day["condition"].as_str().unwrap_or("未知"),
-            day["temp_min"].as_str().unwrap_or(""),
-            day["temp_max"].as_str().unwrap_or("未知"),
-            day["precip_prob"].as_str().unwrap_or("未知"),
-            day["wind_max"]
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .unwrap_or("未知")
-        ));
+        copy.push('\n');
+        copy.push_str(&daily_summary(day));
     }
     if !snapshot.warnings.is_empty() {
         copy.push_str(&format!("\n{}", snapshot.warnings.join("；")));
@@ -216,14 +231,49 @@ pub fn render(snapshot: &WeatherSnapshot, unit: TemperatureUnit) -> (Vec<PluginI
     if !snapshot.warnings.is_empty() {
         subtitle.push_str(&format!(" · {}", snapshot.warnings.join("；")));
     }
-    subtitle.push_str(" | 按 Enter 复制天气摘要");
+    subtitle.push_str(" | 按 Enter 复制完整天气摘要");
     let mut items = vec![PluginItem {
-        title: summary,
+        title: format!(
+            "{} · {summary}",
+            if current.is_some() {
+                "当前"
+            } else {
+                "天气摘要"
+            }
+        ),
         subtitle: Some(subtitle),
         score: 1.0,
         action: PluginAction::Copy { text: copy },
         payload: Some(data[0].clone()),
     }];
+    // 查询出口逐日展开；工具出口仍保留原来的完整结构化天气包。
+    for (index, day) in daily.iter().enumerate() {
+        let date = day["date"].as_str().unwrap_or("");
+        let day_copy = format!(
+            "{} · 来源：{label}\n{}",
+            location.display_name,
+            daily_summary(day)
+        );
+        items.push(PluginItem {
+            title: format!(
+                "{} · {} · {}～{}",
+                daily_date_label(date),
+                day["condition"].as_str().unwrap_or("未知"),
+                day["temp_min"].as_str().unwrap_or("未知"),
+                day["temp_max"].as_str().unwrap_or("未知")
+            ),
+            subtitle: Some(format!(
+                "{} · {label} · 降水概率 {} · 最大风速 {} | 按 Enter 复制当天预报",
+                location.display_name,
+                day["precip_prob"].as_str().unwrap_or("未知"),
+                day["wind_max"].as_str().unwrap_or("未知")
+            )),
+            // 宿主按分数排序，确保当前天气、日期顺序、来源声明的顺序稳定。
+            score: 0.99 - index as f32 * 0.001,
+            action: PluginAction::Copy { text: day_copy },
+            payload: Some(data[0].clone()),
+        });
+    }
     // 数据来源声明项：链接经 HTTPS + 来源域白名单校验，Enter 在外部浏览器打开。
     if let Some(url) = attribution_url(&snapshot.attributions) {
         items.push(PluginItem {
@@ -424,14 +474,88 @@ mod tests {
         assert_eq!(data[0]["daily"][0]["condition_night_code"], "101");
         assert_eq!(data[0]["daily_condition_semantics"], "day_night_split");
         assert!(items[0].subtitle.as_deref().unwrap().contains("和风天气"));
-        // 第二项是可打开的来源声明
-        assert_eq!(items.len(), 2);
-        match &items[1].action {
+        assert_eq!(
+            items[1].title,
+            "2026-10-15 · 周四 · 白天小雨/夜间多云 · 21°C～30°C"
+        );
+        assert!(
+            items[1]
+                .subtitle
+                .as_deref()
+                .unwrap()
+                .contains("降水概率 64%")
+        );
+        // 逐日结果之后是可打开的来源声明。
+        assert_eq!(items.len(), 3);
+        match &items[2].action {
             PluginAction::Open { path } => {
                 assert_eq!(path, "https://developer.qweather.com/attribution.html");
             }
             _ => panic!("attribution item must open the source page"),
         }
+    }
+
+    #[test]
+    fn daily_rows_preserve_order_copy_only_one_day_and_keep_missing_values_unknown() {
+        let snapshot = WeatherSnapshot {
+            location: location(),
+            provider: "open_meteo",
+            fetched_at: "2026-10-19T00:00:00Z".into(),
+            current: None,
+            daily: ["2026-10-19", "2026-10-20", "2026-10-21"]
+                .into_iter()
+                .map(|date| DailyWeather {
+                    date: date.into(),
+                    condition_code: Some(3),
+                    condition: None,
+                    day_condition: None,
+                    night_condition: None,
+                    temperature_max_c: Some(25.0),
+                    temperature_min_c: None,
+                    precipitation_probability_percent: None,
+                    wind_max_kmh: None,
+                })
+                .collect(),
+            warnings: vec!["当前天气不可用".into()],
+            attributions: vec!["https://open-meteo.com/".into()],
+        };
+        let (items, data) = render(&snapshot, TemperatureUnit::Celsius);
+        assert_eq!(items.len(), 5);
+        assert!(items[0].title.starts_with("天气摘要 · "));
+        assert_eq!(items[1].title, "2026-10-19 · 周一 · 阴 · 未知～25°C");
+        assert_eq!(items[2].title, "2026-10-20 · 周二 · 阴 · 未知～25°C");
+        assert!(
+            items[1]
+                .subtitle
+                .as_deref()
+                .unwrap()
+                .contains("降水概率 未知")
+        );
+        assert!(items.windows(2).all(|pair| pair[0].score > pair[1].score));
+        let PluginAction::Copy { text } = &items[1].action else {
+            panic!("daily row must copy its forecast");
+        };
+        assert!(text.contains("广州"));
+        assert!(text.contains("来源：Open-Meteo"));
+        assert!(text.contains("2026-10-19"));
+        assert!(!text.contains("2026-10-20"));
+        let PluginAction::Copy { text } = &items[0].action else {
+            panic!("summary row must copy the complete forecast");
+        };
+        assert!(text.contains("2026-10-19"));
+        assert!(text.contains("2026-10-21"));
+        assert!(text.contains("当前天气不可用"));
+        assert_eq!(data.as_array().unwrap().len(), 1);
+        assert_eq!(data[0]["daily"].as_array().unwrap().len(), 3);
+        assert_eq!(data[0]["availability"]["current"], false);
+    }
+
+    #[test]
+    fn daily_date_labels_do_not_guess_invalid_or_missing_dates() {
+        assert_eq!(daily_date_label("2026-10-25"), "2026-10-25 · 周日");
+        assert_eq!(daily_date_label("2026-02-30"), "2026-02-30");
+        assert_eq!(daily_date_label("未知日期"), "未知日期");
+        assert_eq!(daily_date_label(""), "");
     }
 
     #[test]

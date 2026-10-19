@@ -298,7 +298,8 @@ Summon: `Alt+Q` (text in the main window's input is carried over automatically â
 **Tips**:
 
 - If a Chinese place name returns no matches, try the full district or county name, add a parent region, use an English name, or enter coordinates directly.
-- Select a weather result and press `Enter` to copy the complete summary. Select the attribution entry and press `Enter` to open the source and usage information.
+- The first row shows current weather, or a weather summary when current conditions are unavailable. Each following forecast row covers one day, showing the date, weekday, conditions, and lowâ€“high temperature; its subtitle shows precipitation probability and maximum wind speed.
+- Select the first row and press `Enter` to copy the complete weather summary. Select a daily forecast and press `Enter` to copy only that day's forecast. Select the attribution entry at the end and press `Enter` to open the source and usage information.
 - Forecast length depends on the service's actual response. A daily description summarizes the day; it does not mean the condition lasts all day.
 
 ### Translate
