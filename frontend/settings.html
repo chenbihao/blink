@@ -26,9 +26,9 @@
         </div>
         <div class="sidebar-group">
             <span class="group-title" data-i18n="sidebar.group.functionality">功能</span>
-            <button class="tab" data-i18n="tab.engines" data-tab="engines">引擎</button>
-            <button class="tab" data-i18n="tab.weblinks" data-tab="weblinks">超链</button>
             <button class="tab" data-i18n="tab.plugins" data-tab="plugins">插件</button>
+            <button class="tab" data-i18n="tab.engines" data-tab="engines">搜索引擎</button>
+            <button class="tab" data-i18n="tab.managed_engines" data-tab="managed-engines">托管引擎</button>
             <button class="tab" data-i18n="tab.chord" data-tab="chord">Chord 交互</button>
             <button class="tab" data-i18n="tab.capabilities" data-tab="capabilities">全部能力管理</button>
         </div>
@@ -221,20 +221,15 @@
                 </div>
             </div>
             <div class="setting-row">
-                <label class="setting-label" data-i18n="general.max_results.label">最大结果数<span
-                        class="field-hint-icon" data-i18n-title="general.max_results.hint">ⓘ</span></label>
-                <div class="number-input-wrapper">
-                    <input id="max-results" max="100" min="1" type="number" value="50"/>
-                    <div class="number-spinner">
-                        <button aria-label="增加" class="spinner-up" data-i18n-aria-label="spinner.increase"
-                                type="button">▲
-                        </button>
-                        <button aria-label="减少" class="spinner-down" data-i18n-aria-label="spinner.decrease"
-                                type="button">▼
-                        </button>
-                    </div>
-                </div>
+                <label for="wheel-mode" class="setting-label" data-i18n="general.wheel_mode.label">主窗口滚轮行为<span
+                        class="field-hint-icon" data-i18n-title="general.wheel_mode.hint">ⓘ</span></label>
+                <select id="wheel-mode">
+                    <option value="step" data-i18n="general.wheel_mode.step">逐条滚动</option>
+                    <option value="page" data-i18n="general.wheel_mode.page">整页翻页</option>
+                </select>
             </div>
+            <p id="wheel-mode-status" class="hidden" role="status" aria-live="polite"></p>
+
             <div class="setting-row">
                 <label class="setting-label" data-i18n="general.page_size.label">每页条数<span class="field-hint-icon"
                                                                                                data-i18n-title="general.page_size.hint">ⓘ</span></label>
@@ -250,29 +245,29 @@
                     </div>
                 </div>
             </div>
-
             <div class="setting-row">
-                <label for="wheel-mode" class="setting-label" data-i18n="general.wheel_mode.label">主窗口滚轮行为<span
-                        class="field-hint-icon" data-i18n-title="general.wheel_mode.hint">ⓘ</span></label>
-                <select id="wheel-mode">
-                    <option value="step" data-i18n="general.wheel_mode.step">逐条滚动</option>
-                    <option value="page" data-i18n="general.wheel_mode.page">整页翻页</option>
-                </select>
+                <label class="setting-label" data-i18n="general.max_results.label">最大结果数<span
+                        class="field-hint-icon" data-i18n-title="general.max_results.hint">ⓘ</span></label>
+                <div class="number-input-wrapper">
+                    <input id="max-results" max="100" min="1" type="number" value="50"/>
+                    <div class="number-spinner">
+                        <button aria-label="增加" class="spinner-up" data-i18n-aria-label="spinner.increase"
+                                type="button">▲
+                        </button>
+                        <button aria-label="减少" class="spinner-down" data-i18n-aria-label="spinner.decrease"
+                                type="button">▼
+                        </button>
+                    </div>
+                </div>
             </div>
-            <p id="wheel-mode-status" class="hidden" role="status" aria-live="polite"></p>
 
             <!-- 0.8.3 §4.9 输入补全（Ghost Text，0.8.1 §2.8）已挪至「上下文感知」面板 -->
         </div>
 
         <!-- 引擎 -->
         <div class="panel" id="engines">
-            <h2 data-i18n="panel.engines">引擎</h2>
-            <p class="panel-lede" data-i18n="engines.lede">搜索候选来源、脚本解释器与 Blink 托管本地模型运行时。</p>
-
-            <!-- 搜索候选来源 -->
-            <h3 class="section-heading" data-i18n="engines.section.search_sources">搜索候选来源</h3>
-            <p class="section-desc" data-i18n="engines.section.search_sources.desc">应用 / 文件 / 计算器 ——
-                构成主窗口搜索结果。</p>
+            <h2 data-i18n="panel.engines">搜索引擎</h2>
+            <p class="panel-lede" data-i18n="engines.lede">选择搜索来源，管理应用、文件、书签、计算器与快捷超链。</p>
 
             <!-- 应用搜索（StartMenu） -->
             <div class="extension-card">
@@ -294,8 +289,6 @@
                 </div>
 
                 <div class="extension-body" id="start-menu-options">
-                    <h4 class="plugin-section-title" data-i18n="engine.start_menu.baseline.title">基础搜索<span class="field-hint-icon"
-                            data-i18n-title="engine.start_menu.baseline.desc">ⓘ</span></h4>
                     <div class="setting-row">
                         <label class="setting-label" data-i18n="engine.start_menu.scan_depth.label">扫描深度<span
                                 class="field-hint-icon"
@@ -312,8 +305,6 @@
                             </div>
                         </div>
                     </div>
-                    <h4 class="plugin-section-title" data-i18n="engine.start_menu.enhancements.title">增强搜索<span class="field-hint-icon"
-                            data-i18n-title="engine.start_menu.enhancements.desc">ⓘ</span></h4>
                     <div class="setting-row">
                         <label class="setting-label" data-i18n="engine.start_menu.include_uwp.label">包含 UWP/MSIX
                             应用<span class="field-hint-icon"
@@ -358,110 +349,52 @@
                 </div>
 
                 <div class="extension-body">
-                    <!-- 数据源选择 -->
                     <div class="setting-row">
-                        <label class="setting-label" data-i18n="engine.file_search.data_source.label">搜索模式<span
-                                class="field-hint-icon"
-                                data-i18n-title="engine.file_search.data_source.hint">ⓘ</span></label>
-                        <select id="file-search-data-source">
-                            <option data-i18n="engine.file_search.data_source.auto" value="auto">自动（优先
-                                Everything，降级本地）
-                            </option>
-                            <option data-i18n="engine.file_search.data_source.everything" value="everything">仅
-                                Everything
-                            </option>
-                            <option data-i18n="engine.file_search.data_source.managed" value="managed">仅内置搜索引擎
-                            </option>
-                            <option data-i18n="engine.file_search.data_source.local" value="local">仅本地扫描</option>
-                        </select>
+                        <label class="setting-label" data-i18n="engine.file_search.active_source">当前来源<span
+                                class="field-hint-icon" data-i18n-title="engine.file_search.source_hint">ⓘ</span></label>
+                        <span class="status-badge status-unknown" id="file-search-active-source">…</span>
                     </div>
 
-                    <!-- Everything 数据源统一状态区（0.26.14：用户实例 + 托管实例一个状态面） -->
-                    <div id="everything-config">
-                        <h4 class="managed-everything-title" data-i18n="engine.everything.section.title">Everything 数据源状态</h4>
-                        <p class="extension-desc" data-i18n="engine.everything.section.desc">自动模式按「你的 Everything → 内置搜索引擎（托管）→ 本地扫描」取第一个可用来源；内置引擎未安装时可一键下载受管的 Everything 1.4 便携版（专属回环实例，约 35MB/25 万文件，独立进程）。</p>
-                        <div id="user-everything-rows">
-                        <div class="setting-row">
-                            <label class="setting-label" data-i18n="engine.everything.user.label">你的 Everything</label>
-                            <span class="status-badge status-unknown" data-i18n="engine.status.probing"
-                                  id="everything-status">探测中…</span>
-                            <button class="btn-small" data-i18n="engine.probe" id="probe-everything">重新探测</button>
-                        </div>
-                        <div class="setting-row">
-                            <label class="setting-label" data-i18n="engine.everything.port.label">你的 Everything HTTP 端口<span
-                                    class="field-hint-icon"
-                                    data-i18n-title="engine.everything.port.hint">ⓘ</span></label>
-                            <div class="number-input-wrapper">
-                                <input id="everything-port" max="65535" min="1" type="number" value="80"/>
-                                <div class="number-spinner">
-                                    <button aria-label="增加" class="spinner-up" data-i18n-aria-label="spinner.increase"
-                                            type="button">▲
-                                    </button>
-                                    <button aria-label="减少" class="spinner-down"
-                                            data-i18n-aria-label="spinner.decrease"
-                                            type="button">▼
-                                    </button>
-                                </div>
+                    <div class="setting-row">
+                        <label class="setting-label" data-i18n="engine.everything.port.label" for="everything-port"
+                               id="everything-port-label">已有 Everything 端口<span class="field-hint-icon"
+                                data-i18n-title="engine.file_search.port_hint" id="everything-port-hint-icon">ⓘ</span></label>
+                        <div class="number-input-wrapper">
+                            <input id="everything-port" min="1" max="65535" type="number" value="80"/>
+                            <div class="number-spinner">
+                                <button aria-label="增加" class="spinner-up" data-i18n-aria-label="spinner.increase"
+                                        type="button">▲</button>
+                                <button aria-label="减少" class="spinner-down" data-i18n-aria-label="spinner.decrease"
+                                        type="button">▼</button>
                             </div>
                         </div>
-                        </div>
-                        <div class="setting-row">
-                            <label class="setting-label" data-i18n="engine.everything.managed.label">内置搜索引擎（托管）</label>
-                            <span class="status-badge status-unknown" id="managed-everything-status">…</span>
-                            <button class="btn-small" id="managed-everything-action">安装</button>
-                        </div>
-                        <div class="setting-row">
-                            <label class="setting-label" data-i18n="engine.everything.managed_port.label">托管实例端口<span
-                                    class="field-hint-icon"
-                                    data-i18n-title="engine.everything.managed_port.hint">ⓘ</span></label>
-                            <div class="number-input-wrapper">
-                                <input id="managed-everything-port" max="65535" min="1" type="number" value="52819"/>
-                                <div class="number-spinner">
-                                    <button aria-label="增加" class="spinner-up" data-i18n-aria-label="spinner.increase"
-                                            type="button">▲
-                                    </button>
-                                    <button aria-label="减少" class="spinner-down"
-                                            data-i18n-aria-label="spinner.decrease"
-                                            type="button">▼
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="download-progress" hidden id="managed-everything-progress">
-                            <div class="download-progress__bar">
-                                <div class="download-progress__fill"></div>
-                            </div>
-                            <span class="download-progress__text"></span>
-                        </div>
-                        <div class="setting-row">
-                            <label class="setting-label" data-i18n="engine.managed.instance.label">托管实例</label>
-                            <button class="btn-small" data-i18n="engine.managed.instance.start" id="managed-everything-start" type="button">启动并测试
-                            </button>
-                            <button class="btn-small" data-i18n="engine.managed.instance.stop" id="managed-everything-stop" type="button">停止实例
-                            </button>
-                        </div>
-                        <div class="setting-row">
-                            <label class="setting-label" data-i18n="engine.managed.service.label">实时索引服务<span
-                                    class="field-hint-icon" data-i18n-title="engine.managed.service.hint">ⓘ</span></label>
-                            <button class="btn-small" data-i18n="engine.managed.service.install"
-                                    id="managed-everything-service" type="button">安装服务（UAC）
-                            </button>
-                        </div>
-                        <div class="setting-row">
-                            <label class="setting-label" data-i18n="engine.everything.max_results.label">最大结果数<span
-                                    class="field-hint-icon"
-                                    data-i18n-title="engine.everything.max_results.hint">ⓘ</span></label>
-                            <div class="number-input-wrapper">
-                                <input id="everything-max-results" max="100" min="1" type="number" value="20"/>
-                                <div class="number-spinner">
-                                    <button aria-label="增加" class="spinner-up" data-i18n-aria-label="spinner.increase"
-                                            type="button">▲
-                                    </button>
-                                    <button aria-label="减少" class="spinner-down"
-                                            data-i18n-aria-label="spinner.decrease"
-                                            type="button">▼
-                                    </button>
-                                </div>
+                        <span class="status-badge status-unknown" id="everything-status">…</span>
+                        <button class="btn-small" data-i18n="engine.probe" id="probe-everything" type="button">重新探测</button>
+                    </div>
+
+                    <div class="setting-row" hidden id="file-search-managed-row">
+                        <label class="setting-label" data-i18n="engine.file_search.managed_row">内置搜索引擎</label>
+                        <button class="btn-small" id="file-search-managed-action" type="button"></button>
+                    </div>
+                    <div class="download-progress" hidden id="file-search-managed-progress">
+                        <div class="download-progress__bar"><div class="download-progress__fill"></div></div>
+                        <span class="download-progress__text"></span>
+                    </div>
+
+                    <div class="setting-row">
+                        <label class="setting-label" data-i18n="engine.everything.max_results.label">最大结果数<span
+                                class="field-hint-icon"
+                                data-i18n-title="engine.everything.max_results.hint">ⓘ</span></label>
+                        <div class="number-input-wrapper">
+                            <input id="everything-max-results" max="100" min="1" type="number" value="20"/>
+                            <div class="number-spinner">
+                                <button aria-label="增加" class="spinner-up" data-i18n-aria-label="spinner.increase"
+                                        type="button">▲
+                                </button>
+                                <button aria-label="减少" class="spinner-down"
+                                        data-i18n-aria-label="spinner.decrease"
+                                        type="button">▼
+                                </button>
                             </div>
                         </div>
                     </div>
@@ -545,8 +478,105 @@
                 </div>
             </div>
 
+            <section id="weblinks">
+            <div class="extension-card">
+                <div class="extension-header">
+                    <div class="extension-icon">
+                        <svg aria-hidden="true" class="icon">
+                            <use href="#icon-external-link"/>
+                        </svg>
+                    </div>
+                    <div class="extension-info">
+                        <h3 data-i18n="weblinks.title">超链与搜索引擎</h3>
+                        <p class="extension-desc" data-i18n="weblinks.desc">URL 模板含 {query} 即搜索型；直达型还会在常规搜索中按名称与触发词召回。</p>
+                    </div>
+                    <button class="btn" id="weblinks-add" data-i18n="weblinks.add" type="button">添加</button>
+                </div>
+
+                <div class="extension-body">
+                    <div class="weblinks-toolbar">
+                        <input id="weblinks-filter" class="input-wide" type="search" data-i18n-ph="weblinks.filter" data-i18n-aria-label="weblinks.filter" placeholder="筛选名称、触发词或网址"/>
+                        <span class="weblinks-sort" data-i18n="weblinks.sort">名称 A–Z · 中文按拼音</span>
+                    </div>
+                    <div id="weblinks-list" class="weblinks-list"></div>
+                    <p class="weblinks-error hidden" id="weblinks-error" role="alert"></p>
+
+                    <div class="modal-overlay hidden" id="weblinks-overlay">
+                        <form class="modal weblinks-editor" id="weblinks-editor" role="dialog" aria-modal="true" aria-labelledby="weblinks-editor-title" autocomplete="off">
+                            <div class="modal-header"><h3 id="weblinks-editor-title"></h3></div>
+                            <div class="weblinks-editor-body">
+                                <div class="setting-row">
+                                    <label class="setting-label" data-i18n="weblinks.field.name" for="weblinks-f-name">名称</label>
+                                    <input class="input-wide" id="weblinks-f-name" maxlength="40" required type="text"/>
+                                </div>
+                                <div class="setting-row">
+                                    <label class="setting-label" data-i18n="weblinks.field.keyword" for="weblinks-f-keyword">触发词</label>
+                                    <input class="input-wide" id="weblinks-f-keyword" maxlength="20" required type="text"/>
+                                </div>
+                                <div class="setting-row">
+                                    <label class="setting-label" data-i18n="weblinks.field.home" for="weblinks-f-home">主页地址（可自动提取）</label>
+                                    <input class="input-wide" id="weblinks-f-home" maxlength="500"
+                                           placeholder="https://example.com/" type="url"/>
+                                </div>
+                                <div class="setting-row">
+                                    <label class="setting-label" data-i18n="weblinks.field.url" for="weblinks-f-url">搜索地址（可选）</label>
+                                    <input class="input-wide" id="weblinks-f-url" maxlength="500"
+                                           placeholder="https://example.com/search?q={query}" type="url"/>
+                                </div>
+                                <p class="extension-desc" data-i18n="weblinks.home_hint">无参数打开主页；带参数替换搜索地址中的 {query}。主页留空时自动取搜索网址的域名根路径（保留子域名），也可手动填写。</p>
+                                <p class="weblinks-error hidden" id="weblinks-editor-error" role="alert"></p>
+                            </div>
+                            <div class="weblinks-editor-actions">
+                                <button class="btn" data-i18n="weblinks.cancel" id="weblinks-cancel" type="button">取消</button>
+                                <button class="btn btn-primary" data-i18n="weblinks.save" id="weblinks-save" type="submit">保存</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            </div>
+            </section>
+        </div>
+
+        <div class="panel" id="managed-engines">
+            <h2 data-i18n="panel.managed_engines">托管引擎</h2>
+            <p class="panel-lede" data-i18n="managed_engines.lede">管理 Everything、脚本运行环境与本地模型的安装、运行和存储。</p>
+            <!-- 文件搜索引擎（Blink 托管 Everything，0.26.14/0.26.15：分组标题 + le-card-primary 主操作） -->
+            <h3 class="section-heading" data-i18n="engines.section.file_search">文件搜索引擎</h3>
+            <p class="section-desc" data-i18n="engines.section.file_search.desc">Everything 便携版由 Blink 下载到独立目录并以独立实例运行，不读取、不修改你已安装的
+                Everything。</p>
+
+            <div class="extension-card" id="managed-everything-card">
+                <div class="extension-header le-card-head">
+                    <div class="extension-icon"><svg aria-hidden="true" class="icon"><use href="#icon-folder-search"/></svg></div>
+                    <div class="extension-info">
+                        <h3>Everything</h3>
+                        <p class="extension-desc" data-i18n="engine.managed.card_desc">由 Blink 安装和管理，为文件搜索提供全盘文件名索引。</p>
+                    </div>
+                    <div class="le-card-primary">
+                        <button class="btn btn-primary btn-small le-action-btn le-primary-btn" hidden id="managed-everything-action" type="button"></button>
+                    </div>
+                </div>
+                <div class="extension-body">
+                    <div class="setting-row">
+                        <label class="setting-label" data-i18n="engine.script_runtime.status">当前状态</label>
+                        <span class="status-badge status-unknown" id="managed-everything-status">…</span>
+                        <button class="btn-small" data-i18n="engine.managed.uninstall" hidden id="managed-everything-uninstall" type="button">卸载</button>
+                    </div>
+                    <p class="extension-desc" id="managed-everything-detail"></p>
+                    <div class="download-progress" hidden id="managed-everything-progress">
+                        <div class="download-progress__bar"><div class="download-progress__fill"></div></div>
+                        <span class="download-progress__text"></span>
+                    </div>
+                    <div class="setting-row">
+                        <label class="setting-label" data-i18n="engine.managed.service.label">实时索引服务</label>
+                        <span class="status-badge status-unknown" id="managed-everything-service-status">…</span>
+                        <button class="btn-small" data-i18n="engine.managed.service.install" id="managed-everything-service" type="button">安装服务（UAC）</button>
+                    </div>
+                    <p class="extension-desc" data-i18n="engine.managed.service_guidance">全盘 NTFS 索引需要索引服务。未安装服务时，自动模式使用本地目录扫描；托管连接端口由 Blink 自动分配。</p>
+                </div>
+            </div>
             <!-- 脚本运行时（Blink 托管，0.25.20） -->
-            <h3 class="section-heading" data-i18n="engines.section.script_runtime">脚本运行时（Blink 托管）</h3>
+            <h3 class="section-heading" data-i18n="engines.section.script_runtime">脚本运行时</h3>
             <p class="section-desc" data-i18n="engines.section.script_runtime.desc">Python / Node.js
                 发行版由 Blink 下载到独立目录并锁定版本，用于运行脚本插件；不读取、不修改系统解释器。</p>
 
@@ -723,53 +753,6 @@
                     </div>
                 </div>
             </section>
-        </div>
-
-        <!-- 快捷超链（0.26.12 WebEngine） -->
-        <div class="panel" id="weblinks">
-            <h2 data-i18n="panel.weblinks">快捷超链</h2>
-            <p class="panel-lede" data-i18n="weblinks.lede">自管直达站点与搜索引擎：主窗口输入触发词直达，或「触发词 + 空格 + 内容」搜索。</p>
-
-            <div class="extension-card">
-                <div class="extension-header">
-                    <div class="extension-icon">
-                        <svg aria-hidden="true" class="icon">
-                            <use href="#icon-external-link"/>
-                        </svg>
-                    </div>
-                    <div class="extension-info">
-                        <h3 data-i18n="weblinks.title">超链与搜索引擎</h3>
-                        <p class="extension-desc" data-i18n="weblinks.desc">URL 模板含 {query} 即搜索型；直达型还会在常规搜索中按名称与触发词召回。</p>
-                    </div>
-                    <button class="btn" id="weblinks-add" data-i18n="weblinks.add" type="button">添加</button>
-                </div>
-
-                <div class="extension-body">
-                    <div id="weblinks-list" class="weblinks-list"></div>
-
-                    <form class="weblinks-editor hidden" id="weblinks-editor" autocomplete="off">
-                        <div class="setting-row">
-                            <label class="setting-label" data-i18n="weblinks.field.name">名称</label>
-                            <input class="input-wide" id="weblinks-f-name" maxlength="40" required type="text"/>
-                        </div>
-                        <div class="setting-row">
-                            <label class="setting-label" data-i18n="weblinks.field.keyword">触发词</label>
-                            <input class="input-wide" id="weblinks-f-keyword" maxlength="20" required type="text"/>
-                        </div>
-                        <div class="setting-row">
-                            <label class="setting-label" data-i18n="weblinks.field.url">URL 模板</label>
-                            <input class="input-wide" id="weblinks-f-url" maxlength="500" required
-                                   placeholder="https://example.com/search?q={query}" type="url"/>
-                        </div>
-                        <div class="weblinks-editor-actions">
-                            <button class="btn" data-i18n="weblinks.save" id="weblinks-save" type="submit">保存</button>
-                            <button class="btn" data-i18n="weblinks.cancel" id="weblinks-cancel" type="button">取消</button>
-                        </div>
-                    </form>
-
-                    <p class="weblinks-error hidden" id="weblinks-error"></p>
-                </div>
-            </div>
         </div>
 
         <!-- 插件 -->

@@ -438,6 +438,9 @@ async fn set_config_value(
         "weblinks" => {
             let cfg: crate::app::config::WebLinksConfig =
                 serde_json::from_value(value).map_err(|e| e.to_string())?;
+            if cfg.entries.iter().any(|entry| !crate::domain::search::validate_weblink_urls(entry)) {
+                return Err("weblink_url_invalid".to_string());
+            }
             // 保存时冲突校验：表内重复/保留前缀/既有 engine 与插件触发词。
             // 校验失败整体拒绝并回传全量冲突（前端逐条标红），不落库。
             let router = app.state::<std::sync::Arc<crate::domain::intent::RuleRouter>>();

@@ -46,3 +46,12 @@
     /* 与键帽垂直居中对齐 */
     line-height: 1;
 }
+
+/* 行内弱提示：保留统一键帽形状，缩小一档并弱化文字与底色。 */
+.kbd-quiet {
+    font-size: 0.8em;
+    color: var(--text-sub);
+    background: color-mix(in srgb, var(--surface-2) 55%, transparent);
+    margin-inline-start: var(--space-sm);
+    vertical-align: middle;
+}

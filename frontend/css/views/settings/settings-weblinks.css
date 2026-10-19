@@ -13,13 +13,13 @@
     align-items: center;
     gap: var(--space-sm, 8px);
     padding: var(--space-sm, 8px) var(--space-md, 12px);
-    border: 1px solid var(--border, var(--surface0, #313244));
+    border: 1px solid var(--surface-2);
     border-radius: var(--radius-md, 6px);
     transition: border-color var(--transition-base, 0.15s);
 }
 
 .weblinks-row:hover {
-    border-color: var(--accent, #89b4fa);
+    border-color: var(--accent);
 }
 
 .weblinks-row-disabled .weblinks-row-name,
@@ -29,7 +29,7 @@
 
 .weblinks-row-icon {
     display: inline-flex;
-    color: var(--accent, #89b4fa);
+    color: var(--accent);
     flex-shrink: 0;
 }
 
@@ -50,9 +50,9 @@
     flex-shrink: 0;
     padding: 1px 8px;
     border-radius: var(--radius-sm, 4px);
-    border: 1px solid var(--border, var(--surface0, #313244));
-    background: var(--surface0, #313244);
-    color: var(--subtext0, #a6adc8);
+    border: 1px solid var(--surface-2);
+    background: var(--surface);
+    color: var(--text-sub);
     font-size: 0.85em;
     white-space: nowrap;
 }
@@ -72,29 +72,49 @@
     padding: var(--space-md, 12px) 0;
 }
 
-.weblinks-editor {
+.weblinks-toolbar {
     display: flex;
-    flex-direction: column;
-    gap: var(--space-sm, 8px);
-    margin-top: var(--space-md, 12px);
-    padding: var(--space-md, 12px);
-    border: 1px solid var(--border, var(--surface0, #313244));
-    border-radius: var(--radius-md, 6px);
+    align-items: center;
+    gap: var(--space-md);
+    margin-bottom: var(--space-md);
 }
-
+.weblinks-toolbar input { flex: 1; min-width: 0; }
+.weblinks-sort { color: var(--text-faint); font-size: var(--text-sm); white-space: nowrap; }
+.weblinks-editor {
+    width: min(640px, calc(100% - 2 * var(--space-lg)));
+    max-height: calc(100vh - 2 * var(--space-lg));
+}
+.weblinks-editor-body {
+    display: grid;
+    gap: var(--space-md);
+    padding: var(--space-md) var(--space-lg);
+    overflow-y: auto;
+}
+.weblinks-editor .setting-row {
+    margin: 0;
+    padding: 0;
+    border: 0;
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--space-sm);
+}
+.weblinks-editor .setting-label { width: auto; flex: initial; }
+.weblinks-editor input { width: 100%; max-width: none; }
 .weblinks-editor-actions {
     display: flex;
-    gap: var(--space-sm, 8px);
+    gap: var(--space-sm);
     justify-content: flex-end;
+    padding: var(--space-md) var(--space-lg);
+    border-top: 1px solid var(--surface);
 }
 
 .weblinks-error {
     margin: var(--space-sm, 8px) 0 0;
-    color: var(--red, #f38ba8);
+    color: var(--red);
     white-space: pre-line;
 }
 
 /* 冲突/非法 keyword 的输入框红边（保留原边框宽度避免布局跳动） */
 .weblinks-input-error {
-    border-color: var(--red, #f38ba8) !important;
+    border-color: var(--red) !important;
 }

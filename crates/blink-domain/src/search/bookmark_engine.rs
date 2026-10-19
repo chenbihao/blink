@@ -417,6 +417,7 @@ impl BookmarkEngine {
     }
 
     /// 测试构造：注入 provider（临时目录/固定数据）。
+    #[cfg(test)]
     fn with_provider(config: BookmarksConfig, provider: Arc<dyn BookmarkProvider>) -> Self {
         Self {
             config: Arc::new(RwLock::new(config)),
@@ -440,18 +441,24 @@ impl BookmarkEngine {
             rescan
         };
         if rescan {
-            self.work.write().unwrap().force = true;
+            let mut work = self.work.write().unwrap();
+            work.generation += 1;
+            work.force = true;
+            // 已取消的数据源立即退出已发布快照，旧扫描不得再写回。
+            self.cache.write().unwrap().entries.clear();
+            drop(work);
             self.refresh();
         }
     }
 
     /// 设置页状态投影（只读，无副作用）。
     pub fn status(&self) -> BookmarkStatus {
+        let work = self.work.read().unwrap();
         let cache = self.cache.read().unwrap();
         BookmarkStatus {
             entries: cache.entries.len(),
             truncated: cache.truncated,
-            scanning: self.work.read().unwrap().building,
+            scanning: work.building,
         }
     }
 
@@ -504,7 +511,9 @@ impl BookmarkEngine {
                 }
                 Ok(None) => {
                     // 指纹未变：仅释放单飞标记。
-                    engine.finish(generation, None);
+                    if engine.finish(generation, None) {
+                        engine.refresh();
+                    }
                 }
                 Err(error) => {
                     tracing::warn!(%error, generation, "书签扫描任务失败");
@@ -527,7 +536,7 @@ impl BookmarkEngine {
                 cache.truncated = scan.truncated;
             }
         }
-        stale
+        stale || state.force
     }
 
     fn finish_failed(&self, generation: u64) {
@@ -593,6 +602,28 @@ fn open_item(entry: &BookmarkEntry, score: f32) -> SearchItem {
         score_detail: None,
         context_aware: false,
         color_list_hex: None,
+    }
+}
+
+#[cfg(test)]
+mod browser_icon_tests {
+    use super::*;
+
+    #[test]
+    fn bookmark_origin_icon_does_not_change_open_url() {
+        for browser in ["chrome", "edge", "brave", "unknown"] {
+            let entry = BookmarkEntry {
+                id: format!("{browser}/Default/1"),
+                title: "Example".into(),
+                url: "https://example.com/".into(),
+                folder_path: "Bookmarks".into(),
+                added_at: 0,
+            };
+            let app = open_item(&entry, 1.0).into_app_entry();
+            let expected = (browser != "unknown").then(|| format!("browser:{browser}"));
+            assert_eq!(app.icon_path, expected);
+            assert_eq!(app.lnk_path, entry.url);
+        }
     }
 }
 
@@ -1166,6 +1197,21 @@ mod tests {
         };
         assert!(e.finish(0, Some(stale_scan)), "generation 过期返回 stale");
         assert_eq!(e.status().entries, 0, "过期结果不入索引");
+    }
+
+    #[tokio::test]
+    async fn config_update_invalidates_inflight_scan_and_clears_removed_sources() {
+        let e = engine_with(vec![entry("old", "Old browser", "https://old.test", "", 1)]);
+        e.work.write().unwrap().building = true;
+        e.update_config(BookmarksConfig { browsers: vec!["edge".into()], ..Default::default() });
+        assert_eq!(e.status().entries, 0);
+        let old_scan = BookmarkScan {
+            entries: vec![entry("old", "Old browser", "https://old.test", "", 1)],
+            fingerprints: vec![], truncated: false,
+        };
+        assert!(e.finish(0, Some(old_scan)), "真实配置更新会使旧扫描作废并要求续扫");
+        assert_eq!(e.status().entries, 0);
+        assert!(e.work.read().unwrap().force);
     }
 
     /// 内存量级粗测（验收记录用）：5 万条索引构建 + 估算条目堆占用。

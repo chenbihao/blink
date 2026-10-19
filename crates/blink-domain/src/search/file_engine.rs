@@ -19,7 +19,7 @@ use walkdir::WalkDir;
 use crate::config::FileSearchConfig;
 
 use super::engine::{Lane, QueryContext, SearchAction, SearchEngine, SearchItem};
-use super::everything_runtime::{EverythingRuntime, SEARCH_START_BUDGET};
+use super::everything_runtime::{EverythingRuntime, TEST_START_BUDGET};
 
 /// `data_source` 的解析结果（纯函数，链路单测用）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,25 +44,11 @@ pub fn resolve_source_order(data_source: &str) -> SourceOrder {
     }
 }
 
-/// Everything 探测状态。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EverythingStatus {
-    /// 未探测
-    Unknown,
-    /// 可用
-    Available,
-    /// 不可用
-    Unavailable,
-}
-
 /// 文件搜索引擎。
 pub struct FileEngine {
     /// 配置（运行时可更新，通过 SearchService 注入）
     config: Arc<RwLock<FileSearchConfig>>,
-    /// 用户 Everything 探测状态（仅跟踪 `everything_port`；托管实例就绪态归 runtime）
-    everything_status: Arc<RwLock<EverythingStatus>>,
-    /// 上次探测时间（用于 Unavailable 状态下定期重试）
-    last_probe_at: Arc<RwLock<Option<Instant>>>,
+    user_source: super::file_source::UserEverything,
     /// reqwest 客户端（复用连接）
     client: reqwest::Client,
     /// 本地目录 Fallback 缓存
@@ -138,6 +124,13 @@ impl Default for FileEngine {
     }
 }
 
+/// HTTP 可用性不代表来源归属：当前托管实例占用的端口不能再投影为外部实例。
+fn external_source_snapshot(
+    source: (u16, Option<bool>, bool), owned_port: Option<u16>,
+) -> (u16, Option<bool>, bool) {
+    if owned_port == Some(source.0) { (source.0, Some(false), false) } else { source }
+}
+
 impl FileEngine {
     /// 创建新的文件搜索引擎。
     pub fn new() -> Self {
@@ -147,14 +140,11 @@ impl FileEngine {
     /// 带配置创建。
     pub fn with_config(config: FileSearchConfig) -> Self {
         let cache_ttl = config.local_cache_ttl_sec;
+        let user_source = super::file_source::UserEverything::new(config.everything_port);
         Self {
             config: Arc::new(RwLock::new(config)),
-            everything_status: Arc::new(RwLock::new(EverythingStatus::Unknown)),
-            last_probe_at: Arc::new(RwLock::new(None)),
-            client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(3))
-                .build()
-                .unwrap_or_default(),
+            user_source,
+            client: super::file_source::http_client(),
             fallback_cache: Arc::new(Mutex::new(FallbackCache::new(cache_ttl))),
             runtime: EverythingRuntime::new(),
         }
@@ -169,83 +159,84 @@ impl FileEngine {
     ///
     /// `available: None` = 未探测（启动后未查询过），Some(true/false) = 最近探测结果；
     /// 端口来自当前配置（热更新后即时反映）。
-    pub async fn user_everything_state(&self) -> (u16, Option<bool>) {
-        let port = self.config.read().await.everything_port;
-        let status = *self.everything_status.read().await;
-        (port, match status {
-            EverythingStatus::Unknown => None,
-            EverythingStatus::Available => Some(true),
-            EverythingStatus::Unavailable => Some(false),
-        })
+    pub async fn user_everything_state(&self) -> (u16, Option<bool>, bool) {
+        external_source_snapshot(self.user_source.snapshot().await, self.runtime.port_if_running().await)
+    }
+
+    pub async fn reprobe_everything(&self) {
+        self.user_source.refresh(true).await;
+    }
+
+    pub async fn source_status(&self) -> (String, String) {
+        let cfg = self.config.read().await;
+        let (_, user, _) = self.user_everything_state().await;
+        let managed = self.runtime.snapshot();
+        let active = if !cfg.enabled {
+            "disabled"
+        } else {
+            match resolve_source_order(&cfg.data_source) {
+                SourceOrder::LocalOnly => "local",
+                SourceOrder::UserOnly => {
+                    if user == Some(true) {
+                        "everything"
+                    } else {
+                        "unavailable"
+                    }
+                }
+                SourceOrder::ManagedOnly => {
+                    if managed.running && managed.index_count.is_some_and(|n| n > 0) {
+                        "managed"
+                    } else {
+                        "unavailable"
+                    }
+                }
+                SourceOrder::Auto => {
+                    if user == Some(true) {
+                        "everything"
+                    } else if cfg.managed_everything_enabled
+                        && managed.running
+                        && managed.index_count.is_some_and(|n| n > 0)
+                    {
+                        "managed"
+                    } else {
+                        "local"
+                    }
+                }
+            }
+        };
+        (cfg.data_source.clone(), active.to_string())
     }
 
     /// 更新配置（供 SearchService 调用）。
     pub async fn update_config(&self, config: FileSearchConfig) {
         let mut cfg = self.config.write().await;
+        self.user_source.update_port(config.everything_port).await;
         *cfg = config;
+        self.user_source.request_probe();
         tracing::debug!("FileEngine 配置已更新: port={}", cfg.everything_port);
     }
 
-    /// 探测 Everything HTTP Server 是否可用。
-    async fn probe_everything(&self, port: u16) -> bool {
-        let url = format!("http://localhost:{port}/?search=__blink_probe__&json=1&count=1");
-
-        match self.client.get(&url).send().await {
-            Ok(resp) => {
-                if resp.status().is_success() {
-                    // 校验返回体是 Everything 的 JSON 结构（防止撞到别的 web 服务）
-                    if let Ok(text) = resp.text().await {
-                        // Everything 返回的 JSON 以 `{"totalResults":` 开头
-                        if text.contains("totalResults") || text.contains("results") {
-                            return true;
-                        }
-                    }
-                }
-                false
-            }
-            Err(_) => false,
-        }
-    }
-
-    /// 搜索用户 Everything HTTP API（带探测/重试状态机，仅跟踪 `everything_port`）。
+    /// 只消费已探测连接；未就绪时后台探测，本轮立即尝试托管来源。
     async fn search_everything(
         &self,
         port: u16,
         query: &str,
         max_results: u32,
-    ) -> Vec<FileSearchHit> {
-        // Unavailable 状态下定期重试（每 30 秒一次，兼容后续启动 Everything 的场景）
-        const RETRY_INTERVAL: Duration = Duration::from_secs(30);
-
-        {
-            let mut status = self.everything_status.write().await;
-            let should_retry = match *status {
-                EverythingStatus::Unknown => true,
-                EverythingStatus::Unavailable => {
-                    let last = self.last_probe_at.read().await;
-                    last.is_none_or(|t| t.elapsed() >= RETRY_INTERVAL)
-                }
-                EverythingStatus::Available => false,
-            };
-
-            if should_retry {
-                let now = Instant::now();
-                *self.last_probe_at.write().await = Some(now);
-                *status = if self.probe_everything(port).await {
-                    tracing::debug!("Everything HTTP Server 探测成功，端口 {port}");
-                    EverythingStatus::Available
-                } else {
-                    tracing::debug!("Everything HTTP Server 探测失败，端口 {port}");
-                    EverythingStatus::Unavailable
-                };
-            }
-            if *status == EverythingStatus::Unavailable {
-                return Vec::new();
-            }
+    ) -> Option<Vec<FileSearchHit>> {
+        let (_, available, _) = self.user_everything_state().await;
+        self.user_source.request_probe();
+        if available != Some(true) {
+            return None;
         }
-
-        // 发起搜索（请求失败标记用户实例 Unavailable）
-        self.everything_http_query(port, query, max_results, true).await
+        let result = tokio::time::timeout(
+            Duration::from_millis(80),
+            self.everything_http_query(port, query, max_results),
+        )
+        .await
+        .ok()
+        .flatten();
+        self.user_source.record_query(port, result.is_some()).await;
+        result
     }
 
     /// 直接查询指定端口的 Everything HTTP JSON（托管实例与用户实例共用）。
@@ -257,8 +248,8 @@ impl FileEngine {
         port: u16,
         query: &str,
         max_results: u32,
-        is_user_instance: bool,
-    ) -> Vec<FileSearchHit> {
+    ) -> Option<Vec<FileSearchHit>> {
+        let started = Instant::now();
         // Everything HTTP API 参数:
         // - search: 搜索词
         // - json=1: 返回 JSON 格式
@@ -267,19 +258,16 @@ impl FileEngine {
         // - size_column=1: 包含文件大小
         // - date_modified_column=1: 包含修改时间（Windows FILETIME）
         let url = format!(
-            "http://localhost:{port}/?search={}&json=1&count={max_results}&path_column=1&size_column=1&date_modified_column=1",
+            "http://127.0.0.1:{port}/?search={}&json=1&count={max_results}&path_column=1&size_column=1&date_modified_column=1",
             urlencoding::encode(query)
         );
 
         let resp = match self.client.get(&url).send().await {
-            Ok(r) => r,
+            Ok(r) if r.status().is_success() => r,
+            Ok(_) => return None,
             Err(e) => {
                 tracing::debug!("Everything 请求失败: {e}");
-                if is_user_instance {
-                    // 用户实例：标记不可用，下次探测刷新；托管实例失败归 runtime 退避。
-                    *self.everything_status.write().await = EverythingStatus::Unavailable;
-                }
-                return Vec::new();
+                return None;
             }
         };
 
@@ -287,7 +275,7 @@ impl FileEngine {
             Ok(t) => t,
             Err(e) => {
                 tracing::debug!("Everything 读取响应失败: {e}");
-                return Vec::new();
+                return None;
             }
         };
 
@@ -296,7 +284,7 @@ impl FileEngine {
             Err(e) => {
                 tracing::debug!("Everything JSON 解析失败: {e}");
                 tracing::trace!("失败响应内容: {text}");
-                return Vec::new();
+                return None;
             }
         };
 
@@ -311,7 +299,7 @@ impl FileEngine {
             None => {
                 tracing::debug!("Everything 响应中没有 results 字段或不是数组");
                 tracing::trace!("响应内容: {json}");
-                return items;
+                return None;
             }
         };
 
@@ -360,8 +348,13 @@ impl FileEngine {
             });
         }
 
-        tracing::debug!("Everything 返回 {} 个结果，query={}", items.len(), query);
-        items
+        tracing::debug!(
+            count = items.len(),
+            elapsed_ms = started.elapsed().as_millis(),
+            port,
+            "Everything 查询完成"
+        );
+        Some(items)
     }
 
     /// 从 Fallback 缓存中搜索文件。
@@ -571,58 +564,62 @@ impl FileEngine {
             }
             SourceOrder::UserOnly => {
                 tracing::debug!(query = %q, port = cfg.everything_port, "FileEngine: 仅用户 Everything");
-                self.search_everything(cfg.everything_port, q, cfg.max_results).await
+                {
+                    let result = self
+                        .everything_http_query(cfg.everything_port, q, cfg.max_results)
+                        .await;
+                    self.user_source
+                        .record_query(cfg.everything_port, result.is_some())
+                        .await;
+                    result.unwrap_or_default()
+                }
             }
             SourceOrder::ManagedOnly => {
                 if !cfg.managed_everything_enabled {
                     tracing::trace!("FileEngine: 托管实例已禁用");
                     return Vec::new();
                 }
-                self.search_managed(&cfg, q).await
+                self.search_managed(&cfg, q).await.unwrap_or_default()
             }
             SourceOrder::Auto => {
-                let results =
-                    self.search_everything(cfg.everything_port, q, cfg.max_results).await;
-                if !results.is_empty() {
-                    return results;
+                if let Some(results) = self
+                    .search_everything(cfg.everything_port, q, cfg.max_results)
+                    .await
+                {
+                    return results; // 有效的 0 匹配也是完整回答，不把它当故障。
                 }
-                // 用户 Everything 不可用（状态机已探测）→ 托管实例 → 本地兜底。
-                let user_unavailable = {
-                    let status = self.everything_status.read().await;
-                    *status == EverythingStatus::Unavailable
-                };
-                if user_unavailable && cfg.managed_everything_enabled {
-                    let managed = self.search_managed(&cfg, q).await;
-                    if !managed.is_empty() {
+                if cfg.managed_everything_enabled {
+                    if let Some(managed) = self.search_managed(&cfg, q).await {
                         return managed;
                     }
                 }
-                // 注意区分：Everything 已应答但无匹配（实例活着、索引中/确无匹配）
-                // 与探测不可用都会走本地兜底——日志如实区分，不把 0 结果谎报为不可用。
-                tracing::debug!(
-                    user_unavailable,
-                    "FileEngine: Everything 无可用结果（不可用或无匹配），降级本地搜索"
-                );
+                tracing::debug!("文件搜索使用本地目录兜底");
                 self.search_local_only(&cfg, q).await
             }
         }
     }
 
     /// 托管实例查询：懒启动（短预算）→ 命中即查；未就绪本轮静默降级。
-    async fn search_managed(&self, cfg: &FileSearchConfig, q: &str) -> Vec<FileSearchHit> {
+    async fn search_managed(&self, cfg: &FileSearchConfig, q: &str) -> Option<Vec<FileSearchHit>> {
         match self
             .runtime
-            .ensure_started(cfg.managed_everything_port, super::everything_runtime::SEARCH_START_BUDGET)
+            .ensure_started(
+                cfg.managed_everything_port,
+                super::everything_runtime::SEARCH_START_BUDGET,
+            )
             .await
         {
             Ok(port) => {
                 tracing::debug!(query = %q, port, "FileEngine: 托管 Everything 实例");
-                self.everything_http_query(port, q, cfg.max_results, false).await
+                if !self.runtime.index_ready() {
+                    return None;
+                }
+                self.everything_http_query(port, q, cfg.max_results).await
             }
             Err(error) => {
                 // 未安装是正常态（用户没点下载）；其余为启动期状态，下一轮重试。
                 tracing::debug!(%error, "FileEngine: 托管实例不可用");
-                Vec::new()
+                None
             }
         }
     }
@@ -683,32 +680,54 @@ impl SearchEngine for FileEngine {
     }
 
     fn start(&self) {
-        // 后台异步探测 Everything 状态（带重试，兼容 Everything 比 Blink 启动慢的场景）
-        let status = self.everything_status.clone();
-        let last_probe_at = self.last_probe_at.clone();
-        let client = self.client.clone();
+        let source = self.user_source.clone();
         let config = self.config.clone();
+        tokio::spawn(async move {
+            loop {
+                let cfg = config.read().await.clone();
+                if cfg.enabled
+                    && matches!(
+                        resolve_source_order(&cfg.data_source),
+                        SourceOrder::Auto | SourceOrder::UserOnly
+                    )
+                {
+                    source.refresh(false).await;
+                }
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
+        });
 
         // 0.26.14：已安装且启用时启动即拉起托管实例——app 重启（含 dev 热重载）
         // 会终止实例，只在首搜懒启动会让「装好的引擎重启后消失」，实机反馈不佳；
         // 配置读取与就绪探测全部在 spawn 内 await（start() 跑在 runtime 线程，
         // 禁用 blocking_read——曾致启动期 panic），未就绪由首搜/设置页兜底。
         let runtime = self.runtime.clone();
+        let user_source = self.user_source.clone();
         let managed_config = self.config.clone();
         tokio::spawn(async move {
             let cfg = managed_config.read().await;
-            let needed = cfg.managed_everything_enabled
+            let needed = cfg.enabled && cfg.managed_everything_enabled
                 && matches!(
                     resolve_source_order(&cfg.data_source),
                     SourceOrder::Auto | SourceOrder::ManagedOnly
                 )
                 && runtime.snapshot().installed;
             let port = cfg.managed_everything_port;
+            let auto = resolve_source_order(&cfg.data_source) == SourceOrder::Auto;
             drop(cfg);
             if !needed {
                 return;
             }
-            match runtime.ensure_started(port, SEARCH_START_BUDGET).await {
+            // 必须先于外部来源判定：旧命名实例可能正在用户配置端口上响应。
+            if let Err(error) = runtime.recover_orphan().await {
+                tracing::debug!(%error, "启动时旧托管实例恢复失败");
+                return;
+            }
+            if auto {
+                user_source.refresh(true).await;
+                if user_source.snapshot().await.1 == Some(true) { return; }
+            }
+            match runtime.ensure_started(port, TEST_START_BUDGET).await {
                 Ok(ready_port) => {
                     tracing::info!(port = ready_port, "启动时托管 Everything 实例已拉起");
                 }
@@ -716,56 +735,6 @@ impl SearchEngine for FileEngine {
                     tracing::debug!(%error, "启动时托管实例未就绪（首搜/设置页再试）");
                 }
             }
-        });
-
-        tokio::spawn(async move {
-            let cfg = config.read().await;
-
-            // 仅本地/仅托管模式不需要探测用户 Everything
-            if matches!(
-                resolve_source_order(&cfg.data_source),
-                SourceOrder::LocalOnly | SourceOrder::ManagedOnly
-            ) {
-                tracing::info!("FileEngine: 数据源不使用用户 Everything，跳过探测");
-                let mut s = status.write().await;
-                *s = EverythingStatus::Unavailable;
-                return;
-            }
-
-            let port = cfg.everything_port;
-            drop(cfg); // 释放读锁
-
-            // 最多重试 3 次，间隔 2 秒（兼容 Everything 比 Blink 启动慢的场景）
-            let max_retries = 3u32;
-            for attempt in 1..=max_retries {
-                let url = format!("http://localhost:{port}/?search=__blink_probe__&json=1&count=1");
-                let available = match client.get(&url).send().await {
-                    Ok(resp) => resp.status().is_success(),
-                    Err(_) => false,
-                };
-
-                if available {
-                    tracing::info!(
-                        "Everything HTTP Server 可用，端口 {port}（第 {attempt} 次探测）"
-                    );
-                    *status.write().await = EverythingStatus::Available;
-                    *last_probe_at.write().await = Some(Instant::now());
-                    return;
-                }
-
-                if attempt < max_retries {
-                    tracing::debug!(
-                        "Everything HTTP Server 探测失败，{attempt}/{max_retries}，2 秒后重试"
-                    );
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                }
-            }
-
-            tracing::info!(
-                "Everything HTTP Server 不可用（已重试 {max_retries} 次），文件搜索降级"
-            );
-            *status.write().await = EverythingStatus::Unavailable;
-            *last_probe_at.write().await = Some(Instant::now());
         });
     }
 
@@ -781,6 +750,59 @@ impl SearchEngine for FileEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_http_is_not_reported_as_an_external_everything() {
+        assert_eq!(external_source_snapshot((7788, Some(true), false), Some(7788)), (7788, Some(false), false));
+        assert_eq!(external_source_snapshot((80, Some(true), false), Some(7788)), (80, Some(true), false));
+        assert_eq!(external_source_snapshot((80, None, true), None), (80, None, true));
+    }
+
+    #[tokio::test]
+    async fn auto_query_does_not_wait_for_inflight_user_probe() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 2048];
+            stream.read(&mut request).await.unwrap();
+            accepted_tx.send(()).unwrap();
+            let _ = release_rx.await;
+            let body = r#"{"totalResults":1,"results":[]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        let engine = FileEngine::with_config(FileSearchConfig {
+            everything_port: port,
+            managed_everything_enabled: false,
+            local_dirs: vec![],
+            ..Default::default()
+        });
+        let source = engine.user_source.clone();
+        let probe = tokio::spawn(async move {
+            source.refresh(true).await;
+        });
+        tokio::time::timeout(Duration::from_secs(2), accepted_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_millis(200),
+            engine.search_with_metadata("needle"),
+        )
+        .await;
+        release_tx.send(()).unwrap();
+        server.await.unwrap();
+        probe.await.unwrap();
+        assert!(result.unwrap().is_empty());
+        assert_eq!(engine.user_source.snapshot().await.1, Some(true));
+    }
 
     #[test]
     fn source_order_maps_data_source_values() {

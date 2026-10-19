@@ -83,6 +83,8 @@ fn main() {
                         rest.parse::<u32>()
                             .ok()
                             .and_then(crate::infra::platform::icon::get_stock_icon_png)
+                    } else if let Some(browser) = path.strip_prefix("browser:") {
+                        crate::infra::platform::icon::get_browser_icon_png(browser)
                     } else {
                         crate::infra::platform::icon::get_icon_png(&path)
                             .or_else(|| crate::infra::platform::icon::get_stock_icon_png(SIID_APPLICATION))
@@ -617,6 +619,13 @@ fn main() {
                     domain::config::store::ConfigStore::set(&pools.config, &weblinks_config),
                 ) {
                     tracing::warn!(error = %e, "weblinks 种子表写入失败（不影响本次会话）");
+                }
+            }
+            if weblinks_config.upgrade_home_urls() {
+                if let Err(error) = tauri::async_runtime::block_on(
+                    domain::config::store::ConfigStore::set(&pools.config, &weblinks_config),
+                ) {
+                    tracing::warn!(%error, "超链默认主页升级写入失败（本次会话仍生效）");
                 }
             }
             let skipped = domain::search::register_weblinks_rules(&router, &weblinks_config);

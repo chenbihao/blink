@@ -1,36 +1,9 @@
 //! Autosuggestion / Ghost Text 计算（0.8.1 §2.4）。
 //!
-//! **发现工具，不是召回工具**：ghost text 让用户"看到"规范的 keyword 形式，
-//! 不参与 route 匹配。部分拼音（`fan hello`）不进 route（保持严格），但走
-//! 独立 fuzzy 通道生成 hint（`→ fanyi`）。
-//!
-//! 输入契约（`compute_hint`）：
-//! - `keywords`：`(原文, pinyin_full)` 二元组列表，由 `RuleRouter::collect_suggest_keywords`
-//!   从 keyword 规则表收集。regex 规则跳过（无"完整形式"概念）。
-//! - `query`：用户当前输入原始文本（**未 trim**——保留末尾空格；`fanyi ` 与 `fanyi`
-//!   语义不同——前者是"参数等待中"，后者是纯 keyword）。
-//! - `min_score`：nucleo fuzzy 归一化分（`[0,1]`）阈值，默认 0.7。
-//!
-//! 输出：`Option<CompletionHint>`。
-//! - 命中"已是完整形式"且已有尾空格/参数（`fanyi ` / `fanyi hello`）→ None（已进 Takeover）。
-//! - 命中"已是完整形式"但无尾空格（`fanyi` / `翻译`）→ `display = ""` 的空 hint；
-//!   前端只显示 `<kbd>Tab</kbd>` 按钮，Tab 后追加空格触发 Takeover。
-//! - 否则对每个 keyword 展开两个 target（原文小写 + pinyin_full），取全体最高 fuzzy 分
-//!   且过阈值那一个（`翻` → `翻译`；`fan` → `fanyi`）。
-//!
-//! **候选展开与底层的对齐**：`match_keyword`（route 层）会把一个 keyword 展成 3 个候选
-//! （原文 / pinyin_full / pinyin_initials）用 严格等值+前缀 匹配；本文件是它的"模糊镜像"，
-//! 只用前 2 个候选做 fuzzy 打分——initials 不重复喂入（`fy` 对 `fanyi` 的 fuzzy 分已够高，
-//! 单独加会导致 `fy` 对 `fy` / `fanyi` 都打满分，picks_highest 平局随机化）。
-//!
-//! **`replacement` / `display` 语义**：跟着"命中最高分的那个 target"走。
-//! - 输 `fy` → 命中 target `fanyi` → `display="fanyi"`，`replacement="fanyi "` 或 `"fanyi {arg}"`。
-//! - 输 `翻` → 命中 target `翻译` → `display="翻译"`，`replacement="翻译 "` 或 `"翻译 {arg}"`。
-//! - 已完整场景（`fanyi` / `翻译` 精确等值）→ `display=""`，前端只渲染 `<kbd>Tab</kbd>`
-//!   按钮（示意"按 Tab 进入插件参数模式"），`replacement="{keyword_part} "`。
-//!
-//! **歧义策略**：多个 keyword 打分相同（例如 `tq` 同时是"天气/探亲"首拼）时，按 keyword
-//! 注册顺序取第一个（`>` 严格比较）。历史加权是后续 iteration 的事，本层不做。
+//! 拼音与首拼只作匹配别名；展示和采纳始终回到注册的真实关键词。
+//! 原文/完整拼音精确命中且已带空格或参数时不再补全；原文完整命中
+//! 仅提示采纳键，Tab 追加空格。其余命中显示真实关键词并保留用户参数。
+//! 同分按注册顺序取首个；不改变路由、仲裁或统一的 Tab 采纳协议。
 
 use serde::Serialize;
 
@@ -43,7 +16,7 @@ use nucleo::{Config, Matcher, Utf32Str};
 pub struct CompletionHint {
     /// Tab 后的完整替换文本（keyword + " " + arg；无参时末尾带空格）。
     pub replacement: String,
-    /// UI 显示的"更规范的" keyword 形式（pinyin_full 或原文）。
+    /// UI 显示注册的原文关键词（拼音仅用于匹配）。
     pub display: String,
     /// 用户已输入部分的长度（字节，前端渲染灰色补全时对齐用）。
     pub prefix_len: usize,
@@ -60,11 +33,11 @@ pub struct CompletionHint {
 /// 2. 对每个 keyword 展开 `[原文小写, pinyin_full]` 两个 target，逐个：
 ///    - **精确等值**（`keyword_part == target`）：优先级最高（分数 ∞，用 `f64::INFINITY` 标记）。
 ///    - **fuzzy 部分匹配**：nucleo 打分归一化后过阈值即入选。
-/// 3. 全局取最高分那一个 (best_target, is_exact)。
+/// 3. 全局取最高分对应的原文关键词和精确标记。
 /// 4. 决策：
 ///    - `is_exact` + 已带尾空格/参数 → None（已进 Takeover）。
-///    - `is_exact` + 无尾内容 → Tab-only hint（display=""）。
-///    - fuzzy 命中 → 常规 hint（display=target，replacement=`target ` 或 `target {arg}`）。
+///    - 原文精确命中 + 无尾内容 → Tab-only hint（display=""）。
+///    - 拼音或 fuzzy 命中 → 展示并补全原文关键词，保留参数。
 pub fn compute_hint(
     keywords: &[(String, String)],
     query: &str,
@@ -112,7 +85,7 @@ pub fn compute_hint_scored(
     );
     let mut buf = Vec::new();
 
-    // (score, target, is_exact_equal)。精确等值用 f64::INFINITY 保证盖过任何 fuzzy 分。
+    // (score, canonical_keyword, is_exact_equal)。精确等值用 f64::INFINITY 保证盖过任何 fuzzy 分。
     let mut best: Option<(f64, String, bool)> = None;
 
     for (orig, full) in keywords {
@@ -134,7 +107,7 @@ pub fn compute_hint_scored(
                     .map(|(s, _, _)| *s < f64::INFINITY)
                     .unwrap_or(true)
                 {
-                    best = Some((f64::INFINITY, target.to_string(), true));
+                    best = Some((f64::INFINITY, orig.clone(), true));
                 }
                 continue;
             }
@@ -156,7 +129,7 @@ pub fn compute_hint_scored(
                 continue;
             }
             if best.as_ref().map(|(s, _, _)| norm > *s).unwrap_or(true) {
-                best = Some((norm, target.to_string(), false));
+                best = Some((norm, orig.clone(), false));
             }
         }
     }
@@ -168,9 +141,8 @@ pub fn compute_hint_scored(
         return None;
     }
 
-    // 精确等值 + 无尾内容 → Tab-only hint（display=""）。
-    // replacement 用 keyword_part（保留用户原样的大小写/中文，仅追加空格）。
-    if is_exact {
+    // 原文精确命中才只显示采纳键；拼音命中显示真实关键词。
+    if is_exact && keyword_part.eq_ignore_ascii_case(&target) {
         return Some((
             CompletionHint {
                 replacement: format!("{keyword_part} "),
@@ -181,7 +153,7 @@ pub fn compute_hint_scored(
         ));
     }
 
-    // 常规 fuzzy hint：replacement 跟着命中的 target 走。
+    // fuzzy / 拼音命中统一补全注册原文，避免暴露内部拼音形式。
     let replacement = if arg_part.is_empty() {
         format!("{target} ")
     } else {
@@ -194,7 +166,7 @@ pub fn compute_hint_scored(
             display: target,
             prefix_len: query.len(),
         },
-        raw_score,
+        if is_exact { 1.0 } else { raw_score },
     ))
 }
 
@@ -224,34 +196,56 @@ mod tests {
     }
 
     #[test]
+    fn pinyin_aliases_show_real_keywords_and_keep_finite_score() {
+        let keywords = vec![
+            ("剪贴板".into(), "jiantieban".into()),
+            ("clip".into(), "clip".into()),
+            ("jtb".into(), "jtb".into()),
+            ("jiantieban".into(), "jiantieban".into()),
+        ];
+        for query in ["jt", "jiantie", "jiantieban"] {
+            let (hint, score) = compute_hint_scored(&keywords, query, 0.7).unwrap();
+            assert_eq!(hint.display, "剪贴板", "{query}");
+            assert_eq!(hint.replacement, "剪贴板 ");
+            assert!(score.is_finite() && score <= 1.0);
+        }
+        let hint = compute_hint(&keywords, "cl file  名称", 0.7).unwrap();
+        assert_eq!(hint.display, "clip");
+        assert_eq!(hint.replacement, "clip file  名称");
+        let hint = compute_hint(&keywords, "jtb", 0.7).unwrap();
+        assert_eq!(hint.display, "");
+        assert_eq!(hint.replacement, "jtb ");
+    }
+
+    #[test]
     fn initials_no_arg() {
         let kws = sample_keywords();
         let hint = compute_hint(&kws, "fy", 0.7).expect("should hint");
-        assert_eq!(hint.display, "fanyi");
-        assert_eq!(hint.replacement, "fanyi "); // 尾空格
+        assert_eq!(hint.display, "翻译");
+        assert_eq!(hint.replacement, "翻译 "); // 尾空格
     }
 
     #[test]
     fn initials_with_arg() {
         let kws = sample_keywords();
         let hint = compute_hint(&kws, "fy hello", 0.7).expect("should hint");
-        assert_eq!(hint.display, "fanyi");
-        assert_eq!(hint.replacement, "fanyi hello");
+        assert_eq!(hint.display, "翻译");
+        assert_eq!(hint.replacement, "翻译 hello");
     }
 
     #[test]
     fn partial_pinyin_with_arg() {
         let kws = sample_keywords();
         let hint = compute_hint(&kws, "fan hello", 0.7).expect("should hint");
-        assert_eq!(hint.display, "fanyi");
-        assert_eq!(hint.replacement, "fanyi hello");
+        assert_eq!(hint.display, "翻译");
+        assert_eq!(hint.replacement, "翻译 hello");
     }
 
     #[test]
     fn partial_pinyin_multi_char() {
         let kws = sample_keywords();
         let hint = compute_hint(&kws, "fany hello", 0.7).expect("should hint");
-        assert_eq!(hint.display, "fanyi");
+        assert_eq!(hint.display, "翻译");
     }
 
     #[test]
@@ -269,12 +263,12 @@ mod tests {
     }
 
     #[test]
-    fn full_form_pinyin_no_arg_gives_tab_only_hint() {
-        // 已完整 + 无尾内容 → 返回 display="" 的 Tab-only hint（提示按 Tab 进入参数模式）
+    fn full_form_pinyin_no_arg_shows_canonical_keyword() {
+        // 完整拼音仍展示真实关键词，避免把内部别名当作规范写法。
         let kws = sample_keywords();
-        let hint = compute_hint(&kws, "fanyi", 0.7).expect("should have tab-only hint");
-        assert_eq!(hint.display, "");
-        assert_eq!(hint.replacement, "fanyi ");
+        let hint = compute_hint(&kws, "fanyi", 0.7).expect("should show canonical keyword");
+        assert_eq!(hint.display, "翻译");
+        assert_eq!(hint.replacement, "翻译 ");
     }
 
     #[test]
@@ -320,8 +314,8 @@ mod tests {
         let kws = sample_keywords();
         // 天气首拼 "tq"
         let hint = compute_hint(&kws, "tq 北京", 0.7).expect("should hint");
-        assert_eq!(hint.display, "tianqi");
-        assert_eq!(hint.replacement, "tianqi 北京");
+        assert_eq!(hint.display, "天气");
+        assert_eq!(hint.replacement, "天气 北京");
     }
 
     #[test]
@@ -333,7 +327,7 @@ mod tests {
         ];
         let hint = compute_hint(&kws, "fy hello", 0.7).expect("should hint");
         // "fy" 对 "fanyi" 分数更高（首尾字母都命中），应选 fanyi
-        assert_eq!(hint.display, "fanyi");
+        assert_eq!(hint.display, "翻译");
     }
 
     #[test]
@@ -403,16 +397,16 @@ mod tests {
 
     #[test]
     fn exact_beats_fuzzy_across_keywords() {
-        // "fanyi" 精确等值命中"翻译"的 pinyin_full → 走 Tab-only 分支，
+        // "fanyi" 精确等值命中"翻译"的 pinyin_full → 显示原文，
         // 不应被其他 keyword 的 fuzzy 分数"抢走"（精确用 f64::INFINITY 顶格）。
         let kws = vec![
             ("翻译".to_string(), "fanyi".to_string()),
             // 构造一个 fuzzy 也能贴到 fanyi 的 keyword
             ("fan_prefix".to_string(), "fanprefix".to_string()),
         ];
-        let hint = compute_hint(&kws, "fanyi", 0.7).expect("should have tab-only");
-        assert_eq!(hint.display, "");
-        assert_eq!(hint.replacement, "fanyi ");
+        let hint = compute_hint(&kws, "fanyi", 0.7).expect("should show canonical keyword");
+        assert_eq!(hint.display, "翻译");
+        assert_eq!(hint.replacement, "翻译 ");
     }
 
     #[test]
@@ -425,6 +419,6 @@ mod tests {
         ];
         let hint = compute_hint(&kws, "tq", 0.7).expect("should hint");
         // 先注册的"天气" pinyin_full=tianqi 胜出
-        assert_eq!(hint.display, "tianqi");
+        assert_eq!(hint.display, "天气");
     }
 }

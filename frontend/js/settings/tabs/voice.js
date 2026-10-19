@@ -317,7 +317,7 @@ export async function initVoiceTab() {
             try {
                 let funasrCard = null;
                 await navigateSettings({
-                    tabId: "engines",
+                    tabId: "managed-engines",
                     prepare: async () => {
                         await ensureLocalRuntimeMounted();
                         funasrCard = await waitForEngineCard("funasr");

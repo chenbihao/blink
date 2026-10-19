@@ -731,16 +731,10 @@ pub async fn get_calc_config(app: tauri::AppHandle) -> crate::app::config::CalcC
 
 /// 探测 Everything HTTP Server 状态。
 #[tauri::command]
-pub async fn probe_everything(port: u16) -> bool {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(2))
-        .build()
-        .unwrap_or_default();
-    let url = format!("http://localhost:{port}/?search=__blink_probe__&json=1&count=1");
-    match client.get(&url).send().await {
-        Ok(resp) => resp.status().is_success(),
-        Err(_) => false,
-    }
+pub async fn probe_everything(app: tauri::AppHandle) -> Option<crate::domain::search::FileSearchStatus> {
+    let ss = app.try_state::<std::sync::Arc<crate::domain::search::SearchService>>()?;
+    ss.reprobe_everything().await;
+    ss.file_search_status().await
 }
 
 /// 文件搜索数据源统一状态（0.26.14：用户 Everything + 托管实例一次返回；

@@ -147,6 +147,10 @@ impl SearchItem {
                 pinyin_full: String::new(),
                 description: self.subtitle,
                 lnk_path: path,
+                icon_path: (self.source == "bookmarks")
+                    .then(|| self.id.split('/').next()).flatten()
+                    .filter(|browser| matches!(*browser, "chrome" | "edge" | "brave"))
+                    .map(|browser| format!("browser:{browser}")),
                 is_calc: false,
                 score,
                 is_placeholder: false,

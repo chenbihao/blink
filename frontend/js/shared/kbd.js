@@ -104,12 +104,12 @@ const KEY_META = {
  *   - opts.symbolOnly 强制符号模式（若无符号则 fallback 到文字）
  *
  * @param {string} key event.key 或语义名（如 "Tab" / "ArrowRight" / "Ctrl"）
- * @param {{symbolOnly?: boolean}} opts
+ * @param {{symbolOnly?: boolean, quiet?: boolean}} opts
  * @returns {HTMLElement}
  */
 export function renderKey(key, opts = {}) {
     const kbd = document.createElement("kbd");
-    kbd.className = "kbd";
+    kbd.className = opts.quiet ? "kbd kbd-quiet" : "kbd";
     const meta = KEY_META[normalize(key)];
 
     if (!meta) {
@@ -135,7 +135,7 @@ export function renderKey(key, opts = {}) {
  * docs/production-design/design-language.md §"键盘提示"。
  *
  * @param {string | string[]} combo "Ctrl+K" 或 ["Ctrl", "K"]
- * @param {{symbolOnly?: boolean}} opts 透传给 renderKey
+ * @param {{symbolOnly?: boolean, quiet?: boolean}} opts 透传给 renderKey
  * @returns {HTMLElement}
  */
 export function renderCombo(combo, opts = {}) {

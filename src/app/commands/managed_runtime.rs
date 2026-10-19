@@ -5,10 +5,22 @@
 //! `EventNames::MANAGED_RUNTIME_INSTALL` 事件实时推送（与脚本解释器同构）。
 
 use crate::app::command_error::CommandError;
+use crate::domain::search::everything_runtime::{DEFAULT_MANAGED_PORT, TEST_START_BUDGET};
 use crate::infra::event_names::EventNames;
-use crate::domain::search::everything_runtime::TEST_START_BUDGET;
 use crate::infra::managed_runtime::{self, KIND_EVERYTHING};
 use tauri::Manager;
+
+static RUNTIME_OPERATION: std::sync::LazyLock<std::sync::Arc<tokio::sync::Mutex<()>>> =
+    std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Mutex::new(())));
+fn operation_guard() -> Result<tokio::sync::OwnedMutexGuard<()>, CommandError> {
+    RUNTIME_OPERATION.clone().try_lock_owned().map_err(|_| {
+        CommandError::new(
+            "managed_runtime_busy",
+            "正在执行运行时操作，请稍后重试",
+            true,
+        )
+    })
+}
 
 /// 进度事件节流下限（与脚本解释器侧一致）。
 const PROGRESS_EMIT_MIN_INTERVAL_MS: u64 = 200;
@@ -67,9 +79,8 @@ impl managed_runtime::InstallReporter for EventReporter {
 /// 安装托管 Everything（幂等；进度经事件推送）。安装完成不自动启动——
 /// 实例由首次文件搜索懒启动或设置页「启动并测试」触发。
 #[tauri::command]
-pub async fn install_managed_everything(
-    app: tauri::AppHandle,
-) -> Result<(), CommandError> {
+pub async fn install_managed_everything(app: tauri::AppHandle) -> Result<(), CommandError> {
+    let _operation = operation_guard()?;
     let reporter = EventReporter {
         app: app.clone(),
         last_progress_ms: std::sync::Mutex::new(None),
@@ -91,6 +102,7 @@ pub async fn install_managed_everything(
 /// 停止托管实例（卸载前/服务安装后重启用）。幂等。
 #[tauri::command]
 pub async fn stop_managed_everything(app: tauri::AppHandle) -> Result<(), CommandError> {
+    let _operation = operation_guard()?;
     if let Some(rt) = app
         .try_state::<std::sync::Arc<crate::domain::search::SearchService>>()
         .and_then(|ss| ss.everything_runtime())
@@ -103,9 +115,8 @@ pub async fn stop_managed_everything(app: tauri::AppHandle) -> Result<(), Comman
 /// 启动托管实例并等待就绪（设置页「启动并测试」，长预算）。
 /// 返回就绪端口；未安装/超时返回结构化错误。
 #[tauri::command]
-pub async fn start_managed_everything(
-    app: tauri::AppHandle,
-) -> Result<u16, CommandError> {
+pub async fn start_managed_everything(app: tauri::AppHandle) -> Result<u16, CommandError> {
+    let _operation = operation_guard()?;
     let Some(rt) = app
         .try_state::<std::sync::Arc<crate::domain::search::SearchService>>()
         .and_then(|ss| ss.everything_runtime())
@@ -116,11 +127,8 @@ pub async fn start_managed_everything(
             false,
         ));
     };
-    let cfg = {
-        let pool = &app.state::<crate::infra::data::DbPools>().config;
-        crate::app::config::get_file_search_config(pool).await
-    };
-    rt.ensure_started(cfg.managed_everything_port, TEST_START_BUDGET)
+    rt.resume();
+    rt.ensure_started(DEFAULT_MANAGED_PORT, TEST_START_BUDGET)
         .await
         .map_err(|e| CommandError::new("managed_runtime_start", e.to_string(), true))
 }
@@ -128,38 +136,75 @@ pub async fn start_managed_everything(
 /// 卸载托管 Everything（先停实例再删目录；占用删除失败如实报错）。
 #[tauri::command]
 pub async fn uninstall_managed_everything(app: tauri::AppHandle) -> Result<(), CommandError> {
+    let _operation = operation_guard()?;
     if let Some(rt) = app
         .try_state::<std::sync::Arc<crate::domain::search::SearchService>>()
         .and_then(|ss| ss.everything_runtime())
     {
         rt.stop().await;
     }
-    managed_runtime::uninstall(KIND_EVERYTHING)
+    if let Some(exe) = managed_runtime::resolve(KIND_EVERYTHING) {
+        tokio::task::spawn_blocking(move || -> Result<(), String> {
+            if crate::infra::platform::shell::managed_everything_service_installed(&exe)? {
+                crate::infra::platform::shell::run_elevated_wait(
+                    &exe,
+                    "-instance blink -uninstall-service",
+                )?;
+                for _ in 0..30 {
+                    if !crate::infra::platform::shell::managed_everything_service_installed(&exe)? {
+                        return Ok(());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                return Err("服务仍占用运行时，保留安装文件，请稍后重试".to_string());
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|e| CommandError::new("managed_runtime_service", e.to_string(), true))?
+        .map_err(|e| CommandError::new("managed_runtime_service", e, true))?;
+    }
+    tokio::task::spawn_blocking(|| managed_runtime::uninstall(KIND_EVERYTHING))
+        .await
+        .map_err(|e| CommandError::new("managed_runtime_io", e.to_string(), true))?
         .map_err(|e| CommandError::new(e.code(), e.to_string(), true))
 }
 
-/// 显式 UAC 安装 Everything 服务（实时 NTFS 索引；拒绝则保持慢扫）。
-///
-/// 只发起提权请求（runas）；用户在 UAC 框中同意后 Everything 自行安装服务。
-/// 返回 Ok 仅表示提权请求已受理，服务安装结果不据此断言——安装后需重启
-/// 托管实例以使用服务（前端提示 + 「重启实例」入口）。
+/// 安装仅属于 Blink 的索引服务；在阻塞线程等待结果，不阻塞窗口线程。
 #[tauri::command]
-pub fn install_everything_service() -> Result<(), CommandError> {
-    let Some(exe) = managed_runtime::resolve(KIND_EVERYTHING) else {
-        return Err(CommandError::new(
+pub async fn install_everything_service(app: tauri::AppHandle) -> Result<(), CommandError> {
+    let _operation = operation_guard()?;
+    let exe = managed_runtime::resolve(KIND_EVERYTHING).ok_or_else(|| {
+        CommandError::new(
             "managed_runtime_not_installed",
-            "请先安装内置搜索引擎",
+            "请先安装 Everything",
             false,
-        ));
-    };
-    let args = format!(
-        "-instance {} -install-service",
-        crate::domain::search::everything_runtime::INSTANCE_NAME
-    );
-    crate::infra::platform::shell::run_elevated(&exe, &args).map_err(|e| {
-        // 用户取消 UAC 通常表现为 code=5：如实提示，不视为系统错误。
-        CommandError::new("managed_runtime_uac", e, true)
+        )
+    })?;
+    let rt = app
+        .try_state::<std::sync::Arc<crate::domain::search::SearchService>>()
+        .and_then(|ss| ss.everything_runtime());
+    if let Some(rt) = &rt {
+        rt.stop().await;
+    }
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        crate::infra::platform::shell::managed_everything_service_installed(&exe)?;
+        crate::infra::platform::shell::run_elevated_wait(&exe, "-instance blink -install-service")?;
+        if !crate::infra::platform::shell::managed_everything_service_installed(&exe)? {
+            return Err("安装程序已退出，但未检测到索引服务".to_string());
+        }
+        Ok(())
     })
+    .await
+    .map_err(|e| CommandError::new("managed_runtime_service", e.to_string(), true))?
+    .map_err(|e| CommandError::new("managed_runtime_service", e, true))?;
+    if let Some(rt) = rt {
+        rt.resume();
+        rt.ensure_started(DEFAULT_MANAGED_PORT, TEST_START_BUDGET)
+            .await
+            .map_err(|e| CommandError::new("managed_runtime_start", e.to_string(), true))?;
+    }
+    Ok(())
 }
 
 /// 启动恢复：清扫托管运行时孤儿 staging（main.rs 启动序列调用，不走 IPC）。

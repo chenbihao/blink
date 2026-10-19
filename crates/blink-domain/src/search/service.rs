@@ -112,6 +112,9 @@ pub struct FileSearchStatus {
     /// 用户实例可用性：None = 未探测；Some(true/false) = 最近探测结果
     /// （live 探测由 `probe_everything` 显式触发，此处只读引擎内存态）。
     pub user_available: Option<bool>,
+    pub user_probing: bool,
+    pub data_source: String,
+    pub active_source: String,
 }
 
 /// 引擎配置更新枚举（用于运行时热更新）。
@@ -567,12 +570,24 @@ impl SearchService {
         let engine = self.async_engines.iter().find_map(|e| {
             e.as_any().downcast_ref::<super::file_engine::FileEngine>()
         })?;
-        let (port, available) = engine.user_everything_state().await;
+        let (port, available, probing) = engine.user_everything_state().await;
+        let (data_source, active_source) = engine.source_status().await;
         Some(FileSearchStatus {
             managed: engine.everything_runtime().snapshot(),
             user_port: port,
             user_available: available,
+            user_probing: probing,
+            data_source,
+            active_source,
         })
+    }
+
+    pub async fn reprobe_everything(&self) {
+        if let Some(engine) = self.async_engines.iter().find_map(|e| {
+            e.as_any().downcast_ref::<super::file_engine::FileEngine>()
+        }) {
+            engine.reprobe_everything().await;
+        }
     }
     pub fn resolve_system_entry(&self, id: &str) -> Option<super::system_entries::Entry> {
         self.system_entries()?.resolve(id)
@@ -1377,6 +1392,48 @@ fn empty_arg_hint_entry(plugin_id: &str, display_name: &str, hint: String) -> Ap
 mod tests {
     use super::*;
     use crate::search::engine::SearchAction;
+
+    #[tokio::test]
+    async fn engine_completion_reaches_serialized_search_response_and_tab_route() {
+        struct Events;
+        impl EventPort for Events {
+            fn emit(&self, _: &str, _: serde_json::Value) -> Result<(), String> { Ok(()) }
+            fn emit_to(&self, _: &str, _: &str, _: serde_json::Value) -> Result<(), String> { Ok(()) }
+        }
+        let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1)
+            .connect("sqlite::memory:").await.unwrap();
+        sqlx::query("CREATE TABLE history (lnk_path TEXT, hit_count INTEGER, last_used_at INTEGER)")
+            .execute(&pool).await.unwrap();
+        let router = Arc::new(crate::intent::RuleRouter::new(true));
+        let links = crate::config::WebLinksConfig::seed();
+        super::super::register_weblinks_rules(&router, &links);
+        super::super::register_bookmark_rules(&router, &crate::config::BookmarksConfig::default());
+        let runtime = Arc::new(RwLock::new(SuggestionRuntimeConfig::default()));
+        let mut coordinator = SuggestionCoordinator::new();
+        coordinator.register(Arc::new(crate::intent::suggestion::keyword::KeywordProducer::from_router(
+            router.clone(), runtime.clone(),
+        )));
+        let service = SearchService::new(
+            Arc::new(Events), pool.clone(),
+            vec![Arc::new(super::super::WebEngine::with_config(links))],
+            Arc::new(PluginEngine::new(vec![], pool, None)), router, runtime, coordinator,
+            Arc::new(RwLock::new(None)), Arc::new(RwLock::new(vec![])), Arc::new(RwLock::new(vec![])),
+        );
+        for (query, display, replacement) in [("bil", "bili", "bili "), ("bili", "", "bili "), ("bm", "", "bm ")] {
+            for seq in 1..=6 {
+                let response = service.search(query, seq).await;
+                let json = serde_json::to_value(&response).unwrap();
+                assert_eq!(json["suggestion"]["revision"], seq);
+                let hint = &json["suggestion"]["primary"];
+                assert_eq!(hint["kind"], "completion", "{query}: {json}");
+                assert_eq!(hint["display"], display);
+                assert_eq!(hint["action"]["routeQuery"]["query"], replacement);
+            }
+        }
+        let response = service.search("bili ", 20).await;
+        assert!(response.suggestion.is_none());
+        assert_eq!(response.entries[0].lnk_path, "https://www.bilibili.com/");
+    }
 
     fn item(id: &str, score: f32, source: &str) -> SearchItem {
         SearchItem {

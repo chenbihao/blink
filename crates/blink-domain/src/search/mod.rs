@@ -203,6 +203,7 @@ pub(crate) mod clipboard_engine;
 mod color_engine;
 pub mod everything_runtime;
 pub mod file_engine;
+mod file_source;
 mod mock_slow_engine;
 mod start_menu_engine;
 pub mod system_entries;
@@ -213,7 +214,7 @@ pub use bookmark_engine::{
 };
 pub use weblinks_engine::{
     KeywordConflict, KeywordConflictKind, WebEngine, ENGINE_ID as WEBLINKS_ENGINE_ID,
-    validate_keywords,
+    validate_keywords, validate_urls as validate_weblink_urls,
 };
 use builtin_engine::BuiltinEngine;
 use color_engine::ColorEngine;

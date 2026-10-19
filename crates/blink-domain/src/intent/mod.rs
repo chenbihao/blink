@@ -363,7 +363,7 @@ pub struct RuleRouter {
     ///   不像插件 id 是运行时字符串（manifest 加载）
     /// - 无 Context / Regex 触发场景（0.8.5 只有 keyword）
     ///
-    /// 表由 `build_default_registry` 在 `main.rs` 启动时一次性注入，运行时不变更。
+    /// 表由启动注册与配置热更新共同维护，补全和执行读取同一张表。
     engine_rules: RwLock<Vec<EngineRule>>,
     /// 插件 setting 读取器（`target_lang` 等），后置注入。
     /// None → Context 规则中 `TextIsNonTargetLang` 直接不命中（保守）。
@@ -427,7 +427,7 @@ struct EngineRule {
 /// - 编译期就区分"无参首拼" vs "带参首拼"，新加分支时不容易漏
 ///
 /// `hint` 字段用于未来 UI 教学（"更规范的形式"）。命中原文时 None；命中派生形式时
-/// 承载 `pinyin_full(keyword)`（如 `fy` 命中 `翻译` → hint = `"fanyi"`）。
+/// 承载 `pinyin_full(keyword)`（如 `fy` 匹配 `fanyi`，展示及补全回 `翻译`）。
 enum MatchType {
     /// 精确命中(无参)——命中原文形式
     Exact { hint: Option<String> },
@@ -683,18 +683,23 @@ impl RuleRouter {
         Ok(())
     }
 
-    /// 收集所有 keyword 规则的 `(原文, pinyin_full)` 二元组，供 ghost text 计算（0.8.1）。
+    /// 收集插件与引擎 keyword 的 `(原文, pinyin_full)` 二元组，供 ghost text 计算。
     /// regex 跳过（无"完整形式"概念）。同一 keyword 多次注册（不同插件同 keyword）会重复；
     /// `compute_hint` 内部按分数取最高，无副作用。
     pub(crate) fn collect_suggest_keywords(&self) -> Vec<(String, String)> {
         let rules = self.rules.read().unwrap();
-        rules
+        let mut keywords: Vec<_> = rules
             .iter()
             .filter_map(|r| match &r.kind {
                 RuleKind::Keyword(kw) => Some((kw.clone(), pinyin_full(kw))),
                 RuleKind::Regex(_) => None,
             })
-            .collect()
+            .collect();
+        drop(rules);
+        for rule in self.engine_rules.read().unwrap().iter() {
+            keywords.extend(rule.keywords.iter().map(|kw| (kw.clone(), pinyin_full(kw))));
+        }
+        keywords
     }
 }
 
@@ -1944,17 +1949,17 @@ mod tests {
         let hint = r
             .suggest_completion("fy hello", 0.7)
             .expect("should have hint");
-        assert_eq!(hint.display, "fanyi");
-        assert_eq!(hint.replacement, "fanyi hello");
+        assert_eq!(hint.display, "翻译");
+        assert_eq!(hint.replacement, "翻译 hello");
 
         // 已完整 + 带参 → None（已进 Takeover）
         assert_eq!(r.suggest_completion("fanyi hello", 0.7), None);
         assert_eq!(r.suggest_completion("翻译 hello", 0.7), None);
 
-        // 已完整 + 无尾内容 → display="" 的 Tab-only hint（0.8.1 优化：提示可 Tab 进参数模式）
+        // 完整拼音无参数时显示真实中文关键词，Tab 后进入参数模式。
         let tab_only = r.suggest_completion("fanyi", 0.7).expect("tab-only hint");
-        assert_eq!(tab_only.display, "");
-        assert_eq!(tab_only.replacement, "fanyi ");
+        assert_eq!(tab_only.display, "翻译");
+        assert_eq!(tab_only.replacement, "翻译 ");
 
         // 无匹配 → None
         assert_eq!(r.suggest_completion("chrome", 0.7), None);
@@ -2459,6 +2464,30 @@ mod tests {
 
     // ── 0.8.3 §4.4 Suggestion 通道单测 ────────────────────────────
 
+    #[test]
+    fn engine_keywords_complete_and_follow_hot_registration() {
+        let router = Arc::new(RuleRouter::new(true));
+        crate::search::register_bookmark_rules(&router, &crate::config::BookmarksConfig::default());
+        crate::search::register_weblinks_rules(&router, &crate::config::WebLinksConfig::seed());
+        let producer = keyword_producer(router.clone());
+        let snapshot = ContextSnapshot::default();
+        for (query, replacement) in [("bm", "bm "), ("bil", "bili "), ("bili", "bili ")] {
+            let suggestions = producer.produce(query, &snapshot);
+            assert_eq!(suggestions.len(), 1, "{query}");
+            assert!(matches!(&suggestions[0].action, suggestion::SuggestionAction::RouteQuery { query } if query == replacement));
+        }
+        assert!(producer.produce("bm ", &snapshot).is_empty());
+        assert!(producer.produce("bili 测试", &snapshot).is_empty());
+        let disabled = crate::config::BookmarksConfig { enabled: false, ..Default::default() };
+        crate::search::register_bookmark_rules(&router, &disabled);
+        router.add_engine_rule("weblinks".into(), vec![]);
+        assert!(producer.produce("bm", &snapshot).is_empty());
+        assert!(producer.produce("bili", &snapshot).is_empty());
+        router.add_engine_rule("bookmarks".into(), vec!["marks".into()]);
+        let suggestions = producer.produce("mark", &snapshot);
+        assert!(matches!(&suggestions[0].action, suggestion::SuggestionAction::RouteQuery { query } if query == "marks "));
+    }
+
     #[tokio::test]
     async fn suggestion_keyword_first_letters_returns_keyword_source() {
         // Keyword 分支：非空 query "fy" 命中"翻译"首拼 → Suggestion { source=Keyword }
@@ -2474,7 +2503,7 @@ mod tests {
         assert_eq!(sugs.len(), 1);
         let sug = &sugs[0];
         assert_eq!(sug.kind, SuggestionKind::Completion);
-        assert_eq!(sug.display, "fanyi");
+        assert_eq!(sug.display, "翻译");
         assert!((0.0..=1.0).contains(&sug.rank_score));
     }
 

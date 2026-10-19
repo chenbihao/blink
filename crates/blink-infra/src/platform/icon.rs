@@ -48,6 +48,77 @@ struct CacheEntry {
 /// 值为 `None` 表示「提取过但无图标/失败」，避免对失效项反复重试。
 static ICON_CACHE: Mutex<Option<HashMap<String, CacheEntry>>> = Mutex::new(None);
 
+/// 浏览器图标按需解析程序位置，复用既有图标缓存；不在书签扫描或搜索时访问文件/注册表。
+pub fn get_browser_icon_png(browser: &str) -> Option<Vec<u8>> {
+    browser_executable_names(browser)?;
+    static PATHS: std::sync::LazyLock<HashMap<&'static str, Option<String>>> =
+        std::sync::LazyLock::new(|| ["chrome", "edge", "brave"].into_iter()
+            .map(|browser| (browser, resolve_browser_executable(browser))).collect());
+    PATHS.get(browser)?.as_deref().and_then(get_icon_png)
+}
+
+fn resolve_browser_executable(browser: &str) -> Option<String> {
+    use winreg::{RegKey, enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY}};
+    let (exe, relative) = browser_executable_names(browser)?;
+    let key_path = format!(r"Software\Microsoft\Windows\CurrentVersion\App Paths\{exe}");
+    for hive in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
+        for view in [KEY_WOW64_64KEY, KEY_WOW64_32KEY] {
+            if let Ok(key) = RegKey::predef(hive).open_subkey_with_flags(&key_path, KEY_READ | view)
+                && let Ok(raw) = key.get_value::<String, _>("") {
+                let path = raw.trim().trim_matches('"');
+                if std::path::Path::new(path).is_file() { return Some(path.to_string()); }
+            }
+        }
+    }
+    for root in ["LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)"] {
+        if let Some(base) = std::env::var_os(root) {
+            let path = std::path::PathBuf::from(base).join(relative);
+            if path.is_file() { return Some(path.to_string_lossy().into_owned()); }
+        }
+    }
+    tracing::debug!(browser, "未找到浏览器图标来源，使用书签图标");
+    None
+}
+
+fn browser_executable_names(browser: &str) -> Option<(&'static str, &'static str)> {
+    match browser {
+        "chrome" => Some(("chrome.exe", r"Google\Chrome\Application\chrome.exe")),
+        "edge" => Some(("msedge.exe", r"Microsoft\Edge\Application\msedge.exe")),
+        "brave" => Some(("brave.exe", r"BraveSoftware\Brave-Browser\Application\brave.exe")),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod browser_icon_tests {
+    use super::*;
+
+    #[test]
+    fn only_known_browsers_can_resolve_icons() {
+        for browser in ["chrome", "edge", "brave"] {
+            assert!(browser_executable_names(browser).is_some());
+        }
+        for invalid in ["", "../../other.exe", "chrome.exe", "browser:edge"] {
+            assert!(browser_executable_names(invalid).is_none());
+            assert!(get_browser_icon_png(invalid).is_none());
+        }
+    }
+
+    #[test]
+    #[ignore = "只读本机浏览器图标回放，依赖安装状态"]
+    fn installed_browser_icons_replay() {
+        for browser in ["chrome", "edge", "brave"] {
+            if resolve_browser_executable(browser).is_some() {
+                let png = get_browser_icon_png(browser).expect("已安装浏览器应能提取图标");
+                assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+                println!("{browser}: PNG {} bytes", png.len());
+            } else {
+                println!("{browser}: 未安装，使用书签图标");
+            }
+        }
+    }
+}
+
 /// 初始化图标缓存：建表 + 注册全局 pool + 后台清理。
 /// 委托到 `infra::data::icon_cache::init`（0.12.0 §2.2.3 分层修复）。
 pub async fn init(pool: &sqlx::SqlitePool) -> Result<(), String> {

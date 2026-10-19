@@ -22,12 +22,12 @@
 //! 启动只聚焦已有实例。
 //!
 //! **未提权退化**：Everything 无管理员权限时仍可启动（实测无提权弹框），
-//! 索引退化为普通权限扫描；实时 NTFS 索引需用户在设置页显式 UAC 安装服务
+//! 无服务不保证存在 NTFS 索引，auto 使用本地目录兜底；实时 NTFS 索引需显式安装服务
 //! （app 层 run_elevated）。
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use blink_infra::managed_runtime::{self, KIND_EVERYTHING};
@@ -35,6 +35,7 @@ use tokio_util::sync::CancellationToken;
 
 /// 托管实例名（`-instance blink`）：窗口标题/进程身份/单实例守卫键。
 pub const INSTANCE_NAME: &str = "blink";
+pub const DEFAULT_MANAGED_PORT: u16 = 52819;
 /// 端口探测区间长度：从偏好端口向上尝试 N 个。
 pub const PORT_SCAN_COUNT: u16 = 20;
 /// 启动后 HTTP 就绪探测的单次间隔。
@@ -59,6 +60,8 @@ pub enum StartError {
     NotInstalled,
     #[error("正在退出，不再启动实例")]
     ShuttingDown,
+    #[error("托管实例已由用户停止，请在托管引擎页启动")]
+    Stopped,
     #[error("无可用端口（{base}..+{count}）")]
     NoFreePort { base: u16, count: u16 },
     #[error("实例启动后未就绪: {0}")]
@@ -72,6 +75,8 @@ pub enum StartError {
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeSnapshot {
     pub installed: bool,
+    pub service_installed: bool,
+    pub index_count: Option<u64>,
     /// ready 的实例才算 running（启动中/等就绪显示为未运行 + lastError）。
     pub running: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -87,7 +92,9 @@ pub struct RuntimeSnapshot {
 struct Running {
     port: u16,
     child: tokio::process::Child,
-    ini_path: PathBuf,
+    /// 即使 Blink 被强制终止，内核也会回收其托管子进程。
+    #[cfg(windows)]
+    _job: Option<blink_infra::platform::process::JobObjectHandle>,
     started_at: Instant,
     /// HTTP 探测已通过。未 ready 的实例仍是活 child（后台继续初始化）。
     ready: bool,
@@ -105,11 +112,14 @@ struct State {
 }
 
 struct Inner {
+    /// 仅串行化启动前的孤儿恢复，不占用 stop()/状态读取所需的 state 锁。
+    start_gate: tokio::sync::Mutex<()>,
     /// 串行化 spawn 决策/状态翻转（锁内零长等待，见模块注释锁纪律）。
     state: tokio::sync::Mutex<State>,
     /// 展示快照（同步读，无 IO）。
     snapshot: std::sync::RwLock<RuntimeSnapshot>,
     shutting_down: AtomicBool,
+    suspended: AtomicBool,
     /// stop() 通知通道：cancel 立即打断所有就绪等待/监督循环；
     /// stop 收尾时换新 token 允许后续重启。
     stop_signal: std::sync::RwLock<CancellationToken>,
@@ -136,6 +146,7 @@ impl EverythingRuntime {
             .unwrap_or_default();
         Self {
             inner: Arc::new(Inner {
+                start_gate: tokio::sync::Mutex::new(()),
                 state: tokio::sync::Mutex::new(State {
                     instance: None,
                     run_id: 0,
@@ -145,6 +156,8 @@ impl EverythingRuntime {
                 }),
                 snapshot: std::sync::RwLock::new(RuntimeSnapshot {
                     installed: managed_runtime::resolve(KIND_EVERYTHING).is_some(),
+                    service_installed: false,
+                    index_count: None,
                     running: false,
                     port: None,
                     version,
@@ -152,6 +165,7 @@ impl EverythingRuntime {
                     restart_backoff_ms: None,
                 }),
                 shutting_down: AtomicBool::new(false),
+                suspended: AtomicBool::new(false),
                 stop_signal: std::sync::RwLock::new(CancellationToken::new()),
                 last_port: std::sync::RwLock::new(None),
             }),
@@ -161,26 +175,78 @@ impl EverythingRuntime {
     /// 当前状态快照（只读；installed 随安装/卸载即时重查）。
     pub fn snapshot(&self) -> RuntimeSnapshot {
         let mut snap = self.inner.snapshot.read().unwrap().clone();
-        snap.installed = managed_runtime::resolve(KIND_EVERYTHING).is_some();
+        let exe = managed_runtime::resolve(KIND_EVERYTHING);
+        snap.installed = exe.is_some();
+        snap.service_installed = exe.as_ref().is_some_and(|path| {
+            blink_infra::platform::shell::managed_everything_service_installed(path)
+                .unwrap_or(false)
+        });
         snap
+    }
+
+    pub fn resume(&self) {
+        self.inner.suspended.store(false, Ordering::Release);
+    }
+
+    /// 查询热路径只读内存，不读取安装目录或服务注册表。
+    pub fn index_ready(&self) -> bool {
+        self.inner
+            .snapshot
+            .read()
+            .unwrap()
+            .index_count
+            .is_some_and(|n| n > 0)
     }
 
     /// 就绪端口；未运行/未就绪返回 None。
     pub async fn port_if_running(&self) -> Option<u16> {
         let state = self.inner.state.lock().await;
-        state
-            .instance
-            .as_ref()
-            .filter(|r| r.ready)
-            .map(|r| r.port)
+        state.instance.as_ref().filter(|r| r.ready).map(|r| r.port)
     }
 
-    /// 懒启动并返回就绪端口；已就绪直接返回端口（幂等）。
-    ///
-    /// `budget` 为本次调用等待 HTTP 就绪的上限（搜索路径用
-    /// [`SEARCH_START_BUDGET`]，设置页测试用 [`TEST_START_BUDGET`]）；
-    /// 超时后实例仍在后台继续初始化——下一次调用命中已存活的 child。
-    /// 等待循环不持 state 锁，可被 `stop()` 即时打断。
+    /// 在识别外部 Everything 前先清理本程序遗留的命名实例，避免把自己认成用户来源。
+    pub async fn recover_orphan(&self) -> Result<(), StartError> {
+        let _gate = self.inner.start_gate.lock().await;
+        self.recover_orphan_locked().await
+    }
+
+    async fn recover_orphan_locked(&self) -> Result<(), StartError> {
+        if self.inner.shutting_down.load(Ordering::Acquire) { return Err(StartError::ShuttingDown); }
+        if self.inner.suspended.load(Ordering::Acquire) { return Err(StartError::Stopped); }
+        let recovery_run = {
+            let state = self.inner.state.lock().await;
+            (state.instance.is_none() && state.backoff_until.is_none_or(|until| Instant::now() >= until))
+                .then_some(state.run_id)
+        };
+        if let Some(run_id) = recovery_run {
+            if let Some(exe) = managed_runtime::resolve(KIND_EVERYTHING) {
+                #[cfg(windows)]
+                {
+                    let recovery = tokio::task::spawn_blocking(move || {
+                        // Everything 1.4 SDK 的命名 IPC 窗口与退出命令。
+                        blink_infra::platform::process::reclaim_named_window_process(
+                            &format!("EVERYTHING_TASKBAR_NOTIFICATION_({INSTANCE_NAME})"),
+                            &exe, 40006, Duration::from_secs(2),
+                        )
+                    }).await.map_err(|e| StartError::Spawn(format!("旧实例恢复任务失败: {e}")))?;
+                    if let Err(error) = recovery {
+                        let mut state = self.inner.state.lock().await;
+                        if state.run_id == run_id {
+                            state.last_error = Some(error.clone());
+                            self.publish(&state);
+                        }
+                        return Err(StartError::Spawn(error));
+                    }
+                }
+                let state = self.inner.state.lock().await;
+                if state.run_id != run_id { return Err(StartError::Stopped); }
+            }
+        }
+        Ok(())
+    }
+
+    /// 懒启动并返回就绪端口；已就绪时直接复用。
+    /// `budget` 限制 HTTP 就绪等待；旧实例恢复单独有界，不占 state 锁。
     pub async fn ensure_started(
         &self,
         preferred_port: u16,
@@ -189,9 +255,20 @@ impl EverythingRuntime {
         if self.inner.shutting_down.load(Ordering::Acquire) {
             return Err(StartError::ShuttingDown);
         }
+        if self.inner.suspended.load(Ordering::Acquire) {
+            return Err(StartError::Stopped);
+        }
+        let start_guard = self.inner.start_gate.lock().await;
+        self.recover_orphan_locked().await?;
         // ── 锁段①：spawn 决策（无等待）─────────────────────────────────
         let (port, my_run, was_ready) = {
             let mut state = self.inner.state.lock().await;
+            if self.inner.shutting_down.load(Ordering::Acquire) {
+                return Err(StartError::ShuttingDown);
+            }
+            if self.inner.suspended.load(Ordering::Acquire) {
+                return Err(StartError::Stopped);
+            }
             if let Some(running) = state.instance.as_ref() {
                 if running.ready {
                     return Ok(running.port);
@@ -223,6 +300,10 @@ impl EverythingRuntime {
                     INSTANCE_NAME.to_string(),
                     "-config".to_string(),
                     ini_path.to_string_lossy().to_string(),
+                    "-db".to_string(),
+                    exe.with_file_name("Everything-blink.db")
+                        .to_string_lossy()
+                        .to_string(),
                     // 后台静默启动（无主窗口）；托盘由 ini 关闭（show_tray_icon=0）。
                     // 注意：1.4.1 无 -hide 开关——传它弹「命令行选项」错误框（模态），
                     // 用户关框后进程以 exit 1 结束（2026-10-19 实机教训）。
@@ -231,14 +312,22 @@ impl EverythingRuntime {
                 #[cfg(windows)]
                 cmd.creation_flags(blink_infra::platform::CREATE_NO_WINDOW);
                 let child = cmd
+                    .kill_on_drop(true)
                     .spawn()
                     .map_err(|e| StartError::Spawn(format!("启动 Everything 失败: {e}")))?;
+                #[cfg(windows)]
+                let job = child.id().and_then(|pid| {
+                    blink_infra::platform::process::assign_job_object(pid).map_err(|error| {
+                        tracing::warn!(pid, %error, "Everything 进程约束失败，将由下次启动恢复遗留实例");
+                    }).ok()
+                });
 
                 state.run_id += 1;
                 state.instance = Some(Running {
                     port,
                     child,
-                    ini_path,
+                    #[cfg(windows)]
+                    _job: job,
                     started_at: Instant::now(),
                     ready: false,
                 });
@@ -248,13 +337,14 @@ impl EverythingRuntime {
                 (port, state.run_id, false)
             }
         };
+        drop(start_guard);
 
         let _ = was_ready; // 锁段①到达此处必然 false（ready 已提前 return）
 
         // ── 无锁段：等待就绪（可被 stop 打断）───────────────────────────
         let deadline = Instant::now() + budget;
         loop {
-            if probe_http(port).await {
+            if let Some(index_count) = probe_index_count(port).await {
                 // ── 锁段②：翻转 ready（首个翻转者挂监督，防重复）────────
                 let mut state = self.inner.state.lock().await;
                 if state.run_id != my_run {
@@ -267,10 +357,12 @@ impl EverythingRuntime {
                     .is_some_and(|r| !std::mem::replace(&mut r.ready, true));
                 if became_ready {
                     state.last_error = None;
+                    self.inner.snapshot.write().unwrap().index_count = Some(index_count);
                     *self.inner.last_port.write().unwrap() = Some(port);
                     self.publish(&state);
                     drop(state);
                     self.spawn_supervisor(my_run);
+                    self.spawn_index_monitor(my_run, port);
                 }
                 return Ok(port);
             }
@@ -286,7 +378,11 @@ impl EverythingRuntime {
                     .and_then(|r| r.child.try_wait().ok().flatten());
                 if let Some(exit) = exited {
                     tracing::warn!(?exit, port, "托管 Everything 启动后立即退出");
-                    let started_at = state.instance.as_ref().map(|r| r.started_at).unwrap_or_else(Instant::now);
+                    let started_at = state
+                        .instance
+                        .as_ref()
+                        .map(|r| r.started_at)
+                        .unwrap_or_else(Instant::now);
                     self.enter_backoff(&mut state, started_at);
                     return Err(StartError::Spawn(format!("实例启动即退出: {exit}")));
                 }
@@ -298,7 +394,9 @@ impl EverythingRuntime {
                     state.last_error = Some("等待就绪超时（后台继续初始化）".to_string());
                     self.publish(&state);
                 }
-                return Err(StartError::NotReady(format!("等待 HTTP 就绪超时（{budget:?}）")));
+                return Err(StartError::NotReady(format!(
+                    "等待 HTTP 就绪超时（{budget:?}）"
+                )));
             }
             let signal = self.inner.stop_signal.read().unwrap().clone();
             tokio::select! {
@@ -368,13 +466,8 @@ impl EverythingRuntime {
                             }
                             state.backoff_until = None;
                         }
-                        let preferred = runtime
-                            .inner
-                            .last_port
-                            .read()
-                            .unwrap()
-                            .unwrap_or_default();
-                        let _ = runtime.ensure_started(preferred, SEARCH_START_BUDGET).await;
+                        let preferred = runtime.inner.last_port.read().unwrap().unwrap_or_default();
+                        let _ = runtime.ensure_started(preferred, TEST_START_BUDGET).await;
                         return; // 新启动成功会挂新监督循环
                     }
                     Ok(None) => { /* 存活，继续轮询 */ }
@@ -393,30 +486,76 @@ impl EverythingRuntime {
     /// 等待，不再排队）；收尾换新信号 token 并复位标志，允许后续重启。
     pub async fn stop(&self) {
         tracing::info!("正在停止托管 Everything 实例…");
+        self.inner.suspended.store(true, Ordering::Release);
         self.inner.shutting_down.store(true, Ordering::Release);
         self.inner.stop_signal.read().unwrap().cancel();
-        let mut state = self.inner.state.lock().await;
-        if let Some(mut running) = state.instance.take() {
-            let _ = running.child.kill().await;
+        let running = {
+            let mut state = self.inner.state.lock().await;
+            let running = state.instance.take();
+            state.run_id += 1;
+            state.backoff_until = None;
+            state.last_error = None;
+            self.publish(&state);
+            running
+        };
+        if let Some(mut running) = running {
+            let graceful = async {
+                let exe = managed_runtime::resolve(KIND_EVERYTHING).ok_or(())?;
+                let mut command =
+                    blink_infra::platform::no_window_tokio(tokio::process::Command::new(exe));
+                command
+                    .args(["-instance", INSTANCE_NAME, "-exit"])
+                    .kill_on_drop(true);
+                let status = command.status().await.map_err(|_| ())?;
+                if !status.success() {
+                    return Err(());
+                }
+                running.child.wait().await.map_err(|_| ())?;
+                Ok::<(), ()>(())
+            };
+            if !matches!(
+                tokio::time::timeout(Duration::from_secs(2), graceful).await,
+                Ok(Ok(()))
+            ) {
+                tracing::debug!(
+                    port = running.port,
+                    "Everything 正常退出超时，按持有句柄终止"
+                );
+                let _ = running.child.kill().await;
+            }
             tracing::info!(port = running.port, "托管 Everything 实例已停止");
         }
-        state.run_id += 1; // 使残余探测/监督循环立即过期
-        state.backoff_until = None;
-        state.last_error = None;
-        self.publish(&state);
         *self.inner.stop_signal.write().unwrap() = CancellationToken::new();
         self.inner.shutting_down.store(false, Ordering::Release);
+    }
+
+    fn spawn_index_monitor(&self, my_run: u64, port: u16) {
+        let runtime = self.clone();
+        tokio::spawn(async move {
+            let signal = runtime.inner.stop_signal.read().unwrap().clone();
+            loop {
+                tokio::select! {
+                    _ = signal.cancelled() => return,
+                    _ = tokio::time::sleep(Duration::from_secs(3)) => {}
+                }
+                let count = probe_index_count(port).await;
+                let state = runtime.inner.state.lock().await;
+                if state.run_id != my_run || state.instance.is_none() {
+                    return;
+                }
+                runtime.inner.snapshot.write().unwrap().index_count = count;
+            }
+        });
     }
 
     fn publish(&self, state: &State) {
         let mut snap = self.inner.snapshot.write().unwrap();
         snap.installed = managed_runtime::resolve(KIND_EVERYTHING).is_some();
         snap.running = state.instance.as_ref().is_some_and(|r| r.ready);
-        snap.port = state
-            .instance
-            .as_ref()
-            .filter(|r| r.ready)
-            .map(|r| r.port);
+        if !snap.running {
+            snap.index_count = None;
+        }
+        snap.port = state.instance.as_ref().filter(|r| r.ready).map(|r| r.port);
         snap.last_error = state.last_error.clone();
         snap.restart_backoff_ms = state
             .backoff_until
@@ -441,19 +580,18 @@ pub fn select_free_port(base: u16) -> Option<u16> {
     None
 }
 
-/// HTTP 探测（与 FileEngine 探测同判据：返回 JSON 带 totalResults/results）。
-pub async fn probe_http(port: u16) -> bool {
-    let url = format!("http://127.0.0.1:{port}/?search=__blink_probe__&json=1&count=1");
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
-        .build()
-        .unwrap_or_default();
-    match client.get(&url).send().await {
-        Ok(resp) if resp.status().is_success() => {
-            matches!(resp.text().await, Ok(body) if body.contains("totalResults") || body.contains("results"))
-        }
-        _ => false,
+/// 校验真实 JSON 协议，同时获得索引条数。
+pub async fn probe_index_count(port: u16) -> Option<u64> {
+    static CLIENT: std::sync::LazyLock<reqwest::Client> =
+        std::sync::LazyLock::new(super::file_source::http_client);
+    let url = format!("http://127.0.0.1:{port}/?search=&json=1&count=0");
+    let response = CLIENT.get(url).send().await.ok()?;
+    if !response.status().is_success() {
+        return None;
     }
+    let value = response.json::<serde_json::Value>().await.ok()?;
+    value["results"].is_array().then_some(())?;
+    value["totalResults"].as_u64()
 }
 
 /// 生成/覆写专属 ini（artifact 目录内，`-config` 显式指向）。
@@ -468,18 +606,49 @@ pub fn write_instance_ini(exe: &std::path::Path, port: u16) -> std::io::Result<P
         return Err(std::io::Error::other("exe 无父目录"));
     };
     let ini = dir.join(format!("everything-{INSTANCE_NAME}.ini"));
-    let content = format!(
-        "[Everything]\r\n\
-         instance_name={INSTANCE_NAME}\r\n\
-         http_server_enabled=1\r\n\
-         http_server_bindings=127.0.0.1\r\n\
-         http_server_port={port}\r\n\
-         etp_server_enabled=0\r\n\
-         show_tray_icon=0\r\n\
-         run_in_background=1\r\n"
-    );
+    let existing = match std::fs::read_to_string(&ini) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error),
+    };
+    let content = merge_instance_ini(&existing, port);
     std::fs::write(&ini, content)?;
     Ok(ini)
+}
+
+/// 仅覆盖 Blink 管理的键，保留 Everything 回写的卷信息和索引偏好。
+fn merge_instance_ini(existing: &str, port: u16) -> String {
+    let mut fields = std::collections::BTreeMap::<String, String>::new();
+    let mut in_section = false;
+    for line in existing.trim_start_matches('\u{feff}').lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_section = line.eq_ignore_ascii_case("[Everything]");
+            continue;
+        }
+        if in_section && let Some((key, value)) = line.split_once('=') {
+            fields.insert(key.trim().to_ascii_lowercase(), value.to_string());
+        }
+    }
+    for (key, value) in [
+        ("instance_name", INSTANCE_NAME.to_string()),
+        ("http_server_enabled", "1".into()),
+        ("http_server_bindings", "127.0.0.1".into()),
+        ("http_server_port", port.to_string()),
+        ("etp_server_enabled", "0".into()),
+        ("show_tray_icon", "0".into()),
+        ("run_in_background", "1".into()),
+        ("run_as_admin", "0".into()),
+        ("auto_include_fixed_volumes", "1".into()),
+        ("db_compress", "0".into()),
+    ] {
+        fields.insert(key.into(), value);
+    }
+    let mut content = String::from("[Everything]\r\n");
+    for (key, value) in fields {
+        content.push_str(&format!("{key}={value}\r\n"));
+    }
+    content
 }
 
 // ── 测试 ─────────────────────────────────────────────────────────────────────
@@ -489,10 +658,26 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn stop_does_not_wait_for_start_recovery_gate_or_allow_queued_spawn() {
+        let runtime = EverythingRuntime::new();
+        let gate = runtime.inner.start_gate.lock().await;
+        let pending = runtime.clone();
+        let task = tokio::spawn(async move { pending.ensure_started(DEFAULT_MANAGED_PORT, SEARCH_START_BUDGET).await });
+        tokio::task::yield_now().await;
+        tokio::time::timeout(Duration::from_millis(200), runtime.stop()).await.expect("停止不得等待恢复锁");
+        drop(gate);
+        let result = tokio::time::timeout(Duration::from_secs(1), task).await.unwrap().unwrap();
+        assert!(matches!(result, Err(StartError::Stopped)));
+    }
+
+    #[tokio::test]
     async fn ensure_started_without_install_returns_not_installed() {
         // cfg(test) 隔离根（临时目录）下未安装。
         let rt = EverythingRuntime::new();
-        let err = rt.ensure_started(52819, SEARCH_START_BUDGET).await.unwrap_err();
+        let err = rt
+            .ensure_started(52819, SEARCH_START_BUDGET)
+            .await
+            .unwrap_err();
         assert!(matches!(err, StartError::NotInstalled));
         let snap = rt.snapshot();
         assert!(!snap.installed);
@@ -505,8 +690,12 @@ mod tests {
         let rt = EverythingRuntime::new();
         rt.stop().await;
         rt.stop().await;
+        rt.resume();
         // 停止后 shutting_down 标记被复位：后续 ensure_started 不再被挡。
-        let err = rt.ensure_started(52819, SEARCH_START_BUDGET).await.unwrap_err();
+        let err = rt
+            .ensure_started(52819, SEARCH_START_BUDGET)
+            .await
+            .unwrap_err();
         assert!(
             matches!(err, StartError::NotInstalled),
             "未被 ShuttingDown 挡住: {err:?}"
@@ -530,7 +719,11 @@ mod tests {
         let b = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port_a = a.local_addr().unwrap().port();
         let port_b = b.local_addr().unwrap().port();
-        let (lo, hi) = if port_a < port_b { (port_a, port_b) } else { (port_b, port_a) };
+        let (lo, hi) = if port_a < port_b {
+            (port_a, port_b)
+        } else {
+            (port_b, port_a)
+        };
         let picked = select_free_port(lo).expect("区间内应找到空闲端口");
         assert_ne!(picked, lo);
         assert_ne!(picked, hi);
@@ -551,12 +744,27 @@ mod tests {
             "段头必需（无段头键全被忽略）"
         );
         assert!(content.contains("http_server_enabled=1\r\n"));
-        assert!(content.contains("http_server_bindings=127.0.0.1"), "仅回环绑定");
+        assert!(
+            content.contains("http_server_bindings=127.0.0.1"),
+            "仅回环绑定"
+        );
         assert!(content.contains("http_server_port=52819"));
         assert!(content.contains("etp_server_enabled=0"), "ETP 关闭");
         assert!(content.contains("show_tray_icon=0"), "托盘关闭");
         assert!(content.contains("instance_name=blink"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn instance_ini_preserves_discovered_volumes_and_updates_owned_keys() {
+        let old = "[Everything]\r\nntfs_volume_guids=known-volume\r\nntfs_volume_includes=1\r\nhttp_server_port=1234\r\ndb_compress=1\r\n";
+        let updated = merge_instance_ini(old, 52820);
+        assert!(updated.contains("ntfs_volume_guids=known-volume\r\n"));
+        assert!(updated.contains("ntfs_volume_includes=1\r\n"));
+        assert!(updated.contains("http_server_port=52820\r\n"));
+        assert!(!updated.contains("http_server_port=1234"));
+        assert!(updated.contains("db_compress=0\r\n"));
+        assert_eq!(merge_instance_ini(&updated, 52820), updated);
     }
 
     #[test]

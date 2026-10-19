@@ -369,11 +369,16 @@ pub struct WebLinkEntry {
     pub id: String,
     /// 显示名（参与混排 fuzzy 与拼音首字母召回）。
     pub name: String,
-    /// 触发词：`<keyword>` 出占位/直达项，`<keyword> <arg>` 前缀搜索。
+    /// 触发词：`<keyword>` 打开主页，`<keyword> <arg>` 前缀搜索。
     /// 不含空白、非保留前缀 `ai`、不与 engine/插件触发词冲突（保存时校验，
     /// 加载时 warn 跳过——运行期插件 trigger 变化可能后来占用）。
     pub keyword: String,
+    /// 无参数时打开的主页。留空则从搜索模板提取 origin；旧直达 URL 原样保留。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub home_url: String,
     /// URL 模板；每个 `{query}` 替换为 UTF-8 percent-encoding 后的参数。
+    /// 可为空（仅配置主页时）。保留字段名以兼容既有配置。
+    #[serde(default)]
     pub url_template: String,
     /// 条目开关；false 不注册 keyword、不参与混排。
     #[serde(default = "default_true")]
@@ -406,6 +411,33 @@ impl ConfigKey for WebLinksConfig {
 }
 
 impl WebLinksConfig {
+    /// 升级未改动的种子主页/搜索地址，不覆盖用户自定义地址或已清空的表。
+    pub fn upgrade_home_urls(&mut self) -> bool {
+        let mut changed = false;
+        // 只升级旧默认 GitHub 直达地址；保留名称、触发词、禁用状态及自定义 URL。
+        for entry in &mut self.entries {
+            if entry.id == "github"
+                && entry.home_url.is_empty()
+                && matches!(
+                    entry.url_template.as_str(),
+                    "https://github.com" | "https://github.com/"
+                )
+            {
+                entry.home_url = "https://github.com/".into();
+                entry.url_template = "https://github.com/search?q={query}&ref=opensearch".into();
+                changed = true;
+            }
+        }
+        for seed in Self::seed().entries.into_iter().filter(|e| !e.home_url.is_empty()) {
+            if let Some(entry) = self.entries.iter_mut().find(|e|
+                e.id == seed.id && e.url_template == seed.url_template && e.home_url.is_empty()) {
+                entry.home_url = seed.home_url;
+                changed = true;
+            }
+        }
+        changed
+    }
+
     /// 首次种子表。Google 收录但默认禁用——默认网络环境可达性不稳定，
     /// 收录可自行启用而非缺席（2026-10 定案）。
     pub fn seed() -> Self {
@@ -414,6 +446,7 @@ impl WebLinksConfig {
                 id: id.to_string(),
                 name: name.to_string(),
                 keyword: keyword.to_string(),
+                home_url: if id == "bilibili" { "https://www.bilibili.com/".to_string() } else { String::new() },
                 url_template: url.to_string(),
                 enabled,
             }
@@ -422,7 +455,13 @@ impl WebLinksConfig {
             entries: vec![
                 entry("bing", "Bing", "bing", "https://www.bing.com/search?q={query}", true),
                 entry("baidu", "百度", "bd", "https://www.baidu.com/s?wd={query}", true),
-                entry("github", "GitHub", "gh", "https://github.com", true),
+                entry(
+                    "github",
+                    "GitHub",
+                    "gh",
+                    "https://github.com/search?q={query}&ref=opensearch",
+                    true,
+                ),
                 entry(
                     "bilibili",
                     "Bilibili",

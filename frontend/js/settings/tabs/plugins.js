@@ -566,7 +566,7 @@ async function guideScriptRuntimeInstall(runtimeType) {
             {title: t("engine.script_runtime.title"), kind: "info"},
         );
         if (!go) return;
-        await navigateSettings({tabId: "engines", target: "#script-runtime-card", block: "start"});
+        await navigateSettings({tabId: "managed-engines", target: "#script-runtime-card", block: "start"});
         // 深链定位已等待目标就绪（waitForSettingsTarget）——按钮直接可用；
         // 注意力闪烁 3 次脉冲让用户知道要点哪个（animationend 自动移除）
         const btn = document.getElementById(`script-${runtimeType}-action`);

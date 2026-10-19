@@ -259,6 +259,7 @@ impl SuggestionCoordinator {
                 }
                 // 3e. 降频抑制（§3.8）：同 (kind, origin, 指纹) 连续 3 次未采纳。
                 if input.config.suppress_repeated
+                    && s.kind != SuggestionKind::Completion
                     && fatigue.is_suppressed(super::fatigue::fatigue_key(s))
                 {
                     tracing::debug!(
@@ -340,6 +341,7 @@ impl SuggestionCoordinator {
             ("secondary", &output.secondary),
         ] {
             if let Some(sug) = sug {
+                if sug.kind == SuggestionKind::Completion { continue; }
                 let n = fatigue.record_impression(super::fatigue::fatigue_key(sug));
                 tracing::debug!(
                     id = %sug.id,
@@ -855,6 +857,22 @@ mod tests {
     }
 
     // ── 0.24.3 §3.8 降频集成 ─────────────────────────────────────────────
+
+    #[test]
+    fn completion_remains_available_after_repeated_search_refreshes() {
+        let mut coordinator = SuggestionCoordinator::new();
+        coordinator.register(Arc::new(MockProducer::new(
+            SuggestionSource::Keyword,
+            vec![make_sug("completion-keyword", SuggestionKind::Completion, 0.98, None)],
+        )));
+        let snapshot = snap();
+        let mut fatigue = fresh_fatigue();
+        for _ in 0..8 {
+            let (out, _) = coordinator.coordinate(&input("bili", &snapshot), &mut fatigue);
+            assert_eq!(out.primary.unwrap().kind, SuggestionKind::Completion);
+        }
+        assert!(fatigue.is_empty(), "输入补全不作为意图建议降频");
+    }
 
     /// 同候选连续 3 次曝光未采纳 → 第 4 次 coordinate 起被抑制。
     #[test]

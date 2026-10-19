@@ -16,7 +16,7 @@ import {affectsSharedConfig, connectConfigActivity, createConfigRefresher} from 
 import {createConfigLoadNotice} from "../shared/config-load-notice.js";
 import {initGeneralTab, applyGeneralConfig} from "./tabs/general.js";
 import {initHotkeyTab, applyHotkeyConfig} from "./tabs/hotkey.js";
-import {initEnginesTab} from "./tabs/engines.js";
+import {initEnginesTab, initManagedEnginesTab} from "./tabs/engines.js";
 import {initWeblinksTab} from "./tabs/weblinks.js";
 import {initPluginsTab} from "./tabs/plugins.js";
 import {initCapabilitiesTab} from "./tabs/capabilities.js";
@@ -38,15 +38,15 @@ import {processClass, processDisplay} from "./tabs/engines/local-engine-process.
 import {statusClass} from "./tabs/engines/local-engine-card-utils.js";
 import {registerLocalEngineHooks, unregisterLocalEngineHooks} from "./tabs/engines/local-engine-hooks.js";
 import {aggregateSharedTargets, createCleanupModal} from "./tabs/engines/local-engine-cleanup-modal.js";
-import {markSettingsTabActivation, resetSettingsContentScroll} from "./navigation.js";
+import {markSettingsTabActivation, resetSettingsContentScroll, navigateSettings} from "./navigation.js";
 
 // ── Tab 切换 + 生命周期管理 ─────────────────────────────────────────────────
 
-// local-runtime controller 实例（仅在 engines tab 活跃时 mount）
+// local-runtime controller 实例（仅在 managed-engines tab 活跃时 mount）
 let _leController = null;
 let _leActive = false;
 let _cleanupModal = null;
-let _mountResolvers = []; // mount 完成 promise resolvers
+let _leMountPromise = null;
 
 // 运行时底座拉取状态（loading / ok / error）——foundation 摘要加载失败
 // 必须反馈到顶部摘要行，不能只藏在折叠区里
@@ -56,7 +56,16 @@ let _leFoundationStatus = "loading";
  * mount 本地引擎运行时 controller。
  * 幂等：重复调用不创建重复监听。
  */
-async function mountLocalRuntime() {
+function mountLocalRuntime() {
+    if (_leMountPromise) return _leMountPromise;
+    const pending = mountLocalRuntimeImpl();
+    _leMountPromise = pending;
+    const clear = () => { if (_leMountPromise === pending) _leMountPromise = null; };
+    pending.then(clear, clear);
+    return pending;
+}
+
+async function mountLocalRuntimeImpl() {
     if (_leController) return; // 已 mount
 
     const container = document.getElementById("le-cards-container");
@@ -73,14 +82,16 @@ async function mountLocalRuntime() {
     // 注册受限 adapter hooks（FunASR / PaddleOCR 专属配置区）
     registerLocalEngineHooks();
 
-    _leController = createLocalEngineController({
+    const controller = createLocalEngineController({
         onStateChange: (state) => {
+            if (_leController !== controller || !_leActive) return;
             renderLocalEngineCards(container, state);
             // 同时刷新公共缓存区与顶部运行时摘要
             renderSharedStorage(state);
             renderRuntimeSummary(state);
         },
         onError: (err) => {
+            if (_leController !== controller || !_leActive) return;
             console.error("[local-engine] error:", err);
             if (err?.engine_id) {
                 // controller 已把错误写入对应 EngineStateEntry.transientError。
@@ -94,6 +105,8 @@ async function mountLocalRuntime() {
             }
         },
     });
+
+    _leController = controller;
 
     // 初始化 cleanup modal
     const cleanupModalEl = document.getElementById("le-cleanup-modal");
@@ -131,7 +144,8 @@ async function mountLocalRuntime() {
     }
 
     try {
-        await _leController.mount();
+        await controller.mount();
+        if (_leController !== controller || !_leActive) return;
         if (loadingRegion) loadingRegion.hidden = true;
 
         // 检查是否为空
@@ -147,10 +161,8 @@ async function mountLocalRuntime() {
         // 初始渲染顶部摘要（loading 态）
         renderRuntimeSummary(_leController.getState());
 
-        // resolve mount resolvers
-        for (const resolve of _mountResolvers) resolve();
-        _mountResolvers = [];
     } catch (e) {
+        if (_leController !== controller || !_leActive) return;
         console.error("[local-engine] mount failed:", e);
         if (loadingRegion) loadingRegion.hidden = true;
         if (errorRegion) {
@@ -173,9 +185,7 @@ function disposeLocalRuntime() {
         _cleanupModal.dispose();
         _cleanupModal = null;
     }
-    // 拒绝所有 pending mount resolvers
-    for (const resolve of _mountResolvers) resolve();
-    _mountResolvers = [];
+    _leMountPromise = null;
 
     if (!_leController) return;
     _leController.dispose();
@@ -480,7 +490,7 @@ async function openCleanupModal(engineId, entry, controller, mode) {
     }
 
     // storage 是异步拉取的（get_local_engine_storage 扫描磁盘）——刚进入
-    // engines tab 时 entry.storage 可能还没到。缺失时现场拉一次再打开，
+    // managed-engines tab 时 entry.storage 可能还没到。缺失时现场拉一次再打开，
     // 避免清理面板空白。
     let targets = entry?.storage?.targets;
     if (!targets && engineId && typeof controller?.refreshStorage === "function") {
@@ -515,14 +525,14 @@ document.querySelectorAll(".tab").forEach((btn) => {
         // ── 生命周期回调 ──
         const tab = btn.dataset.tab;
 
-        // 离开 engines tab → dispose runtime
-        if (tab !== "engines" && _leActive) {
+        // 离开 managed-engines tab → dispose runtime
+        if (tab !== "managed-engines" && _leActive) {
             disposeLocalRuntime();
             _leActive = false;
         }
 
-        // 进入 engines tab → mount runtime
-        if (tab === "engines" && !_leActive) {
+        // 进入 managed-engines tab → mount runtime
+        if (tab === "managed-engines" && !_leActive) {
             _leActive = true;
             mountLocalRuntime().catch((e) => {
                 console.error("[settings] mountLocalRuntime failed:", e);
@@ -536,27 +546,12 @@ document.querySelectorAll(".tab").forEach((btn) => {
 /**
  * 等待 local runtime mount 完成。
  * 如果已 mount，立即 resolve。
- * 如果未 mount，激活 engines tab 并等待 mount。
+ * 如果未 mount，激活 managed-engines tab 并等待 mount。
  * @returns {Promise<void>}
  */
-export function ensureLocalRuntimeMounted() {
-    if (_leController && _leController.isMounted()) {
-        return Promise.resolve();
-    }
-    return new Promise((resolve) => {
-        _mountResolvers.push(resolve);
-        // 如果 engines tab 未激活，激活它
-        const enginesTabBtn = document.querySelector('.tab[data-tab="engines"]');
-        if (enginesTabBtn && !enginesTabBtn.classList.contains("active")) {
-            _leActive = true;
-            mountLocalRuntime().then(() => {
-                // mountLocalRuntime 内部会 resolve _mountResolvers
-            }).catch((e) => {
-                console.error("[settings] ensureLocalRuntimeMounted mount failed:", e);
-                resolve(); // 即使失败也 resolve，调用方检查 error region
-            });
-        }
-    });
+export async function ensureLocalRuntimeMounted() {
+    if (!_leActive) await navigateSettings({tabId: "managed-engines"});
+    await mountLocalRuntime();
 }
 
 /**
@@ -669,6 +664,7 @@ async function initializeSettings() {
         initGeneralTab(cfg);
         initHotkeyTab(cfg);
         initEnginesTab(cfg);
+        initManagedEnginesTab();
         initWeblinksTab();
         initPluginsTab(cfg);
         initCapabilitiesTab();
@@ -687,7 +683,7 @@ async function initializeSettings() {
         applyConfigToUI(cfg);
 
         // 如果设置页打开时引擎 Tab 已是激活状态，立即 mount runtime
-        const enginesTabBtn = document.querySelector('.tab[data-tab="engines"]');
+        const enginesTabBtn = document.querySelector('.tab[data-tab="managed-engines"]');
         if (enginesTabBtn?.classList.contains("active")) {
             _leActive = true;
             mountLocalRuntime().catch((e) => {
@@ -757,7 +753,7 @@ window.addEventListener("focus", async () => {
     if (!configReady) await init();
     else if (configListening) { await configRefresher.refresh(); refreshChordActions(); }
 
-    // 只刷新当前激活 tab 的 runtime（如果当前在 engines tab）
+    // 只刷新当前激活 tab 的 runtime（如果当前在 managed-engines tab）
     if (_leActive && _leController && _leController.isMounted()) {
         _leController.refreshStatus().catch((e) => {
             console.warn("[local-engine] refreshStatus on focus failed:", e);

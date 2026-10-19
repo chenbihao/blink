@@ -1,10 +1,10 @@
 /* ── local-runtime modals: cleanup modal + orphan recovery modal/notice ──
-   从 settings-local-runtime.css 拆分（0.22 B2）。scope: #engines .le-cleanup-* + .le-orphan-*
-   保持 selector 文本、specificity 和覆盖关系不变。─────────────────────────── */
+   从 settings-local-runtime.css 拆分（0.22 B2）。scope: :is(#engines, #managed-engines) .le-cleanup-* + .le-orphan-*
+   两类引擎页共享作用域；保留 ID specificity 和覆盖关系。─────────────────────────── */
 
 /* ── cleanup modal ──────────────────────────────────────────────────────────── */
 
-#engines .le-cleanup-modal {
+:is(#engines, #managed-engines) .le-cleanup-modal {
     position: fixed;
     top: 0;
     left: 0;
@@ -16,11 +16,11 @@
     justify-content: center;
 }
 
-#engines .le-cleanup-modal[hidden] {
+:is(#engines, #managed-engines) .le-cleanup-modal[hidden] {
     display: none;
 }
 
-#engines .le-cleanup-overlay {
+:is(#engines, #managed-engines) .le-cleanup-overlay {
     position: absolute;
     top: 0;
     left: 0;
@@ -30,7 +30,7 @@
     cursor: pointer;
 }
 
-#engines .le-cleanup-dialog {
+:is(#engines, #managed-engines) .le-cleanup-dialog {
     position: relative;
     background: var(--bg-sidebar);
     border-radius: var(--radius-lg);
@@ -42,7 +42,7 @@
     flex-direction: column;
 }
 
-#engines .le-cleanup-header {
+:is(#engines, #managed-engines) .le-cleanup-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -50,7 +50,7 @@
     border-bottom: 1px solid var(--surface);
 }
 
-#engines .le-cleanup-title {
+:is(#engines, #managed-engines) .le-cleanup-title {
     font-size: var(--text-lg);
     font-weight: 600;
     color: var(--text);
@@ -58,7 +58,7 @@
     font-style: normal;
 }
 
-#engines .le-cleanup-close {
+:is(#engines, #managed-engines) .le-cleanup-close {
     background: none;
     border: none;
     color: var(--text-dim);
@@ -69,12 +69,12 @@
     align-items: center;
 }
 
-#engines .le-cleanup-close:hover {
+:is(#engines, #managed-engines) .le-cleanup-close:hover {
     color: var(--text);
     background: var(--surface-2);
 }
 
-#engines .le-cleanup-body {
+:is(#engines, #managed-engines) .le-cleanup-body {
     padding: 1rem 1.25rem;
     overflow-y: auto;
     flex: 1;
@@ -83,7 +83,7 @@
     font-style: normal;
 }
 
-#engines .le-cleanup-actions {
+:is(#engines, #managed-engines) .le-cleanup-actions {
     display: flex;
     justify-content: flex-end;
     gap: 0.5rem;
@@ -93,20 +93,20 @@
 
 /* ── cleanup modal targets list ─────────────────────────────────────────────── */
 
-#engines .le-cleanup-desc {
+:is(#engines, #managed-engines) .le-cleanup-desc {
     font-size: var(--text-sm);
     color: var(--text-sub);
     margin: 0 0 0.75rem;
     font-style: normal;
 }
 
-#engines .le-cleanup-list {
+:is(#engines, #managed-engines) .le-cleanup-list {
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
 }
 
-#engines .le-cleanup-item {
+:is(#engines, #managed-engines) .le-cleanup-item {
     display: flex;
     align-items: flex-start;
     gap: 0.5rem;
@@ -117,7 +117,7 @@
     font-style: normal;
 }
 
-#engines .le-cleanup-item-label {
+:is(#engines, #managed-engines) .le-cleanup-item-label {
     display: flex;
     align-items: flex-start;
     gap: 0.5rem;
@@ -126,7 +126,7 @@
 }
 
 /* 自定义复选框：appearance:none 去除原生样式，勾选态 = accent 底 + on-accent 对勾 */
-#engines .le-cleanup-checkbox {
+:is(#engines, #managed-engines) .le-cleanup-checkbox {
     appearance: none;
     flex-shrink: 0;
     margin: 0.125rem 0 0;
@@ -143,16 +143,16 @@
     border-color var(--transition-fast);
 }
 
-#engines .le-cleanup-checkbox:hover:not(:disabled) {
+:is(#engines, #managed-engines) .le-cleanup-checkbox:hover:not(:disabled) {
     border-color: var(--text-dim);
 }
 
-#engines .le-cleanup-checkbox:checked {
+:is(#engines, #managed-engines) .le-cleanup-checkbox:checked {
     background: var(--accent);
     border-color: var(--accent);
 }
 
-#engines .le-cleanup-checkbox:checked::before {
+:is(#engines, #managed-engines) .le-cleanup-checkbox:checked::before {
     content: "";
     width: 0.3125rem;
     height: 0.5625rem;
@@ -161,33 +161,33 @@
     transform: rotate(45deg);
 }
 
-#engines .le-cleanup-checkbox:disabled {
+:is(#engines, #managed-engines) .le-cleanup-checkbox:disabled {
     opacity: 0.4;
     cursor: default;
 }
 
-#engines .le-cleanup-item-info {
+:is(#engines, #managed-engines) .le-cleanup-item-info {
     display: flex;
     flex-direction: column;
     gap: 0.125rem;
     flex: 1;
 }
 
-#engines .le-cleanup-item-title {
+:is(#engines, #managed-engines) .le-cleanup-item-title {
     font-weight: 600;
     color: var(--text);
     font-style: normal;
 }
 
 /* scope/size/flags/affected 一行弱底 badge（与引擎卡 keyline-policy 同族） */
-#engines .le-cleanup-item-meta {
+:is(#engines, #managed-engines) .le-cleanup-item-meta {
     display: flex;
     align-items: center;
     flex-wrap: wrap;
     gap: 0.25rem 0.375rem;
 }
 
-#engines .le-cleanup-item-meta > span {
+:is(#engines, #managed-engines) .le-cleanup-item-meta > span {
     font-size: var(--text-xs);
     padding: 0.0625rem 0.5rem;
     border-radius: var(--radius-sm, 4px);
@@ -197,22 +197,22 @@
     font-style: normal;
 }
 
-#engines .le-cleanup-item-scope,
-#engines .le-cleanup-item-size,
-#engines .le-cleanup-item-flags,
-#engines .le-cleanup-item-affected {
+:is(#engines, #managed-engines) .le-cleanup-item-scope,
+:is(#engines, #managed-engines) .le-cleanup-item-size,
+:is(#engines, #managed-engines) .le-cleanup-item-flags,
+:is(#engines, #managed-engines) .le-cleanup-item-affected {
     font-size: var(--text-xs);
     color: var(--text-dim);
     font-style: normal;
 }
 
-#engines .le-cleanup-item-blocked {
+:is(#engines, #managed-engines) .le-cleanup-item-blocked {
     font-size: var(--text-xs);
     color: var(--red);
     font-style: normal;
 }
 
-#engines .le-cleanup-empty {
+:is(#engines, #managed-engines) .le-cleanup-empty {
     color: var(--text-dim);
     text-align: center;
     padding: 1rem 0;
@@ -220,7 +220,7 @@
 }
 
 /* 清理结果面板：部分成功/跳过场景（全部成功时 modal 直接关闭） */
-#engines .le-cleanup-result {
+:is(#engines, #managed-engines) .le-cleanup-result {
     margin-top: 0.75rem;
     padding: 0.5rem 0.75rem;
     border-radius: var(--radius-sm, 4px);
@@ -229,26 +229,26 @@
     font-style: normal;
 }
 
-#engines .le-cleanup-result-ok {
+:is(#engines, #managed-engines) .le-cleanup-result-ok {
     color: var(--green);
     font-size: var(--text-sm);
     margin: 0;
     font-style: normal;
 }
 
-#engines .le-cleanup-result-skip {
+:is(#engines, #managed-engines) .le-cleanup-result-skip {
     color: var(--red);
     font-size: var(--text-sm);
     margin: 0;
     font-style: normal;
 }
 
-#engines .le-cleanup-result-skip + .le-cleanup-result-reason,
-#engines .le-cleanup-result-reason + .le-cleanup-result-reason {
+:is(#engines, #managed-engines) .le-cleanup-result-skip + .le-cleanup-result-reason,
+:is(#engines, #managed-engines) .le-cleanup-result-reason + .le-cleanup-result-reason {
     margin-top: 0.25rem;
 }
 
-#engines .le-cleanup-result-reason {
+:is(#engines, #managed-engines) .le-cleanup-result-reason {
     color: var(--text-sub);
     font-size: var(--text-xs);
     margin: 0;
@@ -256,7 +256,7 @@
     font-style: normal;
 }
 
-#engines .le-cleanup-error {
+:is(#engines, #managed-engines) .le-cleanup-error {
     margin-top: 0.75rem;
     padding: 0.5rem 0.75rem;
     border-radius: var(--radius-sm, 4px);
@@ -265,13 +265,13 @@
     font-style: normal;
 }
 
-#engines .le-cleanup-error-main {
+:is(#engines, #managed-engines) .le-cleanup-error-main {
     color: var(--red);
     font-size: var(--text-sm);
     font-style: normal;
 }
 
-#engines .le-cleanup-error-hint {
+:is(#engines, #managed-engines) .le-cleanup-error-hint {
     color: var(--text-sub);
     font-size: var(--text-xs);
     margin-top: 0.25rem;

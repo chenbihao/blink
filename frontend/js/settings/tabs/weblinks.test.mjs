@@ -12,13 +12,21 @@ globalThis.document = globalThis.document ?? {
     createElement: () => ({classList: {add() {}, remove() {}, toggle() {}}, append() {}, appendChild() {}}),
 };
 
-const {isSearchTemplate, normalizeConfig, localValidate, parseConflictError, describeConflicts} =
+const {visibleEntries, entryFromDraft, inferHomepage, isSearchTemplate, normalizeConfig, localValidate, parseConflictError, describeConflicts} =
     await import('./weblinks.js');
 
 // ── isSearchTemplate ────────────────────────────────────────────────────────
 assert.equal(isSearchTemplate('https://a.test/s?q={query}'), true);
 assert.equal(isSearchTemplate('https://a.test'), false);
 assert.equal(isSearchTemplate(null), false);
+
+assert.equal(inferHomepage('https://sub.example.co.uk:8443/find?q={query}#results'), 'https://sub.example.co.uk:8443/');
+assert.equal(inferHomepage('https://example.com/projects?q=new#top'), 'https://example.com/projects?q=new#top');
+for (const invalid of ['https://', 'javascript:alert(1)', 'https://user:pass@example.com']) assert.equal(inferHomepage(invalid), '');
+assert.deepEqual(localValidate({name:'Bili',keyword:'bili',home_url:'https://www.bilibili.com/',url_template:'https://search.bilibili.com/all?keyword={query}'}), []);
+assert.deepEqual(localValidate({name:'Home',keyword:'home',home_url:'https://example.com/portal',url_template:''}), []);
+assert.deepEqual(localValidate({name:'Home',keyword:'home',home_url:'https://example.com/{query}',url_template:''}), ['url_invalid']);
+assert.deepEqual(localValidate({name:'Home',keyword:'home',home_url:'https://example.com/',url_template:'https://example.com/search'}), ['search_query_missing']);
 
 // ── normalizeConfig ─────────────────────────────────────────────────────────
 const norm = normalizeConfig({entries: [
@@ -30,6 +38,8 @@ const norm = normalizeConfig({entries: [
 assert.equal(norm.seeded, true);
 assert.equal(norm.entries.length, 3);
 assert.equal(norm.entries[0].enabled, true, '缺省 enabled=true');
+assert.equal(norm.entries[0].home_url, '', '旧条目默认自动提取主页');
+assert.equal(normalizeConfig({entries:[{home_url:'https://example.com/portal'}]}).entries[0].home_url, 'https://example.com/portal');
 assert.equal(norm.entries[1].enabled, false);
 assert.ok(norm.entries[2].id.startsWith('entry-'), '无 id 生成兜底 id');
 assert.deepEqual(normalizeConfig(null), {entries: [], seeded: true});
@@ -73,3 +83,24 @@ const lines = describeConflicts(conflicts, (k) => dict[k] ?? k);
 assert.deepEqual(lines, ['clip: 已被引擎占用 (clipboard)', 'dup: 表内重复']);
 
 console.log('weblinks.test.mjs: all assertions passed');
+
+// 编辑已禁用的条目，不得悄悄启用；新条目默认启用。
+const changed = {id: 'off', name: 'Renamed', keyword: 'off', url_template: 'https://new.test'};
+assert.equal(entryFromDraft({enabled: false}, changed).enabled, false);
+assert.equal(entryFromDraft({enabled: true}, changed).enabled, true);
+assert.equal(entryFromDraft(null, changed).enabled, true);
+
+// 长列表视图：字母/拼音排序、自然数字、同名稳定排序、筛选不改存储顺序。
+const entries = [
+    {id:'z', name:'知乎', keyword:'zh', home_url:'https://zhihu.com/'},
+    {id:'g', name:'GitHub', keyword:'gh', url_template:'https://github.com/search?q={query}'},
+    {id:'b', name:'Bilibili', keyword:'bili'},
+    {id:'10', name:'Site 10', keyword:'s10'},
+    {id:'2', name:'Site 2', keyword:'s2'},
+    {id:'bd', name:'百度', keyword:'bd'},
+];
+assert.deepEqual(visibleEntries(entries).map(e => e.id), ['b','g','2','10','bd','z']);
+assert.deepEqual(entries.map(e => e.id), ['z','g','b','10','2','bd']);
+assert.deepEqual(visibleEntries(entries, ' GH ').map(e => e.id), ['g']);
+assert.deepEqual(visibleEntries(entries, 'ZHihU.com').map(e => e.id), ['z']);
+assert.equal(visibleEntries(entries, 'absent').length, 0);

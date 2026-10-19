@@ -607,11 +607,21 @@ function createItem(app, i) {
         iconWrap.appendChild(renderIcon("external-link", {ariaLabel: "超链条目"}));
         li.appendChild(iconWrap);
     }
-    // 0.26.13：书签条目——Lucide bookmark 占位（同 weblinks：lnk_path 是 URL）。
+    // 浏览器图标由来源身份投影，沿用懒加载协议；失败时保留 bookmark 占位。
     else if (app.source === "bookmarks") {
         const iconWrap = document.createElement("span");
         iconWrap.className = "app-icon clip-file-icon";
-        iconWrap.appendChild(renderIcon("bookmark", {ariaLabel: "书签条目"}));
+        const fallback = () => iconWrap.replaceChildren(renderIcon("bookmark", {ariaLabel: "书签条目"}));
+        if (app.icon_path?.startsWith("browser:")) {
+            const img = document.createElement("img");
+            img.className = "app-icon";
+            img.alt = app.icon_path.slice("browser:".length);
+            img.onerror = fallback;
+            img.src = "http://blink-icon.localhost/" + encodeURIComponent(app.icon_path);
+            iconWrap.appendChild(img);
+        } else {
+            fallback();
+        }
         li.appendChild(iconWrap);
     }
     // 0.26.9：剪贴板文件条目——Lucide file-text 占位（列表不读文件内容、

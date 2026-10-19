@@ -2725,6 +2725,12 @@ input.has-secret-hint::placeholder {
 
 /* ── 浏览器书签（0.26.13 BookmarkEngine，engines tab）──────────────────── */
 
+/* 触发词是 ≤20 字符的短词输入，不随 .input-wide 的 flex:1 撑满整行 */
+#bookmarks-keyword {
+    flex: 0 0 auto;
+    width: 240px;
+}
+
 .bookmarks-browser-toggles {
     display: flex;
     gap: 18px;
@@ -2802,3 +2808,7 @@ input.has-secret-hint::placeholder {
     outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
     outline-offset: 2px;
 }
+
+/* Search behavior and runtime lifecycle are separate pages. */
+#weblinks, #managed-everything-card { scroll-margin-top: var(--space-lg); }
+#weblinks { margin-top: var(--space-lg); }

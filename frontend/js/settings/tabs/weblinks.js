@@ -17,6 +17,16 @@ export function isSearchTemplate(url) {
     return typeof url === "string" && url.includes("{query}");
 }
 
+/** 表单预览：只提取 origin，保留子域名和端口；主页可手动覆盖。 */
+export function inferHomepage(raw) {
+    try {
+        const url = new URL(raw.trim());
+        if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password
+            || /[{}]/.test(url.hostname)) return '';
+        return isSearchTemplate(raw) ? `${url.origin}/` : raw.trim();
+    } catch { return ''; }
+}
+
 /** 后端分片 → 渲染模型。null/损坏 → 空表（后端启动已 seed；null 仅异常窗口出现）。 */
 export function normalizeConfig(raw) {
     if (!raw || typeof raw !== "object" || !Array.isArray(raw.entries)) {
@@ -31,6 +41,7 @@ export function normalizeConfig(raw) {
                 id: typeof e.id === "string" && e.id ? e.id : `entry-${Date.now()}-${seq++}`,
                 name: String(e.name ?? ""),
                 keyword: String(e.keyword ?? ""),
+                home_url: String(e.home_url ?? ""),
                 url_template: String(e.url_template ?? ""),
                 enabled: e.enabled !== false,
             })),
@@ -47,8 +58,11 @@ export function localValidate(entry) {
     const kw = entry.keyword.trim();
     if (!kw || kw.split(/\s+/).length !== 1) issues.push("keyword_invalid");
     if (kw.toLowerCase() === "ai") issues.push("keyword_reserved");
-    const url = entry.url_template.trim();
-    if (!/^https?:\/\//i.test(url)) issues.push("url_invalid");
+    const home = (entry.home_url ?? '').trim();
+    const url = (entry.url_template ?? '').trim();
+    if ((!home && !url) || (home && (!inferHomepage(home) || isSearchTemplate(home)))
+        || (url && !inferHomepage(url))) issues.push("url_invalid");
+    if (home && url && !isSearchTemplate(url)) issues.push("search_query_missing");
     return issues;
 }
 
@@ -79,15 +93,43 @@ export function describeConflicts(conflicts, translate) {
     });
 }
 
+/** 编辑只修改表单字段，保留条目的启用选择。 */
+export function entryFromDraft(existing, fields) {
+    return {...fields, enabled: existing?.enabled ?? true};
+}
+
+/** 列表视图：名称按字母/中文拼音排序，筛选不改变存储顺序或路由优先级。 */
+export function visibleEntries(entries, filter = "") {
+    const needle = filter.trim().toLocaleLowerCase();
+    const collator = new Intl.Collator('zh-CN', {numeric: true, sensitivity: 'base'});
+    return entries.filter(entry => !needle || [entry.name, entry.keyword, entry.home_url, entry.url_template]
+        .some(value => String(value ?? '').toLocaleLowerCase().includes(needle)))
+        // 拉丁名称在前；中文名称在后一组按拼音排序。
+        .sort((a, b) => Number(!/^[a-z0-9]/i.test(a.name)) - Number(!/^[a-z0-9]/i.test(b.name))
+            || collator.compare(a.name, b.name) || collator.compare(a.keyword, b.keyword) || a.id.localeCompare(b.id));
+}
+
 // ── Tab 初始化 ───────────────────────────────────────────────────────────────
 
 export function initWeblinksTab() {
     const listEl = document.getElementById("weblinks-list");
     const editorEl = document.getElementById("weblinks-editor");
     const errorEl = document.getElementById("weblinks-error");
+    const editorErrorEl = document.getElementById("weblinks-editor-error");
+    const overlayEl = document.getElementById("weblinks-overlay");
+    const filterEl = document.getElementById("weblinks-filter");
+    const addEl = document.getElementById("weblinks-add");
+    let returnFocus = null;
+    let saving = false;
     const nameEl = document.getElementById("weblinks-f-name");
     const keywordEl = document.getElementById("weblinks-f-keyword");
     const urlEl = document.getElementById("weblinks-f-url");
+    const homeEl = document.getElementById("weblinks-f-home");
+
+    function updateHomepagePreview() {
+        homeEl.placeholder = inferHomepage(urlEl.value) || 'https://example.com/';
+    }
+    urlEl.addEventListener('input', updateHomepagePreview);
 
     /** @type {{entries: Array, seeded: boolean}} */
     let config = {entries: [], seeded: true};
@@ -109,13 +151,14 @@ export function initWeblinksTab() {
     }
 
     function showError(lines) {
-        if (!lines.length) {
-            errorEl.classList.add("hidden");
-            errorEl.textContent = "";
-            return;
+        for (const el of [errorEl, editorErrorEl]) {
+            el.classList.add("hidden");
+            el.textContent = "";
         }
-        errorEl.classList.remove("hidden");
-        errorEl.textContent = lines.join("\n");
+        if (!lines.length) return;
+        const target = editingId === null ? errorEl : editorErrorEl;
+        target.classList.remove("hidden");
+        target.textContent = lines.join("\n");
     }
 
     function markKeywordInvalid(invalid) {
@@ -124,16 +167,18 @@ export function initWeblinksTab() {
 
     function render() {
         listEl.textContent = "";
-        if (!config.entries.length && editingId === null) {
+        const entries = visibleEntries(config.entries, filterEl.value);
+        if (!entries.length) {
             const empty = document.createElement("p");
             empty.className = "weblinks-empty";
-            empty.textContent = t("weblinks.empty");
+            empty.textContent = t(config.entries.length ? "weblinks.no_matches" : "weblinks.empty");
             listEl.appendChild(empty);
         }
-        for (const entry of config.entries) {
+        for (const entry of entries) {
             listEl.appendChild(renderRow(entry));
         }
-        editorEl.classList.toggle("hidden", editingId === null);
+        overlayEl.classList.toggle("hidden", editingId === null);
+        document.getElementById("weblinks-editor-title").textContent = t(editingId === "new" ? "weblinks.add_title" : "weblinks.edit_title");
         if (editingId !== null) editorEl.dataset.editing = editingId;
     }
 
@@ -158,8 +203,10 @@ export function initWeblinksTab() {
         badge.textContent = entry.keyword;
         const url = document.createElement("span");
         url.className = "weblinks-row-url";
-        url.textContent = entry.url_template;
-        url.title = entry.url_template;
+        const home = entry.home_url || inferHomepage(entry.url_template);
+        url.textContent = home;
+        url.title = isSearchTemplate(entry.url_template)
+            ? `${home}\n${entry.url_template}` : home;
         main.append(title, badge, url);
         if (!entry.enabled) row.classList.add("weblinks-row-disabled");
 
@@ -168,7 +215,7 @@ export function initWeblinksTab() {
         const cb = document.createElement("input");
         cb.type = "checkbox";
         cb.checked = entry.enabled;
-        cb.addEventListener("change", () => persist({ ...entry, enabled: cb.checked }));
+        cb.addEventListener("change", () => persist({ ...entry, enabled: cb.checked }).catch(() => {}));
         const slider = document.createElement("span");
         slider.className = "slider";
         toggle.append(cb, slider);
@@ -186,7 +233,7 @@ export function initWeblinksTab() {
         delBtn.addEventListener("click", () => {
             config.entries = config.entries.filter((e) => e.id !== entry.id);
             if (editingId === entry.id) closeEditor();
-            persistConfig();
+            persistConfig().catch(() => {});
         });
 
         row.append(icon, main, toggle, editBtn, delBtn);
@@ -194,10 +241,13 @@ export function initWeblinksTab() {
     }
 
     function openEditor(entry) {
+        returnFocus = document.activeElement;
         editingId = entry ? entry.id : "new";
         nameEl.value = entry ? entry.name : "";
         keywordEl.value = entry ? entry.keyword : "";
-        urlEl.value = entry ? entry.url_template : "";
+        homeEl.value = entry ? (entry.home_url || (!isSearchTemplate(entry.url_template) ? entry.url_template : '')) : '';
+        urlEl.value = entry && isSearchTemplate(entry.url_template) ? entry.url_template : '';
+        updateHomepagePreview();
         markKeywordInvalid(false);
         showError([]);
         render();
@@ -205,22 +255,44 @@ export function initWeblinksTab() {
     }
 
     function closeEditor() {
+        if (saving) return;
         editingId = null;
         markKeywordInvalid(false);
         showError([]);
         render();
+        (returnFocus?.isConnected ? returnFocus : addEl).focus({preventScroll: true});
     }
+
+    filterEl.addEventListener("input", render);
+    overlayEl.addEventListener("click", event => {
+        if (event.target === overlayEl) closeEditor();
+    });
+    overlayEl.addEventListener("keydown", event => {
+        if (event.key === "Escape") {
+            event.preventDefault();
+            event.stopPropagation();
+            closeEditor();
+        } else if (event.key === "Tab") {
+            const controls = [...editorEl.querySelectorAll('input:not([disabled]), button:not([disabled])')];
+            if (!controls.length) { event.preventDefault(); return; }
+            const first = controls[0], last = controls.at(-1);
+            if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+            else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+        }
+    });
 
     /** 串行化保存（开关快速切换/连续操作不交错）；失败重载回滚乐观状态。 */
     function persistConfig() {
+        const snapshot = structuredClone(config);
         const pending = saveChain.then(async () => {
-            await saveConfig("weblinks", config);
+            await saveConfig("weblinks", snapshot);
         }).catch(async (error) => {
             console.error("[weblinks] save failed:", error);
             const conflicts = parseConflictError(error);
             showError(conflicts
                 ? describeConflicts(conflicts, t)
-                : [t("weblinks.error.save_failed")]);
+                : [t(String(error?.message || error).includes('weblink_url_invalid')
+                    ? "weblinks.error.url_invalid" : "weblinks.error.save_failed")]);
             if (conflicts?.length) markKeywordInvalid(conflicts.some((c) =>
                 c.keyword.trim().toLowerCase() === keywordEl.value.trim().toLowerCase()));
             await load();
@@ -240,13 +312,14 @@ export function initWeblinksTab() {
     document.getElementById("weblinks-cancel").addEventListener("click", closeEditor);
     editorEl.addEventListener("submit", (event) => {
         event.preventDefault();
-        const draft = {
+        if (saving) return;
+        const draft = entryFromDraft(config.entries.find((entry) => entry.id === editingId), {
             id: editingId === "new" ? `entry-${Date.now()}-${Math.floor(Math.random() * 1e6)}` : editingId,
             name: nameEl.value.trim(),
             keyword: keywordEl.value.trim(),
+            home_url: homeEl.value.trim(),
             url_template: urlEl.value.trim(),
-            enabled: true,
-        };
+        });
         const issues = localValidate(draft);
         if (issues.length) {
             showError(issues.map((code) => t(`weblinks.error.${code}`)));
@@ -259,12 +332,18 @@ export function initWeblinksTab() {
         } else {
             config.entries.push(draft);
         }
-        // 成功才关编辑器；失败时表单保持打开、输入值保留（persistConfig 已展示冲突）
+        // 保存期间锁定当前草稿，旧响应不能关闭下一次编辑。
+        saving = true;
+        const controls = [...editorEl.querySelectorAll('input, button')];
+        controls.forEach(control => { control.disabled = true; });
         persistConfig().then(() => {
-            editingId = null;
-            showError([]);
-            render();
-        }).catch(() => {/* persistConfig 已展示错误并重载列表 */});
+            saving = false;
+            closeEditor();
+        }).catch(() => {/* persistConfig 已展示错误并重载列表 */}).finally(() => {
+            saving = false;
+            controls.forEach(control => { control.disabled = false; });
+            if (editingId !== null) keywordEl.focus();
+        });
         render();
     });
 

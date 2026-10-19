@@ -12,6 +12,11 @@ import {saveConfig} from "../../shared/config-keys.js";
 import {EVENTS} from "../../shared/event-names.js";
 import {formatBytes, progressPercent} from "../../shared/download-progress.js";
 import {initApplicationSearch} from "./application-search.js";
+import {
+    initManagedEverything,
+    refreshBadgeText as refreshManagedEverythingBadgeText,
+    renderManagedEverything,
+} from "./engines/managed-everything.js";
 
 /**
  * 初始化搜索引擎 Tab
@@ -24,11 +29,11 @@ export function initEnginesTab(cfg) {
     initCalcConfig();
     initFileSearchConfig();
     initBookmarksConfig();
-    initScriptRuntime();
-    initManagedEverything();
+
     // 状态徽章文本是 JS 动态生成（状态结果 → i18n key），applyI18n 扫不到，
     // 语言切换时通过 i18n 订阅自行刷新
     onLangChange(() => {
+        if (lastFileSearchStatus) renderFileSearchStatus(lastFileSearchStatus);
         refreshEverythingBadgeText();
         refreshBookmarksBadgeText();
         refreshManagedEverythingBadgeText();
@@ -36,6 +41,18 @@ export function initEnginesTab(cfg) {
         refreshScriptRuntimeBadgeText("node");
     });
 }
+
+export function initManagedEnginesTab() {
+    initScriptRuntime();
+    initManagedEverything({refreshStatus: refreshFileSearchStatus});
+}
+
+let lastFileSearchStatus = null;
+let lastFileSearchCfg = null;
+let fileStatusRevision = 0;
+let fileSaveChain = Promise.resolve();
+/** 端口行当前绑定对象：user=已有 Everything；managed=内置引擎（托管）。 */
+let portRowMode = "user";
 
 /**
  * 加载并回填搜索引擎配置（应用搜索 / 文件搜索 / 计算器）
@@ -45,29 +62,20 @@ async function loadEngineConfig() {
     // 文件搜索
     try {
         const fileSearch = await invoke("get_engine_config", {engineId: "file_search"});
+        lastFileSearchCfg = fileSearch;
         const enabled = fileSearch.enabled !== false;
-        const dataSource = fileSearch.data_source || "auto";
         const port = fileSearch.everything_port || 80;
         const maxResults = fileSearch.max_results || 20;
-        const managedPort = fileSearch.managed_everything_port || 52819;
 
         const enabledEl = document.getElementById("file-search-enabled");
-        const dataSourceEl = document.getElementById("file-search-data-source");
         const portEl = document.getElementById("everything-port");
         const maxResultsEl = document.getElementById("everything-max-results");
-        const managedPortEl = document.getElementById("managed-everything-port");
 
         if (enabledEl) enabledEl.checked = enabled;
-        if (dataSourceEl) dataSourceEl.value = dataSource;
         if (portEl) portEl.value = port;
         if (maxResultsEl) maxResultsEl.value = maxResults;
-        if (managedPortEl) managedPortEl.value = managedPort;
-        updateUserEverythingRowsVisible(dataSource);
 
-        // 页面加载后自动探测一次（auto/everything 模式；managed-only 不用用户实例）
-        if (dataSource !== "local" && dataSource !== "managed") {
-            setTimeout(probeEverythingStatus, 500);
-        }
+        refreshFileSearchStatus();
     } catch (e) {
         console.error("loadFileSearchConfig failed:", e);
         const portEl = document.getElementById("everything-port");
@@ -99,60 +107,50 @@ function initCalcConfig() {
 }
 
 /**
- * 初始化文件搜索配置：任一字段变更即保存；探测按钮独立
+ * 初始化文件搜索配置：任一字段变更即保存；探测按钮独立。
+ * 0.26.15 移除「搜索模式」选择：来源决策收敛为自动（用户 Everything → 内置引擎 → 本地），
+ * UI 固定写 data_source:"auto"；托管 Everything 的安装/启停在 managed-everything.js。
  */
 function initFileSearchConfig() {
     // 探测 Everything 状态
     document.getElementById("probe-everything")?.addEventListener("click", probeEverythingStatus);
 
     const enabledEl = document.getElementById("file-search-enabled");
-    const dataSourceEl = document.getElementById("file-search-data-source");
     const portEl = document.getElementById("everything-port");
     const maxResultsEl = document.getElementById("everything-max-results");
-    const managedPortEl = document.getElementById("managed-everything-port");
 
-    [enabledEl, dataSourceEl, portEl, maxResultsEl, managedPortEl].forEach((el) => {
+    [enabledEl, portEl, maxResultsEl].forEach((el) => {
         el?.addEventListener("change", saveFileSearchConfig);
     });
 }
 
-/**
- * 保存文件搜索配置（校验端口 + saveConfig + 视需重探）
- */
-/** managed-only 模式下用户实例两行（状态/端口）无意义，整组隐藏。 */
-function updateUserEverythingRowsVisible(dataSource) {
-    const rows = document.getElementById("user-everything-rows");
-    if (rows) rows.style.display = dataSource === "managed" ? "none" : "";
-}
-
 async function saveFileSearchConfig() {
     const enabled = document.getElementById("file-search-enabled")?.checked ?? true;
-    const dataSource = document.getElementById("file-search-data-source")?.value || "auto";
     const port = parseInt(document.getElementById("everything-port")?.value, 10);
     const maxResults = parseInt(document.getElementById("everything-max-results")?.value, 10) || 20;
-    const managedPort = parseInt(document.getElementById("managed-everything-port")?.value, 10) || 52819;
 
     if (!Number.isFinite(port) || port < 1 || port > 65535) {
         // 用户还在输入中（例如清空端口再输），静默跳过；等输到合法值再自动保存
         console.warn("[engines] file-search port invalid, skip auto-save:", port);
         return;
     }
-    if (!Number.isFinite(managedPort) || managedPort < 1 || managedPort > 65535) {
-        console.warn("[engines] managed port invalid, skip auto-save:", managedPort);
-        return;
+
+    // 端口行跟随当前引擎（0.26.15）：托管模式写 managed_everything_port（下次启动
+    // 实例生效），用户模式写 everything_port；补丁合并下未提交的键保持存储值不动
+    const patch = {enabled, data_source: "auto", max_results: maxResults};
+    if (portRowMode === "managed") {
+        patch.managed_everything_port = port;
+    } else {
+        patch.everything_port = port;
     }
 
-    updateUserEverythingRowsVisible(dataSource);
-
     try {
-        await saveConfig("file_search", {
-            enabled,
-            data_source: dataSource,
-            everything_port: port,
-            max_results: maxResults,
-            managed_everything_port: managedPort,
-        });
-        if (dataSource !== "local" && dataSource !== "managed") {
+        const pending = fileSaveChain.then(() => saveConfig("file_search", patch));
+        fileSaveChain = pending.catch(() => {});
+        await pending;
+        if (portRowMode === "managed") {
+            refreshFileSearchStatus();
+        } else {
             probeEverythingStatus();
         }
     } catch (e) {
@@ -166,21 +164,17 @@ async function saveFileSearchConfig() {
  * 随后拉取统一状态（用户实例 + 托管实例）刷新两枚徽章。
  */
 async function probeEverythingStatus() {
-    const statusEl = document.getElementById("everything-status");
-    const portInput = document.getElementById("everything-port");
-    const port = parseInt(portInput?.value || "80", 10);
-
-    statusEl.textContent = t("engine.status.probing");
-    statusEl.className = "status-badge status-unknown";
-    statusEl.dataset.badgeState = "probing";
-
+    const revision = ++fileStatusRevision;
+    const button = document.getElementById("probe-everything");
+    if (button) button.disabled = true;
     try {
-        await invoke("probe_everything", {port});
-    } catch (e) {
-        console.error("probe_everything failed:", e);
-        statusEl.dataset.badgeState = "failed";
+        const payload = await invoke("probe_everything");
+        if (revision === fileStatusRevision) renderFileSearchStatus(payload);
+    } catch (error) {
+        console.error("probe_everything failed:", error);
+    } finally {
+        if (button) button.disabled = false;
     }
-    await refreshFileSearchStatus();
 }
 
 /**
@@ -188,6 +182,7 @@ async function probeEverythingStatus() {
  * 不做 live 探测——live 探测只在「重新探测」按钮里发生）。
  */
 async function refreshFileSearchStatus() {
+    const revision = ++fileStatusRevision;
     let payload = null;
     try {
         payload = await invoke("get_file_search_status");
@@ -195,7 +190,7 @@ async function refreshFileSearchStatus() {
         console.error("get_file_search_status failed:", e);
         return;
     }
-    renderFileSearchStatus(payload);
+    if (revision === fileStatusRevision) renderFileSearchStatus(payload);
 }
 
 /**
@@ -204,28 +199,91 @@ async function refreshFileSearchStatus() {
  */
 function renderFileSearchStatus(payload) {
     if (!payload) return;
-    // ── 你的 Everything ──
-    const userEl = document.getElementById("everything-status");
-    if (userEl) {
-        if (payload.userAvailable === true) {
-            userEl.dataset.badgeState = "available";
-        } else if (payload.userAvailable === false) {
-            userEl.dataset.badgeState = "unavailable";
-        } else {
-            userEl.dataset.badgeState = "unprobed";
-        }
-        refreshEverythingBadgeText();
+    lastFileSearchStatus = payload;
+    const active = document.getElementById("file-search-active-source");
+    if (active) {
+        active.textContent = t(`engine.file_search.source.${payload.activeSource || "unavailable"}`);
+        active.className = "status-badge " + (["everything", "managed"].includes(payload.activeSource) ? "status-available" : "status-unknown");
     }
+    renderPortRow(payload);
     // ── 内置搜索引擎（托管）──
     renderManagedEverything(payload);
 }
 
 /**
- * 刷新用户 Everything 徽章文本（语言切换/状态更新共用）。
+ * 端口行跟随当前引擎（0.26.15 调优）：用户 Everything 在线 → 绑定用户端口；
+ * 否则已装内置引擎 → 绑定托管端口（运行中回填实际端口，编辑写入
+ * managed_everything_port，下次启动实例生效）；两者皆无 → 用户端口。
+ */
+function renderPortRow(payload) {
+    const mode = payload?.userAvailable === true ? "user" : (payload?.installed ? "managed" : "user");
+    const label = document.getElementById("everything-port-label");
+    const input = document.getElementById("everything-port");
+    const hint = document.getElementById("everything-port-hint-icon");
+    if (!label || !input) return;
+
+    if (mode !== portRowMode) {
+        portRowMode = mode;
+        // label 内含 ⓘ 子元素，须按 applyI18n 同款只更新首个文本节点
+        const labelKey = mode === "managed" ? "engine.managed.port.label" : "engine.everything.port.label";
+        label.dataset.i18n = labelKey;
+        const textNode = [...label.childNodes].find((n) => n.nodeType === Node.TEXT_NODE);
+        if (textNode) textNode.textContent = t(labelKey);
+        else label.insertBefore(document.createTextNode(t(labelKey)), label.firstChild);
+        if (hint) {
+            const hintKey = mode === "managed"
+                ? "engine.file_search.managed_port_hint" : "engine.file_search.port_hint";
+            hint.dataset.i18nTitle = hintKey;
+            hint.title = t(hintKey);
+        }
+        input.value = mode === "managed"
+            ? (payload.running && payload.port) || lastFileSearchCfg?.managed_everything_port || 52819
+            : (lastFileSearchCfg?.everything_port || 80);
+    } else if (mode === "managed" && payload.running && payload.port
+        && document.activeElement !== input) {
+        // 实例重启换端口（占用向上扫描）后回填实际端口；不覆盖输入中的编辑
+        input.value = payload.port;
+    }
+
+    // 徽章跟随绑定对象：托管模式显示托管状态，用户模式显示探测态
+    const badge = document.getElementById("everything-status");
+    if (badge) {
+        if (mode === "managed") {
+            badge.dataset.managedPort = "1";
+            badge.dataset.badgeState = payload.running ? "managed_running" : "managed_installed";
+            badge.dataset.version = payload.version || "";
+        } else {
+            delete badge.dataset.managedPort;
+            if (payload.userProbing) {
+                badge.dataset.badgeState = "probing";
+            } else if (payload.userAvailable === true) {
+                badge.dataset.badgeState = "available";
+            } else if (payload.userAvailable === false) {
+                badge.dataset.badgeState = "unavailable";
+            } else {
+                badge.dataset.badgeState = "unprobed";
+            }
+        }
+        refreshEverythingBadgeText();
+    }
+}
+
+/**
+ * 刷新端口行徽章文本（语言切换/状态更新共用；托管模式显示托管状态）。
  */
 export function refreshEverythingBadgeText() {
     const statusEl = document.getElementById("everything-status");
     if (!statusEl) return;
+    if (statusEl.dataset.managedPort) {
+        if (statusEl.dataset.badgeState === "managed_running") {
+            statusEl.textContent = t("engine.managed.port_status.running");
+            statusEl.className = "status-badge status-available";
+        } else {
+            statusEl.textContent = t("engine.managed.status.installed", {version: statusEl.dataset.version || ""});
+            statusEl.className = "status-badge status-unknown";
+        }
+        return;
+    }
     const key =
         statusEl.dataset.badgeState === "available" ? "engine.status.available" :
             statusEl.dataset.badgeState === "unavailable" ? "engine.status.unavailable" :
@@ -357,6 +415,7 @@ function initBookmarksConfig() {
         const value = collect();
         const pending = saveChain.then(async () => {
             await saveConfig("bookmarks", value);
+            config = value;
         }).catch(async (error) => {
             console.error("[bookmarks] save failed:", error);
             const conflict = parseBookmarkConflictError(error);
@@ -383,8 +442,7 @@ function initBookmarksConfig() {
         if (mixEl) mixEl.checked = config.mix_into_global === true;
         for (const [i, b] of ["chrome", "edge", "brave"].entries()) {
             const el = browserEls[i];
-            if (el) el.checked = !Array.isArray(config.browsers) || config.browsers.length === 0
-                || config.browsers.includes(b);
+            if (el) el.checked = !Array.isArray(config.browsers) || config.browsers.includes(b);
         }
         renderBookmarksStatus();
     }
@@ -609,224 +667,4 @@ function initScriptRuntime() {
     });
 
     refreshScriptRuntimeStatus();
-}
-
-// ── 内置搜索引擎（Blink 托管 Everything，0.26.14）────────────────────────
-//
-// 状态徽章/安装按钮/进度条与脚本运行时同构；实例启停与 UAC 服务安装为
-// 本区块独有。进度经 EVENTS.MANAGED_RUNTIME_INSTALL 事件推送。
-
-/** 渲染托管 Everything 状态徽章与安装按钮态。 */
-function renderManagedEverything(st) {
-    const statusEl = document.getElementById("managed-everything-status");
-    const actionEl = document.getElementById("managed-everything-action");
-    if (!statusEl) return;
-    // 后端 #[serde(flatten)]：runtime 字段直接平铺在 st 上
-    const r = st;
-    if (r?.running) {
-        statusEl.dataset.badgeState = "running";
-        statusEl.dataset.port = r.port ?? "";
-    } else if (r?.installed) {
-        statusEl.dataset.badgeState = "installed";
-        delete statusEl.dataset.port;
-    } else {
-        statusEl.dataset.badgeState = "not_installed";
-        delete statusEl.dataset.port;
-    }
-    statusEl.dataset.version = r?.version || "";
-    statusEl.title = r?.lastError || "";
-    refreshManagedEverythingBadgeText();
-    if (actionEl && !actionEl.dataset.busy) {
-        actionEl.dataset.installed = r?.installed ? "1" : "0";
-        actionEl.textContent = r?.installed
-            ? t("engine.managed.uninstall")
-            : t("engine.managed.install");
-    }
-}
-
-/** 徽章文本刷新（语言切换/状态更新共用）。 */
-export function refreshManagedEverythingBadgeText() {
-    const statusEl = document.getElementById("managed-everything-status");
-    if (!statusEl) return;
-    const state = statusEl.dataset.badgeState;
-    const version = statusEl.dataset.version || "";
-    if (state === "running") {
-        statusEl.textContent = t("engine.managed.status.running", {
-            port: statusEl.dataset.port || "?",
-        });
-        statusEl.className = "status-badge status-available";
-    } else if (state === "installed") {
-        statusEl.textContent = t("engine.managed.status.installed", {version});
-        statusEl.className = "status-badge status-unknown";
-    } else if (state === "installing") {
-        statusEl.textContent = t("engine.managed.status.installing");
-        statusEl.className = "status-badge status-unknown";
-    } else {
-        statusEl.textContent = t("engine.managed.status.not_installed");
-        statusEl.className = "status-badge status-unavailable";
-    }
-}
-
-async function refreshManagedEverythingStatus() {
-    await refreshFileSearchStatus();
-}
-
-/** 下载进度条（downloaded 为 null 时隐藏）。 */
-function renderManagedProgress(downloaded, total) {
-    const wrap = document.getElementById("managed-everything-progress");
-    if (!wrap) return;
-    const fill = wrap.querySelector(".download-progress__fill");
-    const text = wrap.querySelector(".download-progress__text");
-    if (downloaded === null || downloaded === undefined) {
-        wrap.hidden = true;
-        return;
-    }
-    wrap.hidden = false;
-    const percent = progressPercent(downloaded, total);
-    fill.classList.toggle("download-progress__fill--indeterminate", percent === null);
-    fill.style.width = percent === null ? "" : `${percent}%`;
-    if (text) {
-        text.textContent = total
-            ? `${formatBytes(downloaded)} / ${formatBytes(total)} · ${percent ?? "--"}%`
-            : formatBytes(downloaded);
-    }
-}
-
-/** 安装进度事件（stage 机：downloading/extracting/verifying/promoting/done/failed）。 */
-function handleManagedInstallEvent(payload) {
-    const {stage, downloaded, total, message} = payload || {};
-    const actionEl = document.getElementById("managed-everything-action");
-    const statusEl = document.getElementById("managed-everything-status");
-
-    if (stage === "downloading" && downloaded !== undefined) {
-        if (actionEl) {
-            actionEl.dataset.busy = "1";
-            actionEl.disabled = true;
-            actionEl.textContent = t("engine.managed.installing");
-        }
-        renderManagedProgress(downloaded, total ?? null);
-        return;
-    }
-    if (["extracting", "verifying", "promoting"].includes(stage)) {
-        renderManagedProgress(null);
-        if (statusEl) {
-            statusEl.dataset.badgeState = "installing";
-            statusEl.className = "status-badge status-unknown";
-            statusEl.textContent = t(`engine.script_runtime.stage.${stage}`);
-        }
-        return;
-    }
-    if (stage === "done") {
-        renderManagedProgress(null);
-        if (actionEl) {
-            delete actionEl.dataset.busy;
-            actionEl.disabled = false;
-        }
-        refreshManagedEverythingStatus();
-        return;
-    }
-    if (stage === "failed") {
-        renderManagedProgress(null);
-        if (actionEl) {
-            delete actionEl.dataset.busy;
-            actionEl.disabled = false;
-        }
-        if (statusEl) {
-            statusEl.dataset.badgeState = "not_installed";
-            statusEl.className = "status-badge status-unavailable";
-            statusEl.textContent = t("engine.managed.install_failed", {
-                message: message || "unknown",
-            });
-            statusEl.title = message || "";
-        }
-    }
-}
-
-/** 初始化托管 Everything 区块。 */
-function initManagedEverything() {
-    // 周期轮询（3s，仅设置窗口存活期间；统一状态一次 invoke 覆盖两枚徽章，
-    // 用户实例徽章取引擎内存态不做 live 探测——live 探测归「重新探测」按钮）
-    setInterval(refreshFileSearchStatus, 3000);
-
-    document.getElementById("managed-everything-action")?.addEventListener("click", async (e) => {
-        const btn = e.currentTarget;
-        const installed = btn.dataset.installed === "1";
-        try {
-            if (installed) {
-                const ok = await confirmDialog(t("engine.managed.uninstall_confirm"), {
-                    title: t("engine.managed.uninstall"), kind: "warning",
-                });
-                if (!ok) return;
-                await invoke("uninstall_managed_everything");
-            } else {
-                btn.dataset.busy = "1";
-                btn.disabled = true;
-                btn.textContent = t("engine.managed.installing");
-                await invoke("install_managed_everything");
-            }
-            refreshManagedEverythingStatus();
-        } catch (err) {
-            console.error("managed everything action failed:", err);
-            delete btn.dataset.busy;
-            btn.disabled = false;
-            messageDialog(String(err?.message || err), {title: t("common.error"), kind: "error"});
-            refreshManagedEverythingStatus();
-        }
-    });
-
-    // 启动并测试（长预算等待就绪）／停止实例
-    document.getElementById("managed-everything-start")?.addEventListener("click", async () => {
-        const statusEl = document.getElementById("managed-everything-status");
-        if (statusEl) {
-            statusEl.dataset.badgeState = "installing";
-            statusEl.className = "status-badge status-unknown";
-            statusEl.textContent = t("engine.managed.status.starting");
-        }
-        try {
-            await invoke("start_managed_everything");
-        } catch (err) {
-            messageDialog(String(err?.message || err), {title: t("common.error"), kind: "error"});
-        }
-        refreshManagedEverythingStatus();
-    });
-    document.getElementById("managed-everything-stop")?.addEventListener("click", async () => {
-        const statusEl = document.getElementById("managed-everything-status");
-        if (statusEl) {
-            statusEl.dataset.badgeState = "installed";
-            statusEl.dataset.version = statusEl.dataset.version || "";
-            refreshManagedEverythingBadgeText();
-        }
-        try {
-            await invoke("stop_managed_everything");
-        } catch (err) {
-            console.error("stop managed everything failed:", err);
-        }
-        refreshManagedEverythingStatus();
-    });
-
-    // UAC 服务安装：仅发起提权请求；安装后提示重启实例
-    document.getElementById("managed-everything-service")?.addEventListener("click", async (e) => {
-        const btn = e.currentTarget;
-        const ok = await confirmDialog(t("engine.managed.service.confirm"), {
-            title: t("engine.managed.service.label"), kind: "warning",
-        });
-        if (!ok) return;
-        btn.disabled = true;
-        try {
-            await invoke("install_everything_service");
-            messageDialog(t("engine.managed.service.installed_hint"), {
-                title: t("engine.managed.service.label"), kind: "info",
-            });
-        } catch (err) {
-            messageDialog(String(err?.message || err), {
-                title: t("common.error"), kind: "error",
-            });
-        }
-        btn.disabled = false;
-    });
-
-    listen(EVENTS.MANAGED_RUNTIME_INSTALL, (event) => {
-        handleManagedInstallEvent(event.payload);
-    });
-    refreshManagedEverythingStatus();
 }

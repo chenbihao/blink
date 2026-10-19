@@ -12,8 +12,8 @@
 //!
 //! **两种 hint 形态**（沿用 0.8.1）：
 //! - `display` 非空（补全场景 `fy` → `fanyi`）：overlay 渲染灰影
-//! - `display` 为空（已完整无尾空格 `fanyi`）：overlay 不渲染任何字符，
-//!   采纳提示由 SuggestionBar 承载（bar 渲染非 Completion 槽位）
+//! - `display` 为空（已完整无尾空格 `fanyi`）：overlay 仍显示采纳键帽。
+//! 两种形态都用共享 kbd 组件显示当前采纳键，不依赖排除 Completion 的建议条。
 //!
 //! **Ghost 是"发现工具"，不是"召回工具"**：
 //! - 部分拼音 `fan hello` 不进 route 匹配（翻译插件不出现在候选），但走独立 fuzzy
@@ -21,6 +21,8 @@
 
 import {queryEl} from "./dom.js";
 import {acceptSuggestion} from "./suggestion-accept.js";
+import {getTabKey} from "./autosuggest-config.js";
+import {renderCompletionGhost} from "./completion-ghost-view.js";
 
 // 当前 suggestion（SuggestionSet.primary 中 kind=completion 的建议），
 // 形如 { id, kind, action, rankScore, display, prefixLen, origin }
@@ -108,17 +110,11 @@ export function syncTypedText(text) {
  * 调用方保证 ghostTypedEl / ghostSuggestEl 已初始化。
  */
 function renderToDom(query) {
-    if (!currentSuggestion || !currentSuggestion.display) {
-        // 无建议 / 已完整场景（display 为空）：overlay 不渲染字符——用户已看到
-        // 自己的完整输入，加任何影子都是冗余；提示交给 SuggestionBar。
-        ghostTypedEl.textContent = currentSuggestion ? query : "";
-        ghostSuggestEl.textContent = "";
+    if (!renderCompletionGhost(query, currentSuggestion, ghostTypedEl, ghostSuggestEl, getTabKey())) {
         queryEl.removeAttribute("data-ghost-active");
         syncScroll();
         return;
     }
-    ghostTypedEl.textContent = query;
-    ghostSuggestEl.textContent = ` -> ${currentSuggestion.display}`;
     queryEl.setAttribute("data-ghost-active", "");
     // 0.10.6: 有影子时调整滚动留出右侧空间给 preview 文本
     scrollWithMargin();

@@ -86,6 +86,36 @@ pub fn render_url(template: &str, query: &str) -> String {
     template.replace("{query}", &percent_encode_query(query))
 }
 
+/// 只接受可由默认浏览器打开的 HTTP(S) 地址；模板占位符仅允许出现在路径/参数中。
+fn valid_web_url(raw: &str) -> Option<reqwest::Url> {
+    let url = reqwest::Url::parse(raw.trim()).ok()?;
+    (matches!(url.scheme(), "http" | "https")
+        && url.host_str().is_some_and(|host| !host.contains(['{', '}']))
+        && url.username().is_empty() && url.password().is_none()).then_some(url)
+}
+
+/// 主页手动配置优先；旧直达地址保留完整路径；搜索地址仅推导 origin，不猜注册域名。
+pub fn homepage_url(entry: &WebLinkEntry) -> Option<String> {
+    if !entry.home_url.trim().is_empty() {
+        if is_search_template(&entry.home_url) { return None; }
+        valid_web_url(&entry.home_url)?;
+        return Some(entry.home_url.trim().to_string());
+    }
+    let url = valid_web_url(&entry.url_template)?;
+    if !is_search_template(&entry.url_template) {
+        return Some(entry.url_template.trim().to_string());
+    }
+    Some(format!("{}/", url.origin().ascii_serialization()))
+}
+
+/// 保存时校验主页与搜索地址。缺省主页可以推导；显式搜索地址必须保留 {query}。
+pub fn validate_urls(entry: &WebLinkEntry) -> bool {
+    homepage_url(entry).is_some()
+        && (entry.url_template.trim().is_empty() || valid_web_url(&entry.url_template).is_some())
+        && (entry.home_url.trim().is_empty() || entry.url_template.trim().is_empty()
+            || is_search_template(&entry.url_template))
+}
+
 // ── 纯函数：keyword 冲突校验 ──────────────────────────────────────────────────
 
 // 占用者类型在 intent 域（`RuleRouter::keyword_owner` 的返回）；search 依赖 intent 为既有方向。
@@ -196,14 +226,13 @@ fn open_item(entry: &WebLinkEntry, title: String, url: String, score: f32) -> Se
 /// Takeover 条目标题（zh/en 双语；语言来自 `QueryContext.language`）。
 fn takeover_title(entry: &WebLinkEntry, arg: &str, language: &str) -> String {
     let en = language.starts_with("en");
-    if !is_search_template(&entry.url_template) {
+    if arg.is_empty() || !is_search_template(&entry.url_template) {
         return entry.name.clone();
     }
-    match (arg.is_empty(), en) {
-        (true, false) => format!("用{}搜索…", entry.name),
-        (true, true) => format!("Search with {}…", entry.name),
-        (false, false) => format!("{} 搜索 {}", entry.name, arg),
-        (false, true) => format!("Search {arg} with {}", entry.name),
+    if en {
+        format!("Search {arg} with {}", entry.name)
+    } else {
+        format!("{} 搜索 {}", entry.name, arg)
     }
 }
 
@@ -265,7 +294,12 @@ impl SearchEngine for WebEngine {
                 return Vec::new();
             };
             let arg = query.trim();
-            let url = render_url(&entry.url_template, arg);
+            let url = if arg.is_empty() || !is_search_template(&entry.url_template) {
+                homepage_url(entry)
+            } else {
+                valid_web_url(&entry.url_template).map(|_| render_url(&entry.url_template, arg))
+            };
+            let Some(url) = url else { return Vec::new(); };
             let title = takeover_title(entry, arg, ctx.language);
             return vec![open_item(entry, title, url, 1.0)];
         }
@@ -278,7 +312,7 @@ impl SearchEngine for WebEngine {
         let candidates: Vec<&WebLinkEntry> = cfg
             .entries
             .iter()
-            .filter(|e| e.enabled && !is_search_template(&e.url_template))
+            .filter(|e| e.enabled && !is_search_template(&e.url_template) && homepage_url(e).is_some())
             .collect();
         if candidates.is_empty() {
             return Vec::new();
@@ -308,7 +342,7 @@ impl SearchEngine for WebEngine {
         scored
             .into_iter()
             .take(MIXED_LIMIT)
-            .map(|(raw, e)| open_item(e, e.name.clone(), e.url_template.clone(), raw as f32 / best as f32))
+            .filter_map(|(raw, e)| homepage_url(e).map(|url| open_item(e, e.name.clone(), url, raw as f32 / best as f32)))
             .collect()
     }
 }
@@ -325,6 +359,7 @@ mod tests {
             id: id.into(),
             name: name.into(),
             keyword: keyword.into(),
+            home_url: String::new(),
             url_template: url.into(),
             enabled,
         }
@@ -356,6 +391,82 @@ mod tests {
             entries,
             seeded: true,
         })
+    }
+
+    #[tokio::test]
+    async fn homepage_override_and_search_use_separate_destinations() {
+        let mut site = entry("bili", "Bilibili", "bili", "https://search.bilibili.com/all?keyword={query}", true);
+        site.home_url = "https://www.bilibili.com/".into();
+        let e = engine_with(vec![site]);
+        for query in ["", "  "] {
+            let items = run(&e, query, Some("bili")).await;
+            assert!(matches!(&items[0].action, SearchAction::Open { path } if path == "https://www.bilibili.com/"));
+        }
+        let items = run(&e, "测试 & Rust", Some("bili")).await;
+        assert!(matches!(&items[0].action, SearchAction::Open { path }
+            if path == "https://search.bilibili.com/all?keyword=%E6%B5%8B%E8%AF%95%20%26%20Rust"));
+    }
+
+    #[test]
+    fn homepage_inference_preserves_origin_and_legacy_direct_path() {
+        let mut site = entry("s", "S", "s", "https://sub.example.co.uk:8443/find?q={query}#results", true);
+        assert_eq!(homepage_url(&site).as_deref(), Some("https://sub.example.co.uk:8443/"));
+        site.url_template = "https://example.com/projects?sort=new#top".into();
+        assert_eq!(homepage_url(&site).as_deref(), Some(site.url_template.as_str()));
+        site.home_url = "https://example.com/portal".into();
+        site.url_template.clear();
+        assert!(validate_urls(&site));
+        assert_eq!(homepage_url(&site).as_deref(), Some("https://example.com/portal"));
+        for invalid in ["javascript:alert(1)", "https://", "https://user:pass@example.com", "https://example.com/{query}"] {
+            site.home_url = invalid.into();
+            assert!(!validate_urls(&site), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn old_config_upgrades_only_unchanged_seed_homepage() {
+        let mut cfg = WebLinksConfig::seed();
+        cfg.entries.iter_mut().for_each(|e| e.home_url.clear());
+        let old_json = serde_json::to_string(&cfg).unwrap();
+        let mut loaded: WebLinksConfig = serde_json::from_str(&old_json).unwrap();
+        assert!(loaded.upgrade_home_urls());
+        let bili = loaded.entries.iter().find(|e| e.id == "bilibili").unwrap();
+        assert_eq!(homepage_url(bili).as_deref(), Some("https://www.bilibili.com/"));
+        assert!(!loaded.upgrade_home_urls(), "升级幂等");
+        let bili = cfg.entries.iter_mut().find(|e| e.id == "bilibili").unwrap();
+        bili.url_template = "https://example.com/custom?q={query}".into();
+        assert!(!cfg.upgrade_home_urls(), "不覆盖自定义地址");
+        cfg.entries.clear();
+        assert!(!cfg.upgrade_home_urls(), "不恢复用户清空的表");
+    }
+
+    #[tokio::test]
+    async fn github_seed_upgrade_preserves_choices_and_supports_search() {
+        let mut cfg = WebLinksConfig::seed();
+        let github = cfg.entries.iter_mut().find(|e| e.id == "github").unwrap();
+        github.name = "My GitHub".into();
+        github.keyword = "git".into();
+        github.enabled = false;
+        github.url_template = "https://github.com".into();
+        assert!(cfg.upgrade_home_urls());
+        let github = cfg.entries.iter().find(|e| e.id == "github").unwrap();
+        assert_eq!(github.name, "My GitHub");
+        assert_eq!(github.keyword, "git");
+        assert!(!github.enabled);
+        assert_eq!(homepage_url(github).as_deref(), Some("https://github.com/"));
+        assert_eq!(github.url_template, "https://github.com/search?q={query}&ref=opensearch");
+        assert!(!cfg.upgrade_home_urls());
+        let github = cfg.entries.iter_mut().find(|e| e.id == "github").unwrap();
+        github.url_template = "https://github.com/orgs/custom".into();
+        github.home_url.clear();
+        assert!(!cfg.upgrade_home_urls());
+
+        let e = engine_with(WebLinksConfig::seed().entries);
+        let items = run(&e, "rust & 中文", Some("gh")).await;
+        assert!(matches!(&items[0].action, SearchAction::Open { path }
+            if path == "https://github.com/search?q=rust%20%26%20%E4%B8%AD%E6%96%87&ref=opensearch"));
+        let items = run(&e, "", Some("gh")).await;
+        assert!(matches!(&items[0].action, SearchAction::Open { path } if path == "https://github.com/"));
     }
 
     // ── percent-encoding / URL 渲染 ──────────────────────────────────────
@@ -392,7 +503,7 @@ mod tests {
     // ── Takeover 路径 ────────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn takeover_search_empty_arg_produces_placeholder() {
+    async fn takeover_search_empty_arg_opens_homepage() {
         let e = engine_with(vec![entry(
             "g",
             "Google",
@@ -402,8 +513,8 @@ mod tests {
         )]);
         let items = run(&e, "", Some("g")).await;
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].title, "用Google搜索…");
-        assert!(matches!(&items[0].action, SearchAction::Open { path } if path == "https://google.com/search?q="));
+        assert_eq!(items[0].title, "Google");
+        assert!(matches!(&items[0].action, SearchAction::Open { path } if path == "https://google.com/"));
     }
 
     #[tokio::test]
@@ -462,7 +573,7 @@ mod tests {
         assert_eq!(e.search("rust", &en).await[0].title, "Search rust with Google");
         assert_eq!(
             e.search("", &en).await[0].title,
-            "Search with Google…"
+            "Google"
         );
     }
 

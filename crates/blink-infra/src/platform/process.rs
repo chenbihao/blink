@@ -25,6 +25,70 @@
 
 use std::path::Path;
 
+/// 回收已验证的命名窗口进程。只按窗口类定位，核对同一进程句柄的可执行文件后
+/// 请求正常退出；超时才按该句柄终止，不按端口/PID 猜测所有权。须在 blocking 线程调用。
+#[cfg(windows)]
+pub fn reclaim_named_window_process(
+    class_name: &str,
+    expected_exe: &Path,
+    exit_command: u32,
+    grace: std::time::Duration,
+) -> Result<bool, String> {
+    use windows::Win32::Foundation::{CloseHandle, HANDLE, LPARAM, WPARAM};
+    use windows::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
+        PROCESS_TERMINATE, QueryFullProcessImageNameW, TerminateProcess,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, GetWindowThreadProcessId, PostMessageW, WM_COMMAND};
+    use windows::core::{PCWSTR, PWSTR};
+    struct Handle(HANDLE);
+    impl Drop for Handle {
+        fn drop(&mut self) { unsafe { let _ = CloseHandle(self.0); } }
+    }
+    let class: Vec<u16> = class_name.encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        let Ok(window) = FindWindowW(PCWSTR(class.as_ptr()), None) else { return Ok(false); };
+        let mut pid = 0;
+        GetWindowThreadProcessId(window, Some(&mut pid));
+        let process = Handle(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE, false, pid)
+            .map_err(|e| format!("命名实例进程无法验证 ({pid}): {e}"))?);
+        let mut path = [0u16; 32768];
+        let mut len = path.len() as u32;
+        QueryFullProcessImageNameW(process.0, PROCESS_NAME_FORMAT(0), PWSTR(path.as_mut_ptr()), &mut len)
+            .map_err(|e| format!("命名实例程序路径无法验证: {e}"))?;
+        let actual = std::path::PathBuf::from(String::from_utf16_lossy(&path[..len as usize]));
+        if !paths_match_case_insensitive(&actual, expected_exe) {
+            return Err("同名实例不属于当前托管程序，拒绝回收".into());
+        }
+        let exited = || -> Result<bool, String> {
+            let mut code = 0;
+            GetExitCodeProcess(process.0, &mut code).map_err(|e| format!("查询命名实例状态失败: {e}"))?;
+            Ok(code != 259) // STILL_ACTIVE
+        };
+        if exited()? { return Ok(true); }
+        let mut current_pid = 0;
+        GetWindowThreadProcessId(window, Some(&mut current_pid));
+        if current_pid != pid { return Err("命名实例窗口身份已变化，拒绝回收".into()); }
+        PostMessageW(Some(window), WM_COMMAND, WPARAM(exit_command as usize), LPARAM(0))
+            .map_err(|e| format!("请求命名实例正常退出失败: {e}"))?;
+        let deadline = std::time::Instant::now() + grace;
+        while !exited()? && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        if !exited()? {
+            tracing::debug!(pid, "已验证命名实例正常退出超时，按持有句柄终止");
+            TerminateProcess(process.0, 1).map_err(|e| format!("回收已验证实例失败: {e}"))?;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+            while !exited()? && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            if !exited()? { return Err("回收命名实例等待退出超时".into()); }
+        }
+        tracing::info!(pid, "已回收旧的托管命名实例");
+        Ok(true)
+    }
+}
+
 /// 查询进程生命周期内的峰值工作集，供本地模型实机验收记录。
 #[cfg(windows)]
 pub fn peak_working_set_bytes(pid: u32) -> Option<u64> {

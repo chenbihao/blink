@@ -175,3 +175,65 @@ pub fn run_elevated(exe: &std::path::Path, args: &str) -> Result<(), String> {
 pub fn run_elevated(_exe: &std::path::Path, _args: &str) -> Result<(), String> {
     Err("run_elevated 仅支持 Windows".to_string())
 }
+
+/// 只读取 Blink 命名实例服务，拒绝接管指向其他可执行文件的同名服务。
+#[cfg(target_os = "windows")]
+pub fn managed_everything_service_installed(exe: &std::path::Path) -> Result<bool, String> {
+    use winreg::{RegKey, enums::{HKEY_LOCAL_MACHINE, KEY_READ}};
+    let key = match RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey_with_flags(r"SYSTEM\CurrentControlSet\Services\Everything (blink)", KEY_READ) {
+        Ok(key) => key,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.to_string()),
+    };
+    let command: String = key.get_value("ImagePath").map_err(|e| e.to_string())?;
+    let command = command.trim();
+    let path = if let Some(rest) = command.strip_prefix('"') {
+        rest.split('"').next().unwrap_or_default()
+    } else { command.split_whitespace().next().unwrap_or_default() };
+    if !path.eq_ignore_ascii_case(&exe.to_string_lossy()) {
+        return Err("同名 Everything (blink) 服务属于其他安装，未修改该服务".to_string());
+    }
+    Ok(true)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn managed_everything_service_installed(_exe: &std::path::Path) -> Result<bool, String> { Ok(false) }
+
+/// 显式服务管理使用：在 blocking 线程等待提权程序退出，成功后才能删除文件。
+#[cfg(target_os = "windows")]
+pub fn run_elevated_wait(exe: &std::path::Path, args: &str) -> Result<(), String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
+    use windows::Win32::UI::Shell::{ShellExecuteExW, SHELLEXECUTEINFOW, SEE_MASK_NOCLOSEPROCESS, SEE_MASK_NOASYNC};
+    use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
+    let file: Vec<u16> = exe.as_os_str().to_string_lossy().encode_utf16().chain(Some(0)).collect();
+    let parameters: Vec<u16> = args.encode_utf16().chain(Some(0)).collect();
+    let verb: Vec<u16> = "runas\0".encode_utf16().collect();
+    unsafe {
+        let mut info = SHELLEXECUTEINFOW {
+            cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+            fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC,
+            lpVerb: PCWSTR(verb.as_ptr()), lpFile: PCWSTR(file.as_ptr()),
+            lpParameters: PCWSTR(parameters.as_ptr()), nShow: SW_HIDE.0,
+            ..Default::default()
+        };
+        ShellExecuteExW(&mut info).map_err(|e| e.to_string())?;
+        let outcome = (|| {
+            if WaitForSingleObject(info.hProcess, 120_000) != WAIT_OBJECT_0 {
+                return Err("等待服务管理程序超时，请检查服务状态后重试".to_string());
+            }
+            let mut code = 0;
+            GetExitCodeProcess(info.hProcess, &mut code).map_err(|e| e.to_string())?;
+            if code == 0 { Ok(()) } else { Err(format!("服务管理程序退出码 {code}")) }
+        })();
+        let _ = CloseHandle(info.hProcess);
+        outcome
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn run_elevated_wait(_exe: &std::path::Path, _args: &str) -> Result<(), String> {
+    Err("服务管理仅支持 Windows".to_string())
+}

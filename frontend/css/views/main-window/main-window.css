@@ -64,17 +64,25 @@ body.no-glass #app::before {
     -webkit-app-region: no-drag;
 }
 
+/* 输入与影子共用排版，避免原生 input 的默认字体造成字宽/视觉大小差异。 */
+#query,
+#ghost-overlay {
+    font-family: var(--font-sans);
+    font-size: var(--text-2xl);
+    font-weight: var(--weight-normal);
+    line-height: var(--leading-snug);
+    letter-spacing: normal;
+}
+
 #query {
     width: 100%;
     padding: var(--space-sm) var(--space-md);
-    font-size: var(--text-2xl);
     background: transparent;
     color: var(--text);
     border: none;
     outline: none;
     user-select: text;
     caret-color: var(--accent);
-    line-height: var(--leading-snug);
     /* 排除拖动区域：输入框不能拖，否则第一次点击触发拖动检测而不是输入 */
     -webkit-app-region: no-drag;
     /* Step 7: focus 呼吸描边 */
@@ -113,12 +121,9 @@ body.no-glass #app::before {
     position: absolute;
     inset: 0;
     padding: var(--space-sm) var(--space-md); /* 与 #query 完全一致 */
-    font-size: var(--text-2xl);
-    line-height: var(--leading-snug);
     pointer-events: none;
     white-space: pre; /* 保留用户输入里的空格对齐 */
     overflow: hidden;
-    font-family: inherit;
 }
 
 #ghost-overlay .ghost-typed {
@@ -126,11 +131,11 @@ body.no-glass #app::before {
 }
 
 #ghost-overlay .ghost-suggest {
-    /* 纯"影子"提示——只有 Completion 补全场景（display 非空）才会有文字。
-       采纳键帽走 SuggestionBar（视觉分层：passive suggestion vs active hint）。 */
+    /* Completion 灰影；完整触发词仍显示输入框内的采纳键。 */
     color: var(--text-faint);
     opacity: var(--opacity-faint);
 }
+
 
 /* ── Chord 待命影子（.ghost-chord，0.24.7 回退恢复 0.8.5 视觉）────────────
    显示三重与门（纯 CSS，JS 只管内容填充）：
