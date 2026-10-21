@@ -2,10 +2,14 @@
    行布局：图标 | 名称 + 触发词徽章 + URL | 开关 | 编辑 | 删除。
    颜色全走主题变量，圆角/过渡沿用既有档位。 */
 
+/* 0.26.21：长列表滚动容器（导入浏览器搜索引擎后条目可达 30+）；
+   与 weblinks-editor-body 同为 overflow-y auto，主题滚动条全局接管。 */
 .weblinks-list {
     display: flex;
     flex-direction: column;
     gap: var(--space-xs, 4px);
+    max-height: 40vh;
+    overflow-y: auto;
 }
 
 .weblinks-row {
@@ -79,6 +83,7 @@
     margin-bottom: var(--space-md);
 }
 .weblinks-toolbar input { flex: 1; min-width: 0; }
+.weblinks-count { color: var(--text-faint); font-size: var(--text-sm); white-space: nowrap; }
 .weblinks-sort { color: var(--text-faint); font-size: var(--text-sm); white-space: nowrap; }
 .weblinks-editor {
     width: min(640px, calc(100% - 2 * var(--space-lg)));
@@ -118,3 +123,99 @@
 .weblinks-input-error {
     border-color: var(--red) !important;
 }
+
+/* ── 浏览器导入弹窗（0.26.21） ─────────────────────────────────────────────
+   行布局：勾选 | 名称 | 触发词输入 | URL | 跳过原因/校验问题。
+   跳过行整体降透明度（保色相弱化），URL 省略号 + title 悬浮全文。 */
+
+.weblinks-import {
+    width: min(720px, calc(100% - 2 * var(--space-lg)));
+    max-height: calc(100vh - 2 * var(--space-lg));
+}
+.weblinks-import-controls {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm, 8px);
+}
+.weblinks-import-controls .setting-label { width: auto; flex: initial; white-space: nowrap; }
+.weblinks-import-controls select { max-width: 180px; }
+.weblinks-import-status {
+    margin: var(--space-sm, 8px) 0;
+    color: var(--text-sub);
+    font-size: var(--text-sm);
+    white-space: pre-line;
+}
+.weblinks-import-error { color: var(--red); }
+/* 全选/反选工具行（无可导入行时整行 hidden）；checkbox 复用全局 .checkbox 组件 */
+.weblinks-import-selectbar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-md, 12px);
+    margin: var(--space-xs, 4px) 0;
+}
+.weblinks-import-selectbar .label-text { font-size: var(--text-md); }
+/* 跳过行的复选框禁用：压掉组件 hover 高亮，避免「看起来可点」 */
+.weblinks-import-row .checkbox:has(input:disabled) {
+    cursor: not-allowed;
+}
+.weblinks-import-row .checkbox:has(input:disabled):hover .checkmark {
+    border-color: var(--surface-2);
+    background: var(--surface);
+}
+/* 关键词输入：input-small 主题样式，宽度放宽容纳域名风格触发词 */
+.weblinks-import-row input.weblinks-import-keyword:disabled {
+    opacity: 0.7;
+    cursor: not-allowed;
+}
+.weblinks-import-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xs, 4px);
+    max-height: 45vh;
+    overflow-y: auto;
+}
+.weblinks-import-body {
+    padding: var(--space-md) var(--space-lg);
+}
+.weblinks-import-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm, 8px);
+    padding: var(--space-xs, 4px) var(--space-sm, 8px);
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-md, 6px);
+}
+.weblinks-import-row-skip { opacity: 0.55; }
+.weblinks-import-name {
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+    flex-shrink: 2;
+}
+.weblinks-import-keyword {
+    width: 170px;
+    flex-shrink: 0;
+}
+.weblinks-import-url {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    opacity: 0.6;
+    font-size: 0.9em;
+}
+.weblinks-import-skip-badge,
+.weblinks-import-issue {
+    flex-shrink: 0;
+    padding: 1px 8px;
+    border-radius: var(--radius-sm, 4px);
+    border: 1px solid var(--surface-2);
+    background: var(--surface);
+    color: var(--text-sub);
+    font-size: 0.85em;
+    white-space: nowrap;
+}
+.weblinks-import-issue { color: var(--red); }

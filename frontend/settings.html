@@ -511,10 +511,41 @@
                 <div class="extension-body">
                     <div class="weblinks-toolbar">
                         <input id="weblinks-filter" class="input-wide" type="search" data-i18n-ph="weblinks.filter" data-i18n-aria-label="weblinks.filter" placeholder="筛选名称、触发词或网址"/>
+                        <span class="weblinks-count" id="weblinks-count"></span>
+                        <button class="btn" id="weblinks-import-open" data-i18n="weblinks.import.button" type="button">从浏览器导入</button>
                         <span class="weblinks-sort" data-i18n="weblinks.sort">名称 A–Z · 中文按拼音</span>
                     </div>
                     <div id="weblinks-list" class="weblinks-list"></div>
                     <p class="weblinks-error hidden" id="weblinks-error" role="alert"></p>
+
+                    <div class="modal-overlay hidden" id="weblinks-import-overlay">
+                        <form class="modal weblinks-import" id="weblinks-import-form" role="dialog" aria-modal="true" aria-labelledby="weblinks-import-title" autocomplete="off">
+                            <div class="modal-header"><h3 id="weblinks-import-title" data-i18n="weblinks.import.title">导入浏览器搜索引擎</h3></div>
+                            <div class="weblinks-import-body">
+                                <div class="weblinks-import-controls">
+                                    <label class="setting-label" data-i18n="weblinks.import.browser" for="weblinks-import-browser">浏览器</label>
+                                    <select id="weblinks-import-browser"></select>
+                                    <label class="setting-label hidden" id="weblinks-import-profile-label" data-i18n="weblinks.import.profile" for="weblinks-import-profile">Profile</label>
+                                    <select id="weblinks-import-profile" class="hidden"></select>
+                                    <button class="btn" type="button" id="weblinks-import-rescan" data-i18n="weblinks.import.rescan">重新扫描</button>
+                                </div>
+                                <p class="weblinks-import-status" id="weblinks-import-status" role="status"></p>
+                                <div class="weblinks-import-selectbar hidden" id="weblinks-import-selectall-row">
+                                    <label class="checkbox" for="weblinks-import-selectall-check">
+                                        <input type="checkbox" id="weblinks-import-selectall-check"/>
+                                        <span class="checkmark"></span>
+                                        <span class="label-text" data-i18n="weblinks.import.select_all">全选</span>
+                                    </label>
+                                    <button class="btn btn-sm" type="button" id="weblinks-import-invert" data-i18n="weblinks.import.invert">反选</button>
+                                </div>
+                                <div class="weblinks-import-list" id="weblinks-import-list"></div>
+                            </div>
+                            <div class="weblinks-editor-actions">
+                                <button class="btn" data-i18n="weblinks.cancel" id="weblinks-import-cancel" type="button">取消</button>
+                                <button class="btn btn-primary" id="weblinks-import-confirm" type="submit" data-i18n="weblinks.import.confirm">导入所选</button>
+                            </div>
+                        </form>
+                    </div>
 
                     <div class="modal-overlay hidden" id="weblinks-overlay">
                         <form class="modal weblinks-editor" id="weblinks-editor" role="dialog" aria-modal="true" aria-labelledby="weblinks-editor-title" autocomplete="off">

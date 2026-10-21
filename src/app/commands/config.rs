@@ -782,7 +782,7 @@ pub async fn set_config_section(
         return Err("共享配置请使用 set_config 字段更新；恢复默认请使用 reset_config".into());
     }
     let pool = &app.state::<crate::infra::data::DbPools>().config;
-    let json = serde_json::to_string(&value).map_err(|e| format!("序列化失败: {e}"))?;
+    let json = serde_json::to_string(&value).map_err(|e| e.to_string())?;
     crate::infra::data::history::set_config(pool, &key, &json)
         .await
         .map_err(|e| format!("配置写入失败: {e}"))?;
@@ -796,4 +796,308 @@ pub async fn set_config_section(
     }
 
     Ok(())
+}
+
+// ── 浏览器搜索引擎导入（0.26.21）───────────────────────────────────────────
+//
+// 导入=只读扫描+既有保存链路合并：`scan_browser_search_engines` 只读返回候选，
+// 确认导入由前端并入 `app.weblinks` 走 `set_config` 的既有校验/CAS/广播——
+// 本组命令不产生任何写路径。数据源是 Chromium 系每 profile 的 `Web Data`
+// SQLite `keywords` 表；profile 发现复用 0.26.13 书签引擎的同一套代码。
+
+/// 可导入浏览器与其 profile 列表（仅列检测到 `Web Data` 的组合）。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BrowserSearchSource {
+    pub browser: String,
+    pub profiles: Vec<String>,
+}
+
+/// 扫描结果：实际使用的 profile + 候选（含跳过原因，前端预览标灰）。
+#[derive(Debug, serde::Serialize)]
+pub struct BrowserSearchScan {
+    pub profile: String,
+    pub candidates: Vec<crate::domain::search::ImportCandidate>,
+}
+
+/// 枚举某浏览器下存在 `Web Data` 的 profile（`Local State` 缺失回落 Default，
+/// 与书签扫描同口径）。
+fn web_data_profiles(base: &std::path::Path, browser: &str) -> Vec<String> {
+    let Some(user_data) =
+        crate::domain::search::bookmark_engine::browser_user_data_dir(base, browser)
+    else {
+        return Vec::new();
+    };
+    let mut profiles = std::fs::read_to_string(user_data.join("Local State"))
+        .map(|s| crate::domain::search::bookmark_engine::parse_local_state_profiles(&s))
+        .unwrap_or_default();
+    if profiles.is_empty() {
+        profiles.push("Default".to_string());
+    }
+    profiles
+        .into_iter()
+        .filter(|p| user_data.join(p).join("Web Data").is_file())
+        .collect()
+}
+
+/// 临时副本守卫：Drop 时尽力清理（正常路径读取后显式 drop，守卫兜底异常分支）。
+struct TempDbGuard(Vec<std::path::PathBuf>);
+
+impl Drop for TempDbGuard {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// 复制 `Web Data`（及非空 `-journal`）到临时目录，返回副本路径守卫。
+///
+/// Chrome 运行中持有原文件句柄，Windows 上直接打开原文件不可靠；副本归本
+/// 进程所有，SQLite 打开副本时可按需回滚热 journal（Web Data 为 journal 模式
+/// 非本机 WAL，实测单文件复制即可安全读取）。
+fn copy_web_data_to_temp(src: &std::path::Path) -> Result<TempDbGuard, String> {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let unique = format!(
+        "blink-webdata-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let temp_main = std::env::temp_dir().join(format!("{unique}.db"));
+    std::fs::copy(src, &temp_main).map_err(|e| format!("复制 Web Data 失败: {e}"))?;
+    let mut paths = vec![temp_main];
+    // 非空 journal 一并复制（撞上写入瞬间时让副本可回滚；0 字节 journal 无热事务）。
+    let journal = src.with_file_name("Web Data-journal");
+    if journal.is_file()
+        && std::fs::metadata(&journal).map(|m| m.len() > 0).unwrap_or(false)
+    {
+        let temp_journal = std::env::temp_dir().join(format!("{unique}.db-journal"));
+        match std::fs::copy(&journal, &temp_journal) {
+            Ok(_) => paths.push(temp_journal),
+            Err(e) => tracing::debug!(error = %e, "复制 Web Data-journal 失败（忽略，主副本可读则继续）"),
+        }
+    }
+    Ok(TempDbGuard(paths))
+}
+
+/// 只读查询副本的 keywords 表（SELECT 只取需要的列；usage_count 降序最常用在前）。
+async fn read_keyword_rows(
+    db: &std::path::Path,
+) -> Result<Vec<crate::domain::search::KeywordRow>, String> {
+    use sqlx::{Connection, Row};
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(db)
+        .create_if_missing(false);
+    let mut conn = sqlx::sqlite::SqliteConnection::connect_with(&options)
+        .await
+        .map_err(|e| format!("搜索引擎数据库打开失败: {e}"))?;
+    let rows = sqlx::query(
+        "SELECT short_name, keyword, url FROM keywords ORDER BY usage_count DESC, id",
+    )
+    .fetch_all(&mut conn)
+    .await
+    .map_err(|e| format!("keywords 表读取失败（数据库结构可能已变化）: {e}"))?;
+    Ok(rows
+        .iter()
+        .map(|row| crate::domain::search::KeywordRow {
+            // 三列均 NOT NULL；失败按空串防御（跳过判定会兜住）
+            short_name: row.try_get(0).unwrap_or_default(),
+            keyword: row.try_get(1).unwrap_or_default(),
+            url: row.try_get(2).unwrap_or_default(),
+        })
+        .collect())
+}
+
+/// 枚举可导入浏览器（0.26.21）：仅返回检测到 `Web Data` 的浏览器与 profile。
+#[tauri::command]
+pub async fn list_browser_search_sources() -> Result<Vec<BrowserSearchSource>, String> {
+    let base = std::env::var("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default();
+    let sources = tokio::task::spawn_blocking(move || {
+        ["chrome", "edge", "brave"]
+            .iter()
+            .map(|b| (*b, web_data_profiles(&base, b)))
+            .filter(|(_, profiles)| !profiles.is_empty())
+            .map(|(browser, profiles)| BrowserSearchSource {
+                browser: browser.to_string(),
+                profiles,
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .map_err(|e| format!("枚举浏览器数据失败: {e}"))?;
+    Ok(sources)
+}
+
+/// 只读扫描浏览器自定义搜索引擎（0.26.21）。
+///
+/// 复制 `Web Data` 到临时目录避开浏览器文件锁 → 只读 SELECT keywords 表 →
+/// domain 纯函数转换/过滤/判重（对既有超链表 + engine/插件触发词）。
+#[tauri::command]
+pub async fn scan_browser_search_engines(
+    app: tauri::AppHandle,
+    browser: String,
+    profile: Option<String>,
+) -> Result<BrowserSearchScan, String> {
+    let base = std::env::var("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default();
+    // profile 解析与文件复制是同步 IO，挪出工作线程（阻塞操作隔离铁则）。
+    let browser_for_task = browser.clone();
+    let (src, profile) =
+        tokio::task::spawn_blocking(move || -> Result<(std::path::PathBuf, String), String> {
+            let profiles = web_data_profiles(&base, &browser_for_task);
+            let Some(profile) = profile
+                .filter(|p| profiles.iter().any(|x| x == p))
+                .or_else(|| profiles.first().cloned())
+            else {
+                return Err(format!(
+                    "未找到 {browser_for_task} 的搜索引擎数据（可能未安装或尚未添加自定义搜索引擎）"
+                ));
+            };
+            let src = crate::domain::search::bookmark_engine::browser_user_data_dir(
+                &base,
+                &browser_for_task,
+            )
+            .ok_or_else(|| format!("不支持的浏览器: {browser_for_task}"))?
+            .join(&profile)
+            .join("Web Data");
+            Ok((src, profile))
+        })
+        .await
+        .map_err(|e| format!("扫描任务失败: {e}"))??;
+
+    let guard = tokio::task::spawn_blocking(move || copy_web_data_to_temp(&src))
+        .await
+        .map_err(|e| format!("复制任务失败: {e}"))??;
+    let rows = read_keyword_rows(&guard.0[0]).await;
+    drop(guard); // 显式清理临时副本（Drop 兜底异常分支）
+    let rows = rows?;
+
+    let pool = &app.state::<crate::infra::data::DbPools>().config;
+    let existing =
+        crate::app::config::ConfigStore::get::<crate::app::config::WebLinksConfig>(pool).await;
+    let router = app.state::<std::sync::Arc<crate::domain::intent::RuleRouter>>();
+    let candidates = crate::domain::search::import_candidates(
+        &rows,
+        &existing.entries,
+        &|kw| router.keyword_owner(kw, Some(crate::domain::search::WEBLINKS_ENGINE_ID)),
+    );
+    let importable = candidates.iter().filter(|c| c.skip.is_none()).count();
+    tracing::info!(
+        %browser,
+        %profile,
+        total = candidates.len(),
+        importable,
+        "扫描浏览器搜索引擎"
+    );
+    Ok(BrowserSearchScan { profile, candidates })
+}
+
+#[cfg(test)]
+mod weblinks_import_tests {
+    use super::*;
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "blink-webdata-{}-{}-{tag}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn web_data_profiles_filters_by_file_and_falls_back_to_default() {
+        let dir = temp_dir("profiles");
+        // chrome：两个 profile，仅 Default 有 Web Data；无 Local State → 回落 Default
+        let chrome = dir.join("Google/Chrome/User Data");
+        std::fs::create_dir_all(chrome.join("Default")).unwrap();
+        std::fs::create_dir_all(chrome.join("Profile 1")).unwrap();
+        std::fs::write(chrome.join("Default/Web Data"), b"fake").unwrap();
+        assert_eq!(web_data_profiles(&dir, "chrome"), vec!["Default".to_string()]);
+
+        // edge：Local State 声明两个 profile，仅 Profile 1 有文件
+        let edge = dir.join("Microsoft/Edge/User Data");
+        std::fs::create_dir_all(edge.join("Default")).unwrap();
+        std::fs::create_dir_all(edge.join("Profile 1")).unwrap();
+        std::fs::write(
+            edge.join("Local State"),
+            r#"{"profile":{"info_cache":{"Default":{},"Profile 1":{}}}}"#,
+        )
+        .unwrap();
+        std::fs::write(edge.join("Profile 1/Web Data"), b"fake").unwrap();
+        assert_eq!(web_data_profiles(&dir, "edge"), vec!["Profile 1".to_string()]);
+
+        // brave：未安装 / 未知浏览器 → 空
+        assert!(web_data_profiles(&dir, "brave").is_empty());
+        assert!(web_data_profiles(&dir, "netscape").is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn copy_web_data_copies_and_cleans_up() {
+        let dir = temp_dir("copy");
+        let src = dir.join("Web Data");
+        std::fs::write(&src, b"payload-42").unwrap();
+        std::fs::write(dir.join("Web Data-journal"), b"hot").unwrap();
+        let guard = copy_web_data_to_temp(&src).unwrap();
+        assert_eq!(guard.0.len(), 2, "非空 journal 一并复制");
+        assert_eq!(std::fs::read(&guard.0[0]).unwrap(), b"payload-42");
+        let temp_paths: Vec<_> = guard.0.iter().map(|p| p.to_path_buf()).collect();
+        drop(guard);
+        for path in temp_paths {
+            assert!(!path.exists(), "Drop 后临时副本应被清理: {path:?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn read_keyword_rows_orders_by_usage_and_maps_columns() {
+        let dir = temp_dir("rows");
+        let db = dir.join("fixture.db");
+        let options =
+            sqlx::sqlite::SqliteConnectOptions::new().filename(&db).create_if_missing(true);
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE keywords (id INTEGER PRIMARY KEY, short_name VARCHAR NOT NULL, \
+             keyword VARCHAR NOT NULL, url VARCHAR NOT NULL, usage_count INTEGER DEFAULT 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for (id, name, kw, usage) in [
+            (1, "Bing", "bing.com", 3i64),
+            (2, "百度", "baidu.com", 9),
+            (3, "书签", "@书签", 0),
+        ] {
+            sqlx::query("INSERT INTO keywords (id, short_name, keyword, url, usage_count) VALUES (?, ?, ?, ?, ?)")
+                .bind(id)
+                .bind(name)
+                .bind(kw)
+                .bind("https://example.test/?q={searchTerms}")
+                .bind(usage)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        pool.close().await;
+
+        let rows = read_keyword_rows(&db).await.unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.keyword.as_str()).collect::<Vec<_>>(),
+            vec!["baidu.com", "bing.com", "@书签"],
+            "usage_count 降序（最常用在前）"
+        );
+        assert_eq!(rows[0].short_name, "百度");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -12,7 +12,8 @@ globalThis.document = globalThis.document ?? {
     createElement: () => ({classList: {add() {}, remove() {}, toggle() {}}, append() {}, appendChild() {}}),
 };
 
-const {visibleEntries, entryFromDraft, inferHomepage, isSearchTemplate, normalizeConfig, localValidate, parseConflictError, describeConflicts} =
+const {visibleEntries, entryFromDraft, inferHomepage, isSearchTemplate, normalizeConfig, localValidate, parseConflictError, describeConflicts,
+    normalizeCandidates, importKeywordIssue, buildImportEntries, applySelectAll, invertSelection, selectAllState} =
     await import('./weblinks.js');
 
 // ── isSearchTemplate ────────────────────────────────────────────────────────
@@ -82,8 +83,6 @@ const dict = {
 const lines = describeConflicts(conflicts, (k) => dict[k] ?? k);
 assert.deepEqual(lines, ['clip: 已被引擎占用 (clipboard)', 'dup: 表内重复']);
 
-console.log('weblinks.test.mjs: all assertions passed');
-
 // 编辑已禁用的条目，不得悄悄启用；新条目默认启用。
 const changed = {id: 'off', name: 'Renamed', keyword: 'off', url_template: 'https://new.test'};
 assert.equal(entryFromDraft({enabled: false}, changed).enabled, false);
@@ -104,3 +103,62 @@ assert.deepEqual(entries.map(e => e.id), ['z','g','b','10','2','bd']);
 assert.deepEqual(visibleEntries(entries, ' GH ').map(e => e.id), ['g']);
 assert.deepEqual(visibleEntries(entries, 'ZHihU.com').map(e => e.id), ['z']);
 assert.equal(visibleEntries(entries, 'absent').length, 0);
+
+// ── 浏览器导入（0.26.21） ────────────────────────────────────────────────────
+
+// normalizeCandidates：跳过项不勾选、可导入项默认勾选；坏输入防御。
+const candidates = normalizeCandidates([
+    {name: 'LINUX DO', keyword: 'linux.do', url_template: 'https://linux.do/search?q={query}'},
+    {name: '书签', keyword: '@书签', url_template: 'chrome://bookmarks/?q={query}', skip: 'not_http'},
+    null,
+]);
+assert.equal(candidates.length, 2);
+assert.deepEqual(candidates[0], {name: 'LINUX DO', keyword: 'linux.do', urlTemplate: 'https://linux.do/search?q={query}', skip: null, checked: true});
+assert.equal(candidates[1].checked, false, '跳过项默认不勾选');
+assert.deepEqual(normalizeCandidates(null), []);
+assert.deepEqual(normalizeCandidates('x'), []);
+
+// importKeywordIssue：格式/保留前缀/表内重复/批内重复。
+assert.equal(importKeywordIssue('ld', ['gh'], ['bili']), null);
+assert.equal(importKeywordIssue('  ', [], []), 'keyword_invalid');
+assert.equal(importKeywordIssue('go od', [], []), 'keyword_invalid');
+assert.equal(importKeywordIssue('AI', [], []), 'keyword_reserved');
+assert.equal(importKeywordIssue('GH', ['gh'], []), 'keyword_exists', '表内大小写不敏感');
+assert.equal(importKeywordIssue('bili', [], ['BILI']), 'keyword_conflict_in_batch');
+
+// buildImportEntries：只取勾选且校验通过的行；批内重复先到先得；条目形状对齐 WebLinkEntry。
+const rows = normalizeCandidates([
+    {name: 'LINUX DO', keyword: 'linux.do', url_template: 'https://linux.do/search?q={query}'},
+    {name: '百度', keyword: 'Baidu', url_template: 'https://www.baidu.com/#ie=utf-8&wd={query}'},
+    {name: '同词', keyword: 'linux.do', url_template: 'https://dup.test/?q={query}'},
+    {name: '被占', keyword: 'gh', url_template: 'https://gh.taken/?q={query}'},
+    {name: '书签', keyword: '@x', url_template: 'chrome://x', skip: 'not_http'},
+]);
+const built = buildImportEntries(rows, ['gh'], 1234);
+assert.deepEqual(built.map(e => e.name), ['LINUX DO', '百度'], '勾选+通过才导入，批内重复与表内冲突排除');
+assert.equal(built[0].keyword, 'linux.do');
+assert.equal(built[0].home_url, '', '主页留空交后端 origin 推导');
+assert.equal(built[0].url_template, 'https://linux.do/search?q={query}');
+assert.equal(built[0].enabled, true);
+assert.ok(built[0].id.startsWith('entry-1234-'));
+// 取消勾选后不再导入；名称空时回退 keyword。
+const unchecked = rows.map(r => ({...r, checked: r.name === '百度'}));
+assert.deepEqual(buildImportEntries(unchecked, [], 99).map(e => e.name), ['百度']);
+const anonymous = [{name: '', keyword: 'zz', urlTemplate: 'https://zz.test/?q={query}', skip: null, checked: true}];
+assert.equal(buildImportEntries(anonymous, [], 1)[0].name, 'zz');
+
+// 全选/反选与三态：只作用于可导入行，跳过行恒不勾选。
+const mixed = [
+    {name: 'A', keyword: 'a', urlTemplate: 'https://a.test/', skip: null, checked: true},
+    {name: 'B', keyword: 'b', urlTemplate: 'https://b.test/', skip: null, checked: false},
+    {name: 'X', keyword: 'x', urlTemplate: 'chrome://x', skip: 'not_http', checked: false},
+];
+assert.deepEqual(applySelectAll(mixed, true).map(r => r.checked), [true, true, false], '全选不碰跳过行');
+assert.deepEqual(applySelectAll(mixed, false).map(r => r.checked), [false, false, false]);
+assert.deepEqual(invertSelection(mixed).map(r => r.checked), [false, true, false], '反选仅翻转可导入行');
+assert.deepEqual(selectAllState(mixed), {importable: 2, selected: 1, checked: false, indeterminate: true});
+assert.deepEqual(selectAllState(applySelectAll(mixed, true)), {importable: 2, selected: 2, checked: true, indeterminate: false});
+assert.deepEqual(selectAllState(applySelectAll(mixed, false)), {importable: 2, selected: 0, checked: false, indeterminate: false});
+assert.equal(selectAllState([]).importable, 0, '空列表无可导入行');
+
+console.log('weblinks.test.mjs: all assertions passed');

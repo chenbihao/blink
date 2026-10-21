@@ -1798,6 +1798,8 @@ app::commands::toggle_default_trigger,
             app::commands::delete_custom_trigger,
             app::commands::get_config_section,
             app::commands::set_config_section,
+            app::commands::list_browser_search_sources, // 0.26.21 浏览器搜索引擎导入
+            app::commands::scan_browser_search_engines,
             app::commands::save_ai_secret,
             app::commands::delete_ai_secret,
             app::commands::has_ai_secret,

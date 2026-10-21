@@ -228,6 +228,8 @@ mod start_menu_engine;
 pub mod system_entries;
 mod system_shortcuts;
 mod weblinks_engine;
+// 0.26.21：浏览器搜索引擎导入（纯转换/判重；SQLite 读取在 app 层 command）。
+pub mod weblinks_import;
 pub use bookmark_engine::{
     BookmarkEngine, BookmarkStatus, ENGINE_ID as BOOKMARKS_ENGINE_ID, validate_keyword as validate_bookmark_keyword,
 };
@@ -235,6 +237,7 @@ pub use weblinks_engine::{
     KeywordConflict, KeywordConflictKind, WebEngine, ENGINE_ID as WEBLINKS_ENGINE_ID,
     validate_keywords, validate_urls as validate_weblink_urls,
 };
+pub use weblinks_import::{ImportCandidate, ImportSkipReason, KeywordRow, convert_template_url, import_candidates};
 use builtin_engine::BuiltinEngine;
 use color_engine::ColorEngine;
 // BuiltinActionInfo + list_builtin_actions 由 commands::list_builtin_actions 用（设置页）。
