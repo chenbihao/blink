@@ -234,17 +234,31 @@ fn vk_to_key(vk: u32) -> Option<String> {
     if vk == VK_DELETE.0 as u32 {
         return Some("Delete".to_string());
     }
+    // 方向键/导航键（0.26.18 改短名 "up"/"pageup" 等，与全局键白名单键名对齐；
+    // 旧主热键配置中的 "ArrowUp" 等长名在 app 层快照构建处做别名归一）
     if vk == VK_UP.0 as u32 {
-        return Some("ArrowUp".to_string());
+        return Some("up".to_string());
     }
     if vk == VK_DOWN.0 as u32 {
-        return Some("ArrowDown".to_string());
+        return Some("down".to_string());
     }
     if vk == VK_LEFT.0 as u32 {
-        return Some("ArrowLeft".to_string());
+        return Some("left".to_string());
     }
     if vk == VK_RIGHT.0 as u32 {
-        return Some("ArrowRight".to_string());
+        return Some("right".to_string());
+    }
+    if vk == VK_PRIOR.0 as u32 {
+        return Some("pageup".to_string());
+    } // VK_PRIOR = PageUp
+    if vk == VK_NEXT.0 as u32 {
+        return Some("pagedown".to_string());
+    } // VK_NEXT = PageDown
+    if vk == VK_END.0 as u32 {
+        return Some("end".to_string());
+    }
+    if vk == VK_HOME.0 as u32 {
+        return Some("home".to_string());
     }
 
     // 标点/符号键（OEM 键）
@@ -281,6 +295,9 @@ fn vk_to_key(vk: u32) -> Option<String> {
     if vk == 0xDE {
         return Some("'".to_string());
     } // VK_OEM_7
+    if vk == 0xDF {
+        return Some("~".to_string());
+    } // VK_OEM_8（部分布局为独立键，US 邻近布局多映射为 OEM_3 的 Shift 形态）
 
     None
 }
@@ -1718,6 +1735,23 @@ mod tests {
         assert!(is_modifier_key(VK_LCONTROL.0 as u32));
         assert!(is_modifier_key(VK_LMENU.0 as u32));
         assert!(!is_modifier_key(0x41));
+    }
+
+    /// 0.26.18：键名与注册层 vk_for_key 双向对齐（向量真源见 mod.rs
+    /// test_vectors，与 state.rs is_supported_global_hotkey、前端测试同源）。
+    #[test]
+    fn vk_to_key_roundtrips_extended_global_hotkey_keys() {
+        for &(vk, name) in super::super::test_vectors::EXTENDED_VK_KEY_PAIRS {
+            assert_eq!(
+                vk_to_key(vk).as_deref(),
+                Some(name),
+                "vk_to_key(0x{vk:X}) 应为 {name}"
+            );
+        }
+        // 方向键改短名后旧长名不再产出（旧主热键配置别名归一见 app/config.rs）
+        assert_ne!(vk_to_key(0x26).as_deref(), Some("ArrowUp"));
+        // 导航键此前未映射（录制会 UnsupportedVk 忽略），现在可录制
+        assert_eq!(vk_to_key(0x21).as_deref(), Some("pageup"));
     }
 
     #[test]

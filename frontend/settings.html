@@ -842,8 +842,7 @@
                     </div>
                     <div class="extension-info">
                         <h3 data-i18n="ai.enabled.label">启用 AI 提示</h3>
-                        <p class="extension-desc" data-i18n="ai.enabled.hint">本地规则未给出提示时，显示“按 Tab 问
-                            AI”；不会自动调用 AI。</p>
+                        <p class="extension-desc" data-i18n="ai.enabled.hint">本地规则未给出提示时，显示“按 Tab 问 AI”。</p>
                     </div>
                     <label class="switch">
                         <input id="ai-enabled" type="checkbox"/>
@@ -868,18 +867,6 @@
                     </div>
                 </div>
             </div>
-
-            <!-- 供应商列表 ─────────────────────────────────────── -->
-            <div class="section-label" data-i18n="ai.providers.section">供应商 · 密钥独立存于系统凭据管理器</div>
-            <div id="ai-providers-container">
-                <!-- 由 JS 动态渲染：卡片列表 + 「+ 添加供应商」按钮 -->
-            </div>
-        </div>
-
-        <!-- ══ AI 窗口配置（0.12.5 → 0.13.x 拆分）══════════════════════════════ -->
-        <div class="panel" id="ai-chat">
-            <h2 data-i18n="panel.ai_chat">AI 对话设置</h2>
-            <p class="panel-lede" data-i18n="ai.chat.lede">管理对话行为、自动标题、上下文与本对话的较早内容召回。</p>
 
             <!-- 模型与档位 ─────────────────────────────────────── -->
             <div class="extension-card">
@@ -944,6 +931,18 @@
                     </div>
                 </div>
             </div>
+
+            <!-- 供应商列表 ─────────────────────────────────────── -->
+            <div class="section-label" data-i18n="ai.providers.section">供应商 · 密钥独立存于系统凭据管理器</div>
+            <div id="ai-providers-container">
+                <!-- 由 JS 动态渲染：卡片列表 + 「+ 添加供应商」按钮 -->
+            </div>
+        </div>
+
+        <!-- ══ AI 窗口配置（0.12.5 → 0.13.x 拆分）══════════════════════════════ -->
+        <div class="panel" id="ai-chat">
+            <h2 data-i18n="panel.ai_chat">AI 对话设置</h2>
+            <p class="panel-lede" data-i18n="ai.chat.lede">管理对话行为、自动标题、上下文与本对话的较早内容召回。</p>
 
             <!-- 对话 ─────────────────────────────────────── -->
             <div class="extension-card">
@@ -2519,6 +2518,8 @@
                     </button>
                 </div>
             </div>
+            <!-- 0.26.18：主热键录制/保存失败常驻提示（此前仅 console.error） -->
+            <div class="setting-hint" id="hotkey-status" role="alert" hidden></div>
             <!-- tap 阈值 / 看门狗 grace period：已调优，用户无需调整，注释隐藏（保留默认值）
             <div class="setting-row">
                 <label class="setting-label" data-i18n="hotkey.tap.label">tap 阈值<span class="field-hint-icon"

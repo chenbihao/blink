@@ -33,8 +33,10 @@
 
     <!-- Body: sidebar + main 横向排列 -->
     <div class="chat-body">
-        <!-- Sidebar（对话列表，push 布局） -->
-        <aside class="chat-sidebar" data-closed id="chat-sidebar">
+        <!-- Sidebar（对话列表，push 布局）。0.26.18 起默认展开：初始不带 data-closed，
+             会话内开合只由 toggle 按钮改写 DOM 属性（窗口关闭是 hide 不销毁，自然记住）；
+             应用重启回默认展开，不新增持久化。 -->
+        <aside class="chat-sidebar" id="chat-sidebar">
             <div class="chat-sidebar-header">
                 <span class="chat-sidebar-title">对话</span>
                 <div class="chat-sidebar-header-actions">

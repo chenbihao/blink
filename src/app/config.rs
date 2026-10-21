@@ -72,7 +72,7 @@ pub async fn refresh_input_config_with_registry(
         revision: INPUT_CONFIG_REVISION.fetch_add(1, Ordering::Relaxed),
         hotkey: crate::infra::platform::hotkey::NormalizedHotkey {
             modifiers: config.hotkey.modifiers.clone(),
-            key: config.hotkey.key.clone(),
+            key: normalize_legacy_hotkey_key(&config.hotkey.key),
         },
         tap_threshold: Duration::from_millis(config.tap_threshold),
         chord_enabled: chord_cfg.chord_enabled,
@@ -90,6 +90,19 @@ pub async fn refresh_input_config_with_registry(
     };
 
     crate::infra::platform::hotkey::InputController::update_config(snapshot);
+}
+
+/// 主热键旧键名归一（0.26.18）：方向键键名在 `vk_to_key` 中从 "ArrowUp" 等改为
+/// "up" 等，旧配置已保存的长名在此映射到新名，避免 hook 匹配与冲突检查失效。
+/// 全局快捷键白名单此前不接受方向键，无旧值需要处理。
+pub fn normalize_legacy_hotkey_key(key: &str) -> String {
+    match key {
+        "ArrowUp" => "up".to_string(),
+        "ArrowDown" => "down".to_string(),
+        "ArrowLeft" => "left".to_string(),
+        "ArrowRight" => "right".to_string(),
+        other => other.to_string(),
+    }
 }
 
 // ── 0.21.14：从 infra/data/config.rs 上移的迁移函数 ─────────────────────────

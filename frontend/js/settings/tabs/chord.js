@@ -24,7 +24,7 @@ import {recordHotkey} from "../../shared/hotkey-recorder.js";
 import {onLangChange, t} from "../../i18n/index.js";
 import {saveConfig} from "../../shared/config-keys.js";
 import {normalizeCombo, renderComboHTML} from "../../shared/kbd.js";
-import {canRetryGlobalHotkey, globalHotkeyStatusTextKey, normalizeRecordedGlobalHotkey} from "../../shared/global-hotkey.js";
+import {canRetryGlobalHotkey, explainGlobalHotkeyRejection, globalHotkeyStatusTextKey, normalizeRecordedGlobalHotkey} from "../../shared/global-hotkey.js";
 
 import {connectConfigActivity, createConfigRefresher, withConfigActivity} from "../../shared/config-sync.js";
 import {createClipboardConfigWriter} from "./chord-clipboard.js";
@@ -594,9 +594,10 @@ function showGlobalStatusMessage(id, msg) {
 }
 
 /**
- * 0.22.12：全局快捷键自定义组合键录制（校验放宽）。
+ * 0.22.12：全局快捷键自定义组合键录制。
  *
- * 校验规则：单独 F1–F11，或 Ctrl/Alt/Win + 字母/数字/F1–F11/空格。
+ * 校验规则（0.26.18 扩展）：单独 F1–F11，或 Ctrl/Alt/Win（可选 Shift）+
+ * 字母/数字/空格/OEM 标点/方向键/导航键/F1–F11。
  */
 async function startGlobalRecording(btn) {
     showChordSaveError("");
@@ -615,12 +616,16 @@ async function startGlobalRecording(btn) {
             comboEl.textContent = t("chord.global.recording");
         });
 
-        const combo = normalizeRecordedGlobalHotkey(result);
-        if (!combo) {
-            flashCombo(comboEl, origCombo, t("chord.global.invalid"));
+        const rejection = explainGlobalHotkeyRejection(result);
+        if (rejection) {
+            // 0.26.18：无效录制报错常驻状态行（8s）并带具体原因，
+            // 不再把整段文案塞进组合键按钮一闪而过。
+            comboEl.textContent = origCombo;
+            showGlobalStatusMessage(id, describeGlobalHotkeyRejection(rejection));
             return;
         }
 
+        const combo = normalizeRecordedGlobalHotkey(result);
         const {modifiers: canonical, key} = combo;
         const ok = await saveGlobalBinding(id, {
             mode: "custom",
@@ -641,6 +646,22 @@ async function startGlobalRecording(btn) {
         document.removeEventListener("keydown", suppress, true);
         btn.disabled = false;
         btn.classList.remove("recording");
+    }
+}
+
+/**
+ * 白名单拒绝原因 → 用户可读文案（0.26.18，带具体键名/修饰键名的常驻报错）。
+ */
+function describeGlobalHotkeyRejection(rejection) {
+    switch (rejection.code) {
+        case "unsupported_key":
+            return t("chord.global.invalid.key", {key: rejection.key});
+        case "unsupported_modifier":
+            return t("chord.global.invalid.modifier", {modifier: rejection.modifier});
+        case "modifier_required":
+            return t("chord.global.invalid.modifier_required");
+        default:
+            return t("chord.global.invalid");
     }
 }
 
@@ -1127,8 +1148,9 @@ async function startRecording(btn) {
         const isLetter = typeof result.key === "string" && /^[a-z]$/i.test(result.key);
 
         if (!hasAlt || hasOtherMod || !isLetter) {
-            // 无效组合：提示并恢复原 combo
-            flashCombo(comboEl, origCombo, t("chord.binding.invalid"));
+            // 无效组合：常驻列表状态行提示（Alt+字母规则与文案不变），恢复原 combo
+            comboEl.textContent = origCombo;
+            showChordSaveError(t("chord.binding.invalid"));
             return;
         }
 
@@ -1169,18 +1191,6 @@ async function startRecording(btn) {
         btn.disabled = false;
         btn.classList.remove("recording");
     }
-}
-
-/**
- * 短暂显示提示文案后恢复原 combo（用于无效录制反馈）。
- */
-function flashCombo(comboEl, origCombo, msg) {
-    comboEl.textContent = msg;
-    setTimeout(() => {
-        if (comboEl.textContent === msg) {
-            comboEl.textContent = origCombo;
-        }
-    }, 1500);
 }
 
 /**

@@ -3,7 +3,7 @@
  * 包含：快捷键录制、热键配置、滑块配置（tap阈值、grace期）
  */
 
-import {invoke} from "../../shared/tauri.js";
+import {invoke, normalizeError} from "../../shared/tauri.js";
 import {onLangChange, t} from "../../i18n/index.js";
 import {renderCombo} from "../../shared/kbd.js";
 import {recordHotkey} from "../../shared/hotkey-recorder.js";
@@ -66,18 +66,37 @@ function initHotkeyRecording() {
                 defaultHotkey = await invoke("get_default_hotkey");
             } catch (err) {
                 console.error("[reset] get_default_hotkey failed:", err);
+                showHotkeyStatus(normalizeError(err).message);
                 return;
             }
-            await saveConfig("hotkey", {
-                modifiers: defaultHotkey.modifiers,
-                key: defaultHotkey.key,
-                display: defaultHotkey.display,
-            });
+            try {
+                await saveConfig("hotkey", {
+                    modifiers: defaultHotkey.modifiers,
+                    key: defaultHotkey.key,
+                    display: defaultHotkey.display,
+                });
+            } catch (err) {
+                console.error("[reset] save default hotkey failed:", err);
+                showHotkeyStatus(normalizeError(err).message);
+                return;
+            }
+            showHotkeyStatus("");
             renderHotkeyInto(hotkeyRecordBtn, defaultHotkey.display);
             const currentConfig = getCurrentConfig();
             if (currentConfig) currentConfig.hotkey = defaultHotkey;
         });
     }
+}
+
+/**
+ * 主热键面板常驻状态行（0.26.18）：录制失败/保存被拒（如与 chord 键冲突）
+ * 给出可见提示——此前仅 console.error，用户无从得知失败原因。
+ */
+function showHotkeyStatus(message) {
+    const status = document.getElementById("hotkey-status");
+    if (!status) return;
+    status.textContent = message || "";
+    status.hidden = !message;
 }
 
 /**
@@ -89,6 +108,7 @@ async function startRecording() {
 
     hotkeyRecordBtn.disabled = true;
     hotkeyResetBtn.disabled = true;
+    showHotkeyStatus("");
 
     // 录制期间吞掉所有键盘事件的默认行为
     const suppress = (e) => e.preventDefault();
@@ -106,6 +126,7 @@ async function startRecording() {
             key: result.key,
             display: result.display,
         });
+        showHotkeyStatus("");
 
         renderHotkeyInto(hotkeyRecordBtn, result.display);
 
@@ -118,7 +139,9 @@ async function startRecording() {
             };
         }
     } catch (e) {
+        // 0.26.18：录制失败/保存被拒给出常驻 UI 提示，不再只 console.error
         console.error("[startRecording] failed:", e);
+        showHotkeyStatus(normalizeError(e).message);
         const currentConfig = getCurrentConfig();
         renderHotkeyInto(hotkeyRecordBtn, currentConfig?.hotkey?.display || "Alt+Space");
     } finally {

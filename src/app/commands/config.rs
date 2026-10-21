@@ -254,7 +254,7 @@ async fn set_config_value(
                     combo.key(),
                 ) {
                     return Err(format!(
-                        "全局快捷键 {}（{}）不受支持：请使用单独 F1–F11 或 Ctrl/Alt/Win 组合键；F12 为系统保留",
+                        "全局快捷键 {}（{}）不受支持：请使用单独 F1–F11，或 Ctrl/Alt/Win + 字母/数字/空格/标点/方向键/导航键；F12 为系统保留",
                         combo.display(),
                         registry.action_label(&id, &language)
                     ));
@@ -264,12 +264,13 @@ async fn set_config_value(
             if let Some(conflict) = registry.binding_conflicts(&bindings).first() {
                 return Err(registry.describe_binding_conflict(conflict, &language));
             }
-            // 0.22.12：全局快捷键冲突 + 主热键跨检查
+            // 0.22.12：全局快捷键冲突 + 主热键跨检查（0.26.18：旧方向键长名归一后再比）
             let hotkey_cfg =
                 crate::app::config::ConfigStore::get::<crate::app::config::HotkeyConfig>(pool)
                     .await;
+            let hotkey_key = crate::app::config::normalize_legacy_hotkey_key(&hotkey_cfg.key);
             if let Some(conflict) = registry
-                .global_binding_conflicts(&bindings, Some((&hotkey_cfg.modifiers, &hotkey_cfg.key)))
+                .global_binding_conflicts(&bindings, Some((&hotkey_cfg.modifiers, &hotkey_key)))
                 .first()
             {
                 return Err(registry.describe_binding_conflict(conflict, &language));

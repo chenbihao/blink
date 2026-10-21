@@ -370,10 +370,14 @@ fn format_display(modifiers: &[String], key: &str) -> String {
     // 格式化主键
     let key_display = match key {
         " " => "Space",
-        "ArrowUp" => "↑",
-        "ArrowDown" => "↓",
-        "ArrowLeft" => "←",
-        "ArrowRight" => "→",
+        "up" => "↑",
+        "down" => "↓",
+        "left" => "←",
+        "right" => "→",
+        "pageup" => "PgUp",
+        "pagedown" => "PgDn",
+        "home" => "Home",
+        "end" => "End",
         "Escape" => "Esc",
         "Delete" => "Del",
         "Enter" => "Enter",
@@ -407,6 +411,16 @@ pub fn active_session_id() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 0.26.18：方向键/导航键短名 + OEM 标点的录制显示形态。
+    #[test]
+    fn format_display_uses_short_arrow_nav_and_oem_names() {
+        assert_eq!(format_display(&["ctrl".to_string()], "up"), "Ctrl+↑");
+        assert_eq!(format_display(&["alt".to_string()], "pagedown"), "Alt+PgDn");
+        assert_eq!(format_display(&[], "home"), "Home");
+        assert_eq!(format_display(&["ctrl".to_string()], "`"), "Ctrl+`");
+        assert_eq!(format_display(&["shift".to_string()], "'"), "Shift+'");
+    }
 
     #[test]
     fn concurrent_begin_does_not_overwrite_active_sender() {

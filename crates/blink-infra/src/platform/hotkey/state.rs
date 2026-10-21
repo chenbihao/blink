@@ -504,8 +504,10 @@ impl NormalizedHotkey {
     }
 }
 
-/// 功能项全局键白名单：单独 F1–F11，或 Ctrl/Alt/Win + 字母/数字/F1–F11/空格。
-/// 接收 canonical 修饰键；F12 为系统调试器保留，裸输入键不允许全局占用。
+/// 功能项全局键白名单（0.26.18 扩展）：单独 F1–F11，或 Ctrl/Alt/Win（可选
+/// Shift）+ 字母/数字/空格/OEM 标点/方向键/导航键/F1–F11。
+/// 接收 canonical 修饰键；F12 为系统调试器保留，Tab/Enter/Esc/CapsLock/
+/// Backspace/PrintScreen 等裸输入键不允许全局占用。
 pub fn is_supported_global_hotkey(modifiers: &[String], key: &str) -> bool {
     if modifiers
         .iter()
@@ -524,8 +526,29 @@ pub fn is_supported_global_hotkey(modifiers: &[String], key: &str) -> bool {
     let usable_modifier = modifiers
         .iter()
         .any(|m| matches!(m.as_str(), "ctrl" | "alt" | "meta"));
-    let input_key = key.len() == 1 && key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b' ');
-    usable_modifier && (function_key || input_key || key == "space")
+    usable_modifier && (function_key || key == "space" || is_global_input_key(&key))
+}
+
+/// 全局快捷键允许的输入主键：单字符字母/数字/空格/OEM 标点，或方向键/导航键名。
+/// 键名与 `windows.rs::vk_to_key` 逐字对齐（"up"/"pageup"/"`" 等）。
+fn is_global_input_key(key: &str) -> bool {
+    if key.len() == 1 {
+        let c = key.as_bytes()[0] as char;
+        return c.is_ascii_alphanumeric() || c == ' ' || is_oem_punct(c);
+    }
+    matches!(
+        key,
+        "up" | "down" | "left" | "right" | "pageup" | "pagedown" | "home" | "end"
+    )
+}
+
+/// OEM 标点主键（VK_OEM_1..8 区段在 US 布局下的未加 Shift 字符）。
+/// 各国布局同一 VK 对应不同字符，白名单按字符与 VK 双向覆盖。
+fn is_oem_punct(c: char) -> bool {
+    matches!(
+        c,
+        '`' | '-' | '=' | '[' | ']' | '\\' | ';' | '\'' | ',' | '.' | '/' | '~'
+    )
 }
 
 // ── 配置快照 ────────────────────────────────────────────────────────────────
@@ -2025,6 +2048,30 @@ mod tests {
         ] {
             assert!(!is_supported_global_hotkey(&[], key), "{key}");
         }
+    }
+
+    /// 0.26.18 扩展键集与共享向量一致（向量真源见 mod.rs test_vectors，
+    /// 与 global.rs vk_for_key、windows.rs vk_to_key、前端测试同源）。
+    #[test]
+    fn global_hotkey_whitelist_extended_keys_match_shared_vectors() {
+        use crate::platform::hotkey::test_vectors;
+
+        let ctrl = vec!["ctrl".to_string()];
+        for key in test_vectors::SUPPORTED_COMBO_KEYS {
+            assert!(is_supported_global_hotkey(&ctrl, key), "ctrl+{key} 应可用");
+        }
+        for key in test_vectors::REJECTED_KEYS {
+            assert!(!is_supported_global_hotkey(&ctrl, key), "ctrl+{key} 应拒绝");
+        }
+        // 大小写不敏感：录制产出的大写形态归一后命中
+        assert!(is_supported_global_hotkey(&ctrl, "Up"));
+        assert!(is_supported_global_hotkey(&ctrl, "PageDown"));
+        assert!(is_supported_global_hotkey(&ctrl, "`"));
+        // "space" 别名与 canonical " " 等价
+        assert!(is_supported_global_hotkey(&ctrl, "space"));
+        // 纯 Shift 组合仍拒绝
+        assert!(!is_supported_global_hotkey(&["shift".to_string()], "up"));
+        assert!(!is_supported_global_hotkey(&["shift".to_string()], "`"));
     }
 
     #[test]

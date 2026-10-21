@@ -1338,8 +1338,9 @@ async function updatePromptBanner(conversationId) {
 // ── 设置 ────────────────────────────────────────
 
 function openSettings() {
-    // 跳转到设置页「AI 对话设置」tab
-    invoke("open_settings_tab", {tab: "ai-chat"});
+    // 跳转到设置页「AI 供应商」tab（0.26.18 档位卡移入后，未配置供应商的
+    // 空状态引导在此 tab 可完成 供应商→档位→启用 的完整链路）
+    invoke("open_settings_tab", {tab: "ai-providers"});
 }
 
 function openProviderSettings() {

@@ -355,3 +355,66 @@ mod control_queue_tests {
         assert!(matches!(drained[1], ControlMsg::ManualRecovery));
     }
 }
+
+// ── 0.26.18：全局键位白名单共享测试向量 ──────────────────────────────────────
+//
+// 同一规则三处各写（前端 normalizeRecordedGlobalHotkey / IPC
+// is_supported_global_hotkey / 注册层 vk_for_key + vk_to_key），扩展键集时
+// 最易漂移。三处测试共用本向量：
+// - state.rs 测试消费 SUPPORTED/REJECTED/BARE 键集；
+// - global.rs 测试断言 vk_for_key 对每个组合主键可映射（且拒绝键为 None）；
+// - windows.rs（Windows 平台）测试断言 EXTENDED_VK_KEY_PAIRS 双向对齐
+//   （vk_for_key(name) == vk 且 vk_to_key(vk) == name）。
+// 前端 `frontend/js/shared/global-hotkey.test.mjs` 维护同一键集（JS 无法
+// import 本模块，注释互指；两处需同步扩展）。
+#[cfg(test)]
+pub(crate) mod test_vectors {
+    /// Ctrl/Alt/Win（可选 Shift）组合下允许的全部主键形态（canonical 小写键名；
+    /// 单字符集 + 方向/导航键名各取样，"space" 别名另测）。
+    pub(crate) const SUPPORTED_COMBO_KEYS: &[&str] = &[
+        // 字母 / 数字 / 空格
+        "a", "z", "0", "9", " ",
+        // OEM 标点（VK_OEM_1..8 区段，US 布局未加 Shift 字符）
+        "`", "-", "=", "[", "]", "\\", ";", "'", ",", ".", "/", "~",
+        // 方向键 / 导航键
+        "up", "down", "left", "right", "pageup", "pagedown", "home", "end",
+        // 功能键
+        "f1", "f11",
+    ];
+
+    /// 仍拒绝的主键：系统与应用广泛占用的裸输入键、F12 系统保留、未知/多字符名。
+    pub(crate) const REJECTED_KEYS: &[&str] = &[
+        "tab", "enter", "escape", "esc", "capslock", "backspace", "printscreen", "delete",
+        "insert", "f12", "f13", "arrowup", "spacebar", "", "aa",
+    ];
+
+    /// 无修饰键时允许的裸主键（仅功能键 F1–F11）。
+    pub(crate) const BARE_KEYS: &[&str] = &[
+        "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11",
+    ];
+
+    /// 扩展键集的 VK↔键名 对（vk_for_key 正向 / vk_to_key 反向共用）。
+    /// VK 码为 Win32 标准值（0x21..0x28 导航/方向区，0xBA..0xDF OEM 区段）。
+    pub(crate) const EXTENDED_VK_KEY_PAIRS: &[(u32, &str)] = &[
+        (0xC0, "`"),    // VK_OEM_3
+        (0xBD, "-"),    // VK_OEM_MINUS
+        (0xBB, "="),    // VK_OEM_PLUS
+        (0xDB, "["),    // VK_OEM_4
+        (0xDD, "]"),    // VK_OEM_6
+        (0xDC, "\\"),   // VK_OEM_5
+        (0xBA, ";"),    // VK_OEM_1
+        (0xDE, "'"),    // VK_OEM_7
+        (0xBC, ","),    // VK_OEM_COMMA
+        (0xBE, "."),    // VK_OEM_PERIOD
+        (0xBF, "/"),    // VK_OEM_2
+        (0xDF, "~"),    // VK_OEM_8（部分布局为独立键）
+        (0x25, "left"),    // VK_LEFT
+        (0x26, "up"),      // VK_UP
+        (0x27, "right"),   // VK_RIGHT
+        (0x28, "down"),    // VK_DOWN
+        (0x21, "pageup"),  // VK_PRIOR
+        (0x22, "pagedown"), // VK_NEXT
+        (0x23, "end"),     // VK_END
+        (0x24, "home"),    // VK_HOME
+    ];
+}

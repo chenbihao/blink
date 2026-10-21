@@ -47,7 +47,7 @@ While the main window is open, **hold `Alt`** — the input box (when empty) or 
 | `Alt+S` | Pin as sticky note (takes the input box text; empty input creates a blank note) |
 | `Alt+Space` (hold) | Voice input; release to transcribe |
 
-Every Chord action can be remapped in Settings and promoted to a **global hotkey** (works even when the main window is hidden).
+Every Chord action can be remapped in Settings and promoted to a **global hotkey** (works even when the main window is hidden). Custom combos support Ctrl/Alt/Win (Shift optional) + letter/number/space/punctuation/arrow/PgUp-PgDn-Home-End/F1–F11, or standalone F1–F11; invalid recordings show the exact reason in the status line.
 
 ---
 
@@ -245,6 +245,7 @@ Summon: `Alt+Q` (text in the main window's input is carried over automatically �
 | Send / newline | `Enter` / `Shift+Enter` | Streaming output |
 | Stop generating | Stop button or `Esc` while generating | Generated content is kept |
 | Hide when idle | `Esc` | Hides the window (conversation preserved) |
+| Sidebar toggle | Menu button on the left of the header | Open by default; remembered within the session, resets after restart |
 | Edit & resend | Hover a user message → edit | Editing truncates the subsequent messages and resends |
 | Rename | Double-click a conversation in the sidebar | Inline rename |
 | Drag to organize | Drag a conversation into a group / drag a group into another | Moves conversations / reorders groups |

@@ -246,7 +246,8 @@ fn fs_modifiers(modifiers: &[String]) -> (HOT_KEY_MODIFIERS, bool) {
     (fs, true)
 }
 
-/// 主键名 → VK 码。白名单：字母 / 数字 / F1-F11 / 空格。
+/// 主键名 → VK 码。白名单（0.26.18 扩展）：字母 / 数字 / F1-F11 / 空格 /
+/// OEM 标点 / 方向键 / 导航键。键名与 `windows.rs::vk_to_key` 反向对齐。
 fn vk_for_key(key: &str) -> Option<u32> {
     let lower = key.to_lowercase();
     let mut chars = lower.chars();
@@ -255,7 +256,7 @@ fn vk_for_key(key: &str) -> Option<u32> {
             'a'..='z' => return Some(c.to_ascii_uppercase() as u32),
             '0'..='9' => return Some(c as u32),
             ' ' => return Some(VK_SPACE.0 as u32),
-            _ => {}
+            _ => return oem_vk_for_char(c),
         }
     }
     if lower == "space" {
@@ -268,7 +269,41 @@ fn vk_for_key(key: &str) -> Option<u32> {
     {
         return Some(VK_F1.0 as u32 + n - 1);
     }
-    None
+    named_vk_for_key(&lower)
+}
+
+/// OEM 标点字符（VK_OEM_1..8 区段 US 布局形态）→ VK 码。
+fn oem_vk_for_char(c: char) -> Option<u32> {
+    Some(match c {
+        '`' => 0xC0,    // VK_OEM_3
+        '-' => 0xBD,    // VK_OEM_MINUS
+        '=' => 0xBB,    // VK_OEM_PLUS
+        '[' => 0xDB,    // VK_OEM_4
+        ']' => 0xDD,    // VK_OEM_6
+        '\\' => 0xDC,   // VK_OEM_5
+        ';' => 0xBA,    // VK_OEM_1
+        '\'' => 0xDE,   // VK_OEM_7
+        ',' => 0xBC,    // VK_OEM_COMMA
+        '.' => 0xBE,    // VK_OEM_PERIOD
+        '/' => 0xBF,    // VK_OEM_2
+        '~' => 0xDF,    // VK_OEM_8（部分布局为独立键）
+        _ => return None,
+    })
+}
+
+/// 方向键/导航键名 → VK 码。
+fn named_vk_for_key(key: &str) -> Option<u32> {
+    Some(match key {
+        "left" => 0x25,    // VK_LEFT
+        "up" => 0x26,      // VK_UP
+        "right" => 0x27,   // VK_RIGHT
+        "down" => 0x28,    // VK_DOWN
+        "pageup" => 0x21,  // VK_PRIOR
+        "pagedown" => 0x22, // VK_NEXT
+        "end" => 0x23,     // VK_END
+        "home" => 0x24,    // VK_HOME
+        _ => return None,
+    })
 }
 
 /// 组合键显示名（日志用）。
@@ -314,6 +349,25 @@ mod tests {
         assert_eq!(vk_for_key("tab"), None);
         assert_eq!(vk_for_key(""), None);
         assert_eq!(vk_for_key("f13"), None);
+    }
+
+    /// 0.26.18：注册层键集与共享向量一致（向量真源见 mod.rs test_vectors，
+    /// 与 state.rs is_supported_global_hotkey、windows.rs vk_to_key 同源）。
+    #[test]
+    fn vk_for_key_matches_shared_vectors() {
+        use crate::platform::hotkey::test_vectors;
+
+        for &(vk, name) in test_vectors::EXTENDED_VK_KEY_PAIRS {
+            assert_eq!(vk_for_key(name), Some(vk), "vk_for_key({name})");
+        }
+        for key in test_vectors::SUPPORTED_COMBO_KEYS {
+            assert!(vk_for_key(key).is_some(), "vk_for_key({key}) 应可映射");
+        }
+        for key in test_vectors::REJECTED_KEYS {
+            assert_eq!(vk_for_key(key), None, "vk_for_key({key}) 应拒绝");
+        }
+        // 大小写不敏感（录制产出的大写形态）
+        assert_eq!(vk_for_key("Up"), Some(0x26));
     }
 
     #[test]

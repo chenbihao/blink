@@ -652,6 +652,14 @@ export const AI_PRESET_CATALOG = {
         tint: "slate",
         category: "local"
     },
+    "magpie": {
+        kind: "openai_compatible",
+        base_url: "http://127.0.0.1:3425/v1",
+        display_name_default: "Magpie",
+        monogram: "Mg",
+        tint: "slate",
+        category: "local"
+    },
     "custom": {kind: null, base_url: null, display_name_default: null, monogram: null, tint: "ink", category: "custom"},
 };
 
@@ -959,6 +967,11 @@ async function saveNewProvider({kind, displayName, baseUrl, apiKey, errEl, selec
         created_at: Math.floor(Date.now() / 1000),
     };
     cfg.providers = [...(cfg.providers || []), newProvider];
+    // 0.26.18：与「移除最后一个供应商时自动关闭」对称——配置首个供应商后自动
+    // 开启「启用 AI 提示」（移除供应商被连带关闭后，用户不必手动找回开关）。
+    // 仅在新增后仅此一家时触发，不覆盖「已有供应商仍手动关闭」的显式选择。
+    const autoEnableHint = !cfg.enabled && cfg.providers.length === 1;
+    if (autoEnableHint) cfg.enabled = true;
     aiState.hasSecretMap.set(providerId, !!apiKey || kind === "ollama_http");
     // 0.17.8: 保存密钥掩码提示，供 provider 卡片展示
     if (apiKey) {
@@ -974,8 +987,13 @@ async function saveNewProvider({kind, displayName, baseUrl, apiKey, errEl, selec
         await saveAIConfig();
     } catch (e) {
         cfg.providers = cfg.providers.filter((p) => p.id !== providerId);
+        if (autoEnableHint) cfg.enabled = false;
         if (errEl) errEl.textContent = t("ai.error.save_failed", {err: String(e)});
         return;
+    }
+    if (autoEnableHint) {
+        const enabledEl = document.getElementById("ai-enabled");
+        if (enabledEl) enabledEl.checked = true;
     }
 
     closeAIProviderModal();
