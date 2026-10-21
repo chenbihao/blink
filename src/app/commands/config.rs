@@ -102,7 +102,15 @@ async fn set_config_value(
             }
             // 托盘菜单是 Rust 侧静态构建的（不走前端 i18n），切语言后需主动重建。
             // on_menu_event 挂在 TrayIcon 上，set_menu 不影响 id 路由。
-            crate::app::tray::rebuild_menu(&app, &language);
+            // 0.26.20：重建时保留「检查更新」项的版本提示（不受语言切换影响）。
+            let update_hint = app
+                .try_state::<std::sync::Arc<std::sync::RwLock<crate::app::update_reminder::UpdateReminderState>>>()
+                .map(|c| {
+                    let state = c.read().unwrap_or_else(|e| e.into_inner()).clone();
+                    crate::app::update_reminder::tray_version_hint(&state).map(|v| v.to_string())
+                })
+                .flatten();
+            crate::app::tray::rebuild_menu(&app, &language, update_hint.as_deref());
             tracing::info!(%language, "语言已更新");
         }
         "log_level" => {
@@ -131,6 +139,12 @@ async fn set_config_value(
             let version: u32 = serde_json::from_value(value).map_err(|e| e.to_string())?;
             crate::app::config::update_onboarding_version(pool, version).await?;
             tracing::info!(version, "引导向导版本标记已更新");
+        }
+        // 0.26.20：自动检查更新总开关（设置页关于 tab）。关闭后后台静默检查停跑、
+        // 建议槽与托盘版本提示不再出现；手动检查（按钮/内置动作）不拦（用户主动行为）。
+        "auto_check_update" => {
+            let enabled: bool = serde_json::from_value(value).map_err(|e| e.to_string())?;
+            crate::app::update_reminder::set_auto_check_enabled(&app, enabled).await;
         }
         "tap_threshold" => {
             let threshold: u64 = serde_json::from_value(value).map_err(|e| e.to_string())?;

@@ -53,6 +53,19 @@ export function runBuiltinAction(id, arg) {
     return invoke("run_builtin_action", {id, arg: arg ?? null});
 }
 
+// ── 0.26.20 更新提醒 ────────────────────────────────────────────────────────
+
+/** 记录版本提示已读屏蔽（建议槽 × 关闭与 Tab 采纳共用）：
+ *  当前可用版本记入 dismissed_version，本版本不再出现、发布更新版本后恢复。 */
+export function dismissUpdateVersion() {
+    return invoke("dismiss_update_version");
+}
+
+/** 打开设置页并定位到指定 Tab（后端含 tab 白名单校验）。 */
+export function openSettingsTab(tab) {
+    return invoke("open_settings_tab", {tab});
+}
+
 /** Save a file image and return its exact history ID for a following pin/edit operation. */
 export function saveClipboardFileAsImage(id) {
     return invoke("save_clipboard_file_image", {id});

@@ -445,8 +445,29 @@ fn main() {
                 infra::platform::window::show_welcome_window(app.handle());
             }
 
-            // 托盘菜单：显示主窗口 + 设置 + 便签管理 + 关于 + 退出（按当前语言构建，运行时切语言会重建）
-            let menu = app::tray::build_menu(app, &app_config.language)?;
+            // 0.26.20 更新提醒状态：启动一次 DB 读，managed cell 供唤起路径盖章
+            // （零 IO）与后台任务写入；后台静默检查任务（首查延迟 2min）随后拉起。
+            let update_reminder_state = tauri::async_runtime::block_on(
+                app::update_reminder::load_state(&pools.config),
+            );
+            tracing::debug!(
+                auto = update_reminder_state.auto_check_enabled,
+                latest = %update_reminder_state.latest_version,
+                "更新提醒状态已加载"
+            );
+            app.manage(std::sync::Arc::new(std::sync::RwLock::new(
+                update_reminder_state.clone(),
+            )));
+            // 后台静默检查：≥2min 首查、24h 节流、失败仅 warn（不进启动热路径）
+            app::update_reminder::spawn_background_task(app.handle().clone());
+
+            // 托盘菜单：显示主窗口 + 设置 + 便签管理 + 关于 + 检查更新 + 退出
+            //（按当前语言构建，运行时切语言/更新提示变化会重建）
+            let menu = app::tray::build_menu(
+                app,
+                &app_config.language,
+                app::update_reminder::tray_version_hint(&update_reminder_state),
+            )?;
             TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .tooltip("Blink")
@@ -463,6 +484,8 @@ fn main() {
                         let _ = crate::infra::platform::window::show_chat_window(app, None);
                     }
                     "about" => open_about(app),
+                    // 0.26.20：检查更新——打开设置关于 tab（打开即静默自动检查并渲染）
+                    "check_update" => app::update_reminder::open_settings_about(app),
                     // 0.19.17：输入钩子逃生舱——Alt+Space 失效时从此手动恢复
                     "recover_hook" => {
                         tracing::info!("托盘菜单：用户请求恢复输入钩子");
@@ -557,6 +580,11 @@ fn main() {
                     ai_registry_cell.clone(),
                     router.clone(),
                 ),
+            ));
+            // 0.26.20：更新提醒 producer（纯读快照 available_update，空 query 独占；
+            // Coordinator 特判仅占空缺槽位）。数据由 window_orchestrator 唤起时盖章。
+            suggestion_coordinator.register(std::sync::Arc::new(
+                domain::intent::suggestion::update::UpdateProducer,
             ));
 
             // 无条件构造 PluginEngine（空 plugins 也是合法态）。
@@ -1653,6 +1681,7 @@ app::commands::generate_palette_schemes,
             app::commands::get_app_info,
             app::commands::check_update,
             app::commands::install_update, // 0.25.10 应用内一键更新
+            app::commands::dismiss_update_version, // 0.26.20 版本提示已读屏蔽
             app::commands::show_theme_debug_cmd, // 0.25.11 主题调试台入口
             app::commands::debug_uia_focus, // 0.25.21 焦点控件 UIA 诊断
             app::commands::resize_window,
@@ -2007,14 +2036,9 @@ fn open_settings(app: &tauri::AppHandle) {
 }
 
 /// 打开设置窗口并定位到「关于」Tab。
+/// 0.26.20：实现收敛到 update_reminder（托盘「检查更新」/建议采纳共用）。
 fn open_about(app: &tauri::AppHandle) {
-    open_settings(app);
-    if let Some(w) = app.get_webview_window("settings") {
-        // HTML 异步加载，需延迟等 DOM 就绪后再切 Tab
-        let _ = w.eval(
-            "setTimeout(() => document.querySelector('.tab[data-tab=\"about\"]')?.click(), 300)",
-        );
-    }
+    app::update_reminder::open_settings_about(app);
 }
 
 /// 最小 percent-decode：还原前端 `encodeURIComponent` 编码的图标路径。

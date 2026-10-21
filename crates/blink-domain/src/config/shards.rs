@@ -552,6 +552,48 @@ fn default_bookmark_max_entries() -> u32 {
     50_000
 }
 
+// ── UpdateConfig（0.26.20）───────────────────────────────────────────────────
+
+/// 更新提醒分片（0.26.20）：自动检查开关 + 检查状态三项。
+///
+/// `latest_version` 只记录「最近一次成功检查得到的最新发布版」；是否构成
+/// 「可用更新」由 app 层结合当前应用版本与 `dismissed_version` 判定
+/// （domain 不感知应用版本号，`env!("CARGO_PKG_VERSION")` 是 bin 侧概念）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpdateConfig {
+    /// 自动检查总开关（默认开）。关闭 = 后台静默检查不跑、建议槽与托盘版本
+    /// 提示不出现；设置页手动「检查更新」与主窗口内置动作不受影响（用户主动
+    /// 行为不拦）。
+    #[serde(default = "default_true")]
+    pub auto_check_enabled: bool,
+    /// 最近一次检查时间（Unix 秒，0 = 从未）。后台 24h 节流判据；失败也推进——
+    /// 24h 内最多一次尝试，避免断网场景每小时重试打满 GitHub 匿名限流。
+    #[serde(default)]
+    pub last_check: i64,
+    /// 最近一次成功检查得到的最新版本（空串 = 未知）。
+    #[serde(default)]
+    pub latest_version: String,
+    /// 用户已读屏蔽的版本（建议槽 Tab 采纳或显式关闭时记录；发布更新的版本
+    /// 后自动恢复提示）。
+    #[serde(default)]
+    pub dismissed_version: String,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            auto_check_enabled: true,
+            last_check: 0,
+            latest_version: String::new(),
+            dismissed_version: String::new(),
+        }
+    }
+}
+
+impl ConfigKey for UpdateConfig {
+    const KEY: &'static str = "app.update";
+}
+
 // ── ContextConfig ─────────────────────────────────────────────────────────────
 
 /// Context 层配置：控制唤起时的环境采集行为。
@@ -934,6 +976,26 @@ mod tests {
         let cleared = r#"{"browsers":["edge"]}"#;
         let c: BookmarksConfig = serde_json::from_str(cleared).unwrap();
         assert_eq!(c.browsers, ["edge"]);
+    }
+
+    /// 0.26.20：旧分片（无 update 字段）反序列化保持默认——自动检查开、
+    /// 从未检查、版本未知、未屏蔽；显式关闭与已记录状态原样保留。
+    #[test]
+    fn update_config_legacy_json_keeps_defaults() {
+        let empty: UpdateConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(empty, UpdateConfig::default());
+
+        let legacy = r#"{"latest_version":"0.26.21","last_check":1770000000}"#;
+        let c: UpdateConfig = serde_json::from_str(legacy).unwrap();
+        assert!(c.auto_check_enabled, "缺字段的开关默认开");
+        assert_eq!(c.latest_version, "0.26.21");
+        assert_eq!(c.last_check, 1770000000);
+        assert_eq!(c.dismissed_version, "");
+
+        let off = r#"{"auto_check_enabled":false,"latest_version":"0.26.21","dismissed_version":"0.26.21"}"#;
+        let c: UpdateConfig = serde_json::from_str(off).unwrap();
+        assert!(!c.auto_check_enabled);
+        assert_eq!(c.dismissed_version, "0.26.21");
     }
 
     /// 0.25.14：旧分片（无 preselection_cutout 字段）反序列化必须默认开启挖洞，

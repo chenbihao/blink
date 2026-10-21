@@ -213,13 +213,55 @@ pub async fn launch_app(app: tauri::AppHandle, lnk_path: String) -> Result<(), S
 /// 未知 id → 返回 `Err`；前端会打印到控制台，不弹窗。
 ///
 /// **0.14.7 W3**：返回 `CommandError`（结构化错误协议），前端按 code/message 展示。
+///
+/// **0.26.20 修订**：返回值为动作结果协议——
+/// - 普通动作：成功后隐藏主窗（后端收尾），返回 `{"done": true}`
+/// - 声明 `BuiltinResultAction::ReturnItems` 的动作（descriptor 声明，当前唯一
+///   消费者 `check_update`）：在下方 command 层分派执行（网络/app 状态依赖进不了
+///   domain Capability，与 `open_system_entry` 的 history 回写同层性质——command
+///   层编排，不进 registry），主窗**不**隐藏，返回 `{"items": [...]}`（标准条目
+///   数组，前端先占位后原位替换渲染）。前端不再按 id 特判直调专用命令。
 #[tauri::command]
 pub async fn run_builtin_action(
     app: tauri::AppHandle,
     id: String,
     arg: Option<serde_json::Value>,
-) -> Result<(), crate::app::command_error::CommandError> {
+) -> Result<serde_json::Value, crate::app::command_error::CommandError> {
     tracing::debug!(%id, ?arg, "run_builtin_action: 收到请求");
+
+    // 0.26.20 修订：ReturnItems 动作的 command 层分派（descriptor 是准入清单——
+    // 见 builtin_engine ACTIONS 表，勿绕过声明直接加 id）。
+    if matches!(
+        crate::domain::search::find_result_action_by_capability_id(&id),
+        Some(crate::domain::search::BuiltinResultAction::ReturnItems { .. })
+    ) {
+        return match id.as_str() {
+            "check_update" => {
+                let outcome = crate::app::commands::perform_update_check(&app).await;
+                let latest =
+                    outcome.error.is_none().then(|| outcome.latest_version.clone());
+                crate::app::update_reminder::record_check_outcome(&app, latest.as_deref()).await;
+                let pool = &app.state::<crate::infra::data::DbPools>().config;
+                let lang = crate::domain::config::store::ConfigStore::get::<
+                    crate::domain::config::shards::AppearanceConfig,
+                >(pool)
+                .await
+                .language;
+                let items = crate::app::update_reminder::check_result_items(&outcome, &lang);
+                tracing::info!(
+                    has_update = outcome.has_update,
+                    error = ?outcome.error,
+                    "run_builtin_action: check_update 完成，结果条目回流结果区"
+                );
+                Ok(serde_json::json!({ "items": items }))
+            }
+            other => Err(crate::app::command_error::CommandError::new(
+                "not_found",
+                format!("ReturnItems 动作缺少 command 层分派: {other}"),
+                false,
+            )),
+        };
+    }
 
     // 0.14.6 §2.2：从 state 获取 DomainEnv 桥接器
     let env_arc = app
@@ -298,7 +340,7 @@ pub async fn run_builtin_action(
             }
         }
         crate::infra::platform::window::hide(&app, "run_builtin_action");
-        return Ok(());
+        return Ok(serde_json::json!({ "done": true }));
     }
 
     tracing::warn!(%id, "run_builtin_action: 未知 id");

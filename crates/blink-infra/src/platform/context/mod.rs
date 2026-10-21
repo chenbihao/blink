@@ -106,6 +106,10 @@ pub struct AwarenessSnapshot {
     ///
     /// **顺序无语义**：`find_text(source)` 按 source 查找,不假设顺序。
     pub texts: Vec<AwarenessText>,
+    /// 可用的应用更新版本（0.26.20 更新提醒）——app 层在唤起采集后盖章
+    /// （「自动检查开 && 检测到新版 && 未 dismiss」三条件成立时的版本号），
+    /// `collect` 不填、infra 不做判定；Suggestion 域的 UpdateProducer 纯读此字段。
+    pub available_update: Option<String>,
 }
 
 impl Default for AwarenessSnapshot {
@@ -114,6 +118,7 @@ impl Default for AwarenessSnapshot {
             captured_at: Instant::now(),
             foreground_app: None,
             texts: Vec::new(),
+            available_update: None,
         }
     }
 }
@@ -298,6 +303,8 @@ pub fn collect(cfg: &CollectParams) -> AwarenessSnapshot {
         captured_at: Instant::now(),
         foreground_app,
         texts,
+        // 更新提醒由 app 层在 collect 之后盖章（见字段注释），此处恒 None
+        available_update: None,
     }
 }
 

@@ -27,6 +27,11 @@ use crate::context::trigger::{self as ctx_trigger, ContextTrigger, ParamSource};
 pub enum BuiltinResultAction {
     /// 把 `CapabilityResult::Text.content` 复制到剪贴板。
     CopyText { skip_persist: bool },
+    /// 执行结果以标准条目数组回流主窗口结果区（0.26.20 修订）：
+    /// 主窗不隐藏，前端先展示独占占位行、invoke 返回 `{items}` 后原位替换。
+    /// 执行体在 command 层分派（网络/app 状态依赖进不了 domain Capability）。
+    /// `pending_hint` = 占位主行文案的 i18n key（经 `Action.hint` 下发，前端 t() 渲染）。
+    ReturnItems { pending_hint: &'static str },
 }
 
 /// 内置动作定义（引擎内部模型，用于 keyword 匹配 + Context 触发 + 搜索结果展示）。
@@ -86,6 +91,27 @@ const ACTIONS: &[BuiltinAction] = &[
         param_source: ParamSource::None,
         param_field: "",
         result_action: None,
+        default_enabled: true,
+    },
+    // 0.26.20 更新提醒：keyword 命中召回「检查更新」动作；空 query 不注入任何
+    // 更新条目（不影响用户路径）。执行经 run_builtin_action 的 command 层分派
+    // （检查是网络请求，进不了 domain Capability），结果以标准条目数组回流
+    // 结果区（新版→回车跳设置关于 tab / 已最新→结果行反馈），主窗不隐藏——
+    // 由 ReturnItems 声明（0.26.20 修订：原前端特判直调专用命令，已协议化收回）。
+    BuiltinAction {
+        id: "check_update",
+        capability_id: "check_update",
+        title: "检查更新",
+        title_en: "Check for Updates",
+        subtitle: "检查 Blink 新版本",
+        subtitle_en: "Check for a new Blink version",
+        keywords: &["更新", "升级", "检查更新", "update"],
+        context: &[],
+        param_source: ParamSource::None,
+        param_field: "",
+        result_action: Some(BuiltinResultAction::ReturnItems {
+            pending_hint: "update.checking",
+        }),
         default_enabled: true,
     },
     BuiltinAction {
@@ -530,6 +556,9 @@ fn action_to_search_item(
 ) -> SearchItem {
     // 0.21.3：RunAction.id 直接为 capability_id（descriptor target），
     // 不再隐式假设 descriptor id == capability id。
+    // 0.26.20 修订：descriptor 声明 ReturnItems 的动作，其 await_result/占位文案
+    // 由 `into_app_entry` 投影时按 capability_id 回查 descriptor 注入（本函数不掺入
+    // Action 协议字段——SearchItem 保持引擎中立）。
     SearchItem {
         id: format!("builtin:{}", action.id),
         title: action.title.to_string(),
@@ -772,6 +801,70 @@ mod tests {
         assert!(!items.is_empty());
         assert_eq!(items[0].title, "打开设置");
         assert!(items[0].score > 0.0);
+    }
+
+    /// 0.26.20：check_update 动作——keyword/拼音/英文命中召回，空 query 不注入。
+    #[tokio::test]
+    async fn search_check_update() {
+        let engine = BuiltinEngine;
+        let history = HashMap::new();
+        let snapshot = ContextSnapshot::default();
+
+        for q in ["更新", "升级", "检查更新", "update", "jcgx", "gx"] {
+            let ctx = make_ctx(&history, &snapshot);
+            let items = engine.search(q, &ctx).await;
+            assert!(
+                items.iter().any(|i| i.id == "builtin:check_update"),
+                "查询 {q} 应召回 check_update"
+            );
+        }
+
+        // 空 query：不注入任何更新条目（0.24.8 纯建议化语义保持）
+        let ctx = make_ctx(&history, &snapshot);
+        let items = engine.search("", &ctx).await;
+        assert!(!items.iter().any(|i| i.id == "builtin:check_update"));
+
+        // disabled 过滤照常生效
+        let disabled = ["check_update".to_string()];
+        let ctx = QueryContext {
+            history: &history,
+            snapshot: &snapshot,
+            disabled_builtin_actions: &disabled,
+            disabled_context_bindings: &[],
+            language: "zh",
+            takeover_keyword: None,
+        };
+        let items = engine.search("更新", &ctx).await;
+        assert!(!items.iter().any(|i| i.id == "builtin:check_update"));
+    }
+
+    /// 0.26.20 修订：check_update 声明 ReturnItems——`into_app_entry` 投影后
+    /// 前端 Action 带 `awaitResult=true` + 占位文案 key（hint），其余内置动作
+    /// 不带（serde skip false）。前端据此先占位、以 run_builtin_action 返回的
+    /// `{items}` 原位替换。
+    #[tokio::test]
+    async fn check_update_action_carries_await_result() {
+        let engine = BuiltinEngine;
+        let history = HashMap::new();
+        let snapshot = ContextSnapshot::default();
+        let ctx = make_ctx(&history, &snapshot);
+
+        let items = engine.search("检查更新", &ctx).await;
+        let check = items
+            .iter()
+            .find(|i| i.id == "builtin:check_update")
+            .expect("应召回 check_update");
+        let entry = check.clone().into_app_entry();
+        let action = &entry.actions[0];
+        assert_eq!(action.run_id.as_deref(), Some("check_update"));
+        assert!(action.await_result, "ReturnItems 动作投影 awaitResult=true");
+        assert_eq!(action.hint.as_deref(), Some("update.checking"));
+
+        // 普通动作（打开设置）不带 await_result / pending hint
+        let settings = engine.search("设置", &ctx).await;
+        let plain = settings[0].clone().into_app_entry();
+        assert!(!plain.actions[0].await_result);
+        assert!(plain.actions[0].hint.is_none());
     }
 
     #[tokio::test]

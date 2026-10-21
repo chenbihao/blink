@@ -15,7 +15,7 @@
 //! ai-mode ↔ ghost 的加载期环在现有代码已存在且安全）。
 
 import {queryEl} from "./dom.js";
-import {reportSuggestionAdoption, runBuiltinAction} from "../shared/api.js";
+import {dismissUpdateVersion, hideWindow, openSettingsTab, reportSuggestionAdoption, runBuiltinAction} from "../shared/api.js";
 import {showActionError} from "./action-error.js";
 import * as aiMode from "./ai-mode.js";
 
@@ -56,7 +56,10 @@ export function acceptSuggestion(suggestion, slot, revision, hooks = {}) {
     const action = suggestion.action;
 
     // 防御：后端契约保证 action 必填；缺失/未知变体时视为不可采纳，避免误吞 Tab
-    if (!action?.routeQuery && !action?.enterAiMode && !action?.invokeCapability) {
+    if (
+        !action?.routeQuery && !action?.enterAiMode
+        && !action?.invokeCapability && !action?.openSettingsTab
+    ) {
         hooks.onStale?.(suggestion);
         return false;
     }
@@ -78,6 +81,21 @@ export function acceptSuggestion(suggestion, slot, revision, hooks = {}) {
         runBuiltinAction(capabilityId, args ?? null).catch((e) => {
             showActionError("run_builtin_action", e);
         });
+        return true;
+    }
+
+    if (action.openSettingsTab) {
+        // OpenSettingsTab（0.26.20 更新提醒）：跳设置指定 Tab（后端白名单校验）。
+        // 更新提示的采纳同时记录 dismissed_version——用户已知情，本版本不再出现
+        //（与建议槽 × 显式关闭同语义），并隐藏主窗（与 open_settings 行为一致：
+        // 打开设置即完成，主窗不再浮着）；均 fire-and-forget，失败不影响跳转。
+        openSettingsTab(action.openSettingsTab.tab).catch((e) => {
+            showActionError("open_settings_tab", e);
+        });
+        if (suggestion.kind === "updateAvailable") {
+            dismissUpdateVersion().catch(() => {});
+            hideWindow().catch(() => {});
+        }
         return true;
     }
 

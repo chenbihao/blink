@@ -11,6 +11,7 @@ const KIND_KEY = {
     open: "hint.open",
     copy: "hint.copy",
     route: "hint.route",
+    settings: "hint.settings", // 0.26.20 修订：纯 UI 导航（如检查更新结果行）
 };
 
 /**
@@ -23,8 +24,10 @@ const KIND_KEY = {
  */
 export function actionHint(action, clipboardMode) {
     if (!action) return {template: "", params: {}};
-    // 插件自定义动作名（action.hint，来自 manifest）原样使用不翻译；默认动作名走 i18n
+    // 动作自定义名（action.hint）可能是 i18n key（后端 ReturnItems 动作下发占位
+    // 文案 key，如 "update.checking"）也可能是原生文案（插件 manifest）——统一
+    // 过 t()：缺键回退原串（i18n/index.js 降级链），两类都安全。
     const key = clipboardMode && action.kind === "copy" ? "hint.paste_to_input" : KIND_KEY[action.kind];
-    const label = action.hint || (key ? t(key) : t("hint.fallback"));
+    const label = action.hint ? t(action.hint) : (key ? t(key) : t("hint.fallback"));
     return {template: t("hint.enter"), params: {label}};
 }

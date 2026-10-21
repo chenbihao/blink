@@ -488,6 +488,14 @@ export const zh = {
     "about.update.downloading": "正在下载更新… {percent}%",
     "about.update.downloading_no_size": "正在下载更新… {downloaded}",
     "about.update.installing": "下载完成，正在安装，应用即将自动重启…",
+    "about.update.auto_check": "自动检查更新",
+    "about.update.auto_check.hint": "开启后每天在后台静默检查一次新版本，并在主窗口建议条与托盘提示；关闭后不再自动检查与提示，手动检查不受影响",
+    // update.checking 由后端 ReturnItems 动作经 Action.hint 下发（占位主行 key）
+    "update.checking": "正在检查更新…",
+    // 慢 action 通用协议文案（0.26.20 修订：结果条目本体由后端按语言构造）
+    "action.working": "正在执行…",
+    "action.please_wait": "请稍候",
+    "action.failed": "操作失败",
 
     // ── 网络 Tab（动态渲染）──
     "network.title": "全局网络代理",
@@ -1346,6 +1354,7 @@ export const zh = {
     "hint.open": "打开",
     "hint.copy": "复制结果",
     "hint.route": "查询",
+    "hint.settings": "打开设置",
     "hint.paste_to_input": "上屏/复制",
     "hint.fallback": "执行",
     "hint.enter": "{{key:Enter}} {label}",
@@ -1369,6 +1378,8 @@ export const zh = {
     "suggestionbar.openPath_with": "打开路径 “{text}”",
     "suggestionbar.revealInExplorer": "资源管理器定位",
     "suggestionbar.revealInExplorer_with": "资源管理器定位 “{text}”",
+    "suggestionbar.update_available": "Blink {version} 可用",
+    "suggestionbar.update_dismiss": "关闭（本版本不再提示）",
 
     // ModeHeader（0.24.4 §5.5）：持续模式的唯一呈现
     "mode.ai.label": "AI",

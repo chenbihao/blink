@@ -107,6 +107,16 @@ cargo test --workspace --exclude blink-plugin-ip --exclude blink-plugin-translat
 - 宿主以 manifest 上限与调用方剩余时间取更小预算；排队、进程准备、stdin 写入、HTTP 和结果等待计入同一总期限。插件续发请求只能使用剩余预算。
 - cancel、调用方 drop、超时与进程退出须清理对应 pending，丢弃迟到响应；按请求与进程代次隔离，不能全局取消其他调用。并发与等待者须有上限，超限返回 busy；请求合并仅限预算兼容的调用，单个等待者退出不误取消其他等待者。
 - 插件联网复用宿主 HTTP 路径。鉴权请求限制非预期重定向；路径签名请求拒绝重定向。日志和用户错误不得回显路径/查询中的密钥或精确位置，网络库错误也须脱敏；协议 stdout 只发 JSONL，诊断使用宿主 stderr 分级桥。
+- **查询占位协议**：keyword 命中的异步插件查询，同步首响应必须携带 `is_placeholder: true` 占位项（「{插件名} 查询中…」；`placeholder_score`：Priority > 1.0 置顶 / Inline < 0 沉底），增量结果按 source（= plugin_id）到达后由前端清理对应占位；**空结果必须发 `score = -2` 标记项显式清理占位**，不静默无回包。`empty_arg_hint` 静态项与 `args.hints` 引导项与占位同 source 且 `is_placeholder = false`——它们**不是**「真实结果已到」的信号，前端迟到占位判定不得据此丢弃同批占位（0.26.17 引入引导项时踩坑、0.26.20 修复，回归锚定在 `results-viewport.test.mjs`）。
+
+### 4.5 内置动作结果协议（强制，0.26.20 修订）
+
+`run_builtin_action` 是主窗内置动作的统一入口，返回值即动作结果协议：
+
+- **普通动作**：执行副作用 → 成功后**后端隐藏主窗**，返回 `{"done": true}`；descriptor 可声明 `BuiltinResultAction::CopyText` 追加剪贴板写入。前端对返回值零处理。
+- **`BuiltinResultAction::ReturnItems { pending_hint }`**（慢动作、结果需回流结果区，如检查更新）：**主窗不隐藏**，返回 `{"items": [...]}`——标准条目数组（AppEntry 兼容形状），由**后端构造**（含按 `AppearanceConfig.language` 本地化的文案与 Lucide `icon` 字段，与托盘菜单同惯例；条目数据后端出、前端纯渲染），前端先占位后原位替换（见 spec-frontend §5.1 ReturnItems 通用协议）。
+- **ReturnItems 动作的执行体在 command 层分派**（网络/app 状态依赖进不了 domain Capability，与 `open_system_entry` 的 history 回写同层性质）；descriptor（ACTIONS 表）是唯一准入清单，禁止绕过声明直接在 command 层加 id 分派。
+- **前端禁止按 capability id 特判**再直调专用命令承载结果回流（0.26.20 原实现即此形态，已协议化收回；`actions.js` 历史特判仅剩无回流的快副作用直调，如剪贴板图片复制/钉图）。纯快副作用动作可保留专用命令直调（0.16.4 先例），但新增时优先评估走 registry。
 
 > 具体实现与回归入口见 [0.26 phase §七](../phases/0.26-plugin-system-upgrade.md)。
 

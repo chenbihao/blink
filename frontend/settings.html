@@ -2821,6 +2821,16 @@
                 <div class="about-update-progress-bar" id="about-update-progress-bar"></div>
             </div>
             <div class="release-notes" hidden id="about-release-notes"></div>
+            <!-- 0.26.20：自动检查更新总开关——关闭后后台静默检查与建议槽/托盘版本提示停止；
+                 手动「检查更新」按钮与主窗口内置动作不受影响 -->
+            <div class="setting-row">
+                <label class="setting-label" data-i18n="about.update.auto_check">自动检查更新<span
+                        class="field-hint-icon" data-i18n-title="about.update.auto_check.hint">ⓘ</span></label>
+                <label class="checkbox">
+                    <input id="about-auto-check" type="checkbox" checked/>
+                    <span class="checkmark"></span>
+                </label>
+            </div>
             <div class="setting-row">
                 <label class="setting-label" data-i18n="about.stack.label">技术栈</label>
                 <span class="value">Rust 2024 + Tauri 2 + WebView2</span>

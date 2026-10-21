@@ -227,7 +227,11 @@
 - 每轮交互使用独立 epoch/session id；旧任务只能提交或清理所属会话，不能覆盖、清空新会话状态
 - 合成前校验输入资源已就绪且宽高均大于 0；无效输入走可诊断错误/降级路径，禁止直接进入 `drawImage`
 
-**invoke 与事件到达顺序不保证（强制）**：Tauri 的 `invoke()` 返回与 `emit` 事件推送之间没有先后保证——命令/插件足够快时，结果事件会先于 invoke 携带的占位批到达（0.25.20 实测：占位成为同 seq 无人清理的增量，结果与 loading 同屏；builtin 网络插件耗时长必先回 invoke，踩不到此窗口）。同一 seq/source 的状态提交必须幂等且可丢弃：追加占位等中间态前先检查是否已有真实结果，已有则丢弃占位；禁止假设「先 invoke 返回、后事件到达」的时序。
+**invoke 与事件到达顺序不保证（强制）**：Tauri 的 `invoke()` 返回与 `emit` 事件推送之间没有先后保证——命令/插件足够快时，结果事件会先于 invoke 携带的占位批到达（0.25.20 实测：占位成为同 seq 无人清理的增量，结果与 loading 同屏；builtin 网络插件耗时长必先回 invoke，踩不到此窗口）。同一 seq/source 的状态提交必须幂等且可丢弃：追加占位等中间态前先检查是否已有真实结果，已有则丢弃占位；**「已有真实结果」只看本批之前已入列的条目——同批内先于占位处理的同 source 非占位项（如 args.hints 引导项）不算**（0.26.20 修订：0.26.17 引导项与插件占位同 source，旧判定把同批引导项当真实结果、误丢占位）。禁止假设「先 invoke 返回、后事件到达」的时序。
+
+**慢 action 走 ReturnItems 通用协议（强制，0.26.20 修订）**：主窗内执行时间不可忽略的动作（网络检查等）由 descriptor 声明 `BuiltinResultAction::ReturnItems`（见 spec-backend 动作协议），前端**不得按 capability id 特判**。链路：`Action.awaitResult=true`（投影自 descriptor）→ Enter 先展示结果区独占占位行（`results.showActionPending`，主行文案 key 由 `Action.hint` 下发、副行固定 `t("action.please_wait")`，与插件占位同 spinner 视觉）→ `run_builtin_action` 返回 `{items}`（后端构造的标准条目数组，含本地化文案与 Lucide `icon` 字段）→ `results.settleActionItems` 零加工整体替换（条目走 createItem 常规渲染、自带 actions 可再次触发）；普通动作返回 `{done}`（后端已隐藏主窗），前端不追加反馈。等待/结果态不占 statusbar 提示栏、不用窗口底边 toast；invoke 抛错时以通用错误行收尾（占位不得悬挂）。占位被新搜索/窗口隐藏清掉后 settle 必须幂等 no-op（迟到结果不覆盖新内容）。毫秒级本地动作不声明 ReturnItems（闪烁比空白更差）。
+
+**合成条目图标协议**：无 `lnk_path`/`icon_path` 可懒加载的后端合成条目（检查更新结果行等）用 `icon` 字段直给 Lucide 图标名，`createItem` 通用分支渲染——禁止为单个 source 加图标短路分支（weblinks/bookmarks 为历史存量，新条目一律走 `icon` 字段）。
 
 ### 5.2 窗体尺寸稳定（强制）
 

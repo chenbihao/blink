@@ -18,6 +18,7 @@
 import {t} from "../i18n/index.js";
 import {renderCombo, renderKey} from "../shared/kbd.js";
 import {iconHTML} from "../shared/icon.js";
+import {dismissUpdateVersion} from "../shared/api.js";
 import * as autosuggestConfig from "./autosuggest-config.js";
 import {acceptSuggestion} from "./suggestion-accept.js";
 import {syncWindowSize, resyncWindowSize} from "./window-size.js";
@@ -158,6 +159,9 @@ function renderRows() {
  * @param {"primary"|"secondary"} slot
  */
 function buildRow(sug, slot) {
+    // 0.26.20：更新提示行带显式关闭（×）入口——button 不能嵌 button，
+    // 该 kind 用 div 行承载（其余 kind 维持 button 不变）。
+    if (sug.kind === "updateAvailable") return buildUpdateRow(sug, slot);
     const row = document.createElement("button");
     row.type = "button";
     row.className = `suggestion-row slot-${slot}`;
@@ -195,6 +199,58 @@ function buildRow(sug, slot) {
         : renderCombo("Shift+Tab");
     keyEl.classList.add("suggestion-key");
     row.appendChild(keyEl);
+    return row;
+}
+
+/**
+ * 更新提示行（0.26.20）：div 行承载（内嵌 × 关闭按钮，button 不能嵌套）。
+ * 点击行 = 采纳（跳设置关于 tab + 记录 dismiss，走 suggestion-accept 共用通道）；
+ * 点击 × = 显式关闭（记录 dismissed_version，本版本不再出现）。
+ * @param {object} sug Suggestion wire 对象（kind=updateAvailable）
+ * @param {"primary"|"secondary"} slot
+ */
+function buildUpdateRow(sug, slot) {
+    const row = document.createElement("div");
+    row.className = `suggestion-row suggestion-update slot-${slot}`;
+    row.setAttribute("role", "button");
+    row.setAttribute("tabindex", "-1");
+    // 与 button 行同语义：防止 mousedown 抢走 #query 焦点（主链路铁则）
+    row.addEventListener("mousedown", (e) => e.preventDefault());
+    row.addEventListener("click", () => accept(slot));
+
+    const icon = document.createElement("span");
+    icon.className = "suggestion-icon";
+    icon.innerHTML = iconHTML("download");
+    row.appendChild(icon);
+
+    const text = document.createElement("span");
+    text.className = "suggestion-text";
+    text.textContent = t("suggestionbar.update_available", {version: sug.display || ""});
+    row.appendChild(text);
+
+    const keyEl = slot === "primary"
+        ? renderKey(autosuggestConfig.getTabKey())
+        : renderCombo("Shift+Tab");
+    keyEl.classList.add("suggestion-key");
+    row.appendChild(keyEl);
+
+    const dismiss = document.createElement("button");
+    dismiss.type = "button";
+    dismiss.className = "suggestion-dismiss";
+    dismiss.title = t("suggestionbar.update_dismiss");
+    dismiss.setAttribute("aria-label", t("suggestionbar.update_dismiss"));
+    dismiss.innerHTML = iconHTML("x");
+    dismiss.addEventListener("mousedown", (e) => e.preventDefault());
+    dismiss.addEventListener("click", (e) => {
+        e.stopPropagation();
+        dismissUpdateVersion().catch(() => {});
+        // 本地立即下线该槽位（后端快照在下次唤起时重新盖章，本会话不再出现）
+        if (slot === "primary") primary = null;
+        else secondary = null;
+        renderRows();
+        syncBarHeight();
+    });
+    row.appendChild(dismiss);
     return row;
 }
 

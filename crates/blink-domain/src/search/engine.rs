@@ -306,6 +306,17 @@ impl SearchItem {
                 // 0.16.4：剪贴板图片项的 run_id = "copy_clipboard_image"，
                 // arg = image_id。前端据此渲染缩略图。
                 // 0.26.9：剪贴板文件项的 run_id = "copy_clipboard_files"，arg = 条目 id。
+                // 0.26.20 修订：descriptor 声明 ReturnItems 的动作（如检查更新）
+                // 附 await_result + 占位文案 key——前端先占位，以 invoke 返回的
+                // items 原位替换（主窗不隐藏）。descriptor 是唯一事实源，投影时
+                // 按 capability_id 回查（SearchItem 保持引擎中立）。
+                let (await_result, pending_hint) =
+                    match super::builtin_engine::find_result_action_by_capability_id(&id) {
+                        Some(super::builtin_engine::BuiltinResultAction::ReturnItems {
+                            pending_hint,
+                        }) => (true, Some(pending_hint.to_string())),
+                        _ => (false, None),
+                    };
                 let is_image = id == "copy_clipboard_image";
                 let is_clip_file = id == "copy_clipboard_files";
                 let action_target = if is_image {
@@ -357,8 +368,9 @@ impl SearchItem {
                         hint: if is_image {
                             Some("复制".into())
                         } else {
-                            None
+                            pending_hint
                         },
+                        await_result,
                         ..Action::default()
                     }],
                     score_detail,

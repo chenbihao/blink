@@ -20,6 +20,7 @@ pub enum TrayText {
     StickyManager,
     Settings,
     About,
+    CheckUpdate,
     Quit,
 }
 
@@ -34,12 +35,14 @@ pub fn text(lang: &str, key: TrayText) -> &'static str {
         (true, TrayText::StickyManager) => "便签管理",
         (true, TrayText::Settings) => "设置",
         (true, TrayText::About) => "关于 Blink",
+        (true, TrayText::CheckUpdate) => "检查更新",
         (true, TrayText::Quit) => "退出 Blink",
         (false, TrayText::ShowMain) => "Show Main Window",
         (false, TrayText::StickyManager) => "Sticky Manager",
         (false, TrayText::ChatWindow) => "AI Chat Window",
         (false, TrayText::Settings) => "Settings",
         (false, TrayText::About) => "About Blink",
+        (false, TrayText::CheckUpdate) => "Check for Updates",
         (false, TrayText::Quit) => "Quit Blink",
     }
 }
@@ -48,10 +51,19 @@ pub fn text(lang: &str, key: TrayText) -> &'static str {
 ///
 /// 菜单 item id（`"settings"` / `"about"` / `"quit"`）是稳定的，重建菜单后 id 不变，
 /// `on_menu_event` 路由依然有效。
-pub fn build_menu(app: &impl Manager<tauri::Wry>, lang: &str) -> tauri::Result<Menu<tauri::Wry>> {
+///
+/// `update_hint`（0.26.20）：检测到新版本时「检查更新」项文案携带版本号
+///（如「检查更新（0.26.21 可用）」）；None = 基础文案。托盘不受 dismiss 影响
+///——主动点开菜单才可见，始终显示最新已知版本。
+pub fn build_menu(
+    app: &impl Manager<tauri::Wry>,
+    lang: &str,
+    update_hint: Option<&str>,
+) -> tauri::Result<Menu<tauri::Wry>> {
     // 0.18.4：菜单重组——便签管理 + AI 对话窗口归为 chord 能力组，设置上提
     // 0.19.17：新增「恢复输入钩子」逃生舱——Alt+Space 失效时用户可从此恢复
-    // 结构：show_main → sep → sticky_manager → chat_window → sep → settings → about → sep → quit
+    // 0.26.20：新增「检查更新」——点击打开设置关于 tab（打开即静默自动检查）
+    // 结构：show_main → sep → sticky_manager → chat_window → sep → settings → about → check_update → sep → quit
     let show_main = MenuItem::with_id(
         app,
         "show_main",
@@ -87,6 +99,13 @@ pub fn build_menu(app: &impl Manager<tauri::Wry>, lang: &str) -> tauri::Result<M
         true,
         None::<&str>,
     )?;
+    let check_update_label = match update_hint {
+        Some(v) if lang.starts_with("zh") => format!("检查更新（{v} 可用）"),
+        Some(v) => format!("Check for Updates ({v} available)"),
+        None => text(lang, TrayText::CheckUpdate).to_string(),
+    };
+    let check_update =
+        MenuItem::with_id(app, "check_update", check_update_label, true, None::<&str>)?;
     let sep = tauri::menu::PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", text(lang, TrayText::Quit), true, None::<&str>)?;
     Menu::with_items(
@@ -100,25 +119,26 @@ pub fn build_menu(app: &impl Manager<tauri::Wry>, lang: &str) -> tauri::Result<M
             &settings,
             // &recover_hook,
             &about,
+            &check_update,
             &sep,
             &quit,
         ],
     )
 }
 
-/// 重建托盘菜单（运行时语言切换时调用）。
+/// 重建托盘菜单（运行时语言切换 / 更新提示变化时调用）。
 ///
-/// 托盘默认 id `"main"`（见模块级注释）。重建失败仅 warn，不阻断语言切换主流程。
+/// 托盘默认 id `"main"`（见模块级注释）。重建失败仅 warn，不阻断调用方主流程。
 ///
 /// 接收 `AppHandle` 而非泛型 `impl Manager`——`tray_by_id` 是 `App`/`AppHandle` 的
 /// inherent method，不在 `Manager` trait 上。`build_menu` 仍走泛型，setup（`&mut App`）
 /// 与此处都能调用。
-pub fn rebuild_menu(app: &tauri::AppHandle, lang: &str) {
+pub fn rebuild_menu(app: &tauri::AppHandle, lang: &str, update_hint: Option<&str>) {
     let Some(tray) = app.tray_by_id("main") else {
         tracing::warn!("rebuild_menu: tray_by_id(\"main\") 未找到，跳过托盘重建");
         return;
     };
-    match build_menu(app, lang) {
+    match build_menu(app, lang, update_hint) {
         Ok(menu) => {
             if let Err(e) = tray.set_menu(Some(menu)) {
                 tracing::warn!(%e, "rebuild_menu: set_menu 失败");

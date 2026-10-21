@@ -488,6 +488,14 @@ export const en = {
     "about.update.downloading": "Downloading update… {percent}%",
     "about.update.downloading_no_size": "Downloading update… {downloaded}",
     "about.update.installing": "Download complete. Installing — the app will restart shortly…",
+    "about.update.auto_check": "Auto-check for updates",
+    "about.update.auto_check.hint": "When enabled, Blink silently checks for new versions once a day and notifies in the main window and tray. When disabled, no automatic checks or notifications; manual checking still works",
+    // update.checking is dispatched by the backend ReturnItems action via Action.hint
+    "update.checking": "Checking for updates…",
+    // Generic slow-action protocol strings (0.26.20 rev: result items are built by the backend per language)
+    "action.working": "Working…",
+    "action.please_wait": "Please wait",
+    "action.failed": "Action failed",
 
     // ── Network tab (dynamic) ──
     "network.title": "Global Network Proxy",
@@ -1353,6 +1361,7 @@ export const en = {
     "hint.open": "Open",
     "hint.copy": "Copy result",
     "hint.route": "Query",
+    "hint.settings": "Open settings",
     "hint.paste_to_input": "Paste / Copy",
     "hint.fallback": "Run",
     "hint.enter": "{{key:Enter}} {label}",
@@ -1374,6 +1383,8 @@ export const en = {
     "suggestionbar.openPath_with": "Open path \"{text}\"",
     "suggestionbar.revealInExplorer": "Reveal in Explorer",
     "suggestionbar.revealInExplorer_with": "Reveal \"{text}\"",
+    "suggestionbar.update_available": "Blink {version} available",
+    "suggestionbar.update_dismiss": "Dismiss (won't show again for this version)",
 
     // ModeHeader (0.24.4 §5.5): single presentation of persistent modes
     "mode.ai.label": "AI",

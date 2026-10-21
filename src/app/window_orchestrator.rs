@@ -41,7 +41,11 @@ pub fn invoke_with_placement(app: &AppHandle, placement: window::MainWindowPlace
         clipboard_enabled: context_cfg.clipboard_enabled,
         sensitive_apps: context_cfg.sensitive_apps.clone(),
     };
-    let snapshot = crate::infra::platform::context::collect(&collect_params);
+    let mut snapshot = crate::infra::platform::context::collect(&collect_params);
+    // 0.26.20：更新提醒盖章——managed cell 零 IO 读取；「可用更新」三条件
+    //（自动检查开 && 检测到新版 && 未 dismiss）由 update_reminder 判定，
+    // UpdateProducer 只读快照（domain 不发网络请求）。
+    snapshot.available_update = crate::app::update_reminder::snapshot_update_hint(app);
     // 0.26.16：粘贴锚点。正常路径取快照前台；快照为空有两种情形——
     // ① 前台是 Blink 自己的窗口（collect 主动跳过，见 context::windows
     //   「前台是 Blink 自己，跳过」）：此刻主窗尚未 show（不可见），前台 Blink

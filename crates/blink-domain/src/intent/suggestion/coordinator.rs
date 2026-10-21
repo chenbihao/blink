@@ -258,8 +258,11 @@ impl SuggestionCoordinator {
                     return false;
                 }
                 // 3e. 降频抑制（§3.8）：同 (kind, origin, 指纹) 连续 3 次未采纳。
+                //     UpdateAvailable 豁免——版本提示是持久通知（显式 dismiss 是
+                //     唯一消失通道），降频自动隐藏会造成「未关闭却消失」的困惑。
                 if input.config.suppress_repeated
                     && s.kind != SuggestionKind::Completion
+                    && s.kind != SuggestionKind::UpdateAvailable
                     && fatigue.is_suppressed(super::fatigue::fatigue_key(s))
                 {
                     tracing::debug!(
@@ -283,13 +286,16 @@ impl SuggestionCoordinator {
         //    query 池在前、awareness 池在后，层内按 rank_score 降序（稳定排序）。
         //    这同时实现"输入即意图表达"（0.8.4）：非空 query 下 awareness 候选
         //    最多占 secondary，不抢 primary。
+        //    0.26.20：UpdateAvailable 不进两池——版本提示仅占空缺槽位（步骤 5），
+        //    不参与排序竞争、不挤占更高优先级建议。
         let mut query_pool: Vec<Suggestion> = Vec::new();
         let mut awareness_pool: Vec<Suggestion> = Vec::new();
+        let mut update_pool: Vec<Suggestion> = Vec::new();
         for s in kept {
-            if s.origin.is_none() {
-                query_pool.push(s);
-            } else {
-                awareness_pool.push(s);
+            match s.kind {
+                SuggestionKind::UpdateAvailable => update_pool.push(s),
+                _ if s.origin.is_none() => query_pool.push(s),
+                _ => awareness_pool.push(s),
             }
         }
         sort_by_rank(&mut query_pool);
@@ -334,6 +340,22 @@ impl SuggestionCoordinator {
             }
         }
 
+        // ── 5b. 更新提示空缺填充（0.26.20）──
+        //    UpdateAvailable 不参与上面的竞争，仅在槽位空缺时补位：
+        //    - primary 空缺 → 版本提示担任 primary（空 query 无其他建议的常态）
+        //    - secondary 空缺（含被 rank 门槛挡掉的）→ 补 secondary
+        //    不受 secondary_min_rank 约束——它是后端已确认的确定性信息而非
+        //    概率猜测；显式关闭（dismiss）与总开关（快照不盖章）是唯一下线通道。
+        if let Some(update) = update_pool.pop() {
+            if output.primary.is_none() {
+                tracing::debug!(id = %update.id, slot = "primary", "update 提示填充空缺 primary");
+                output.primary = Some(update);
+            } else if input.config.secondary_enabled && output.secondary.is_none() {
+                tracing::debug!(id = %update.id, slot = "secondary", "update 提示填充空缺 secondary");
+                output.secondary = Some(update);
+            }
+        }
+
         // ── 6. 曝光计数（§3.8 降频输入；§5.4 可观测性——曝光→采纳转换率的分子侧）
         //    只对进入可见槽位的候选计数（被过滤/去重的不算曝光）。
         for (slot, sug) in [
@@ -341,7 +363,14 @@ impl SuggestionCoordinator {
             ("secondary", &output.secondary),
         ] {
             if let Some(sug) = sug {
-                if sug.kind == SuggestionKind::Completion { continue; }
+                // Completion / UpdateAvailable 不计曝光：前者非意图建议（§3.8 既定），
+                // 后者不受降频、无需曝光计数（0.26.20）
+                if matches!(
+                    sug.kind,
+                    SuggestionKind::Completion | SuggestionKind::UpdateAvailable
+                ) {
+                    continue;
+                }
                 let n = fatigue.record_impression(super::fatigue::fatigue_key(sug));
                 tracing::debug!(
                     id = %sug.id,
@@ -1158,5 +1187,114 @@ mod tests {
         let (out, _) = coordinator.coordinate(&i, &mut fresh_fatigue());
         assert_eq!(out.primary.unwrap().id, "translate-query");
         assert!(out.secondary.is_none(), "secondary 槽被设置页关闭");
+    }
+
+    // ── 0.26.20 更新提示空缺填充 ─────────────────────────────────────────
+
+    /// UpdateProducer：空 query 无其他建议 → 填充 primary（快照带版本即触发）。
+    #[test]
+    fn update_fills_empty_primary() {
+        let mut coordinator = SuggestionCoordinator::new();
+        coordinator.register(Arc::new(super::super::update::UpdateProducer));
+        let mut s = AwarenessSnapshot::default();
+        s.available_update = Some("0.26.21".to_string());
+        let (out, _) = coordinator.coordinate(&input("", &s), &mut fresh_fatigue());
+        let p = out.primary.expect("空 query 无竞争 → update 任 primary");
+        assert_eq!(p.id, "update-available");
+        assert_eq!(p.kind, SuggestionKind::UpdateAvailable);
+        assert!(out.secondary.is_none());
+    }
+
+    /// 有更高优先级建议（翻译 0.82）时不抢占：翻译任 primary，update 补 secondary。
+    #[test]
+    fn update_fills_vacant_secondary_not_primary() {
+        let mut coordinator = SuggestionCoordinator::new();
+        coordinator.register(Arc::new(super::super::update::UpdateProducer));
+        coordinator.register(Arc::new(MockProducer::new(
+            SuggestionSource::Context,
+            vec![make_sug(
+                "translate-selection",
+                SuggestionKind::Translate,
+                0.82,
+                Some(SuggestionOrigin::Clipboard),
+            )],
+        )));
+        let mut s = AwarenessSnapshot::default();
+        s.available_update = Some("0.26.21".to_string());
+        let (out, _) = coordinator.coordinate(&input("", &s), &mut fresh_fatigue());
+        assert_eq!(out.primary.unwrap().id, "translate-selection");
+        let sec = out.secondary.expect("secondary 空缺 → update 补位");
+        assert_eq!(sec.id, "update-available");
+    }
+
+    /// 两槽都有主（primary 0.92 + secondary 0.80 双双入选）→ update 不出现。
+    #[test]
+    fn update_yields_when_both_slots_taken() {
+        let mut coordinator = SuggestionCoordinator::new();
+        coordinator.register(Arc::new(super::super::update::UpdateProducer));
+        coordinator.register(Arc::new(MockProducer::new(
+            SuggestionSource::Context,
+            vec![
+                make_sug(
+                    "translate-selection",
+                    SuggestionKind::Translate,
+                    0.92,
+                    Some(SuggestionOrigin::Selection),
+                ),
+                make_sug(
+                    "ai-selection",
+                    SuggestionKind::AskAi,
+                    0.80,
+                    Some(SuggestionOrigin::Selection),
+                ),
+            ],
+        )));
+        let mut s = AwarenessSnapshot::default();
+        s.available_update = Some("0.26.21".to_string());
+        let (out, _) = coordinator.coordinate(&input("", &s), &mut fresh_fatigue());
+        assert_eq!(out.primary.unwrap().id, "translate-selection");
+        assert_eq!(out.secondary.unwrap().id, "ai-selection");
+    }
+
+    /// update 的 0.5 低分不受 secondary_min_rank 门槛拦截（确定性信息补位），
+    /// 且反复 coordinate 不被降频抑制（translate 三连未采纳被正常降频后，
+    /// update 升任 primary 继续可见）。
+    #[test]
+    fn update_bypasses_secondary_rank_gate_and_fatigue() {
+        let mut coordinator = SuggestionCoordinator::new();
+        coordinator.register(Arc::new(super::super::update::UpdateProducer));
+        coordinator.register(Arc::new(MockProducer::new(
+            SuggestionSource::Context,
+            vec![make_sug(
+                "translate-selection",
+                SuggestionKind::Translate,
+                0.92,
+                Some(SuggestionOrigin::Selection),
+            )],
+        )));
+        let mut s = AwarenessSnapshot::default();
+        s.available_update = Some("0.26.21".to_string());
+        let mut fatigue = fresh_fatigue();
+        for round in 0..5 {
+            let (out, _) = coordinator.coordinate(&input("", &s), &mut fatigue);
+            let update_visible = matches!(&out.primary, Some(p) if p.id == "update-available")
+                || matches!(&out.secondary, Some(sec) if sec.id == "update-available");
+            assert!(
+                update_visible,
+                "round {round}: update 低分 0.5 应补空缺槽位，且多轮不被降频"
+            );
+        }
+    }
+
+    /// 非空 query：UpdateProducer 不产，正常建议不受影响。
+    #[test]
+    fn update_absent_on_non_empty_query() {
+        let mut coordinator = SuggestionCoordinator::new();
+        coordinator.register(Arc::new(super::super::update::UpdateProducer));
+        let mut s = AwarenessSnapshot::default();
+        s.available_update = Some("0.26.21".to_string());
+        let (out, _) = coordinator.coordinate(&input("chrome", &s), &mut fresh_fatigue());
+        assert!(out.primary.is_none());
+        assert!(out.secondary.is_none());
     }
 }

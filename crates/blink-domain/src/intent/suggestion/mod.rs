@@ -23,6 +23,7 @@ pub mod coordinator;
 pub mod fatigue;
 pub mod keyword;
 pub mod producer;
+pub mod update;
 
 use std::hash::{Hash, Hasher};
 
@@ -45,6 +46,9 @@ pub enum SuggestionSource {
     /// AI Producer（0.24.2 从 SearchService 后置注入迁入；ai-trigger 候选由
     /// Coordinator 直接构造，同样盖 Ai）。
     Ai,
+    /// 更新提醒（0.26.20）：后台静默检查发现新版本时空 query 提示。数据来自
+    /// `AwarenessSnapshot.available_update`（app 层盖章），Producer 纯读不发网络请求。
+    Update,
 }
 
 /// 建议的语义类别（0.24 §3.4 / §3.5；0.24.8 打开类激活）。
@@ -72,6 +76,11 @@ pub enum SuggestionKind {
     /// 资源管理器定位（剪贴板/输入为文件路径）。rank 0.88（仅与 OpenPath 同现，
     /// 场景内无翻译竞争，高于 AI 兜底 0.80）。
     RevealInExplorer,
+    /// 新版本可用（0.26.20）：后台检查发现 `latest > current` 且未被 dismiss 时
+    /// 空 query 提示「Blink x.y.z 可用」。仅占空缺槽位、不参与正常竞争
+    /// （Coordinator 特判，见 coordinate 步骤 5），不受降频抑制（显式 dismiss 是
+    /// 唯一消失通道）。
+    UpdateAvailable,
 }
 
 /// 类型化采纳动作（0.24 §3.5）。
@@ -103,6 +112,11 @@ pub enum SuggestionAction {
         capability_id: String,
         args: serde_json::Value,
     },
+    /// 跳转设置页指定 Tab（0.26.20，更新提醒采纳）。纯 UI 导航，不是原子能力
+    /// （spec-architecture §A3.5：UI 状态导航走 Interaction 内部协议，不伪装成
+    /// Capability）；前端经 `open_settings_tab` command 执行（含 tab 白名单校验）。
+    #[serde(rename_all = "camelCase")]
+    OpenSettingsTab { tab: String },
 }
 
 /// Context 类 Suggestion 的取值来源（0.8.3 §4.9 UX 加强）——
@@ -391,6 +405,35 @@ mod tests {
             v["secondary"]["action"]["invokeCapability"]["args"]["path"],
             "C:\\tmp\\a.txt"
         );
+    }
+
+    /// 0.26.20：UpdateAvailable + OpenSettingsTab wire 形状（kind camelCase；
+    /// action externally tagged，tab 字段名原样）。
+    #[test]
+    #[allow(deprecated)]
+    fn update_available_wire_shape() {
+        let set = SuggestionSet {
+            revision: 11,
+            primary: Some(Suggestion {
+                id: "update-available".to_string(),
+                kind: SuggestionKind::UpdateAvailable,
+                action: SuggestionAction::OpenSettingsTab {
+                    tab: "about".to_string(),
+                },
+                rank_score: 0.5,
+                display: "0.26.21".to_string(),
+                prefix_len: 0,
+                origin: None,
+                fingerprint: 0,
+                source: SuggestionSource::Update,
+                ranking_hint: None,
+            }),
+            secondary: None,
+        };
+        let v = serde_json::to_value(&set).unwrap();
+        assert_eq!(v["primary"]["kind"], "updateAvailable");
+        assert_eq!(v["primary"]["action"]["openSettingsTab"]["tab"], "about");
+        assert_eq!(v["primary"]["display"], "0.26.21");
     }
 
     /// 指纹对相同文本稳定、对不同文本区分（会话内）。

@@ -119,6 +119,15 @@ function ensureSeq(seq) {
  */
 function appendNew(items, didReset) {
     const seen = new Set(allItems.map(itemKey));
+    // 0.26.20 修订：迟到占位判定只看**本批之前**已存在的真实结果。原判定扫全量
+    // allItems，会把同批先于占位处理的非占位项误当"真实结果已到"——0.26.17
+    // args.hints 引导项与插件占位同 source（plugin_id）且 is_placeholder=false，
+    // Mixed 同步批顺序 guides → placeholder，占位被当迟到丢弃（裸 `ip ` 无转圈，
+    // 0.26.17 引入、0.26.20 实机发现）。跨批迟到语义不变：增量结果批先行入列，
+    // 后到的 sync 占位仍被正确丢弃。
+    const realSourcesBefore = new Set(
+        allItems.filter((x) => !x.is_placeholder).map((x) => x.source)
+    );
     let changed = false;
 
     // 检测空结果标记(后端发送的特殊项,score=-2 是约定的空标记)
@@ -133,7 +142,7 @@ function appendNew(items, didReset) {
         // 到达：结果已立为该 seq 基底，后到的占位若照常 append 将永远无人
         // 清理（清理块只看本批 items，占位自己被排除）——结果与转圈同屏。
         if (item.is_placeholder && item.score !== -2
-            && allItems.some((x) => x.source === item.source && !x.is_placeholder)) {
+            && realSourcesBefore.has(item.source)) {
             continue;
         }
         const key = itemKey(item);
@@ -459,6 +468,63 @@ export function appendItems(items, seq) {
     return true;
 }
 
+// ── 0.26.20 慢 action 本地占位（awaitResult 协议，检查更新等）─────────────
+// 与插件查询的后端占位同视觉（is-loading + spinner）；Takeover 式独占——等待期
+// 结果区只有这一行。settleActionItems 用后端返回的标准条目数组整体替换（多条
+// 目支持，逐条走 createItem 常规渲染，自带 actions 可再次触发）；期间新搜索/
+// seq 重置会清掉占位，settle 守卫判 source 后幂等 no-op（迟到结果自然丢弃——
+// 用户已继续输入）。
+
+const ACTION_PENDING_SOURCE = "action_pending";
+
+/**
+ * 展示慢 action 等待占位（独占结果区，光标归零）。
+ * 与插件占位行同构：spinner + 主行 + 副行（hint 缺省则无副行，与插件占位的
+ * 「请稍候」副行对齐建议始终传）。
+ * @param {string} title 已本地化的标题（如"正在检查更新…"）
+ * @param {string} [hint] 已本地化的副行提示
+ */
+export function showActionPending(title, hint) {
+    allItems = [{
+        name: title,
+        pinyin_name: "",
+        pinyin_full: "",
+        lnk_path: "",
+        is_calc: false,
+        score: 999,
+        is_placeholder: true,
+        is_error: false,
+        source: ACTION_PENDING_SOURCE,
+        description: hint || null,
+        actions: [],
+    }];
+    listNavigation.reset(); // 滚轮余量作废（spec-frontend §5.10）
+    viewStart = 0;
+    selected = 0;
+    renderViewport();
+}
+
+/**
+ * 用后端返回的标准条目数组替换本地动作占位；占位已不在（新搜索/窗口隐藏重置）
+ * 时幂等 no-op——迟到结果丢弃，不打扰用户已继续的路径。
+ * 条目由后端构造（含本地化文案与 Lucide `icon` 字段），此处零加工直接入列，
+ * 与常规结果项同构渲染、可再次触发（如「发现新版本」行回车跳设置）。
+ * @param {Array<object>} items 后端 run_builtin_action 返回的 {items} 数组
+ * @returns {boolean} 是否完成替换
+ */
+export function settleActionItems(items) {
+    const pending = allItems.length === 1
+        && allItems[0].source === ACTION_PENDING_SOURCE
+        && allItems[0].is_placeholder;
+    if (!pending || !Array.isArray(items) || items.length === 0) return false;
+    allItems = items;
+    listNavigation.reset();
+    viewStart = 0;
+    selected = 0;
+    renderViewport();
+    return true;
+}
+
 /**
  * 0.25.29: 删除局部移除（替代删除后全量 reloadList 的游标重置问题）。
  *
@@ -611,6 +677,15 @@ function createItem(app, i) {
         const iconWrap = document.createElement("span");
         iconWrap.className = "app-icon clip-file-icon";
         iconWrap.appendChild(renderIcon("external-link", {ariaLabel: "超链条目"}));
+        li.appendChild(iconWrap);
+    }
+    // 0.26.20 修订：后端合成条目的通用图标协议——`icon` 字段直给 Lucide 名
+    //（无 lnk_path/icon_path 可懒加载的条目：检查更新结果行等）。取代逐
+    // source 短路（原 action_result 专用分支已删），后续合成条目复用同一字段。
+    else if (app.icon) {
+        const iconWrap = document.createElement("span");
+        iconWrap.className = "app-icon clip-file-icon";
+        iconWrap.appendChild(renderIcon(app.icon, {ariaLabel: app.icon}));
         li.appendChild(iconWrap);
     }
     // 浏览器图标由来源身份投影，沿用懒加载协议；失败时保留 bookmark 占位。

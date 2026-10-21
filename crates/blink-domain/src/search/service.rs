@@ -279,7 +279,7 @@ impl SearchService {
 
     /// 写回剪贴板文本（clipboard listener 检测到剪贴板变化时调用）。
     ///
-    /// **动机**：`update_snapshot` 只在热键 invoke 时执行一次；主窗口保持打开时
+    /// **动机**：`update_snapshot` 只在热键 invoke 时执行一次;主窗口保持打开时
     /// 用户复制/剪切新内容,snapshot 里的 Clipboard 项会陈旧,导致 Context ghost /
     /// AI 四筛子读到旧值。与 `update_selected_text` 对称补上局部刷新入口。
     ///
@@ -291,6 +291,16 @@ impl SearchService {
         use blink_infra::platform::context::AwarenessSource;
         let mut guard = self.snapshot.write().unwrap();
         guard.upsert_text(AwarenessSource::Clipboard, text);
+    }
+
+    /// 清除快照中的可用更新标记（0.26.20）。
+    ///
+    /// 用户 dismiss 版本提示或关闭「自动检查更新」时由 app 层调用：本窗口会话
+    /// 内迟到的搜索响应（awareness-updated retrigger 等）不得再返回该建议——
+    /// 下一次唤起由 `window_orchestrator` 按最新状态重新盖章。
+    pub fn clear_available_update(&self) {
+        let mut guard = self.snapshot.write().unwrap();
+        guard.available_update = None;
     }
 
     /// 更新最大结果数（update_general_config 时调用）。热更新，搜索热路径零 IO。

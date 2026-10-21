@@ -15,6 +15,7 @@ import {
     hideWindow,
     launchApp,
     openContentEditor,
+    openSettingsTab,
     pinClipboardImage,
     recordClipboardHit,
     runBuiltinAction,
@@ -22,6 +23,10 @@ import {
 } from "../shared/api.js";
 import {showActionError} from "./action-error.js";
 import {queryEl} from "./dom.js";
+// 0.26.20：results ↔ actions 加载期环（results 顶层 import activateItem，本模块
+// 运行时才调 results 的占位 API）——与 suggestion-accept ↔ ghost 同款安全环。
+import * as results from "./results.js";
+import {t} from "../i18n/index.js";
 
 /**
  * 激活一个结果项。
@@ -86,6 +91,21 @@ export async function activateItem(data) {
         return;
     }
 
+    if (kind === "settings") {
+        // 0.26.20 修订：纯 UI 导航动作（Interaction 层协议，不伪装 Capability——
+        // spec-architecture §A3.5，与建议槽 OpenSettingsTab 同语义）：payload =
+        // 目标 tab id（后端命令带白名单校验）。首个消费者：检查更新的
+        //「发现新版本」结果行（回车跳设置关于 tab）。
+        try {
+            await openSettingsTab(action.payload || "general");
+        } catch (e) {
+            showActionError("open_settings_tab", e);
+            return; // 失败不隐藏，让用户察觉
+        }
+        hideWindow();
+        return;
+    }
+
     if (kind === "run") {
         const id = action.runId;
         if (!id) {
@@ -121,11 +141,14 @@ export async function activateItem(data) {
                 await pinClipboardImage(imageId);
             } catch (e) {
                 showActionError("pin_clipboard_image", e);
-                return;
+                return; // 失败不隐藏，让用户察觉
             }
             hideWindow();
             return;
         }
+
+        // 0.26.20 修订：检查更新不再前端特判——descriptor 声明 ReturnItems 后
+        // 走下方通用协议（awaitResult 占位 + {items} 回流）。
 
         // P2-#18: 文本型 item 的编辑动作——打开内容编辑器
         if (id === "edit_text_item") {
@@ -182,10 +205,34 @@ export async function activateItem(data) {
 
         // 内置动作（0.8.0 §1.3）：id 分派，后端 run_builtin_action 内部自动隐藏窗口
         // （OpenSettings 会先显设置窗、再隐主窗；无需前端调 hideWindow）。
+        // awaitResult（descriptor 声明 ReturnItems 的慢动作，如检查更新）：
+        // 先展示独占占位行（hint = 后端下发的占位文案 i18n key），invoke 返回
+        // {items} 后以标准条目原位替换（后端不隐藏主窗）；其余动作成功即由
+        // 后端隐藏窗口，返回 {done}，前端不追加反馈。
+        if (action.awaitResult) {
+            results.showActionPending(
+                t(action.hint || "action.working"),
+                t("action.please_wait")
+            );
+        }
+        let r;
         try {
-            await runBuiltinAction(id, action.runArg ?? null);
+            r = await runBuiltinAction(id, action.runArg ?? null);
         } catch (e) {
-            showActionError("run_builtin_action", e);
+            if (action.awaitResult) {
+                // 占位还挂着：以通用错误行收尾（IPC 层异常；业务失败由后端以
+                // is_error 条目经 {items} 返回，不走 invoke 错误通道）
+                results.settleActionItems([{
+                    name: t("action.failed"),
+                    is_error: true,
+                }]);
+            } else {
+                showActionError("run_builtin_action", e);
+            }
+            return;
+        }
+        if (r && Array.isArray(r.items)) {
+            results.settleActionItems(r.items);
         }
         return;
     }

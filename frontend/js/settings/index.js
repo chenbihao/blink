@@ -25,7 +25,7 @@ import {initContextTab} from "./tabs/context.js";
 import {initGuideTab} from "./tabs/guide.js";
 import {initStorageTab} from "./tabs/storage.js";
 import {initDebugTab} from "./tabs/debug.js";
-import {initAboutTab} from "./tabs/about.js";
+import {initAboutTab, onAboutTabActivated} from "./tabs/about.js";
 import {initAITab} from "./tabs/ai.js";
 import {initVoiceTab} from "./tabs/voice.js";
 import {initChordTab, refreshChordActions} from "./tabs/chord.js";
@@ -538,6 +538,9 @@ document.querySelectorAll(".tab").forEach((btn) => {
                 console.error("[settings] mountLocalRuntime failed:", e);
             });
         }
+
+        // 0.26.20：进入关于 tab → 静默自动检查更新（内部有 60s 节流与总开关判定）
+        if (tab === "about") onAboutTabActivated();
     });
 });
 

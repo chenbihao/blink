@@ -286,7 +286,22 @@ async fn global_proxy_url(app: &tauri::AppHandle) -> Option<String> {
     })
 }
 
-/// 设置页-关于：检查 GitHub Release 是否有新版本（0.25.19 起一次拉取最近多条）。
+/// 一次检查的结果（0.26.20 从 check_update command 提取，供设置页手动检查 /
+/// 后台静默任务 / 主窗口内置动作三路共用）。Clone 供结果条目构造测试复用基准。
+#[derive(Clone)]
+pub(crate) struct UpdateCheckOutcome {
+    pub has_update: bool,
+    pub current_version: String,
+    pub latest_version: String,
+    pub release_url: String,
+    pub release_notes: String,
+    /// (version, notes, release_url)，从新到旧。
+    pub updates: Vec<(String, String, String)>,
+    /// Some(错误描述) = 网络失败 / API 异常；此时 has_update 恒 false。
+    pub error: Option<String>,
+}
+
+/// 检查 GitHub Release 是否有新版本（0.26.20 提取为共享函数）。
 ///
 /// 流程：请求 GitHub API `/repos/{owner/repo}/releases?per_page=10`（时间倒序）→
 /// 取第一条非 prerelease 为「最新发布版」（在客户端复现 `/latest` 端点的
@@ -294,16 +309,9 @@ async fn global_proxy_url(app: &tauri::AppHandle) -> Option<String> {
 /// 已发布条目经 `extract_changelog` 过滤模板后作为 `updates` 数组返回，
 /// 供前端按版本分组展示更新日志（跳版升级可看到中间各版内容）。
 ///
-/// 返回 JSON：
-/// - 成功：`{ has_update, current_version, latest_version, release_url,
-///   release_notes, updates: [{version, notes, release_url}] }`
-///   （updates 从新到旧，可能为空数组）
-/// - 网络失败：`{ has_update: false, current_version, error: "..." }`
-///
 /// **走全局代理**：如果用户配置了 `engine:_global_proxy`，检查更新请求也走代理。
-/// 国内直连 `api.github.com` 极易超时，这是此前「检查更新无效」的根因。
-#[tauri::command]
-pub async fn check_update(app: tauri::AppHandle) -> serde_json::Value {
+/// 国内直连 `api.github.com` 极易超时，这是此前「检查更新无效」的根由。
+pub(crate) async fn perform_update_check(app: &tauri::AppHandle) -> UpdateCheckOutcome {
     let current = env!("CARGO_PKG_VERSION");
     let repo = env!("CARGO_PKG_REPOSITORY");
     // 从 "https://github.com/owner/repo" 提取 "owner/repo"
@@ -315,7 +323,7 @@ pub async fn check_update(app: tauri::AppHandle) -> serde_json::Value {
     let api_url = format!("https://api.github.com/repos/{repo_path}/releases?per_page=10");
 
     // 读取全局代理配置，与插件 HTTP 请求共用
-    let proxy_url = global_proxy_url(&app).await;
+    let proxy_url = global_proxy_url(app).await;
 
     let mut builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
@@ -335,30 +343,18 @@ pub async fn check_update(app: tauri::AppHandle) -> serde_json::Value {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(%e, "check_update: 请求 GitHub API 失败");
-            return serde_json::json!({
-                "has_update": false,
-                "current_version": current,
-                "error": format!("网络请求失败: {e}"),
-            });
+            return error_outcome(current, format!("网络请求失败: {e}"));
         }
     };
     if !resp.status().is_success() {
         tracing::warn!(status = %resp.status(), "check_update: GitHub API 返回非 2xx");
-        return serde_json::json!({
-            "has_update": false,
-            "current_version": current,
-            "error": format!("GitHub API 返回 {}", resp.status()),
-        });
+        return error_outcome(current, format!("GitHub API 返回 {}", resp.status()));
     }
     let releases = match resp.json::<Vec<serde_json::Value>>().await {
         Ok(b) => b,
         Err(e) => {
             tracing::warn!(%e, "check_update: 解析 JSON 失败");
-            return serde_json::json!({
-                "has_update": false,
-                "current_version": current,
-                "error": "响应解析失败".to_string(),
-            });
+            return error_outcome(current, "响应解析失败".to_string());
         }
     };
 
@@ -382,20 +378,82 @@ pub async fn check_update(app: tauri::AppHandle) -> serde_json::Value {
     // 0.25.19：全部待更新版本（> 当前版本，从新到旧），供前端分组展示
     let pending = collect_pending_updates(&releases, current);
 
-    let has_update = version_gt(&latest, current);
+    let has_update = crate::app::update_reminder::version_gt(&latest, current);
     if has_update {
         tracing::info!(current, latest, pending = pending.len(), "发现新版本");
     } else {
         tracing::debug!(current, latest, "已是最新版本");
     }
 
+    UpdateCheckOutcome {
+        has_update,
+        current_version: current.to_string(),
+        latest_version: latest,
+        release_url,
+        release_notes,
+        updates: pending,
+        error: None,
+    }
+}
+
+/// 构造失败结果（`has_update` 恒 false，`latest_version` 留空）。
+fn error_outcome(current: &str, error: String) -> UpdateCheckOutcome {
+    UpdateCheckOutcome {
+        has_update: false,
+        current_version: current.to_string(),
+        latest_version: String::new(),
+        release_url: String::new(),
+        release_notes: String::new(),
+        updates: Vec::new(),
+        error: Some(error),
+    }
+}
+
+/// 设置页-关于：检查 GitHub Release 是否有新版本（0.25.19 起一次拉取最近多条）。
+///
+/// 返回 JSON：
+/// - 成功：`{ has_update, current_version, latest_version, release_url,
+///   release_notes, updates: [{version, notes, release_url}] }`
+///   （updates 从新到旧，可能为空数组）
+/// - 网络失败：`{ has_update: false, current_version, error: "..." }`
+///
+/// 0.26.20：网络与解析逻辑提取为 [`perform_update_check`]（与后台静默检查共用）；
+/// 命令侧同时经 `update_reminder::record_check_outcome` 落库检查状态（手动
+/// 检查也推进 24h 节流与 `latest_version`，后台任务不重复查）。
+#[tauri::command]
+pub async fn check_update(app: tauri::AppHandle) -> serde_json::Value {
+    let outcome = perform_update_check(&app).await;
+    let latest = outcome.error.is_none().then(|| outcome.latest_version.clone());
+    crate::app::update_reminder::record_check_outcome(&app, latest.as_deref()).await;
+    outcome_to_json(&outcome)
+}
+
+/// 记录「已读屏蔽」：把当前可用更新版本写入 `dismissed_version`（0.26.20）。
+/// 建议槽的显式关闭与 Tab 采纳都调用本命令——用户已知情，本版本不再出现；
+/// 发布更新的版本后自动恢复提示。无可用版本时 no-op。
+#[tauri::command]
+pub async fn dismiss_update_version(app: tauri::AppHandle) -> Result<(), String> {
+    crate::app::update_reminder::dismiss_latest(&app).await;
+    Ok(())
+}
+
+/// 检查结果 → 前端 JSON（设置页 check_update 命令专用；主窗口内置动作走
+/// run_builtin_action 的 ReturnItems 协议，条目由 update_reminder::check_result_items 构造）。
+fn outcome_to_json(outcome: &UpdateCheckOutcome) -> serde_json::Value {
+    if let Some(error) = &outcome.error {
+        return serde_json::json!({
+            "has_update": false,
+            "current_version": outcome.current_version,
+            "error": error,
+        });
+    }
     serde_json::json!({
-        "has_update": has_update,
-        "current_version": current,
-        "latest_version": latest,
-        "release_url": release_url,
-        "release_notes": release_notes,
-        "updates": pending
+        "has_update": outcome.has_update,
+        "current_version": outcome.current_version,
+        "latest_version": outcome.latest_version,
+        "release_url": outcome.release_url,
+        "release_notes": outcome.release_notes,
+        "updates": outcome.updates
             .iter()
             .map(|(version, notes, url)| serde_json::json!({
                 "version": version,
@@ -418,7 +476,7 @@ fn collect_pending_updates(
         .filter(|r| !r["prerelease"].as_bool().unwrap_or(false))
         .filter_map(|r| {
             let version = r["tag_name"].as_str()?.trim_start_matches('v');
-            if !version_gt(version, current) {
+            if !crate::app::update_reminder::version_gt(version, current) {
                 return None;
             }
             let notes = extract_changelog(r["body"].as_str().unwrap_or(""));
@@ -796,25 +854,8 @@ fn db_size_bytes(data_dir: &std::path::Path, file: &str) -> u64 {
 ///
 /// 优先用 `semver` 库严格比较（支持 pre-release / build metadata），
 /// 解析失败时 fallback 到简单数字比较（兼容非标准版本号如 `0.9`）。
-fn version_gt(a: &str, b: &str) -> bool {
-    match (semver::Version::parse(a), semver::Version::parse(b)) {
-        (Ok(va), Ok(vb)) => va > vb,
-        _ => version_gt_fallback(a, b),
-    }
-}
-
-/// Fallback：非标准版本号的简单数字比较，取前三段，缺失按 0 算。
-fn version_gt_fallback(a: &str, b: &str) -> bool {
-    let parse = |s: &str| -> (u64, u64, u64) {
-        let parts: Vec<u64> = s.split('.').filter_map(|p| p.parse().ok()).collect();
-        (
-            parts.first().copied().unwrap_or(0),
-            parts.get(1).copied().unwrap_or(0),
-            parts.get(2).copied().unwrap_or(0),
-        )
-    };
-    parse(a) > parse(b)
-}
+/// 0.26.20：version_gt / version_gt_fallback 迁至 `app::update_reminder`
+///（检查结果与「可用更新」判定共用同一比较）。
 
 /// 递归计算目录大小（字节）。
 pub(crate) fn dir_size_bytes(path: &std::path::Path) -> u64 {

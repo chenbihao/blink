@@ -14,6 +14,7 @@ import {EVENTS} from "../../shared/event-names.js";
 import {initMarkdown, renderMarkdown} from "../../shared/markdown.js";
 import {t} from "../../i18n/index.js";
 import {navigateSettings} from "../navigation.js";
+import {saveConfig} from "../../shared/config-keys.js";
 
 /**
  * 初始化关于 Tab
@@ -152,10 +153,13 @@ async function loadAboutInfo() {
 }
 
 /**
- * 检查更新按钮 + 一键更新（0.25.10）
+ * 检查更新按钮 + 一键更新 + 打开即自动检查 + 自动检查开关（0.26.20）
  *
- * 两条链路：
- * - 检查：invoke check_update → 展示新版本 / notes / 「一键更新」入口
+ * 三条链路：
+ * - 手动检查：点击按钮 → invoke check_update → 展示新版本 / notes / 「一键更新」入口
+ * - 自动检查（0.26.20）：关于 tab 每次激活静默执行一次（≥60s 节流防快速切换
+ *   tab 反复打 GitHub 匿名限流；「自动检查更新」关闭时不自动跑），结果渲染
+ *   与手动按钮共用同一函数
  * - 安装：invoke install_update 立即返回 started，之后进度只走
  *   UPDATE_INSTALL_PROGRESS 事件（downloading → installing → 应用被
  *   安装器接管自动重启，即成功终点）；检查阶段失败走 invoke 错误，
@@ -202,11 +206,14 @@ function initCheckUpdate() {
         }
     });
 
-    btn.addEventListener("click", async () => {
-        btn.disabled = true;
+    /**
+     * 执行一次检查并渲染结果（手动按钮与 tab 激活自动检查共用渲染函数
+     * `renderCheckResult`；此处负责按钮态与区域重置）。
+     * @returns {Promise<void>}
+     */
+    async function runCheck() {
         updateEl.hidden = false;
         updateEl.textContent = "…";
-        // 重置 release notes 区域
         if (notesEl) {
             notesEl.hidden = true;
             notesEl.innerHTML = "";
@@ -214,28 +221,17 @@ function initCheckUpdate() {
         if (installBtn) installBtn.hidden = true;
         if (progressEl) progressEl.hidden = true;
         try {
-            const r = await invoke("check_update");
-            if (r.error) {
-                // 网络失败 / API 异常 —— 显示后端返回的具体原因，方便用户判断
-                // 常见场景：403 = GitHub 匿名限流（60 次/小时），「网络」= 代理/断网
-                updateEl.textContent = friendlyUpdateError(r.error);
-            } else if (r.has_update) {
-                // .external-link + data-url 走统一外链委托（外部浏览器打开）
-                // .about-update-link 套用项目统一超链样式（accent 色）
-                const link = r.release_url
-                    ? ` · <a href="#" class="external-link about-update-link" data-url="${r.release_url}">查看</a>`
-                    : "";
-                updateEl.innerHTML = `新版本 ${r.latest_version} 可用${link}`;
-                // 0.25.10：发现新版本 → 露出一键更新入口
-                if (installBtn) installBtn.hidden = false;
-                // 0.17.1：展示 release notes；0.25.19：多版本分组渲染
-                renderUpdateNotes(notesEl, r);
-            } else {
-                updateEl.textContent = `已是最新版本（${r.current_version}）`;
-            }
+            renderCheckResult(await invoke("check_update"));
         } catch (e) {
             updateEl.textContent = "检查失败";
             console.error("check_update failed:", e);
+        }
+    }
+
+    btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        try {
+            await runCheck();
         } finally {
             btn.disabled = false;
         }
@@ -269,6 +265,92 @@ function initCheckUpdate() {
             }
         });
     }
+
+    initAutoCheckToggle();
+}
+
+// ── 0.26.20：关于 tab 激活自动检查 + 「自动检查更新」开关 ──────────────────
+
+/** tab 激活自动检查的最小间隔（防快速切换反复打 GitHub 匿名限流）。 */
+const AUTO_CHECK_MIN_INTERVAL_MS = 60 * 1000;
+let lastAutoCheckAt = 0;
+
+/**
+ * 关于 tab 激活钩子（settings/index.js tab 切换回调；设置页窗口预热后 init
+ * 也会执行，故不能在 initAboutTab 里直接检查——那等于应用启动即查）。
+ * 「自动检查更新」关闭时不自动跑（用户仍可点手动按钮）。
+ */
+export function onAboutTabActivated() {
+    const toggle = document.getElementById("about-auto-check");
+    if (toggle && !toggle.checked) return;
+    const now = Date.now();
+    if (now - lastAutoCheckAt < AUTO_CHECK_MIN_INTERVAL_MS) return;
+    lastAutoCheckAt = now;
+    invoke("check_update").then((r) => {
+        renderCheckResult(r);
+    }).catch((e) => {
+        // 静默自动检查失败不打扰（与手动按钮的显式错误展示区分）
+        console.debug("about tab auto check failed:", e);
+    });
+}
+
+/**
+ * 把 check_update 结果渲染到关于 tab（手动按钮与 tab 激活自动检查共用）。
+ * 手动路径的按钮禁用/区域重置由各自调用方处理，此处只渲染结果；
+ * 非新版路径收起 release notes（防上次检查的旧内容残留）。
+ */
+function renderCheckResult(r) {
+    const updateEl = document.getElementById("about-update");
+    const notesEl = document.getElementById("about-release-notes");
+    const installBtn = document.getElementById("about-install-update");
+    const progressEl = document.getElementById("about-update-progress");
+    if (!updateEl) return;
+    updateEl.hidden = false;
+    if (r.error) {
+        updateEl.textContent = friendlyUpdateError(r.error);
+    } else if (r.has_update) {
+        // .external-link + data-url 走统一外链委托（外部浏览器打开）；
+        // .about-update-link 套用项目统一超链样式（accent 色）
+        const link = r.release_url
+            ? ` · <a href="#" class="external-link about-update-link" data-url="${r.release_url}">查看</a>`
+            : "";
+        updateEl.innerHTML = `新版本 ${r.latest_version} 可用${link}`;
+        if (installBtn) installBtn.hidden = false;
+        renderUpdateNotes(notesEl, r);
+    } else {
+        updateEl.textContent = `已是最新版本（${r.current_version}）`;
+    }
+    if (!r.has_update) {
+        if (notesEl) notesEl.hidden = true;
+        if (installBtn) installBtn.hidden = true;
+    }
+    if (progressEl) progressEl.hidden = true;
+}
+
+/**
+ * 「自动检查更新」开关（0.26.20）：读 app.update 分片回填，change 走
+ * saveConfig("auto_check_update")（后端联动后台任务/建议槽/托盘提示与托盘重建）。
+ */
+function initAutoCheckToggle() {
+    const toggle = document.getElementById("about-auto-check");
+    if (!toggle) return;
+    invoke("get_config_section", {key: "app.update"}).then((cfg) => {
+        // 缺省（分片未写或后端 None）= 默认开
+        toggle.checked = cfg?.auto_check_enabled !== false;
+    }).catch((e) => console.error("read app.update failed:", e));
+
+    toggle.addEventListener("change", async () => {
+        const desired = toggle.checked;
+        toggle.disabled = true;
+        try {
+            await saveConfig("auto_check_update", desired);
+        } catch (err) {
+            toggle.checked = !desired;
+            console.error("set auto_check_update failed:", err);
+        } finally {
+            toggle.disabled = false;
+        }
+    });
 }
 
 /**

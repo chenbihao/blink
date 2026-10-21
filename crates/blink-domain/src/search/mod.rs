@@ -70,6 +70,17 @@ pub struct Action {
     /// CalcEngine / Plugin Copy 恒为 None。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hit_id: Option<String>,
+    /// `Run` 动作是否以 items 回流结果区（0.26.20 修订）：descriptor 声明
+    /// `BuiltinResultAction::ReturnItems` 时为 true。前端先展示独占占位行，
+    /// `run_builtin_action` 返回 `{items}` 后原位替换渲染（主窗不隐藏）；
+    /// 此时 `hint` 携带占位主行文案的 i18n key（前端 t() 渲染）。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub await_result: bool,
+}
+
+/// serde skip 谓词：bool 为 false 时不序列化（await_result 默认值不出现在 JSON）。
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl Default for Action {
@@ -83,6 +94,7 @@ impl Default for Action {
             run_id: None,
             run_arg: None,
             hit_id: None,
+            await_result: false,
         }
     }
 }

@@ -248,4 +248,63 @@ for (const clipboard of [false, true]) {
     h.context.render(batch(), 3);
     assert.equal(descs[0].textContent, '刚刚 · 1200 chars · clipboard.hover_full_text', '重渲以副行基准幂等重算，不叠加提示');
 }
+
+// ── 0.26.20：占位回归（同批引导项不误丢占位）与慢 action 本地占位 ──────────
+{
+    // 回归修复：Mixed 同步批 = 引导项(同 source 非占位) + 占位 → 三条共存。
+    // 0.26.17 引导项与占位同 source（plugin_id）且 is_placeholder=false，
+    // 旧的"迟到占位丢弃"扫全量 allItems 把同批引导项当真实结果，占位被丢
+    //（裸 `ip ` 无转圈，0.26.20 实机发现）。
+    const h = setup();
+    const guide = (name) => ({name, source: 'builtin.ip', score: 0.3, is_placeholder: false, actions: [{kind: 'route', payload: name}]});
+    const ph = {name: 'IP 查询中…', source: 'builtin.ip', score: 1.2, is_placeholder: true, actions: []};
+    h.context.render([guide('ip refresh'), guide('ip local'), ph], 1);
+    assert.equal(h.context.getItems().length, 3, '引导项与占位同批共存');
+    assert.equal(h.context.getItems().filter(x => x.is_placeholder).length, 1, '占位不得被迟到判定丢弃');
+}
+{
+    // 跨批迟到占位仍丢弃（0.25.20 语义保持）：增量真实结果先行入列，
+    // 后到的 sync 占位不复活转圈。
+    const h = setup();
+    h.context.render([{name: 'IP 结果', source: 'builtin.ip', score: 2, is_placeholder: false, actions: []}], 1);
+    h.context.merge([{name: 'IP 查询中…', source: 'builtin.ip', score: 1.2, is_placeholder: true, actions: []}], 1);
+    assert.equal(h.context.getItems().filter(x => x.is_placeholder).length, 0, '真实结果已在，迟到占位丢弃');
+}
+{
+    // 慢 action 本地占位（0.26.20 修订：awaitResult 通用协议）：独占等待行 →
+    // 后端 {items} 标准条目数组整体替换（icon 字段走 createItem 通用图标分支，
+    // 条目自带 actions 可再次触发）；占位被新搜索清掉后 settle 幂等 no-op
+    const h = setup();
+    h.context.render([{name: '检查更新', source: 'builtin', actions: [{kind: 'run', runId: 'check_update', awaitResult: true}]}], 1);
+    h.context.showActionPending('正在检查更新…', '请稍候');
+    assert.equal(h.context.getItems().length, 1, '等待期独占结果区');
+    assert.equal(h.context.getItems()[0].is_placeholder, true);
+    assert.equal(h.context.getItems()[0].source, 'action_pending');
+    assert.equal(h.context.getItems()[0].description, '请稍候', '占位带副行，与插件占位（请稍候）同构');
+    const items = [
+        {name: '发现新版本 0.26.21', source: 'update', icon: 'download', score: 999,
+            description: '回车查看更新内容', is_placeholder: false, is_error: false,
+            actions: [{kind: 'settings', payload: 'about'}]},
+        {name: '已是最新版本（0.26.20）', source: 'update', icon: 'check', score: 998,
+            description: 'GitHub 最新发布版本', is_placeholder: false, is_error: false,
+            actions: [{kind: 'copy', payload: '0.26.20'}]},
+    ];
+    assert.equal(h.context.settleActionItems(items), true);
+    assert.equal(h.context.getItems().length, 2, '多条目整体替换占位');
+    assert.equal(h.context.getItems()[0].name, '发现新版本 0.26.21');
+    assert.equal(h.context.getItems()[0].icon, 'download', 'icon 字段透传（createItem 通用图标分支）');
+    assert.deepEqual(h.context.getItems()[0].actions, [{kind: 'settings', payload: 'about'}], '条目动作原样保留，可再次触发');
+    assert.equal(h.context.getItems().some(x => x.is_placeholder), false);
+    // 新搜索清掉占位后，迟到的 settle 不覆盖新结果
+    h.context.showActionPending('正在检查更新…', '请稍候');
+    h.context.render([{name: '新搜索', source: 'other', actions: []}], 2);
+    assert.equal(h.context.settleActionItems(items), false, '占位已不在 → no-op');
+    assert.equal(h.context.getItems()[0].name, '新搜索', '迟到结果不覆盖新搜索');
+    // 空数组/非数组守卫：不替换、不抛错
+    h.context.showActionPending('正在检查更新…');
+    assert.equal(h.context.settleActionItems([]), false);
+    assert.equal(h.context.settleActionItems(null), false);
+    assert.equal(h.context.getItems()[0].is_placeholder, true, '守卫失败时占位保持');
+}
+
 console.log('results 视口模型：page/step、流式追加、局部移除、页大小热更新与悬浮提示条件追加通过');
