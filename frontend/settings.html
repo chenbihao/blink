@@ -2829,11 +2829,6 @@
                 <label class="setting-label" data-i18n="about.license.label">许可</label>
                 <span class="value" id="about-license">—</span>
             </div>
-            <!-- 0.26.14：内置搜索引擎（Everything）随应用分发，按其许可要求附声明 -->
-            <div class="setting-row">
-                <label class="setting-label" data-i18n="about.license.third_party.label">第三方组件</label>
-                <span class="value" data-i18n="about.license.third_party">内置搜索引擎 Everything（voidtools）以 MIT 许可分发，含 PCRE（BSD-3-Clause）组件</span>
-            </div>
             <div class="setting-row">
                 <label class="setting-label" data-i18n="about.repository.label">仓库</label>
                 <span class="value"><a class="external-link" href="#" id="about-repository">—</a></span>
@@ -2842,6 +2837,13 @@
                 <label class="setting-label" data-i18n="about.guide.label">使用指南</label>
                 <button class="about-check-btn" data-i18n="about.guide.open" id="about-guide-open" type="button">打开丝滑小妙招</button>
             </div>
+            <!-- 0.26.19：开源与许可统一入口（Everything MIT + PCRE BSD-3 全文，可扩展托管组件条目）；
+                 行内不再套 .value（mono/break-all 为版本号与路径设计），声明文案为正文断行 -->
+            <div class="setting-row">
+                <label class="setting-label" data-i18n="about.license.third_party.label">开源与许可</label>
+                <button class="about-check-btn" data-i18n="about.license.open" id="about-licenses-open" type="button">查看声明</button>
+            </div>
+            <div class="about-licenses" hidden id="about-licenses"></div>
         </div>
     </main>
 </div>

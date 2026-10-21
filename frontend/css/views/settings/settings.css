@@ -396,6 +396,74 @@ body {
     color: var(--text);
 }
 
+/* 0.26.19：开源与许可声明展开区——正文断行（不套 .setting-row .value 的
+   mono/break-all，那是版本号与路径的样式）；许可全文 pre 保留原文排版，
+   高度有界可滚动；落地路径是磁盘位置，mono 展示合理 */
+.about-licenses {
+    margin: var(--space-sm, 8px) 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm, 8px);
+}
+
+.about-license-item {
+    border: 1px solid var(--surface);
+    border-radius: var(--radius-sm, 4px);
+    padding: var(--space-sm, 8px) var(--space-md, 12px);
+}
+
+.about-license-head {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: var(--space-sm, 8px);
+}
+
+.about-license-name {
+    font-weight: 600;
+    color: var(--text);
+}
+
+.about-license-version,
+.about-license-kind {
+    font-size: var(--text-sm, 13px);
+    color: var(--text-sub);
+}
+
+.about-license-homepage {
+    font-size: var(--text-sm, 13px);
+}
+
+.about-license-path {
+    margin-top: var(--space-xs, 4px);
+    font-size: var(--text-sm, 13px);
+    color: var(--text-sub);
+}
+
+.about-license-path code {
+    font-family: var(--font-mono, monospace);
+    font-size: 0.9em;
+    background: var(--surface);
+    padding: 1px 4px;
+    border-radius: 3px;
+    word-break: break-all; /* 超长安装路径强制换行，mono 场景合理 */
+}
+
+.about-license-body {
+    margin: var(--space-sm, 8px) 0 0;
+    padding: var(--space-sm, 8px);
+    max-height: 220px;
+    overflow-y: auto;
+    background: var(--surface);
+    border-radius: var(--radius-sm, 4px);
+    font-family: inherit; /* 许可法律文本用正文字体，不做代码观感 */
+    font-size: var(--text-sm, 13px);
+    line-height: 1.6;
+    color: var(--text-sub);
+    white-space: pre-wrap;
+    word-break: normal; /* 英文许可文本按词断行 */
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
 settings-components.css — 通用 UI 组件：setting-row、按钮、表单控件、开关
 ═══════════════════════════════════════════════════════════════════════════ */

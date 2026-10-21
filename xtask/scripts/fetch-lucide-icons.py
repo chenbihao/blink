@@ -75,7 +75,8 @@ ICON_LIST = [
     # 截图 overlay 工具按钮
     "scan-text",        # OCR 🔍
     "pin",              # 钉图 📌
-    "bookmark-check",   # 翻译并 pin（0.18.1：书签+勾选 = 翻译确认后钉住）
+    "bookmark-check",   # 翻译并 pin（旧，0.26.19 换 receipt-text，保留兼容）
+    "receipt-text",     # 翻译并钉图（0.26.19：译文行文拓在图上 = 收据文本语义，替换 bookmark-check）
     "save",             # 保存为文件 💾
     "grid-3x3",         # 马赛克（0.11.8：从 emoji 🗯 迁移，格子点阵最像马赛克视觉）
     "spray-can",        # 涂抹（0.11.8：从 emoji ▦ 迁移，喷罐涂抹感）

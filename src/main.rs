@@ -1701,6 +1701,8 @@ app::commands::generate_palette_schemes,
             app::commands::start_managed_everything,
             app::commands::stop_managed_everything,
             app::commands::install_everything_service,
+            // 0.26.19：关于页开源与许可声明
+            app::commands::get_license_notices,
             app::commands::open_file_dialog,
             app::commands::pick_directory_dialog,
 app::commands::get_clipboard_history,

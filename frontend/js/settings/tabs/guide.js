@@ -137,7 +137,10 @@ function trackTocActive(content) {
         content.addEventListener("scroll", () => {
             if (!ticking) {
                 ticking = true;
-                requestAnimationFrame(updateTocActive);
+                requestAnimationFrame(() => {
+                    ticking = false;
+                    updateTocActive();
+                });
             }
         }, {passive: true});
     }

@@ -222,3 +222,48 @@ pub fn managed_runtime_startup_sweep() {
         }
     });
 }
+
+// ── 开源与许可声明（0.26.19）────────────────────────────────────────────
+
+/// 关于页「开源与许可」声明条目。body 为许可声明全文（官方原文），
+/// installed_path 为已安装时许可文件落地的绝对路径。
+/// 后续托管组件（本地模型等）作为新条目追加，前端按列表渲染。
+#[derive(serde::Serialize)]
+pub struct LicenseNotice {
+    pub id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    pub license: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub homepage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub installed_path: Option<String>,
+    pub body: String,
+}
+
+/// 关于页「开源与许可」声明列表（只读 + 幂等补偿许可落地）。
+///
+/// Everything 属随应用再分发：MIT 要求副本附许可声明，此处返回官方
+/// License.txt 全文；已安装而磁盘缺许可文件（0.26.19 之前的老安装）时
+/// 顺带补写，失败仅日志、不阻塞声明展示。
+#[tauri::command]
+pub fn get_license_notices() -> Vec<LicenseNotice> {
+    let installed_path = managed_runtime::ensure_license(KIND_EVERYTHING)
+        .inspect_err(|e| tracing::warn!(error = %e, "许可文件补偿落地失败"))
+        .ok()
+        .flatten()
+        .map(|p| p.display().to_string());
+    let version = managed_runtime::lock_entry(KIND_EVERYTHING)
+        .ok()
+        .map(|e| e.version);
+    vec![LicenseNotice {
+        id: KIND_EVERYTHING.to_string(),
+        name: "Everything (voidtools)".to_string(),
+        version,
+        license: "MIT（含 PCRE BSD-3-Clause 组件）".to_string(),
+        homepage: Some("https://www.voidtools.com/".to_string()),
+        installed_path,
+        body: managed_runtime::EVERYTHING_LICENSE_TXT.to_string(),
+    }]
+}

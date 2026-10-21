@@ -7,6 +7,7 @@
  * 0.17.1：新增 release notes 展示（Markdown 渲染）
  * 0.25.10：新增一键更新（invoke install_update + UPDATE_INSTALL_PROGRESS 进度事件）
  * 0.25.19：更新日志多版本分组展示（跳版升级时从新到旧列出全部待更新版本）
+ * 0.26.19：新增「开源与许可」声明入口（get_license_notices，含托管 Everything 官方 License.txt 全文）
  */
 import {invoke, listen, normalizeError} from "../../shared/tauri.js";
 import {EVENTS} from "../../shared/event-names.js";
@@ -22,11 +23,110 @@ export function initAboutTab() {
     initMarkdown();
     loadAboutInfo();
     initCheckUpdate();
+    initLicenseNotices();
 
     // 丝滑小妙招入口（0.25.28）：跨 tab 跳转统一走 navigation（spec-frontend §5.7）
     document.getElementById("about-guide-open")?.addEventListener("click", () => {
         navigateSettings({tabId: "guide"}).catch((e) => console.error("navigate to guide failed:", e));
     });
+}
+
+/**
+ * 开源与许可声明（0.26.19）
+ *
+ * 托管 Everything 属随应用再分发，MIT 要求副本附许可声明。点击「查看声明」
+ * 按需拉取后端聚合的声明列表（官方 License.txt 全文 + 落地路径），再点收起。
+ * 数据静态且一次性渲染，无版本竞态；加载失败保持可重试。
+ */
+function initLicenseNotices() {
+    const btn = document.getElementById("about-licenses-open");
+    const panel = document.getElementById("about-licenses");
+    if (!btn || !panel) return;
+
+    btn.addEventListener("click", async () => {
+        if (!panel.hidden) {
+            panel.hidden = true;
+            return;
+        }
+        if (!panel.dataset.loaded) {
+            try {
+                const notices = await invoke("get_license_notices");
+                renderLicenseNotices(panel, notices);
+                panel.dataset.loaded = "1";
+            } catch (e) {
+                console.error("get_license_notices failed:", e);
+                panel.textContent = t("about.license.load_failed");
+                // 不标记 loaded，下次点击自动重试
+            }
+        }
+        panel.hidden = false;
+    });
+}
+
+/**
+ * 渲染声明条目列表。
+ * 结构与后端 LicenseNotice 对齐；installed_path 为磁盘上的许可文件位置
+ * （mono 展示合理），声明正文用 pre 保持原文排版、正文断行。
+ */
+function renderLicenseNotices(panel, notices) {
+    panel.innerHTML = "";
+    if (!Array.isArray(notices) || !notices.length) {
+        panel.textContent = t("about.license.load_failed");
+        return;
+    }
+    for (const n of notices) {
+        const item = document.createElement("div");
+        item.className = "about-license-item";
+
+        const head = document.createElement("div");
+        head.className = "about-license-head";
+        const name = document.createElement("span");
+        name.className = "about-license-name";
+        name.textContent = n.name || n.id;
+        head.appendChild(name);
+        if (n.version) {
+            const ver = document.createElement("span");
+            ver.className = "about-license-version";
+            ver.textContent = n.version;
+            head.appendChild(ver);
+        }
+        const kind = document.createElement("span");
+        kind.className = "about-license-kind";
+        kind.textContent = n.license || "";
+        head.appendChild(kind);
+        if (n.homepage) {
+            // .external-link + data-url 走统一外链委托（外部浏览器打开）
+            const link = document.createElement("a");
+            link.href = "#";
+            link.className = "external-link about-license-homepage";
+            link.dataset.url = n.homepage;
+            link.textContent = t("about.license.homepage");
+            head.appendChild(link);
+        }
+        item.appendChild(head);
+
+        const path = document.createElement("div");
+        path.className = "about-license-path";
+        if (n.installed_path) {
+            const label = document.createElement("span");
+            label.className = "about-license-path-label";
+            label.textContent = t("about.license.installed_at");
+            const code = document.createElement("code");
+            code.textContent = n.installed_path;
+            path.appendChild(label);
+            path.appendChild(code);
+        } else {
+            path.textContent = t("about.license.not_installed");
+        }
+        item.appendChild(path);
+
+        const body = document.createElement("pre");
+        body.className = "about-license-body";
+        body.textContent = n.body || "";
+        item.appendChild(body);
+
+        panel.appendChild(item);
+    }
 }
 
 /**

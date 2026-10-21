@@ -16,8 +16,11 @@
 //! `--version` 输出，`version_check` 字段约定为 exe 文件头 magic（"MZ" =
 //! PE），字节级身份由 sha256 锁定（2026-10-19 实测下载核实）。
 //!
-//! **许可**：Everything 1.4 为 MIT（含 PCRE BSD-3 组件），允许再分发；
-//! 关于页附声明即合规（phase 0.26.14 §5.15 路线决策）。
+//! **许可**：Everything 1.4 为 MIT（含 PCRE BSD-3 组件），允许再分发。
+//! 官方发行 zip 不含 License.txt，这里以编译期嵌入的官方原文
+//! （resources/runtimes/everything-License.txt，与 voidtools.com/License.txt
+//! 逐字节一致）在安装时落地到 artifact 目录，满足 MIT「副本附许可声明」的
+//! 再分发要求（0.26.19；此前关于页仅有一句声明文案，属不完整合规）。
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -28,6 +31,13 @@ use sha2::{Digest, Sha256};
 /// 编译期嵌入的运行时锁文件（版本 + URL + SHA-256 + 大小的 single source of truth）。
 pub const MANAGED_RUNTIME_LOCK_JSON: &str =
     include_str!("../../../resources/runtimes/everything-asset-lock.json");
+
+/// Everything 官方 License.txt 原文（MIT + PCRE BSD-3，安装时落地 artifact 目录）。
+pub const EVERYTHING_LICENSE_TXT: &str =
+    include_str!("../../../resources/runtimes/everything-License.txt");
+
+/// artifact 目录内许可文件名（与官方发行包惯例一致）。
+const LICENSE_FILE_NAME: &str = "License.txt";
 
 /// 托管运行时种类（当前仅 Everything；新增成员在此扩展）。
 pub const KIND_EVERYTHING: &str = "everything";
@@ -144,6 +154,31 @@ pub fn resolve(kind: &str) -> Option<PathBuf> {
     let entry = lock_entry(kind).ok()?;
     let exe = root().join(entry.artifact_id()).join(&entry.exe_relpath);
     exe.is_file().then_some(exe)
+}
+
+/// 已安装 artifact 内许可文件路径（不存在安装则 None；文件是否已落地另查）。
+pub fn license_path(kind: &str) -> Option<PathBuf> {
+    let entry = lock_entry(kind).ok()?;
+    let dir = root().join(entry.artifact_id());
+    dir.is_dir().then(|| dir.join(LICENSE_FILE_NAME))
+}
+
+/// 幂等落地许可文件：artifact 已安装而 License.txt 缺失或内容不符时（重）写入。
+///
+/// 覆盖两类场景：新安装事务在 promote 后调用；0.26.19 之前的老安装由
+/// 调用方（关于页许可查询等低频路径）补偿调用。未安装返回 Ok(None)。
+pub fn ensure_license(kind: &str) -> Result<Option<PathBuf>, ManagedRuntimeError> {
+    let Some(path) = license_path(kind) else {
+        return Ok(None);
+    };
+    let current = std::fs::read(&path).ok();
+    if current.as_deref() == Some(EVERYTHING_LICENSE_TXT.as_bytes()) {
+        return Ok(Some(path));
+    }
+    std::fs::create_dir_all(path.parent().unwrap_or(Path::new("")))?;
+    std::fs::write(&path, EVERYTHING_LICENSE_TXT)?;
+    tracing::info!(kind, path = %path.display(), "已落地托管运行时许可文件");
+    Ok(Some(path))
 }
 
 /// 生命周期租约放在 artifact 外，卸载该版本时仍保有互斥。
@@ -313,6 +348,11 @@ async fn install_inner(
         return Err(ManagedRuntimeError::InstallFailed(format!("promote 失败: {e}")));
     }
     cleanup(&staging);
+
+    // ── 5. 许可落地（MIT 再分发要求；失败不回滚安装，仅告警） ──
+    if let Err(e) = ensure_license(kind) {
+        tracing::warn!(kind, error = %e, "许可文件落地失败（不影响运行时使用）");
+    }
 
     reporter.on_stage("done");
     reporter.on_log(
@@ -656,6 +696,50 @@ mod tests {
         assert!(safe_entry_relpath("c:/windows/system32").is_none());
         assert!(safe_entry_relpath("../escape").is_none());
         assert!(safe_entry_relpath("").is_none());
+    }
+
+    /// 嵌入的许可文件必须是官方 Everything License.txt 原文（MIT 授权段 +
+    /// PCRE BSD-3 段），防止误替换成占位文本后静默进安装包。
+    #[test]
+    fn embedded_license_is_official_everything_text() {
+        assert!(EVERYTHING_LICENSE_TXT.len() > 2000, "官方原文约 2.7KB");
+        assert!(EVERYTHING_LICENSE_TXT.contains("David Carpenter"));
+        assert!(EVERYTHING_LICENSE_TXT.contains("Permission is hereby granted"));
+        assert!(EVERYTHING_LICENSE_TXT.contains("Perl-Compatible Regular Expressions"));
+        assert!(EVERYTHING_LICENSE_TXT.contains("University of Cambridge"));
+    }
+
+    #[test]
+    fn ensure_license_idempotent_and_compensates_old_install() {
+        // 未安装：None，不创建任何文件
+        assert!(ensure_license(KIND_EVERYTHING).unwrap().is_none());
+        assert!(license_path(KIND_EVERYTHING).is_none());
+
+        // 伪造 0.26.19 之前的老安装（artifact 目录存在、无 License.txt）
+        let dir = root().join(lock_entry(KIND_EVERYTHING).unwrap().artifact_id());
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = ensure_license(KIND_EVERYTHING)
+            .unwrap()
+            .expect("已安装 artifact 应落地许可");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            EVERYTHING_LICENSE_TXT.as_bytes()
+        );
+        assert_eq!(license_path(KIND_EVERYTHING), Some(path.clone()));
+
+        // 幂等：内容一致时不重写（mtime 不变验证无意义，内容等价即达标）
+        let again = ensure_license(KIND_EVERYTHING).unwrap();
+        assert_eq!(again, Some(path.clone()));
+
+        // 内容损坏（如旧版本升级残留）→ 重写修复
+        std::fs::write(&path, "stale").unwrap();
+        let repaired = ensure_license(KIND_EVERYTHING).unwrap();
+        assert_eq!(
+            std::fs::read(repaired.unwrap()).unwrap(),
+            EVERYTHING_LICENSE_TXT.as_bytes()
+        );
+
+        let _ = std::fs::remove_dir_all(root());
     }
 
     #[test]
