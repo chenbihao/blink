@@ -10,6 +10,7 @@ import {t} from "../i18n/index.js";
 const KIND_KEY = {
     open: "hint.open",
     copy: "hint.copy",
+    route: "hint.route",
 };
 
 /**

@@ -558,6 +558,8 @@ function unifiedMenu() {
 const KIND_LABELS = {
     copy: () => t("menu.copy"),
     open: () => t("menu.open"),
+    // 0.26.17：args.hints 引导项——与状态栏共用同一文案
+    route: () => t("hint.route"),
 };
 
 /** 0.26.16：置顶档位（小时）——产品定案 1/6/12/24 四档平铺，不做永久置顶。 */

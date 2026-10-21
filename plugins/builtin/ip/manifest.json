@@ -8,12 +8,33 @@
     "en": "Show local and domestic/international egress IPs, with optional network details"
   },
   "builtin": true,
+  "args": {
+    "hints": [
+      {
+        "value": "refresh",
+        "aliases": ["刷新"],
+        "desc": {
+          "zh": "刷新出口检测结果，仍遵守各检测站的最小请求间隔",
+          "en": "Refresh egress results, still respecting per-detector rate limits"
+        }
+      },
+      {
+        "value": "local",
+        "aliases": ["本地"],
+        "desc": {
+          "zh": "仅查询本机网卡地址，不联网检测出口",
+          "en": "Query local adapter addresses only, no egress requests"
+        }
+      }
+    ]
+  },
   "runtime": {
     "type": "process",
     "protocol": "jsonl",
     "exec": "./bin/blink-plugin-ip.exe",
     "timeout_ms": 8000,
-    "concurrency": 1
+    "debounce_ms": 500,
+    "concurrency": 4
   },
   "triggers": [
     {

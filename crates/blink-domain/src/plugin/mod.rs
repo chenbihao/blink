@@ -17,7 +17,8 @@ use std::sync::Arc;
 pub use capability::{PluginCapabilityAdapter, plugin_tool_id};
 pub use engine::PluginEngine;
 pub use manifest::{
-    LocalizableText, ManifestContextWhen, ManifestSurfaceHint, PluginManifest, PluginTrigger,
+    ArgHint, LocalizableText, ManifestContextWhen, ManifestSurfaceHint, PluginManifest,
+    PluginTrigger,
 };
 pub use process::PluginHandle;
 #[allow(unused_imports)]

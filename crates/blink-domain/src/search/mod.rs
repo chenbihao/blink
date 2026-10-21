@@ -34,6 +34,9 @@ pub enum ActionKind {
     /// 运行注册好的内置动作（by id），参数走 `Action.run_arg`。
     /// 前端识别 `kind === "run"` → `invoke("run_builtin_action", { id, arg })`。
     Run,
+    /// 以新查询路由（0.26.17 args.hints 列表引导项）：`payload` 携带目标查询，
+    /// 前端回写输入框并派发一轮新搜索（与建议 RouteQuery 采纳同语义）。
+    Route,
     // 未来：Plugin / Ai
 }
 

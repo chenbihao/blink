@@ -589,6 +589,10 @@ fn main() {
 
             // 注入规则到 RuleRouter（合并 manifest triggers + 用户自定义 triggers）
             for plugin in &plugins {
+                // 0.26.17：args.hints 静态 manifest 数据，对全部插件注册（含禁用——
+                // 禁用过滤由规则移除承载；跳过注册会让"启动时禁用、后来启用"的
+                // 插件拿不到 hints，只能重启恢复）。
+                router.set_plugin_args_hints(plugin.id(), plugin.manifest().arg_hints().to_vec());
                 if !plugin_engine.is_enabled(plugin.id()) {
                     tracing::debug!(plugin = %plugin.id(), "插件已禁用,跳过规则注入");
                     continue;

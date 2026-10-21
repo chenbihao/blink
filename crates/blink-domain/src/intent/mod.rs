@@ -91,7 +91,7 @@ pub enum ExecArg {
 
 impl ExecArg {
     /// 取用户显式参数；`None` 返回 `None`。
-    #[allow(dead_code)] // 内部工具方法，未来扩展点
+    /// 0.26.17 起 args.hints 引导项合成消费（exec_takeover 还原 keyword）。
     pub fn as_str(&self) -> Option<&str> {
         match self {
             ExecArg::UserExplicit(s) => Some(s.as_str()),
@@ -294,6 +294,22 @@ pub enum KeywordOwner {
     Plugin(String),
 }
 
+/// args.hints 参数提示规则（0.26.17）：声明了参数提示的插件 keyword 与 hints
+/// 的 join 产物。Takeover/Mixed 列表引导项（SearchService）与 Ghost 参数前缀
+/// 补全（suggest / KeywordProducer）共用同一真源；keyword 为注册原文
+/// （用户自定义触发词与 manifest 触发词并列），引导项回写用它而非用户输入形式。
+#[derive(Debug, Clone)]
+pub struct ArgHintRule {
+    /// 注册 keyword 原文（引导项回写的规范形式）。
+    pub keyword: String,
+    /// keyword 完整拼音（仅匹配别名，同 suggest 惯例，不回写）。
+    pub pinyin_full: String,
+    /// 所属插件 id（引导项 source 与显示名查找）。
+    pub plugin_id: String,
+    /// 参数提示列表（manifest 声明顺序）。
+    pub hints: Vec<crate::plugin::ArgHint>,
+}
+
 /// 单次查询的共享上下文。0.4 仅 history + snapshot;P3 VectorRouter/AIRouter 扩展时用上。
 #[allow(dead_code)] // 0.4+ 意图路由扩展时启用
 pub struct QueryContext<'a> {
@@ -331,6 +347,13 @@ pub trait IntentRouter: Send + Sync {
 
     /// 更新 context binding 禁用列表（0.8.3 §4.6）。默认 no-op。
     fn apply_context_disable_list(&self, _keys: Vec<String>) {}
+
+    /// 声明 args.hints 的 keyword 规则（0.26.17 参数提示）。默认空——非规则型
+    /// 实现（mock）不参与；SearchService 据此在 Takeover/Mixed 列表合成参数
+    /// 引导项（`exec_takeover` / `exec_mixed` 两路共用）。
+    fn arg_hint_rules(&self) -> Vec<ArgHintRule> {
+        Vec::new()
+    }
 
     // 0.24.2：`best_suggestion` / `take_last_ranking_hint` 已删除——Suggestion 仲裁
     // 迁入 `SuggestionCoordinator`（实例由 SearchService 持有，编排层传 RouteSummary），
@@ -375,6 +398,12 @@ pub struct RuleRouter {
     /// key = `binding_key(target_id, trigger_key)`。命中 key 的 binding 在
     /// `match_context_hits` 中被跳过——route() 与 suggestion 判定共用此门槛。
     disabled_bindings: RwLock<std::collections::HashSet<String>>,
+    /// 插件 args.hints 表（0.26.17）：plugin_id → manifest 参数提示。
+    ///
+    /// 静态 manifest 数据（配置热更新只改 keyword，不改 hints），启动注册一次；
+    /// 读取时与 keyword 规则表 join（rules 里存在的 keyword 才带出 hints），
+    /// 插件禁用 → 规则被移除 → hints 自然不再命中，无需单独清理。
+    args_hints: RwLock<std::collections::HashMap<String, Vec<crate::plugin::ArgHint>>>,
     // 0.24.2：coordinator / last_ranking_hint 字段已删——SuggestionCoordinator 实例
     // 迁至 SearchService 持有（编排层传 RouteSummary，§3.7），RankingHint 由
     // coordinate 返回值直接回传，不再经 router 中转。
@@ -450,6 +479,7 @@ impl RuleRouter {
             // 单测下不注入 language → 用 "zh" 兜底（Blink 默认 UI 语言）。
             app_language: RwLock::new("zh".to_string()),
             disabled_bindings: RwLock::new(std::collections::HashSet::new()),
+            args_hints: RwLock::new(std::collections::HashMap::new()),
         }
     }
 
@@ -701,6 +731,48 @@ impl RuleRouter {
         }
         keywords
     }
+
+    /// 注册插件的 args.hints（0.26.17）。manifest 静态数据，启动时对**全部**插件
+    /// 注入（含禁用——禁用过滤由规则表移除承载，若跳过注册，启动时禁用、后来
+    /// 启用的插件将拿不到 hints）；空 hints 移除该插件条目。
+    pub fn set_plugin_args_hints(&self, plugin_id: &str, hints: Vec<crate::plugin::ArgHint>) {
+        let mut table = self.args_hints.write().unwrap();
+        if hints.is_empty() {
+            table.remove(plugin_id);
+        } else {
+            table.insert(plugin_id.to_string(), hints);
+        }
+        tracing::debug!(plugin_id, "插件 args.hints 已注册");
+    }
+
+    /// 收集声明了 args.hints 的插件 keyword 规则（0.26.17 参数提示数据源）。
+    /// 与 keyword 规则表 join——禁用插件的规则已被移除，其 hints 不再带出；
+    /// 用户自定义 keyword 与 manifest keyword 同享该插件的 hints。
+    pub(crate) fn collect_arg_hint_rules(&self) -> Vec<ArgHintRule> {
+        let rules = self.rules.read().unwrap();
+        if rules.is_empty() {
+            return Vec::new();
+        }
+        let table = self.args_hints.read().unwrap();
+        if table.is_empty() {
+            return Vec::new();
+        }
+        rules
+            .iter()
+            .filter_map(|r| match &r.kind {
+                RuleKind::Keyword(kw) => {
+                    let hints = table.get(&r.plugin_id)?.clone();
+                    Some(ArgHintRule {
+                        keyword: kw.clone(),
+                        pinyin_full: pinyin_full(kw),
+                        plugin_id: r.plugin_id.clone(),
+                        hints,
+                    })
+                }
+                RuleKind::Regex(_) => None,
+            })
+            .collect()
+    }
 }
 
 #[async_trait::async_trait]
@@ -831,6 +903,10 @@ impl IntentRouter for RuleRouter {
     fn suggest_completion(&self, query: &str, min_score: f64) -> Option<CompletionHint> {
         let keywords = self.collect_suggest_keywords();
         suggest::compute_hint(&keywords, query, min_score)
+    }
+
+    fn arg_hint_rules(&self) -> Vec<ArgHintRule> {
+        RuleRouter::collect_arg_hint_rules(self)
     }
 
     fn set_app_language(&self, language: String) {
@@ -2692,6 +2768,123 @@ mod tests {
         );
         let snap = ContextSnapshot::default();
         assert!(producer.produce("fan", &snap).is_empty());
+    }
+
+    // ── 0.26.17: args.hints 参数前缀补全 ─────────────────────────────────
+
+    fn ip_arg_hint(value: &str, aliases: &[&str]) -> crate::plugin::ArgHint {
+        crate::plugin::ArgHint {
+            value: value.to_string(),
+            aliases: aliases.iter().map(|s| s.to_string()).collect(),
+            desc: crate::plugin::LocalizableText::Plain(String::new()),
+        }
+    }
+
+    fn ip_router_with_arg_hints() -> Arc<RuleRouter> {
+        let r = Arc::new(RuleRouter::new(true));
+        r.add_keyword_rule(
+            "builtin.ip".into(),
+            "ip".into(),
+            Surface::Auto,
+            SurfaceView::List,
+        );
+        r.set_plugin_args_hints(
+            "builtin.ip",
+            vec![
+                ip_arg_hint("refresh", &["刷新"]),
+                ip_arg_hint("local", &["本地"]),
+            ],
+        );
+        r
+    }
+
+    #[tokio::test]
+    async fn router_collect_arg_hint_rules_joins_rules_and_hints() {
+        let r = ip_router_with_arg_hints();
+        let entries = r.collect_arg_hint_rules();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].keyword, "ip");
+        assert_eq!(entries[0].plugin_id, "builtin.ip");
+        assert_eq!(entries[0].hints.len(), 2);
+
+        // 未声明 hints 的插件 keyword 不带出（join 语义）
+        r.add_keyword_rule(
+            "builtin.translate".into(),
+            "翻译".into(),
+            Surface::Auto,
+            SurfaceView::List,
+        );
+        let entries = r.collect_arg_hint_rules();
+        assert_eq!(entries.len(), 1);
+
+        // 禁用插件 → reload 清规则 → hints 不再带出（args_hints 表残留无害）
+        r.reload_plugin_triggers("builtin.ip", &[]);
+        assert!(r.collect_arg_hint_rules().is_empty());
+
+        // trait 方法与 inherent 同源（SearchService 经 dyn IntentRouter 消费）
+        assert_eq!(r.arg_hint_rules().len(), 0);
+        r.add_keyword_rule(
+            "builtin.ip".into(),
+            "ip".into(),
+            Surface::Auto,
+            SurfaceView::List,
+        );
+        assert_eq!(r.arg_hint_rules().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn keyword_producer_arg_hint_after_exact_trailing_returns_none_path() {
+        // "ip r"：keyword 精确+带参 → compute_hint_scored None → args 路径出参数补全
+        let r = ip_router_with_arg_hints();
+        let producer = keyword_producer(r);
+        let snap = ContextSnapshot::default();
+        let out = producer.produce("ip r", &snap);
+        assert_eq!(out.len(), 1);
+        let sug = &out[0];
+        assert_eq!(sug.id, "completion-arg-hint");
+        assert_eq!(sug.display, "refresh");
+        assert_eq!(
+            route_query(sug),
+            "ip refresh ",
+            "Tab 采纳回写规范 keyword+value+尾空格"
+        );
+        assert!((sug.rank_score - 0.98).abs() < 1e-6);
+
+        // 别名前缀同样命中，回写规范 value
+        let r = ip_router_with_arg_hints();
+        let producer = keyword_producer(r);
+        let out = producer.produce("ip 刷", &snap);
+        assert_eq!(out.len(), 1);
+        assert_eq!(route_query(&out[0]), "ip refresh ");
+    }
+
+    #[tokio::test]
+    async fn keyword_producer_no_hint_when_arg_empty_or_complete() {
+        let snap = ContextSnapshot::default();
+        // 空 arg：不出（列表引导项负责），与既有「精确+尾空格不出 hint」行为一致
+        let r = ip_router_with_arg_hints();
+        let producer = keyword_producer(r);
+        assert!(producer.produce("ip ", &snap).is_empty());
+        // 完整 value：已进 Takeover 查询语义，无补全
+        assert!(producer.produce("ip refresh", &snap).is_empty());
+        // 非前缀 arg：无 hints 可补
+        assert!(producer.produce("ip xyz", &snap).is_empty());
+    }
+
+    #[tokio::test]
+    async fn keyword_producer_without_hints_keeps_existing_behavior() {
+        // 未声明 args.hints 的插件（translate/weather）：精确+带参仍无补全（不变）
+        let r = Arc::new(RuleRouter::new(true));
+        r.add_keyword_rule(
+            "builtin.translate".into(),
+            "翻译".into(),
+            Surface::Auto,
+            SurfaceView::List,
+        );
+        let producer = keyword_producer(r);
+        let snap = ContextSnapshot::default();
+        assert!(producer.produce("翻译 hello", &snap).is_empty());
+        assert!(producer.produce("fanyi hello", &snap).is_empty());
     }
 
     #[tokio::test]

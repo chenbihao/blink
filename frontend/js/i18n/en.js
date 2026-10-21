@@ -1345,6 +1345,7 @@ export const en = {
     // ── Main window: status bar ──
     "hint.open": "Open",
     "hint.copy": "Copy result",
+    "hint.route": "Query",
     "hint.paste_to_input": "Paste / Copy",
     "hint.fallback": "Run",
     "hint.enter": "{{key:Enter}} {label}",

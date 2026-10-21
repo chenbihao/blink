@@ -180,6 +180,48 @@ fn split_first_word(s: &str) -> (&str, &str) {
     }
 }
 
+/// 参数前缀补全（0.26.17）：keyword 精确命中（原文小写/全拼，ASCII 大小写不敏感）
+/// 且 arg 为某 hint 的严格前缀时，产出参数级 CompletionHint（`ip r` → refresh）。
+///
+/// 与 `compute_hint_scored` 的分工：后者对「精确+尾空格/参数」返回 None（已进
+/// Takeover 不再提示 keyword）——本函数**豁免**该规则，在 keyword 已确定的前提
+/// 下继续补全参数。arg 为空不出（空参的参数发现由 Takeover/Mixed 列表引导项
+/// 负责）；arg 已是完整 value/alias 不出（`matches_prefix` 严格前缀语义）。
+///
+/// rules 为 `RuleRouter::collect_arg_hint_rules` join 产物；采纳回真实注册词
+/// （keyword 原文 + value 规范值），拼音与 aliases 只参与匹配。
+pub fn compute_arg_hint(rules: &[super::ArgHintRule], query: &str) -> Option<CompletionHint> {
+    if query.trim_start().is_empty() {
+        return None;
+    }
+    let (keyword_part, arg_part) = split_first_word(query);
+    // arg 为空：无前缀可补，交给列表引导项
+    if arg_part.is_empty() {
+        return None;
+    }
+    let keyword_lower = keyword_part.to_ascii_lowercase();
+    for rule in rules {
+        // keyword 精确命中（原文小写或全拼）——带参场景 keyword 已确定，不做 fuzzy
+        let matched = keyword_lower == rule.keyword.to_ascii_lowercase()
+            || (!rule.pinyin_full.is_empty() && keyword_lower == rule.pinyin_full);
+        if !matched {
+            continue;
+        }
+        for hint in &rule.hints {
+            if hint.matches_prefix(arg_part) {
+                // 尾随空格 = "参数已完整"信号，与 keyword Tab-only hint 的
+                // `"fanyi "` 同式；Tab 采纳回写 `{keyword} {value} ` 立即触发查询
+                return Some(CompletionHint {
+                    replacement: format!("{} {} ", rule.keyword, hint.value),
+                    display: hint.value.clone(),
+                    prefix_len: query.len(),
+                });
+            }
+        }
+    }
+    None
+}
+
 // ── 单测 ──────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -420,5 +462,121 @@ mod tests {
         let hint = compute_hint(&kws, "tq", 0.7).expect("should hint");
         // 先注册的"天气" pinyin_full=tianqi 胜出
         assert_eq!(hint.display, "天气");
+    }
+
+    // ── 0.26.17: 参数前缀补全 ────────────────────────────────────────────
+
+    use crate::plugin::{ArgHint, LocalizableText};
+
+    fn rule(keyword: &str, pinyin: &str, hints: Vec<ArgHint>) -> crate::intent::ArgHintRule {
+        crate::intent::ArgHintRule {
+            keyword: keyword.to_string(),
+            pinyin_full: pinyin.to_string(),
+            plugin_id: "builtin.ip".to_string(),
+            hints,
+        }
+    }
+
+    fn ip_arg_entries() -> Vec<crate::intent::ArgHintRule> {
+        let hint = |value: &str, aliases: &[&str]| ArgHint {
+            value: value.to_string(),
+            aliases: aliases.iter().map(|s| s.to_string()).collect(),
+            desc: LocalizableText::Plain(String::new()),
+        };
+        vec![rule(
+            "ip",
+            "ip",
+            vec![hint("refresh", &["刷新"]), hint("local", &["本地"])],
+        )]
+    }
+
+    #[test]
+    fn arg_hint_prefix_of_value() {
+        let entries = ip_arg_entries();
+        let hint = compute_arg_hint(&entries, "ip r").expect("prefix of refresh");
+        assert_eq!(hint.display, "refresh");
+        assert_eq!(hint.replacement, "ip refresh ");
+        assert_eq!(hint.prefix_len, "ip r".len());
+    }
+
+    #[test]
+    fn arg_hint_prefix_of_alias_matches_canonical_value() {
+        // 别名「刷新」参与匹配，采纳回写规范 value（与 keyword 拼音同模式）
+        let entries = ip_arg_entries();
+        let hint = compute_arg_hint(&entries, "ip 刷").expect("alias prefix");
+        assert_eq!(hint.display, "refresh");
+        assert_eq!(hint.replacement, "ip refresh ");
+    }
+
+    #[test]
+    fn arg_hint_exact_value_no_hint() {
+        let entries = ip_arg_entries();
+        assert_eq!(compute_arg_hint(&entries, "ip refresh"), None);
+        assert_eq!(compute_arg_hint(&entries, "ip refresh "), None);
+        assert_eq!(compute_arg_hint(&entries, "ip 刷新"), None);
+    }
+
+    #[test]
+    fn arg_hint_empty_arg_no_hint() {
+        // 空 arg 由列表引导项负责发现，Ghost 不出
+        let entries = ip_arg_entries();
+        assert_eq!(compute_arg_hint(&entries, "ip "), None);
+        assert_eq!(compute_arg_hint(&entries, "ip"), None);
+    }
+
+    #[test]
+    fn arg_hint_keyword_must_be_exact() {
+        let entries = ip_arg_entries();
+        // keyword 非精确命中（fuzzy "i"）不出——带参场景 keyword 已由路由确定
+        assert_eq!(compute_arg_hint(&entries, "i r"), None);
+        assert_eq!(compute_arg_hint(&entries, "ipp r"), None);
+    }
+
+    #[test]
+    fn arg_hint_keyword_case_insensitive() {
+        let entries = ip_arg_entries();
+        let hint = compute_arg_hint(&entries, "IP R").expect("case-insensitive");
+        assert_eq!(hint.replacement, "ip refresh ");
+    }
+
+    #[test]
+    fn arg_hint_non_matching_arg_no_hint() {
+        let entries = ip_arg_entries();
+        assert_eq!(compute_arg_hint(&entries, "ip xyz"), None);
+    }
+
+    #[test]
+    fn arg_hint_no_hints_entries_no_hint() {
+        // 未声明 hints 的插件（translate/weather）行为不变
+        let entries = vec![rule("翻译", "fanyi", vec![])];
+        assert_eq!(compute_arg_hint(&entries, "翻译 r"), None);
+        assert_eq!(compute_arg_hint(&entries, "fanyi r"), None);
+    }
+
+    #[test]
+    fn arg_hint_second_hint_matches() {
+        let entries = ip_arg_entries();
+        let hint = compute_arg_hint(&entries, "ip lo").expect("prefix of local");
+        assert_eq!(hint.display, "local");
+        assert_eq!(hint.replacement, "ip local ");
+        // 中文别名「本地」
+        let hint = compute_arg_hint(&entries, "ip 本").expect("alias 本地");
+        assert_eq!(hint.replacement, "ip local ");
+    }
+
+    #[test]
+    fn arg_hint_chinese_keyword_exact_match() {
+        // 中文 keyword 插件（假设触发词为「地址」）配 hints：原文精确命中才补参数
+        let hint = ArgHint {
+            value: "refresh".to_string(),
+            aliases: vec![],
+            desc: LocalizableText::Plain(String::new()),
+        };
+        let entries = vec![rule("地址", "dizhi", vec![hint])];
+        // 全拼命中同样精确（拼音只作匹配别名，采纳回原文）
+        let h = compute_arg_hint(&entries, "dizhi r").expect("pinyin keyword exact");
+        assert_eq!(h.replacement, "地址 refresh ");
+        let h = compute_arg_hint(&entries, "地址 r").expect("orig keyword exact");
+        assert_eq!(h.replacement, "地址 refresh ");
     }
 }

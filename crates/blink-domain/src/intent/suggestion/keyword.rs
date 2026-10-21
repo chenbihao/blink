@@ -49,25 +49,47 @@ impl SuggestionProducer for KeywordProducer {
 
         let min_score = self.runtime.read().unwrap().min_score;
         let keywords = self.router.collect_suggest_keywords();
-        let Some((hint, fuzzy)) = suggest::compute_hint_scored(&keywords, query, min_score) else {
-            return Vec::new();
-        };
-        // §3.4 rank 表：补全 = 0.70 + 0.28 × fuzzy（0.70～0.98）。
-        // compute_hint_scored 对 exact 命中给 1.0 → 0.98 封顶，fuzzy ∈ [min_score, 1.0]。
-        let fuzzy = fuzzy.min(1.0);
-        vec![Suggestion {
-            id: "completion-keyword".to_string(),
-            kind: SuggestionKind::Completion,
-            action: SuggestionAction::RouteQuery {
-                query: hint.replacement,
-            },
-            rank_score: 0.70 + 0.28 * fuzzy,
-            display: hint.display,
-            prefix_len: hint.prefix_len,
-            origin: None,
-            fingerprint: text_fingerprint(query),
-            source: SuggestionSource::Keyword,
-            ranking_hint: None,
-        }]
+        if let Some((hint, fuzzy)) = suggest::compute_hint_scored(&keywords, query, min_score) {
+            // §3.4 rank 表：补全 = 0.70 + 0.28 × fuzzy（0.70～0.98）。
+            // compute_hint_scored 对 exact 命中给 1.0 → 0.98 封顶，fuzzy ∈ [min_score, 1.0]。
+            let fuzzy = fuzzy.min(1.0);
+            return vec![Suggestion {
+                id: "completion-keyword".to_string(),
+                kind: SuggestionKind::Completion,
+                action: SuggestionAction::RouteQuery {
+                    query: hint.replacement,
+                },
+                rank_score: 0.70 + 0.28 * fuzzy,
+                display: hint.display,
+                prefix_len: hint.prefix_len,
+                origin: None,
+                fingerprint: text_fingerprint(query),
+                source: SuggestionSource::Keyword,
+                ranking_hint: None,
+            }];
+        }
+        // 0.26.17 参数前缀补全：keyword 精确 + 带参场景 compute_hint_scored 恒
+        // None（「精确+尾空格不出 hint」规则），args.hints 在此豁免该规则继续补全
+        // 参数（`ip r` → refresh）。与 keyword 补全同走 RouteQuery 采纳通道与
+        // Completion 展示（ghost 影子文字 + 共享 kbd 键帽）；精确 keyword + 参数
+        // 前缀是强信号，rank 与 keyword exact 同档 0.98。
+        if let Some(hint) = suggest::compute_arg_hint(&self.router.collect_arg_hint_rules(), query)
+        {
+            return vec![Suggestion {
+                id: "completion-arg-hint".to_string(),
+                kind: SuggestionKind::Completion,
+                action: SuggestionAction::RouteQuery {
+                    query: hint.replacement,
+                },
+                rank_score: 0.98,
+                display: hint.display,
+                prefix_len: hint.prefix_len,
+                origin: None,
+                fingerprint: text_fingerprint(query),
+                source: SuggestionSource::Keyword,
+                ranking_hint: None,
+            }];
+        }
+        Vec::new()
     }
 }

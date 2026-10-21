@@ -31,6 +31,7 @@ use blink_infra::utils::perf::ai_slo;
 use super::AppEntry;
 use super::engine::{Lane, QueryContext, SearchEngine, SearchItem};
 use super::scorer::{boost_priority, placeholder_score, source_rank};
+use super::{Action, ActionKind};
 
 // 0.17.6: AI lane 常量已随 SearchService AI 路径删除（AI_DEFAULT_HARD_TIMEOUT_MS /
 // TURN2_TIMEOUT_MIN_MS / TURN2_TIMEOUT_MAX_MS / TURN2_FALLBACK_DELAY_MS）。
@@ -747,7 +748,9 @@ impl SearchService {
 
         // 按 Route 分派到四个 executor（0.8.6 §8.2.1 拆 God Method）
         let entries = match route {
-            Route::Takeover { plugin_id, arg, .. } => self.exec_takeover(plugin_id, arg, seq),
+            Route::Takeover { plugin_id, arg, .. } => {
+                self.exec_takeover(plugin_id, arg, seq, q)
+            }
             Route::EngineTakeover { engine_id, arg, .. } => {
                 self.exec_engine_takeover(engine_id, arg, &search_ctx).await
             }
@@ -902,11 +905,13 @@ impl SearchService {
     }
 
     /// Takeover executor（0.8.6 §8.2.1）：插件独占返回区。
+    /// `q` 为 trim 后的原始查询——用于 args.hints 引导项还原触发 keyword。
     fn exec_takeover(
         &self,
         plugin_id: String,
         arg: crate::intent::ExecArg,
         seq: u64,
+        q: &str,
     ) -> Vec<AppEntry> {
         if let Some(hint_text) = self.empty_arg_hint(&plugin_id, &arg) {
             tracing::debug!(plugin = %plugin_id, "empty_arg_hint 命中 Takeover，跳过插件查询");
@@ -916,11 +921,79 @@ impl SearchService {
                 hint_text,
             )];
         }
+        // 0.26.17：args.hints 引导项——arg 为空（参数发现）或为某 hint 的严格
+        // 前缀（缩小候选）时在占位项后合成；插件查询照常发起（空参默认查询有
+        // 意义；无效参的最终失败仍如实显示错误行）。
+        let guides = self.arg_guide_entries(q, arg.as_str(), Some(&plugin_id));
         self.spawn_takeover(plugin_id.clone(), arg.to_plugin_string(), seq);
-        vec![placeholder_entry(
+        let mut entries = vec![placeholder_entry(
             &plugin_id,
             &self.display_name(&plugin_id),
-        )]
+        )];
+        entries.extend(guides);
+        entries
+    }
+
+    /// args.hints 列表引导项（0.26.17）：Takeover（绑定 `plugin_filter`，keyword
+    /// 从 query 剥掉显式 arg 还原）与 Mixed（`plugin_filter=None`，query 恰为某
+    /// 声明 hints 的 keyword 原文/全拼——Exact 混排候选场景，如裸 `ip`）两路共用。
+    ///
+    /// 数据源为 `router.arg_hint_rules()`（keyword↔hints join 真源，含用户自定义
+    /// 触发词）；引导项回写**注册原文 keyword**（用户输拼音/别名也回规范形式）。
+    /// arg 为空展示全部 hints，为严格前缀时缩小到匹配项。
+    fn arg_guide_entries(
+        &self,
+        q: &str,
+        arg: Option<&str>,
+        plugin_filter: Option<&str>,
+    ) -> Vec<AppEntry> {
+        let rules = self.router.arg_hint_rules();
+        if rules.is_empty() {
+            return Vec::new();
+        }
+        // keyword 部分：Takeover 带参时剥掉 arg；无参/混排时整段（trim 尾空格）
+        let (keyword_part, arg_str) = match arg {
+            Some(a) => (
+                q.strip_suffix(a.trim()).map(str::trim_end).unwrap_or(q),
+                a.trim(),
+            ),
+            None => (q.trim_end(), ""),
+        };
+        if keyword_part.is_empty() {
+            return Vec::new();
+        }
+        let kw_lower = keyword_part.to_ascii_lowercase();
+        let lang = self.language.read().unwrap().clone();
+        let mut out = Vec::new();
+        for rule in &rules {
+            if let Some(pid) = plugin_filter
+                && pid != rule.plugin_id
+            {
+                continue;
+            }
+            // keyword 精确命中（原文小写或全拼）——首拼弱信号不引导（用户尚未
+            // 提交 keyword，由既有 Ghost 补全先教 keyword 本身）
+            let matched = kw_lower == rule.keyword.to_ascii_lowercase()
+                || (!rule.pinyin_full.is_empty() && kw_lower == rule.pinyin_full);
+            if !matched {
+                continue;
+            }
+            let plugin_name = self.display_name(&rule.plugin_id);
+            for hint in &rule.hints {
+                if !arg_str.is_empty() && !hint.matches_prefix(arg_str) {
+                    continue;
+                }
+                out.push(arg_guide_entry(
+                    &rule.plugin_id,
+                    &format!("{} {}", rule.keyword, hint.value),
+                    &hint.desc.resolve(&lang),
+                    &plugin_name,
+                ));
+            }
+            // 首个命中规则即止：同 keyword 双注册属边缘配置，不重复引导
+            break;
+        }
+        out
     }
 
     /// EngineTakeover executor（0.8.6 §8.2.1）：本体 engine 独占。
@@ -1023,7 +1096,12 @@ impl SearchService {
             .map(SearchItem::into_app_entry)
             .collect();
 
+        // 0.26.17：args.hints 引导项（Exact 混排场景）——query 恰为声明参数提示的
+        // keyword（裸 `ip` / `ip `：Exact 命中是 Priority 候选，走 Mixed 而非
+        // Takeover）；占位项在插件真实结果到达后被清，引导项保留并沉到其下。
+        let arg_guides = self.arg_guide_entries(q, None, None);
         all_items.extend(hint_entries);
+        all_items.extend(arg_guides);
         all_items.extend(placeholders);
 
         // ── AI Ghost 由 Coordinator 产出（0.24.2：AiProducer → coordinate → SuggestionSet）──
@@ -1394,6 +1472,37 @@ fn empty_arg_hint_entry(plugin_id: &str, display_name: &str, hint: String) -> Ap
     }
 }
 
+/// args.hints 引导项（0.26.17）：可执行的参数引导条目。
+/// - 主行显示将执行的查询（`ip refresh`），副行显示 desc（缺省回退插件显示名）
+/// - `Route` 动作 payload 携带完整目标查询（尾随空格——采纳即触发该参数查询，
+///   与 keyword Tab-only hint 的 `"fanyi "` 同式）
+/// - 分数 0.3：低于插件真实结果（非负分 + 占位替换后置顶），高于错误行（负分），
+///   增量结果到达后自然沉到真实结果之下（is_placeholder=false，不被清理）
+fn arg_guide_entry(plugin_id: &str, query: &str, desc: &str, plugin_name: &str) -> AppEntry {
+    AppEntry {
+        name: query.to_string(),
+        pinyin_name: String::new(),
+        pinyin_full: String::new(),
+        lnk_path: String::new(),
+        is_calc: false,
+        score: 0.3,
+        is_placeholder: false,
+        is_error: false,
+        source: plugin_id.to_string(),
+        description: Some(if desc.is_empty() {
+            plugin_name.to_string()
+        } else {
+            desc.to_string()
+        }),
+        actions: vec![Action {
+            kind: ActionKind::Route,
+            payload: Some(format!("{query} ")),
+            ..Action::default()
+        }],
+        ..Default::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1439,6 +1548,147 @@ mod tests {
         let response = service.search("bili ", 20).await;
         assert!(response.suggestion.is_none());
         assert_eq!(response.entries[0].lnk_path, "https://www.bilibili.com/");
+    }
+
+    /// 0.26.17：声明 args.hints 的插件合成参数引导项（Takeover + Mixed 两路）。
+    /// 空参展示全部 hints；前缀参缩小到匹配项；完整参/无 hints 不合成。
+    /// 引导项 Route 动作携带 `{keyword} {value} `（尾随空格），副行显示 desc。
+    #[tokio::test]
+    async fn arg_hints_synthesize_route_guide_entries_both_paths() {
+        struct Events;
+        impl EventPort for Events {
+            fn emit(&self, _: &str, _: serde_json::Value) -> Result<(), String> { Ok(()) }
+            fn emit_to(&self, _: &str, _: &str, _: serde_json::Value) -> Result<(), String> { Ok(()) }
+        }
+        let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1)
+            .connect("sqlite::memory:").await.unwrap();
+        sqlx::query("CREATE TABLE history (lnk_path TEXT, hit_count INTEGER, last_used_at INTEGER)")
+            .execute(&pool).await.unwrap();
+
+        // 构造带 args.hints 的插件（exec 指向不存在的 exe——查询在后台任务失败，
+        // 不影响本测试断言的同步返回批）
+        let manifest: crate::plugin::PluginManifest = serde_json::from_str(r#"{
+            "schema_version": 1, "id": "builtin.ip", "name": "IP", "version": "0",
+            "runtime": {"exec": "never-start.exe"},
+            "triggers": [{"type": "keyword", "keyword": "ip"}],
+            "capabilities": ["query"],
+            "args": {"hints": [
+                {"value": "refresh", "aliases": ["刷新"], "desc": {"zh": "刷新出口检测结果", "en": "Refresh"}},
+                {"value": "local", "aliases": ["本地"], "desc": "仅本机地址"}
+            ]}
+        }"#).unwrap();
+        let plugin = Arc::new(crate::plugin::PluginHandle::new(
+            Arc::new(manifest), std::path::PathBuf::new(), None,
+        ));
+        let router = Arc::new(crate::intent::RuleRouter::new(true));
+        router.add_keyword_rule(
+            "builtin.ip".into(), "ip".into(),
+            crate::intent::Surface::Auto, crate::intent::SurfaceView::List,
+        );
+        // main.rs 启动接线同款：hints 注册进 router（搜索侧唯一真源）
+        router.set_plugin_args_hints(
+            "builtin.ip",
+            vec![
+                crate::plugin::ArgHint {
+                    value: "refresh".into(),
+                    aliases: vec!["刷新".into()],
+                    desc: crate::plugin::LocalizableText::Localized(
+                        [("zh".to_string(), "刷新出口检测结果".to_string()),
+                         ("en".to_string(), "Refresh".to_string())].into_iter().collect()),
+                },
+                crate::plugin::ArgHint {
+                    value: "local".into(),
+                    aliases: vec!["本地".into()],
+                    desc: crate::plugin::LocalizableText::Plain("仅本机地址".into()),
+                },
+            ],
+        );
+        let runtime = Arc::new(RwLock::new(SuggestionRuntimeConfig::default()));
+        let coordinator = SuggestionCoordinator::new();
+        let service = SearchService::new(
+            Arc::new(Events), pool.clone(), vec![],
+            Arc::new(PluginEngine::new(vec![plugin], pool, None)),
+            router, runtime, coordinator,
+            Arc::new(RwLock::new(None)), Arc::new(RwLock::new(vec![])), Arc::new(RwLock::new(vec![])),
+        );
+
+        // ① "ip "（Exact 混排候选）：占位项 + refresh/local 两条引导项
+        let response = service.search("ip ", 1).await;
+        assert_eq!(response.entries.len(), 3, "{:?}", response.entries.iter().map(|e| (e.name.as_str(), e.is_placeholder)).collect::<Vec<_>>());
+        let guides: Vec<&AppEntry> = response.entries.iter().filter(|e| !e.is_placeholder).collect();
+        assert_eq!(guides.len(), 2);
+        assert_eq!(guides[0].name, "ip refresh");
+        assert_eq!(guides[0].description.as_deref(), Some("刷新出口检测结果"));
+        assert_eq!(guides[1].name, "ip local");
+        assert_eq!(guides[1].description.as_deref(), Some("仅本机地址"));
+        // Route 动作 wire 契约：kind=route + payload 带尾随空格目标查询
+        let json = serde_json::to_value(&response).unwrap();
+        let guide_idx: Vec<usize> = response.entries.iter().enumerate()
+            .filter(|(_, e)| !e.is_placeholder).map(|(i, _)| i).collect();
+        assert_eq!(json["entries"][guide_idx[0]]["actions"][0]["kind"], "route");
+        assert_eq!(json["entries"][guide_idx[0]]["actions"][0]["payload"], "ip refresh ");
+        assert_eq!(json["entries"][guide_idx[1]]["actions"][0]["payload"], "ip local ");
+
+        // ② "ip r"（前缀参 Takeover）：只保留 refresh 引导；占位仍在（查询照常发起）
+        let response = service.search("ip r", 2).await;
+        assert_eq!(response.entries.len(), 2, "{:?}", response.entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>());
+        assert!(response.entries[0].is_placeholder);
+        assert_eq!(response.entries[1].name, "ip refresh");
+
+        // ③ "ip 刷"（别名前缀）：命中 refresh，回写规范 value
+        let response = service.search("ip 刷", 3).await;
+        assert_eq!(response.entries.len(), 2);
+        assert_eq!(response.entries[1].name, "ip refresh");
+
+        // ④ "ip refresh"（完整参）：无引导项（用户已输入目标参数）
+        let response = service.search("ip refresh", 4).await;
+        assert_eq!(response.entries.len(), 1);
+        assert!(response.entries[0].is_placeholder);
+
+        // ⑤ "ip xyz"（不匹配参数）：无引导项，查询照常（错误如实显示）
+        let response = service.search("ip xyz", 5).await;
+        assert_eq!(response.entries.len(), 1);
+    }
+
+    /// 0.26.17：未声明 args.hints 的插件 Takeover 行为不变（无引导项）。
+    #[tokio::test]
+    async fn takeover_without_arg_hints_keeps_placeholder_only() {
+        struct Events;
+        impl EventPort for Events {
+            fn emit(&self, _: &str, _: serde_json::Value) -> Result<(), String> { Ok(()) }
+            fn emit_to(&self, _: &str, _: &str, _: serde_json::Value) -> Result<(), String> { Ok(()) }
+        }
+        let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1)
+            .connect("sqlite::memory:").await.unwrap();
+        sqlx::query("CREATE TABLE history (lnk_path TEXT, hit_count INTEGER, last_used_at INTEGER)")
+            .execute(&pool).await.unwrap();
+        let manifest: crate::plugin::PluginManifest = serde_json::from_str(
+            r#"{"schema_version":1,"id":"builtin.translate","name":"翻译","version":"0",
+                "runtime":{"exec":"never-start.exe"},
+                "triggers":[{"type":"keyword","keyword":"翻译"}]}"#,
+        )
+        .unwrap();
+        let plugin = Arc::new(crate::plugin::PluginHandle::new(
+            Arc::new(manifest), std::path::PathBuf::new(), None,
+        ));
+        let router = Arc::new(crate::intent::RuleRouter::new(true));
+        router.add_keyword_rule(
+            "builtin.translate".into(), "翻译".into(),
+            crate::intent::Surface::Auto, crate::intent::SurfaceView::List,
+        );
+        let service = SearchService::new(
+            Arc::new(Events), pool.clone(), vec![],
+            Arc::new(PluginEngine::new(vec![plugin], pool, None)),
+            router, Arc::new(RwLock::new(SuggestionRuntimeConfig::default())),
+            SuggestionCoordinator::new(),
+            Arc::new(RwLock::new(None)), Arc::new(RwLock::new(vec![])), Arc::new(RwLock::new(vec![])),
+        );
+        // 空参/带参均只有占位项（既有行为）
+        for query in ["翻译 ", "翻译 hello"] {
+            let response = service.search(query, 1).await;
+            assert_eq!(response.entries.len(), 1, "{query}");
+            assert!(response.entries[0].is_placeholder);
+        }
     }
 
     fn item(id: &str, score: f32, source: &str) -> SearchItem {
@@ -1491,3 +1741,4 @@ mod tests {
         assert_eq!(r.len(), 3);
     }
 }
+

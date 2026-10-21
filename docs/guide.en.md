@@ -317,11 +317,11 @@ Summon: `Alt+Q` (text in the main window's input is carried over automatically �
 
 ### IP lookup
 
-**How to call**: Type `ip` to view local addresses and the egress IPs seen by domestic and international detectors. Select an address and press `Enter` to copy it.
+**How to call**: Type `ip` to view local addresses and the egress IPs seen by domestic and international detectors. Select an address and press `Enter` to copy it. After typing `ip`, the list shows `ip refresh` / `ip local` guide entries — press `Enter` to run that query directly. Typing `ip r` shows a gray inline completion; press `Tab` to complete it to `ip refresh` (alias prefixes such as `ip 刷` / `ip 本` complete the same way).
 
 **Common operations**: Under **Settings → Plugins → IP**, choose the IPv4 query scope. “Query IPv6” is off by default; enable it to show one valid non-temporary and one temporary local IPv6, and run one independent IPv6 egress check, with IPv4 listed first. “Enhanced network details” is off by default; enable it to also query gateways, tunnel/virtual adapters and system proxy status, and show other valid IPv6 addresses. Drag to reorder domestic and international detectors. Failed checks use backups within the same group by default; fallback can be disabled. IPv6 prefers test-ipv6.com with ipify as backup, using a single group rather than domestic/international groups. International IPv4 prefers ifconfig.co for location data, with ipify (IP only) as backup; existing custom orders are preserved.
 
-**Tips**: Use `ip local` for local addresses without network requests, or `ip refresh` to refresh egress results subject to detector rate limits. When sharing a LAN address, choose the physical adapter's local IPv4.
+**Tips**: Use `ip local` for local addresses without network requests, or `ip refresh` to refresh egress results subject to detector rate limits. When sharing a LAN address, choose the physical adapter's local IPv4. While typing, the query fires after a pause of roughly half a second, so intermediate keystrokes do not produce error rows.
 
 ---
 

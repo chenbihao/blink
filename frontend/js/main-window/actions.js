@@ -21,6 +21,7 @@ import {
     showStickyWindow
 } from "../shared/api.js";
 import {showActionError} from "./action-error.js";
+import {queryEl} from "./dom.js";
 
 /**
  * 激活一个结果项。
@@ -68,6 +69,20 @@ export async function activateItem(data) {
             hideWindow();
         }
         // 无文本(空串/缺省):不复制也不隐藏,让用户察觉该结果无可复制内容
+        return;
+    }
+
+    if (kind === "route") {
+        // 0.26.17：args.hints 引导项——payload 携带目标查询，回写输入框并派发
+        // 一轮新搜索（与建议 RouteQuery 采纳同语义）。程序化写入后显式滚到末尾
+        // （spec-frontend §5.8：裸 value= 会重置 scrollLeft，浏览器不跟随光标）。
+        const target = action.payload;
+        if (target) {
+            queryEl.value = target;
+            queryEl.setSelectionRange(target.length, target.length);
+            queryEl.scrollLeft = queryEl.scrollWidth;
+            queryEl.dispatchEvent(new Event("input", {bubbles: true}));
+        }
         return;
     }
 

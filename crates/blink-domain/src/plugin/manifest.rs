@@ -49,6 +49,53 @@ pub struct PluginManifest {
     /// 缺失或空 = 该插件不参与 AI tool-call（老插件向后兼容）。
     #[serde(default)]
     pub tools: Vec<ToolDef>,
+    /// 参数提示声明（0.26.17 顶层 `args.hints`）：枚举型参数候选。
+    ///
+    /// 仅适用 keyword 触发、参数可枚举的插件（IP 的 refresh/local）；自由参数插件
+    /// （翻译文本/天气城市）不声明。宿主两路消费：Takeover 列表引导项（空参/前缀参
+    /// 时合成可执行条目，回车直接以该参数执行查询）与 Ghost 参数前缀补全
+    /// （`ip r` → 影子补全 refresh）。未声明（老 manifest）为 None，行为不变。
+    #[serde(default)]
+    pub args: Option<ArgsSpec>,
+}
+
+/// manifest 顶层 `args` 段（0.26.17）。
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ArgsSpec {
+    /// 枚举型参数候选；空表等效未声明。
+    #[serde(default)]
+    pub hints: Vec<ArgHint>,
+}
+
+/// 单个参数提示：`{ value, aliases[], desc }`。
+#[derive(Debug, Clone, Deserialize)]
+pub struct ArgHint {
+    /// 规范参数值——列表引导项执行与 Ghost 采纳都回写该值；aliases 只参与匹配。
+    pub value: String,
+    /// 匹配别名（如中文「刷新」），仅前缀匹配用，不回写。
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    /// 双语描述（同 description 的 `LocalizableText` 模式），列表引导项副行显示。
+    #[serde(default)]
+    pub desc: LocalizableText,
+}
+
+impl ArgHint {
+    /// arg 是否为该 hint 的**严格**前缀：value 或任一 alias 以 arg 开头（ASCII
+    /// 大小写不敏感——插件侧 args 处理同样 lowercase）且不等于完整词。
+    /// 完整词 = 用户已输入目标参数，无需引导；空 arg 恒 false（空参场景由调用方
+    /// 展示全部 hints，不走本判定）。
+    pub fn matches_prefix(&self, arg: &str) -> bool {
+        let arg = arg.trim().to_ascii_lowercase();
+        if arg.is_empty() {
+            return false;
+        }
+        let is_strict_prefix = |word: &str| {
+            let w = word.trim().to_ascii_lowercase();
+            w.starts_with(&arg) && w != arg
+        };
+        is_strict_prefix(&self.value) || self.aliases.iter().any(|a| is_strict_prefix(a))
+    }
 }
 
 /// 插件声明的 tool 定义(0.9.3)——对齐 `ToolSchema` + `DangerClass`。
@@ -613,6 +660,11 @@ impl PluginManifest {
     /// 是否提供 query 召回能力。
     pub fn supports_query(&self) -> bool {
         self.capabilities.iter().any(|c| c == "query")
+    }
+
+    /// args.hints 声明（0.26.17）；未声明或空表返回空切片。
+    pub fn arg_hints(&self) -> &[ArgHint] {
+        self.args.as_ref().map(|a| a.hints.as_slice()).unwrap_or(&[])
     }
 
     /// 解析 exec 为绝对路径(相对路径基于 manifest 所在目录,不依赖 cwd)。
@@ -1259,6 +1311,104 @@ mod tests {
             t2.setting_bindings.as_ref().unwrap().get("target_lang"),
             Some(&"target_lang".to_string())
         );
+    }
+
+    // ── 0.26.17: args.hints 参数提示协议 ─────────────────────────────────
+
+    #[test]
+    fn args_hints_parses_bilingual_desc_and_aliases() {
+        let json = r#"{
+            "schema_version": 1, "id": "builtin.ip", "name": "IP", "version": "0",
+            "runtime": {"exec": "x.exe"},
+            "args": {
+                "hints": [
+                    {"value": "refresh", "aliases": ["刷新"],
+                     "desc": {"zh": "刷新出口检测结果", "en": "Refresh egress results"}},
+                    {"value": "local", "desc": "仅本机地址"}
+                ]
+            }
+        }"#;
+        let m: PluginManifest = serde_json::from_str(json).unwrap();
+        let hints = m.arg_hints();
+        assert_eq!(hints.len(), 2);
+        assert_eq!(hints[0].value, "refresh");
+        assert_eq!(hints[0].aliases, vec!["刷新"]);
+        assert_eq!(hints[0].desc.resolve("zh"), "刷新出口检测结果");
+        assert_eq!(hints[0].desc.resolve("en"), "Refresh egress results");
+        // desc 兼容纯字符串（Plain 形态，回退 zh 取原文）
+        assert_eq!(hints[1].desc.resolve("en"), "仅本机地址");
+        assert!(hints[1].aliases.is_empty());
+    }
+
+    #[test]
+    fn args_hints_absent_defaults_none() {
+        // 老 manifest 无 args 字段 → None（serde 忽略未列字段方向的反向：新宿主读旧
+        // manifest 同样零迁移），arg_hints() 返回空切片
+        let json =
+            r#"{"schema_version":1,"id":"x","name":"X","version":"0","runtime":{"exec":"x.exe"}}"#;
+        let m: PluginManifest = serde_json::from_str(json).unwrap();
+        assert!(m.args.is_none());
+        assert!(m.arg_hints().is_empty());
+    }
+
+    #[test]
+    fn args_hints_empty_list_treated_as_undeclared() {
+        // 显式空 hints 等效未声明——消费方统一走 arg_hints() 空切片语义
+        let json = r#"{
+            "schema_version": 1, "id": "x", "name": "X", "version": "0",
+            "runtime": {"exec": "x.exe"},
+            "args": {"hints": []}
+        }"#;
+        let m: PluginManifest = serde_json::from_str(json).unwrap();
+        assert!(m.arg_hints().is_empty());
+    }
+
+    #[test]
+    fn arg_hint_matches_prefix_strict_and_case_insensitive() {
+        let hint = ArgHint {
+            value: "refresh".to_string(),
+            aliases: vec!["刷新".to_string()],
+            desc: LocalizableText::Plain(String::new()),
+        };
+        // value 严格前缀（ASCII 大小写不敏感——插件侧 args 同样 lowercase）
+        assert!(hint.matches_prefix("r"));
+        assert!(hint.matches_prefix("R"));
+        assert!(hint.matches_prefix("REFRE"));
+        // alias 前缀
+        assert!(hint.matches_prefix("刷"));
+        // 完整词不是前缀——用户已输入目标参数，无需引导
+        assert!(!hint.matches_prefix("refresh"));
+        assert!(!hint.matches_prefix("刷新"));
+        // 其他词
+        assert!(!hint.matches_prefix("x"));
+        assert!(!hint.matches_prefix("local"));
+        // 空 arg 恒 false（空参展示全部由调用方负责）
+        assert!(!hint.matches_prefix(""));
+        assert!(!hint.matches_prefix("   "));
+    }
+
+    #[test]
+    fn ip_manifest_declares_flow_control_and_arg_hints() {
+        // 0.26.17 配置止血快照：防抖 500（对齐 translate/weather）+ 并发 4 +
+        // refresh/local 参数提示（别名 刷新/本地）。插件逻辑零改动，纯 manifest 配置。
+        let manifest: PluginManifest = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../plugins/builtin/ip/manifest.json"
+        )))
+        .unwrap();
+        assert_eq!(manifest.runtime.debounce_ms, Some(500));
+        assert_eq!(manifest.runtime.concurrency, Some(4));
+        let hints = manifest.arg_hints();
+        assert_eq!(hints.len(), 2, "ip 声明 refresh/local 两个参数提示");
+        assert_eq!(hints[0].value, "refresh");
+        assert!(hints[0].aliases.contains(&"刷新".to_string()));
+        assert_eq!(hints[1].value, "local");
+        assert!(hints[1].aliases.contains(&"本地".to_string()));
+        // desc 双语均非空（副行展示用）
+        for hint in hints {
+            assert!(!hint.desc.resolve("zh").is_empty());
+            assert!(!hint.desc.resolve("en").is_empty());
+        }
     }
 
     // ── 0.14: ToolDef.projection 投影规则 ────────────────────────────────

@@ -1338,6 +1338,7 @@ export const zh = {
     // ── 主窗口：提示栏 ──
     "hint.open": "打开",
     "hint.copy": "复制结果",
+    "hint.route": "查询",
     "hint.paste_to_input": "上屏/复制",
     "hint.fallback": "执行",
     "hint.enter": "{{key:Enter}} {label}",
