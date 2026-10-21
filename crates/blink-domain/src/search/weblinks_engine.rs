@@ -220,6 +220,7 @@ fn open_item(entry: &WebLinkEntry, title: String, url: String, score: f32) -> Se
         score_detail: None,
         context_aware: false,
         color_list_hex: None,
+        pinned_until: 0,
     }
 }
 

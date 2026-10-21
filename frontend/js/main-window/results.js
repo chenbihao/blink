@@ -21,7 +21,7 @@ import {createSwatch, getColorPayload, isColorEntry, parse as parseColor} from "
 import * as clipboardMode from "./clipboard-mode.js";
 import {entryRef, refKey, refFromLi} from './clipboard-entry.js';
 import {bindClipboardPreview, bindErrorPreview, bindTextPreview, hideClipboardPreview} from "./clipboard-preview.js";
-import {t} from "../i18n/index.js";
+import {t, getLang} from "../i18n/index.js";
 
 // 0.17.6: showAiConfirm / getAiConfirmData / updateAiStream 已删除。
 // 主窗口 AI 改走 ChatService，流式渲染由 ai-mode.js 负责。
@@ -391,6 +391,7 @@ function renderViewport() {
             li = createItem(app, i);
         } else {
             updateBadge(li, i); // 复用节点：页内位置可能变,刷新 Alt 角标编号
+            syncReusedItem(li, app); // 0.26.16：置顶状态与文本就地同步（数据可能已变）
         }
         nextCache.set(key, li);
         return li;
@@ -515,6 +516,11 @@ function createItem(app, i) {
     // 0.16.4：图片项标记（右键菜单钉图用）
     if (app.is_image) {
         li.dataset.isImage = "true";
+    }
+    // 0.26.16：置顶到期时刻（Unix 秒）——右键菜单读它判断置顶/续期语境，
+    // 行尾徽章显示 pin 图标 + 剩余时间（30s tick 由 clipboard-mode 驱动刷新）。
+    if (app.pinned_until > 0) {
+        li.dataset.pinnedUntil = String(app.pinned_until);
     }
     // 0.16.1: actions 数组整体存入 dataset（JSON），激活/提示栏/右键菜单共用
     li.dataset.actions = JSON.stringify(app.actions || []);
@@ -715,6 +721,11 @@ function createItem(app, i) {
     }
     li.appendChild(body);
 
+    // 0.26.16：置顶徽章（正文之后、Alt 数字角标之前，行尾常显弱化）
+    if (app.pinned_until > 0) {
+        appendPinBadge(li, app.pinned_until);
+    }
+
     // Alt 数字角标：每页 1~9，按住 Alt 时显示（CSS 控制）
     if (i < 9) {
         const badge = document.createElement("span");
@@ -747,8 +758,88 @@ function createItem(app, i) {
     return li;
 }
 
-/** 从 <li> 读出激活/提示所需数据。0.16.1: 返回 actions 数组，消费方取 actions[0]。 */
-function itemData(li) {
+// ── 0.26.16 剪贴板置顶徽章 ─────────────────────────────────────────────────
+
+/** 置顶剩余时间的用户可读格式（zh：剩 X 天/小时/分；en：Xd Xh left）。到期返回空串。 */
+export function formatPinRemaining(pinnedUntilSec) {
+    const remaining = Math.max(0, pinnedUntilSec - Math.floor(Date.now() / 1000));
+    if (remaining <= 0) return "";
+    const isZh = getLang() === "zh";
+    const days = Math.floor(remaining / 86400);
+    const hours = Math.floor((remaining % 86400) / 3600);
+    const minutes = Math.floor((remaining % 3600) / 60);
+    let time;
+    if (days > 0) {
+        time = isZh ? `${days} 天 ${hours} 小时` : `${days}d ${hours}h`;
+    } else if (hours > 0) {
+        time = isZh ? `${hours} 小时 ${minutes} 分` : `${hours}h ${minutes}m`;
+    } else {
+        time = isZh ? `${minutes} 分` : `${minutes}m`;
+    }
+    return t("clipboard.pin_remaining", {time});
+}
+
+/** 行尾置顶徽章：Lucide pin（禁 emoji）+ 剩余时间；时间由 30s tick 刷新。
+ *  统一插到 Alt 数字角标之前（无角标时行尾），两条渲染路径顺序一致。 */
+function appendPinBadge(li, pinnedUntil) {
+    const badge = document.createElement("span");
+    badge.className = "clip-pin-badge";
+    badge.dataset.pinnedUntil = String(pinnedUntil);
+    badge.appendChild(renderIcon("pin", {ariaLabel: t("clipboard.pinned")}));
+    const remaining = document.createElement("span");
+    remaining.className = "pin-remaining";
+    remaining.textContent = formatPinRemaining(pinnedUntil);
+    badge.appendChild(remaining);
+    if (!remaining.textContent) badge.classList.add("expired");
+    li.insertBefore(badge, li.querySelector(".item-badge") || null);
+}
+
+/**
+ * 复用 <li> 节点的就地状态同步（0.26.16）。
+ *
+ * `liCache` 跨 render 保留节点防图标白闪，但条目数据可能已被重查更新
+ * （置顶/续期/取消置顶后 `reloadList` 强制重查，同 key 条目命中旧节点）：
+ * 这里同步置顶徽章与 `dataset.pinnedUntil`（右键菜单语境来源），正文/副行
+ * 文本跟随最新数据（置顶刷新 `created_at` 后时间描述也变了）。
+ * `dataset.actions` 等身份字段不变——key 相同即同一历史条目。
+ */
+function syncReusedItem(li, app) {
+    const pinnedUntil = app.pinned_until > 0 ? app.pinned_until : 0;
+    if (Number(li.dataset.pinnedUntil || 0) !== pinnedUntil) {
+        li.querySelector(".clip-pin-badge")?.remove();
+        delete li.dataset.pinnedUntil;
+        if (pinnedUntil > 0) {
+            li.dataset.pinnedUntil = String(pinnedUntil);
+            appendPinBadge(li, pinnedUntil);
+        }
+    }
+    const name = li.querySelector(".item-name");
+    if (name && name.textContent !== app.name) name.textContent = app.name;
+    const desc = li.querySelector(".item-desc");
+    if (desc && app.description && desc.textContent !== app.description) {
+        desc.textContent = app.description;
+    }
+}
+
+/**
+ * 刷新当前 DOM 内全部置顶徽章的剩余时间（剪贴板模式 30s tick 调用）。
+ * 到期条目隐藏徽章；排序归位由下一次重查自然完成（惰性过期，不强制刷新）。
+ */
+export function updatePinBadges() {
+    for (const badge of resultsEl.querySelectorAll(".clip-pin-badge")) {
+        const until = Number(badge.dataset.pinnedUntil || 0);
+        const text = formatPinRemaining(until);
+        if (!text) {
+            badge.classList.add("expired");
+            continue;
+        }
+        badge.classList.remove("expired");
+        const remainingEl = badge.querySelector(".pin-remaining");
+        if (remainingEl) remainingEl.textContent = text;
+    }
+}
+
+/** 从 <li> 读出激活/提示所需数据。0.16.1: 返回 actions 数组，消费方取 actions[0]。 */function itemData(li) {
     let actions = [];
     try {
         actions = JSON.parse(li.dataset.actions || "[]");

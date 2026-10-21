@@ -44,6 +44,8 @@ pub struct ClipboardImage {
     pub source_app: Option<String>,
     /// 0.17.9：源文件名（从 CF_HDROP 提取，文件管理器复制图片文件时有值）。
     pub source_path: Option<String>,
+    /// 0.26.16：置顶到期时刻（Unix 秒，0 = 未置顶）。`> now` 即置顶，惰性过期。
+    pub pinned_until: i64,
 }
 
 /// 默认图片上限。
@@ -62,7 +64,8 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
             sha256 TEXT NOT NULL,
             created_at INTEGER NOT NULL,
             source_app TEXT,
-            source_path TEXT
+            source_path TEXT,
+            pinned_until INTEGER NOT NULL DEFAULT 0
         )",
     )
     .execute(pool)
@@ -79,6 +82,19 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
         let msg = e.to_string();
         if !msg.contains("duplicate column") {
             tracing::warn!(error = %msg, "clipboard_images 加 source_path 列失败");
+        }
+    }
+
+    // 0.26.16：同模式加 pinned_until 列
+    let migrate_result = sqlx::query(
+        "ALTER TABLE clipboard_images ADD COLUMN pinned_until INTEGER NOT NULL DEFAULT 0",
+    )
+    .execute(pool)
+    .await;
+    if let Err(e) = migrate_result {
+        let msg = e.to_string();
+        if !msg.contains("duplicate column") {
+            tracing::warn!(error = %msg, "clipboard_images 加 pinned_until 列失败");
         }
     }
 
@@ -102,13 +118,18 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
     // 而 leaf page 可能远离文件头部，导致冷缓存下多次磁盘 I/O。
     // 覆盖索引将元数据集中在 ~2 个 index page（60 行 × ~100B），读取量从
     // 数十 KB 降至 ~12KB。
+    //
+    // 0.26.16：v2 纳入 pinned_until（置顶排序表达式读它），旧 v1 索引随即删除。
     sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_clip_img_meta_covering \
-         ON clipboard_images(created_at DESC, id, width, height, source_app, source_path)",
+        "CREATE INDEX IF NOT EXISTS idx_clip_img_meta_covering_v2 \
+         ON clipboard_images(created_at DESC, id, width, height, source_app, source_path, pinned_until)",
     )
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
+    let _ = sqlx::query("DROP INDEX IF EXISTS idx_clip_img_meta_covering")
+        .execute(pool)
+        .await;
 
     tracing::debug!("clipboard_images 表已初始化");
     Ok(())
@@ -118,11 +139,19 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
 ///
 /// **去重语义**（0.16.4）：入库前按 sha256 删除旧记录（删旧留新），
 /// 再 INSERT 新记录。保证跨时段重复复制同一图片只保留最新一条。
+/// 0.26.16：删旧留新时继承置顶状态（同文本表语义，用户钉住的是内容）。
 pub async fn save_image(pool: &SqlitePool, item: &ClipboardImage) -> Result<(), String> {
     // P1-#15 fix: 删旧留新包在事务里，防止 DELETE 成功 INSERT 失败导致数据丢失
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
-    // 删旧留新：先按 sha256 删除同内容旧记录
+    // 删旧留新：先按 sha256 删除同内容旧记录（置顶状态随后继承）
+    let previous_pinned_until: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(pinned_until), 0) FROM clipboard_images WHERE sha256 = ?1",
+    )
+    .bind(&item.sha256)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
     sqlx::query("DELETE FROM clipboard_images WHERE sha256 = ?1")
         .bind(&item.sha256)
         .execute(&mut *tx)
@@ -131,8 +160,8 @@ pub async fn save_image(pool: &SqlitePool, item: &ClipboardImage) -> Result<(), 
 
     sqlx::query(
         "INSERT OR REPLACE INTO clipboard_images
-         (id, png_blob, thumb_blob, width, height, sha256, created_at, source_app, source_path)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+         (id, png_blob, thumb_blob, width, height, sha256, created_at, source_app, source_path, pinned_until)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
     )
     .bind(&item.id)
     .bind(&item.png_blob)
@@ -143,6 +172,7 @@ pub async fn save_image(pool: &SqlitePool, item: &ClipboardImage) -> Result<(), 
     .bind(item.created_at)
     .bind(&item.source_app)
     .bind(&item.source_path)
+    .bind(item.pinned_until.max(previous_pinned_until))
     .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
@@ -171,11 +201,14 @@ pub async fn promote_image(pool: &SqlitePool, id: &str) -> Result<bool, String> 
 /// 此函数仅在测试中使用（验证 save/get 闭环）。
 #[allow(dead_code)]
 pub async fn query_recent_images(pool: &SqlitePool, limit: i64) -> Vec<ClipboardImageMeta> {
+    let now = chrono::Utc::now().timestamp();
     sqlx::query_as::<_, ClipboardImageMeta>(
-        "SELECT id, thumb_blob, width, height, created_at, source_app, source_path
-         FROM clipboard_images ORDER BY created_at DESC, id DESC LIMIT ?1",
+        "SELECT id, thumb_blob, width, height, created_at, source_app, source_path, pinned_until
+         FROM clipboard_images
+         ORDER BY (pinned_until > ?2) DESC, created_at DESC, id DESC LIMIT ?1",
     )
     .bind(limit)
+    .bind(now)
     .fetch_all(pool)
     .await
     .unwrap_or_default()
@@ -188,12 +221,15 @@ pub async fn query_recent_days_images(
     days: u32,
     limit: i64,
 ) -> Vec<ClipboardImageMeta> {
-    let cutoff = chrono::Utc::now().timestamp() - (days as i64 * 86400);
+    let now = chrono::Utc::now().timestamp();
+    let cutoff = now - (days as i64 * 86400);
     sqlx::query_as::<_, ClipboardImageMeta>(
-        "SELECT id, thumb_blob, width, height, created_at, source_app, source_path
-         FROM clipboard_images WHERE created_at > ?1 ORDER BY created_at DESC, id DESC LIMIT ?2",
+        "SELECT id, thumb_blob, width, height, created_at, source_app, source_path, pinned_until
+         FROM clipboard_images WHERE created_at > ?1
+         ORDER BY (pinned_until > ?2) DESC, created_at DESC, id DESC LIMIT ?3",
     )
     .bind(cutoff)
+    .bind(now)
     .bind(limit)
     .fetch_all(pool)
     .await
@@ -212,37 +248,48 @@ pub struct ClipboardImageListItem {
     pub created_at: i64,
     pub source_app: Option<String>,
     pub source_path: Option<String>,
+    /// 0.26.16：置顶到期时刻（Unix 秒，0 或已过期 = 未置顶）。
+    pub pinned_until: i64,
 }
 
 /// 查询最近的剪贴板图片元数据（不含任何 BLOB，仅 id/尺寸/来源/时间）。
 ///
 /// 0.19.1：供 `list_clipboard_images` Capability 用，避免加载缩略图 BLOB。
 pub async fn query_recent_image_list(pool: &SqlitePool, limit: i64) -> Vec<ClipboardImageListItem> {
+    let now = chrono::Utc::now().timestamp();
     sqlx::query_as::<_, ClipboardImageListItem>(
-        "SELECT id, width, height, created_at, source_app, source_path
-         FROM clipboard_images ORDER BY created_at DESC, id DESC LIMIT ?1",
+        "SELECT id, width, height, created_at, source_app, source_path, pinned_until
+         FROM clipboard_images
+         ORDER BY (pinned_until > ?2) DESC, created_at DESC, id DESC LIMIT ?1",
     )
     .bind(limit)
+    .bind(now)
     .fetch_all(pool)
     .await
     .unwrap_or_default()
 }
 
-/// 0.25.29：keyset 游标分页——查询严格早于 `cursor`（`(created_at, id)` 字符串序）
-/// 的图片元数据。与 `query_recent_image_list` 排序键一致，不重不漏。
+/// 0.25.29：keyset 游标分页——查询严格早于 `cursor` 的图片元数据。
+/// 0.26.16：排序键头部加置顶位（与文本表同构），游标条件为三元组比较。
 pub async fn query_recent_image_list_after(
     pool: &SqlitePool,
     cursor: &super::clipboard::ClipboardCursor,
     limit: i64,
 ) -> Vec<ClipboardImageListItem> {
+    let now = chrono::Utc::now().timestamp();
+    let cursor_pinned = i64::from(cursor.pinned);
     sqlx::query_as::<_, ClipboardImageListItem>(
-        "SELECT id, width, height, created_at, source_app, source_path
+        "SELECT id, width, height, created_at, source_app, source_path, pinned_until
          FROM clipboard_images
-         WHERE (created_at < ?1 OR (created_at = ?1 AND id < ?2))
-         ORDER BY created_at DESC, id DESC LIMIT ?3",
+         WHERE ((pinned_until > ?3) < ?4
+                OR ((pinned_until > ?3) = ?4
+                    AND (created_at < ?1 OR (created_at = ?1 AND id < ?2))))
+         ORDER BY (pinned_until > ?3) DESC, created_at DESC, id DESC LIMIT ?5",
     )
     .bind(cursor.created_at)
     .bind(&cursor.id)
+    .bind(now)
+    .bind(cursor_pinned)
     .bind(limit)
     .fetch_all(pool)
     .await
@@ -262,14 +309,16 @@ pub async fn search_image_list(
     query: &str,
     limit: i64,
 ) -> Vec<ClipboardImageListItem> {
+    let now = chrono::Utc::now().timestamp();
     let pattern = format!("%{query}%");
     sqlx::query_as::<_, ClipboardImageListItem>(
-        "SELECT id, width, height, created_at, source_app, source_path
+        "SELECT id, width, height, created_at, source_app, source_path, pinned_until
          FROM clipboard_images
          WHERE source_app LIKE ?1 OR source_path LIKE ?1
-         ORDER BY created_at DESC, id DESC LIMIT ?2",
+         ORDER BY (pinned_until > ?2) DESC, created_at DESC, id DESC LIMIT ?3",
     )
     .bind(&pattern)
+    .bind(now)
     .bind(limit)
     .fetch_all(pool)
     .await
@@ -277,23 +326,30 @@ pub async fn search_image_list(
 }
 
 /// 0.25.29：keyset 游标分页的图片 SQL 搜索——LIKE 过滤 + 严格早于 cursor。
+/// 0.26.16：游标条件含置顶位（三元组比较，与文本表同构）。
 pub async fn search_image_list_after(
     pool: &SqlitePool,
     query: &str,
     cursor: &super::clipboard::ClipboardCursor,
     limit: i64,
 ) -> Vec<ClipboardImageListItem> {
+    let now = chrono::Utc::now().timestamp();
+    let cursor_pinned = i64::from(cursor.pinned);
     let pattern = format!("%{query}%");
     sqlx::query_as::<_, ClipboardImageListItem>(
-        "SELECT id, width, height, created_at, source_app, source_path
+        "SELECT id, width, height, created_at, source_app, source_path, pinned_until
          FROM clipboard_images
          WHERE (source_app LIKE ?1 OR source_path LIKE ?1)
-           AND (created_at < ?2 OR (created_at = ?2 AND id < ?3))
-         ORDER BY created_at DESC, id DESC LIMIT ?4",
+           AND ((pinned_until > ?4) < ?5
+                OR ((pinned_until > ?4) = ?5
+                    AND (created_at < ?2 OR (created_at = ?2 AND id < ?3))))
+         ORDER BY (pinned_until > ?4) DESC, created_at DESC, id DESC LIMIT ?6",
     )
     .bind(&pattern)
     .bind(cursor.created_at)
     .bind(&cursor.id)
+    .bind(now)
+    .bind(cursor_pinned)
     .bind(limit)
     .fetch_all(pool)
     .await
@@ -312,6 +368,8 @@ pub struct ClipboardImageMeta {
     pub source_app: Option<String>,
     /// 0.17.9：源文件名（从 CF_HDROP 提取）。
     pub source_path: Option<String>,
+    /// 0.26.16：置顶到期时刻（Unix 秒，0 或已过期 = 未置顶）。
+    pub pinned_until: i64,
 }
 
 /// 按 id 查询完整 PNG（写回剪贴板 / pin 用）。
@@ -361,16 +419,47 @@ pub async fn clear_all_images(pool: &SqlitePool) {
         .await;
 }
 
-/// 清理过期图片（按天）。
+/// 0.26.16：设置/取消置顶。`until` 为到期 Unix 秒（0 = 取消置顶）。
+/// 返回是否有行被更新（false = 条目不存在）。再次置顶即重置到期时间。
+/// 置顶同时刷新 `created_at`（后置顶排置顶组最前 + 延长保留期起点，
+/// 与 promote_image 同模式）；取消置顶不动时间。
+pub async fn set_image_pinned_until(
+    pool: &SqlitePool,
+    id: &str,
+    until: i64,
+) -> Result<bool, String> {
+    let now = chrono::Utc::now().timestamp();
+    let result = if until > 0 {
+        sqlx::query("UPDATE clipboard_images SET pinned_until = ?2, created_at = ?3 WHERE id = ?1")
+            .bind(id)
+            .bind(until)
+            .bind(now)
+            .execute(pool)
+            .await
+    } else {
+        sqlx::query("UPDATE clipboard_images SET pinned_until = ?2 WHERE id = ?1")
+            .bind(id)
+            .bind(until)
+            .execute(pool)
+            .await
+    }
+    .map_err(|e| e.to_string())?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// 清理过期图片（按天）。0.26.16：未过期置顶条目豁免。
 pub async fn cleanup_old_images(pool: &SqlitePool, days: u32) {
     if days == 0 {
         return;
     }
-    let cutoff = chrono::Utc::now().timestamp() - (days as i64 * 86400);
-    let result = sqlx::query("DELETE FROM clipboard_images WHERE created_at < ?1")
-        .bind(cutoff)
-        .execute(pool)
-        .await;
+    let now = chrono::Utc::now().timestamp();
+    let cutoff = now - (days as i64 * 86400);
+    let result =
+        sqlx::query("DELETE FROM clipboard_images WHERE created_at < ?1 AND pinned_until <= ?2")
+            .bind(cutoff)
+            .bind(now)
+            .execute(pool)
+            .await;
     if let Ok(r) = result {
         let rows = r.rows_affected();
         if rows > 0 {
@@ -379,21 +468,27 @@ pub async fn cleanup_old_images(pool: &SqlitePool, days: u32) {
     }
 }
 
-/// 超量清理：保留最新的 max_items 条。
+/// 超量清理：保留最新的 max_items 条。0.26.16：置顶条目不参与容量计算与淘汰。
 pub async fn cleanup_excess_images(pool: &SqlitePool, max_items: u32) {
-    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM clipboard_images")
-        .fetch_one(pool)
-        .await
-        .unwrap_or((0,));
+    let now = chrono::Utc::now().timestamp();
+    let count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM clipboard_images WHERE pinned_until <= ?1",
+    )
+    .bind(now)
+    .fetch_one(pool)
+    .await
+    .unwrap_or((0,));
 
     if count.0 > max_items as i64 {
         let excess = count.0 - max_items as i64;
         let _ = sqlx::query(
             "DELETE FROM clipboard_images WHERE id IN (
-                SELECT id FROM clipboard_images ORDER BY created_at ASC, id ASC LIMIT ?1
+                SELECT id FROM clipboard_images WHERE pinned_until <= ?2
+                ORDER BY created_at ASC, id ASC LIMIT ?1
             )",
         )
         .bind(excess)
+        .bind(now)
         .execute(pool)
         .await;
     }
@@ -452,6 +547,7 @@ mod tests {
             created_at,
             source_app: source_app.map(|s| s.to_string()),
             source_path: None,
+            pinned_until: 0,
         }
     }
 
@@ -531,6 +627,7 @@ mod tests {
             cursor = Some(crate::data::clipboard::ClipboardCursor {
                 created_at: last.created_at,
                 id: last.id.clone(),
+                pinned: false,
             });
         }
         assert_eq!(collected, vec!["img_c", "img_b", "img_a"]);
@@ -544,6 +641,7 @@ mod tests {
             &crate::data::clipboard::ClipboardCursor {
                 created_at: first_search[0].created_at,
                 id: first_search[0].id.clone(),
+                pinned: false,
             },
             10,
         )
@@ -567,6 +665,7 @@ mod tests {
             created_at: 1000,
             source_app: Some("TestApp".to_string()),
             source_path: None,
+            pinned_until: 0,
         };
         save_image(&pool, &item).await.unwrap();
 
@@ -599,6 +698,7 @@ mod tests {
             created_at: 1000,
             source_app: None,
             source_path: None,
+            pinned_until: 0,
         };
         save_image(&pool, &item1).await.unwrap();
 
@@ -613,6 +713,7 @@ mod tests {
             created_at: 2000,
             source_app: Some("New".to_string()),
             source_path: None,
+            pinned_until: 0,
         };
         save_image(&pool, &item2).await.unwrap();
 
@@ -638,6 +739,7 @@ mod tests {
                 created_at: i as i64,
                 source_app: None,
                 source_path: None,
+                pinned_until: 0,
             };
             save_image(&pool, &item).await.unwrap();
         }
@@ -649,6 +751,42 @@ mod tests {
         // 保留最新的（created_at 最大的）
         assert_eq!(items[0].created_at, 4);
         assert_eq!(items[2].created_at, 2);
+    }
+
+    /// 0.26.16：置顶组排序 + 清理豁免 + set 闭环。
+    #[tokio::test]
+    async fn pin_orders_first_and_exempts_cleanup() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        init_db(&pool).await.unwrap();
+        let now = chrono::Utc::now().timestamp();
+        save_image(&pool, &img("old_pinned", 100, Some("old.exe")))
+            .await
+            .unwrap();
+        save_image(&pool, &img("new", now, Some("new.exe")))
+            .await
+            .unwrap();
+        assert!(set_image_pinned_until(&pool, "old_pinned", now + 3600).await.unwrap());
+        assert!(!set_image_pinned_until(&pool, "ghost", 1).await.unwrap());
+        assert!(
+            query_recent_images(&pool, 10).await.iter().any(|m| m.id == "old_pinned" && m.created_at >= now),
+            "置顶刷新 created_at"
+        );
+
+        let ids: Vec<String> = query_recent_image_list(&pool, 10)
+            .await
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(ids, vec!["old_pinned", "new"], "置顶组在前");
+
+        cleanup_old_images(&pool, 1).await;
+        cleanup_excess_images(&pool, 1).await;
+        let ids: Vec<String> = query_recent_image_list(&pool, 10)
+            .await
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(ids, vec!["old_pinned", "new"], "过期置顶图片豁免按天与超量清理");
     }
 
     #[tokio::test]
@@ -666,6 +804,7 @@ mod tests {
             created_at: 1000,
             source_app: Some("explorer.exe".to_string()),
             source_path: Some("photo.jpg".to_string()),
+            pinned_until: 0,
         };
         save_image(&pool, &item).await.unwrap();
 

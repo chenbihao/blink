@@ -798,6 +798,7 @@ fn to_search_item(plugin_id: &str, item: PluginItem) -> SearchItem {
         score_detail: Some(format!("plugin={:.2}", score)),
         context_aware: false,
         color_list_hex: None,
+        pinned_until: 0,
     }
 }
 

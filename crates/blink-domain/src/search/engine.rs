@@ -88,6 +88,9 @@ pub struct SearchItem {
     /// 字面量时填充。into_app_entry 时透传到 AppEntry.color_list_hex 并设 is_color_list。
     /// None = 非颜色列表；Some(vec) = 颜色列表（2~8 项）。
     pub color_list_hex: Option<Vec<String>>,
+    /// 0.26.16：置顶到期时刻（Unix 秒，0 = 未置顶）——仅剪贴板历史条目有意义。
+    /// `> now` 即置顶；引擎层排序已把置顶组排前，此字段供前端渲染置顶标识/剩余时间。
+    pub pinned_until: i64,
 }
 
 impl SearchItem {
@@ -245,6 +248,7 @@ impl SearchItem {
                     is_placeholder: false,
                     is_error,
                     source: self.source.clone(),
+                    pinned_until: self.pinned_until,
                     actions: vec![
                         Action {
                             kind: ActionKind::Copy,
@@ -345,6 +349,7 @@ impl SearchItem {
                     is_placeholder: false,
                     is_error,
                     source: self.source.clone(),
+                    pinned_until: self.pinned_until,
                     actions: vec![Action {
                         kind: ActionKind::Run,
                         run_id: Some(id),
@@ -438,6 +443,7 @@ mod tests {
             score_detail: Some("fuzzy=0.8".into()),
             context_aware: false,
             color_list_hex: None,
+            pinned_until: 0,
         };
         let e = item.into_app_entry();
         assert_eq!(e.name, "App");
@@ -463,6 +469,7 @@ mod tests {
             score_detail: Some("calc=1.0".into()),
             context_aware: false,
             color_list_hex: None,
+            pinned_until: 0,
         };
         let e = item.into_app_entry();
         assert_eq!(e.name, "= 2");
@@ -487,6 +494,7 @@ mod tests {
                 score_detail: None,
                 context_aware: false,
                 color_list_hex: None,
+                pinned_until: 0,
             }
             .into_app_entry()
         };

@@ -216,6 +216,7 @@ mod tests {
                 score_detail: None,
                 context_aware: false,
                 color_list_hex: None,
+                pinned_until: 0,
             },
             size_bytes: Some(42),
             modified_at: Some(1_700_000_000),

@@ -53,6 +53,47 @@ pub async fn manage_clipboard_entries(
     }
 }
 
+/// 0.26.16：置顶/取消置顶剪贴板条目（右键菜单入口）。
+///
+/// 与删除（[`manage_clipboard_entries`]）同为**列表管理操作**：走同一
+/// `pin_clipboard_entry` Capability（Registry 门禁与参数校验复用），但不隐藏
+/// 主窗——`run_builtin_action` 的通用收尾 hide 对「执行完就走」的动作合理
+/// （打开设置/复制/打开 URL），对改变排序的管理操作不适用：置顶后列表强制
+/// 重查，用户停留在剪贴板模式继续操作。
+#[tauri::command]
+pub async fn pin_clipboard_entries(
+    app: tauri::AppHandle,
+    operation: String,
+    entries: Vec<ClipboardEntryRef>,
+    hours: Option<u32>,
+) -> Result<(), CommandError> {
+    let env = app
+        .state::<std::sync::Arc<crate::app::domain_env::TauriDomainEnv>>()
+        .inner()
+        .clone();
+    let registry = app.state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>();
+    let ctx = crate::domain::capability::InvokeContext {
+        env: env.as_ref(),
+        origin: crate::domain::capability::InvocationOrigin::LocalSurface,
+        runtime: crate::domain::capability::RuntimeCapabilities {
+            surface: Some(env.as_ref()),
+            main_process: true,
+            desktop_session: true,
+        },
+        deadline: None,
+    };
+    let result = registry
+        .invoke(
+            "pin_clipboard_entry",
+            serde_json::json!({"operation":operation,"entries":entries,"hours":hours}),
+            &ctx,
+        )
+        .await?;
+    tracing::info!(operation, count = entries.len(), "pin_clipboard_entries: 置顶状态更新");
+    let _ = result;
+    Ok(())
+}
+
 /// UI continuation adapter: return the committed identity without hiding the main window.
 #[tauri::command]
 pub async fn save_clipboard_file_image(
@@ -263,8 +304,17 @@ pub async fn paste_to_input(app: tauri::AppHandle, text: String) -> Result<(), S
         .map_err(|_| "正在粘贴，请稍后重试".to_string())?;
     // 在首次 await 前读取原 HWND，复制/隐藏之前快照身份，不在后台重新选目标。
     let prev_hwnd = crate::infra::platform::window::last_external_foreground_hwnd();
+    // 0.26.16：粘贴源主窗 HWND——PasteTarget 放行本体窗口（对话窗/便签等）
+    // 后，只需排除 main 自身，防止把粘贴键发回正在隐藏的源窗口。
+    let main_hwnd = app
+        .get_webview_window("main")
+        .and_then(|w| w.hwnd().ok())
+        .map(|h| h.0 as isize);
     let (target, text, units) = tokio::task::spawn_blocking(move || {
-        let target = prev_hwnd.and_then(crate::infra::platform::window::PasteTarget::capture);
+        let target =
+            prev_hwnd.and_then(|hwnd| crate::infra::platform::window::PasteTarget::capture(
+                hwnd, main_hwnd,
+            ));
         let units = text.encode_utf16().count();
         (target, text, units)
     })

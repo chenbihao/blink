@@ -543,6 +543,7 @@ fn action_to_search_item(
         score_detail: Some(score_detail),
         context_aware,
         color_list_hex: None,
+        pinned_until: 0,
     }
 }
 

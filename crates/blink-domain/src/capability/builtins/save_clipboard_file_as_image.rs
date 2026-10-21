@@ -144,6 +144,7 @@ impl Capability for SaveClipboardFileAsImage {
             created_at: chrono::Utc::now().timestamp(),
             source_app: Some("blink:file-import".into()),
             source_path,
+            pinned_until: 0,
         };
         // 提交前复核历史引用仍存在（读取/解码耗时期间条目可能被删）
         if blink_infra::data::clipboard_files::get_paths_by_id(&pools.history, &request.id)

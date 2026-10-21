@@ -45,6 +45,8 @@ pub struct ClipboardFileMeta {
     pub first_name: String,
     pub created_at: i64,
     pub source_app: Option<String>,
+    /// 0.26.16：置顶到期时刻（Unix 秒，0 或已过期 = 未置顶）。
+    pub pinned_until: i64,
 }
 
 /// 文件条目搜索行（含 paths_json，供引擎对各路径文件名做模糊匹配）。
@@ -58,6 +60,8 @@ pub struct ClipboardFileSearchRow {
     pub created_at: i64,
     pub source_app: Option<String>,
     pub paths_json: String,
+    /// 0.26.16：置顶到期时刻（Unix 秒，0 或已过期 = 未置顶）。
+    pub pinned_until: i64,
 }
 
 /// 初始化 clipboard_files 表（history 库）。
@@ -71,12 +75,26 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
             first_name TEXT NOT NULL,
             created_at INTEGER NOT NULL,
             source_app TEXT,
-            payload_bytes INTEGER NOT NULL
+            payload_bytes INTEGER NOT NULL,
+            pinned_until INTEGER NOT NULL DEFAULT 0
         )",
     )
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
+
+    // 0.26.16：旧表迁移——加 pinned_until 列（duplicate column 静默跳过，幂等）。
+    let migrate_result = sqlx::query(
+        "ALTER TABLE clipboard_files ADD COLUMN pinned_until INTEGER NOT NULL DEFAULT 0",
+    )
+    .execute(pool)
+    .await;
+    if let Err(e) = migrate_result {
+        let msg = e.to_string();
+        if !msg.contains("duplicate column") {
+            tracing::warn!(error = %msg, "clipboard_files 加 pinned_until 列失败");
+        }
+    }
 
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_clip_files_created ON clipboard_files(created_at)")
         .execute(pool)
@@ -91,13 +109,17 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
     // 覆盖索引：query_recent_file_list(_after) 只 SELECT
     // id, file_count, first_name, created_at, source_app——不碰 paths_json 的
     // overflow page（与 clipboard_history / clipboard_images 同范式）。
+    // 0.26.16：v2 纳入 pinned_until（置顶排序表达式读它），旧 v1 索引随即删除。
     sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_clip_files_meta_covering \
-         ON clipboard_files(created_at DESC, id, file_count, first_name, source_app)",
+        "CREATE INDEX IF NOT EXISTS idx_clip_files_meta_covering_v2 \
+         ON clipboard_files(created_at DESC, id, file_count, first_name, source_app, pinned_until)",
     )
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
+    let _ = sqlx::query("DROP INDEX IF EXISTS idx_clip_files_meta_covering")
+        .execute(pool)
+        .await;
 
     tracing::debug!("clipboard_files 表已初始化");
     Ok(())
@@ -106,6 +128,7 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
 /// 保存文件条目：同组合（哈希 + 列表核对双确认）删旧留新。
 ///
 /// 哈希碰撞（键同列表不同）不覆盖，作为独立条目共存。
+/// 0.26.16：删旧留新时继承置顶状态（同文本/图片表语义）。
 pub async fn save_file(pool: &SqlitePool, item: &ClipboardFileItem) -> Result<(), String> {
     let paths_json = dropfiles::serialize_paths(&item.paths)?;
     let dedup_hash = dropfiles::dedup_key(&item.paths);
@@ -119,14 +142,15 @@ pub async fn save_file(pool: &SqlitePool, item: &ClipboardFileItem) -> Result<()
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
     // 哈希命中后核对列表本体：排序比较，避免仅凭哈希覆盖（碰撞防御）
-    let existing = sqlx::query_as::<_, (String, String)>(
-        "SELECT id, paths_json FROM clipboard_files WHERE dedup_hash = ?1",
+    let existing = sqlx::query_as::<_, (String, String, i64)>(
+        "SELECT id, paths_json, pinned_until FROM clipboard_files WHERE dedup_hash = ?1",
     )
     .bind(&dedup_hash)
     .fetch_optional(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
-    if let Some((old_id, old_json)) = existing {
+    let mut inherited_pinned_until = 0i64;
+    if let Some((old_id, old_json, old_pinned_until)) = existing {
         let same_set = serde_json::from_str::<Vec<String>>(&old_json)
             .map(|old_paths| {
                 let mut a = old_paths;
@@ -137,6 +161,7 @@ pub async fn save_file(pool: &SqlitePool, item: &ClipboardFileItem) -> Result<()
             })
             .unwrap_or(false);
         if same_set {
+            inherited_pinned_until = old_pinned_until.max(0);
             sqlx::query("DELETE FROM clipboard_files WHERE id = ?1")
                 .bind(&old_id)
                 .execute(&mut *tx)
@@ -147,8 +172,8 @@ pub async fn save_file(pool: &SqlitePool, item: &ClipboardFileItem) -> Result<()
 
     sqlx::query(
         "INSERT OR REPLACE INTO clipboard_files
-         (id, paths_json, dedup_hash, file_count, first_name, created_at, source_app, payload_bytes)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+         (id, paths_json, dedup_hash, file_count, first_name, created_at, source_app, payload_bytes, pinned_until)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
     )
     .bind(&item.id)
     .bind(&paths_json)
@@ -158,6 +183,7 @@ pub async fn save_file(pool: &SqlitePool, item: &ClipboardFileItem) -> Result<()
     .bind(item.created_at)
     .bind(&item.source_app)
     .bind(paths_json.len() as i64)
+    .bind(inherited_pinned_until)
     .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
@@ -166,34 +192,45 @@ pub async fn save_file(pool: &SqlitePool, item: &ClipboardFileItem) -> Result<()
     Ok(())
 }
 
-const META_COLUMNS: &str = "id, file_count, first_name, created_at, source_app";
+const META_COLUMNS: &str = "id, file_count, first_name, created_at, source_app, pinned_until";
 
 /// 查询最近的文件条目元数据（keyset 排序与文本/图片表同构）。
+/// 0.26.16：排序键头部加置顶位（未过期置顶条目排普通条目之前）。
 pub async fn query_recent_file_list(pool: &SqlitePool, limit: i64) -> Vec<ClipboardFileMeta> {
-    let sql = sqlx::AssertSqlSafe(format!(
-        "SELECT {META_COLUMNS} FROM clipboard_files ORDER BY created_at DESC, id DESC LIMIT ?1"
-    ));
-    sqlx::query_as::<_, ClipboardFileMeta>(sql)
+    let now = chrono::Utc::now().timestamp();
+    let sql = format!(
+        "SELECT {META_COLUMNS} FROM clipboard_files \
+         ORDER BY (pinned_until > ?2) DESC, created_at DESC, id DESC LIMIT ?1"
+    );
+    sqlx::query_as::<_, ClipboardFileMeta>(sqlx::AssertSqlSafe(sql))
         .bind(limit)
+        .bind(now)
         .fetch_all(pool)
         .await
         .unwrap_or_default()
 }
 
 /// keyset 游标分页：严格早于 `cursor` 的文件条目元数据。
+/// 0.26.16：游标条件为含置顶位的三元组比较（与文本/图片表同构）。
 pub async fn query_recent_file_list_after(
     pool: &SqlitePool,
     cursor: &super::clipboard::ClipboardCursor,
     limit: i64,
 ) -> Vec<ClipboardFileMeta> {
+    let now = chrono::Utc::now().timestamp();
+    let cursor_pinned = i64::from(cursor.pinned);
     let sql = format!(
         "SELECT {META_COLUMNS} FROM clipboard_files \
-         WHERE (created_at < ?1 OR (created_at = ?1 AND id < ?2)) \
-         ORDER BY created_at DESC, id DESC LIMIT ?3"
+         WHERE ((pinned_until > ?3) < ?4 \
+                OR ((pinned_until > ?3) = ?4 \
+                    AND (created_at < ?1 OR (created_at = ?1 AND id < ?2)))) \
+         ORDER BY (pinned_until > ?3) DESC, created_at DESC, id DESC LIMIT ?5"
     );
     sqlx::query_as::<_, ClipboardFileMeta>(sqlx::AssertSqlSafe(sql))
         .bind(cursor.created_at)
         .bind(&cursor.id)
+        .bind(now)
+        .bind(cursor_pinned)
         .bind(limit)
         .fetch_all(pool)
         .await
@@ -201,25 +238,33 @@ pub async fn query_recent_file_list_after(
 }
 
 /// 有界文件搜索候选；SQL 仅约束保留期/游标，模糊匹配交给引擎。
+/// 0.26.16：游标条件含置顶位；无游标（?6 IS NULL）从头扫描。
 pub async fn query_file_search_candidates(
     pool: &SqlitePool,
     cursor: Option<&super::clipboard::ClipboardCursor>,
     limit: i64,
     retention_days: u32,
 ) -> Vec<ClipboardFileSearchRow> {
+    let now = chrono::Utc::now().timestamp();
     let cutoff = (retention_days > 0)
-        .then(|| chrono::Utc::now().timestamp() - i64::from(retention_days) * 86400);
+        .then(|| now - i64::from(retention_days) * 86400);
     sqlx::query_as::<_, ClipboardFileSearchRow>(
-        "SELECT id, file_count, first_name, created_at, source_app, paths_json
+        "SELECT id, file_count, first_name, created_at, source_app, paths_json, pinned_until
          FROM clipboard_files
          WHERE (?1 IS NULL OR created_at < ?1 OR (created_at = ?1 AND id < ?2))
            AND (?3 IS NULL OR created_at >= ?3)
-         ORDER BY created_at DESC, id DESC LIMIT ?4",
+           AND (?6 IS NULL
+                OR (pinned_until > ?5) < ?6
+                OR ((pinned_until > ?5) = ?6
+                    AND (created_at < ?1 OR (created_at = ?1 AND id < ?2))))
+         ORDER BY (pinned_until > ?5) DESC, created_at DESC, id DESC LIMIT ?4",
     )
     .bind(cursor.map(|c| c.created_at))
     .bind(cursor.map(|c| c.id.as_str()))
     .bind(cutoff)
     .bind(limit)
+    .bind(now)
+    .bind(cursor.map(|c| i64::from(c.pinned)))
     .fetch_all(pool)
     .await
     .unwrap_or_default()
@@ -278,15 +323,19 @@ pub async fn clear_all_files(pool: &SqlitePool) {
 }
 
 /// 按天清理过期文件条目（0=不按时间清理，直接返回）。
+/// 0.26.16：未过期置顶条目豁免。
 pub async fn cleanup_old_files(pool: &SqlitePool, days: u32) {
     if days == 0 {
         return;
     }
-    let cutoff = chrono::Utc::now().timestamp() - (days as i64 * 86400);
-    let result = sqlx::query("DELETE FROM clipboard_files WHERE created_at < ?1")
-        .bind(cutoff)
-        .execute(pool)
-        .await;
+    let now = chrono::Utc::now().timestamp();
+    let cutoff = now - (days as i64 * 86400);
+    let result =
+        sqlx::query("DELETE FROM clipboard_files WHERE created_at < ?1 AND pinned_until <= ?2")
+            .bind(cutoff)
+            .bind(now)
+            .execute(pool)
+            .await;
     if let Ok(r) = result {
         let rows = r.rows_affected();
         if rows > 0 {
@@ -299,20 +348,28 @@ pub async fn cleanup_old_files(pool: &SqlitePool, days: u32) {
 ///
 /// 条数超限一次删足超额数；载荷超限从最旧起累积删除直至达标。
 /// 与保存同调用序（保存后清理），不进保存事务。
+/// 0.26.16：未过期置顶条目豁免淘汰——不参与条数基数，也不进载荷 victim；
+/// 置顶期间允许总量暂时超出（到期后自动回归）。
 pub async fn cleanup_excess_files(pool: &SqlitePool, max_items: u32) {
-    let count: i64 = sqlx::query_as("SELECT COUNT(*) FROM clipboard_files")
-        .fetch_one(pool)
-        .await
-        .map(|(c,): (i64,)| c)
-        .unwrap_or(0);
+    let now = chrono::Utc::now().timestamp();
+    let count: i64 = sqlx::query_as(
+        "SELECT COUNT(*) FROM clipboard_files WHERE pinned_until <= ?1",
+    )
+    .bind(now)
+    .fetch_one(pool)
+    .await
+    .map(|(c,): (i64,)| c)
+    .unwrap_or(0);
     if count > max_items as i64 {
         let excess = count - max_items as i64;
         let _ = sqlx::query(
             "DELETE FROM clipboard_files WHERE id IN (
-                SELECT id FROM clipboard_files ORDER BY created_at ASC, id ASC LIMIT ?1
+                SELECT id FROM clipboard_files WHERE pinned_until <= ?2
+                ORDER BY created_at ASC, id ASC LIMIT ?1
             )",
         )
         .bind(excess)
+        .bind(now)
         .execute(pool)
         .await;
         tracing::debug!(removed = excess, "文件条目超条数上限,淘汰最旧");
@@ -326,10 +383,12 @@ pub async fn cleanup_excess_files(pool: &SqlitePool, max_items: u32) {
     if total <= dropfiles::MAX_TOTAL_PAYLOAD_BYTES {
         return;
     }
-    // 从最旧起累积删除，直到总载荷回到上限内
+    // 从最旧起累积删除，直到总载荷回到上限内（置顶条目不进 victim）
     let rows: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT id, payload_bytes FROM clipboard_files ORDER BY created_at ASC, id ASC",
+        "SELECT id, payload_bytes FROM clipboard_files \
+         WHERE pinned_until <= ?1 ORDER BY created_at ASC, id ASC",
     )
+    .bind(now)
     .fetch_all(pool)
     .await
     .unwrap_or_default();
@@ -360,6 +419,30 @@ pub async fn cleanup_excess_files(pool: &SqlitePool, max_items: u32) {
     if removed > 0 {
         tracing::debug!(removed, freed_bytes = acc, "文件条目超载荷上限,淘汰最旧");
     }
+}
+
+/// 0.26.16：设置/取消置顶。`until` 为到期 Unix 秒（0 = 取消置顶）。
+/// 返回是否有行被更新（false = 条目不存在）。再次置顶即重置到期时间。
+/// 置顶同时刷新 `created_at`（后置顶排置顶组最前 + 延长保留期起点，
+/// 与 promote_image 同模式）；取消置顶不动时间。
+pub async fn set_file_pinned_until(pool: &SqlitePool, id: &str, until: i64) -> Result<bool, String> {
+    let now = chrono::Utc::now().timestamp();
+    let result = if until > 0 {
+        sqlx::query("UPDATE clipboard_files SET pinned_until = ?2, created_at = ?3 WHERE id = ?1")
+            .bind(id)
+            .bind(until)
+            .bind(now)
+            .execute(pool)
+            .await
+    } else {
+        sqlx::query("UPDATE clipboard_files SET pinned_until = ?2 WHERE id = ?1")
+            .bind(id)
+            .bind(until)
+            .execute(pool)
+            .await
+    }
+    .map_err(|e| e.to_string())?;
+    Ok(result.rows_affected() > 0)
 }
 
 /// 生成唯一 ID。
@@ -491,7 +574,7 @@ mod tests {
         assert_eq!(first.len(), 2);
         let cursor = super::super::clipboard::ClipboardCursor {
             created_at: first[1].created_at,
-            id: first[1].id.clone(),
+            id: first[1].id.clone(), pinned: false,
         };
         let rest = query_recent_file_list_after(&pool, &cursor, 10).await;
         let ids: Vec<&str> = rest.iter().map(|m| m.id.as_str()).collect();
@@ -511,7 +594,7 @@ mod tests {
             collected.extend(batch.iter().map(|m| m.id.clone()));
             cur = Some(super::super::clipboard::ClipboardCursor {
                 created_at: last.created_at,
-                id: last.id.clone(),
+                id: last.id.clone(), pinned: false,
             });
         }
         assert_eq!(collected, vec!["fc", "fb", "fa"]);
@@ -540,7 +623,7 @@ mod tests {
         // 游标下推
         let cursor = super::super::clipboard::ClipboardCursor {
             created_at: hits[0].created_at,
-            id: hits[0].id.clone(),
+            id: hits[0].id.clone(), pinned: false,
         };
         let rest = query_file_search_candidates(&pool, Some(&cursor), 10, 0).await;
         assert_eq!(rest.len(), 1);
@@ -604,6 +687,52 @@ mod tests {
 
         clear_all_files(&pool).await;
         assert!(query_recent_file_list(&pool, 10).await.is_empty());
+    }
+
+    /// 0.26.16：置顶组排序 + 清理豁免 + set 闭环 + 重采集继承。
+    #[tokio::test]
+    async fn pin_orders_first_exempts_cleanup_and_inherits_on_repost() {
+        let pool = pool().await;
+        let now = chrono::Utc::now().timestamp();
+        save_file(&pool, &item("old", &[r"C:\old.txt"], 100, None))
+            .await
+            .unwrap();
+        save_file(&pool, &item("fresh", &[r"C:resh.txt"], now, None))
+            .await
+            .unwrap();
+        let until = now + 6 * 3600;
+        assert!(set_file_pinned_until(&pool, "old", until).await.unwrap());
+        assert!(!set_file_pinned_until(&pool, "ghost", until).await.unwrap());
+        let pinned_row = query_recent_file_list(&pool, 10)
+            .await
+            .into_iter()
+            .find(|m| m.id == "old")
+            .unwrap();
+        assert!(pinned_row.created_at >= now, "置顶刷新 created_at");
+
+        let ids: Vec<String> = query_recent_file_list(&pool, 10)
+            .await
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(ids, vec!["old", "fresh"], "置顶组在前");
+
+        cleanup_old_files(&pool, 1).await;
+        cleanup_excess_files(&pool, 1).await;
+        let ids: Vec<String> = query_recent_file_list(&pool, 10)
+            .await
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(ids, vec!["old", "fresh"], "过期置顶文件豁免清理");
+
+        // 同组合重采集（删旧留新）继承置顶
+        save_file(&pool, &item("repost", &[r"C:\old.txt"], now + 10, None))
+            .await
+            .unwrap();
+        let rows = query_recent_file_list(&pool, 10).await;
+        assert_eq!(rows[0].id, "repost");
+        assert_eq!(rows[0].pinned_until, until, "置顶状态跨重采集继承");
     }
 
     #[tokio::test]

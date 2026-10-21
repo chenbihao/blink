@@ -66,6 +66,7 @@ impl SearchEngine for CalcEngine {
                 score_detail: Some("calc=1.0".into()),
                 context_aware: false,
                 color_list_hex: None,
+                pinned_until: 0,
             }],
             None => Vec::new(),
         }

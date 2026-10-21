@@ -34,6 +34,9 @@ function setup() {
     const activations = [];
     const noop = () => {};
     const queryEl = {value: '', placeholder: '', focus: noop};
+    // 0.26.16：置顶剩余时间 tick——独立于防抖 timers（tick() 只推进防抖，
+    // 不触发 30s 徽章刷新），exit 清除即从 map 删除。
+    const pinTimers = new Map();
     const context = vm.createContext({
         listNavigation: {reset: () => {}}, KIND_ORDER, nextKind,
         inputState: {isAltDown: () => false},
@@ -53,6 +56,7 @@ function setup() {
             nearTail: () => nearTail,
             hasItems: () => hasItems,
             getLoadedCount: () => loadedItems.length,
+            updatePinBadges: noop,
         },
         ghost: {clear: noop}, suggestionBar: {clear: noop},
         statusbar: {clearOverride: noop, setOverride: noop},
@@ -62,6 +66,8 @@ function setup() {
         setClipboardLayout: noop, markClipboardLayoutReady: noop, t: key => key,
         setTimeout: callback => {timers.set(++timerId, callback); return timerId;},
         clearTimeout: id => {timers.delete(id);},
+        setInterval: callback => {const id = Symbol('pinTick'); pinTimers.set(id, callback); return id;},
+        clearInterval: id => {pinTimers.delete(id);},
         searchClipboard: (query, seq, kind, cursor, batch) => {
             const request = {...deferred(), query, seq, kind, cursor, batch};
             const resolve = request.resolve;

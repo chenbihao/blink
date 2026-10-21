@@ -48,6 +48,7 @@ pub mod open_settings;
 pub mod open_system_entry;
 pub mod open_url;
 pub mod pin_image;
+pub mod pin_clipboard_entry;
 pub mod read_clipboard;
 pub mod read_clipboard_history_image;
 pub mod read_sticky;
@@ -146,6 +147,15 @@ mod tests {
         ] {
             assert!(registry.get(id).is_some(), "{id} 应通过 inventory 注册");
         }
+    }
+
+    #[test]
+    fn phase_0_26_16_capabilities_are_in_inventory() {
+        let registry = crate::capability::CapabilityRegistry::new();
+        assert!(
+            registry.get("pin_clipboard_entry").is_some(),
+            "pin_clipboard_entry 应通过 inventory 注册"
+        );
     }
 
     #[test]

@@ -174,6 +174,7 @@ mod tests {
                 created_at: 1,
                 source_app: None,
                 hit_count: 0,
+                pinned_until: 0,
             },
         )
         .await

@@ -444,6 +444,7 @@ fn normalize_to_items(
                 score_detail: Some(detail),
                 context_aware: false,
                 color_list_hex: None,
+                pinned_until: 0,
             }
         })
         .collect()

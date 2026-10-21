@@ -21,7 +21,8 @@ import {
     saveClipboardFileAsImage,
     showStickyManager,
     showStickyWindow,
-    triggerChord
+    triggerChord,
+    pinClipboardEntries,
 } from "../shared/api.js";
 import {retrigger} from "./search.js";
 import * as ghost from "./ghost.js";
@@ -559,6 +560,28 @@ const KIND_LABELS = {
     open: () => t("menu.open"),
 };
 
+/** 0.26.16：置顶档位（小时）——产品定案 1/6/12/24 四档平铺，不做永久置顶。 */
+const PIN_TTL_HOURS = [1, 6, 12, 24];
+
+/** Capability 当前支持的置顶类型（ClipboardEntryKind 三变体）。 */
+const PINNABLE_KINDS = new Set(["text", "image", "file"]);
+
+/** 置顶/续期/取消置顶统一执行：0 = 取消。完成后强制重查（排序与徽章都要更新），
+ *  保持剪贴板模式不退出，焦点还给输入框（菜单 popup 点击后继续打字）。 */
+function pinEntry(ref, hours) {
+    const operation = hours > 0 ? "pin" : "unpin";
+    // 走专用 pin_clipboard_entries（列表管理入口，不隐藏主窗）——
+    // run_builtin_action 对所有能力统一收尾 hide，置顶后需停留在列表继续操作。
+    pinClipboardEntries(operation, [ref], hours > 0 ? hours : undefined)
+        .then(() => {
+            if (clipboardMode.isActive()) {
+                clipboardMode.reloadList({force: true});
+                queryEl?.focus({preventScroll: true});
+            }
+        })
+        .catch((e) => showActionError("pin_clipboard_entry", e));
+}
+
 /**
  * 0.16.1: 右键菜单按 actions 数组组装。
  * (a) 先展开 actions 全部动作（label 由 kind 派生，有 hint 用 hint）
@@ -708,6 +731,27 @@ function itemMenu(li, {selectedText = ""} = {}) {
                     else showActionError(action, {...err, message: t("clipboard.saved_image_action_failed", {message: err.message})});
                 }
             }});
+        }
+    }
+
+    // 0.26.16：置顶——三类历史条目（文本/图片/文件）统一支持。档位文案恒为
+    // 「置顶 N 小时」：已置顶时再点同档位 = 从现在起重新计 N 小时（重置语义，
+    // 不用「续期」等换词——徽章剩余时间已表达当前状态，避免叠加/重置歧义）；
+    // 已置顶条目额外提供「取消置顶」。执行走 pin_clipboard_entries 专用
+    // command（列表管理入口，不隐藏主窗），完成后强制刷新列表排序。
+    // 限定已知三类：未来新类型（如 audio）未获 Capability 支持，不提供入口。
+    if (clipboardRef && PINNABLE_KINDS.has(clipboardRef.kind)) {
+        const pinnedUntil = Number(li.dataset.pinnedUntil || 0);
+        const isPinned = pinnedUntil > Math.floor(Date.now() / 1000);
+        items.push({separator: true});
+        for (const hours of PIN_TTL_HOURS) {
+            items.push({
+                label: t("menu.pin_for", {hours}),
+                run: () => pinEntry(clipboardRef, hours),
+            });
+        }
+        if (isPinned) {
+            items.push({label: t("menu.unpin"), run: () => pinEntry(clipboardRef, 0)});
         }
     }
 

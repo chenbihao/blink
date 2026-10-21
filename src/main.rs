@@ -1708,6 +1708,7 @@ app::commands::search_clipboard_history,
             app::commands::delete_clipboard_item,
             app::commands::delete_clipboard_items_batch,
             app::commands::manage_clipboard_entries,
+            app::commands::pin_clipboard_entries,
             app::commands::delete_clipboard_image,
             app::commands::clear_clipboard_history,
             // 0.26.9 剪贴板文件条目

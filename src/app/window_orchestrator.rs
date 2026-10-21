@@ -42,6 +42,12 @@ pub fn invoke_with_placement(app: &AppHandle, placement: window::MainWindowPlace
         sensitive_apps: context_cfg.sensitive_apps.clone(),
     };
     let snapshot = crate::infra::platform::context::collect(&collect_params);
+    // 0.26.16：粘贴锚点。正常路径取快照前台；快照为空有两种情形——
+    // ① 前台是 Blink 自己的窗口（collect 主动跳过，见 context::windows
+    //   「前台是 Blink 自己，跳过」）：此刻主窗尚未 show（不可见），前台 Blink
+    //   窗口必非 main 自己（对话窗/便签等）——直接记录为锚点，否则残留旧值，
+    //   「贴入本体窗口」会贴错目标（0.26.16 实机教训）；
+    // ② 主窗已可见时的重复唤起：前台就是 main，不能记录（保持旧锚点）。
     if let Some(hwnd) = snapshot
         .foreground_app
         .as_ref()
@@ -49,6 +55,11 @@ pub fn invoke_with_placement(app: &AppHandle, placement: window::MainWindowPlace
         .filter(|hwnd| *hwnd != 0)
     {
         window::set_last_external_hwnd(hwnd);
+    } else if !window::is_visible() {
+        if let Some(hwnd) = window::get_foreground_hwnd().filter(|hwnd| *hwnd != 0) {
+            tracing::debug!(hwnd, "invoke: 前台是 Blink 自己的窗口，记录为粘贴锚点");
+            window::set_last_external_hwnd(hwnd);
+        }
     }
     tracing::debug!(
         foreground_app = ?snapshot.foreground_app.as_ref().map(|f| &f.process_name),

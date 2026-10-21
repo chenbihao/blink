@@ -494,10 +494,15 @@ impl EditorSessionService {
         }
     }
 
-    /// 剪贴板结果首存：新建历史项（继承原条目命中数）+ 写回系统剪贴板。
+    /// 剪贴板结果首存：新建历史项（继承原条目命中数与置顶）+ 写回系统剪贴板。
     ///
     /// 写入带 `EditorResult` 自写标记——监听器跳过持久化，结果项由本服务
     /// 显式入库，同一会话不堆积历史（§3.10）。
+    ///
+    /// 0.26.16：**置顶随编辑转移**（编辑后按新的为准）——新条目继承源条目的
+    /// `pinned_until`；内容被修改（源条目仍存在）时取消源条目置顶，避免新旧
+    /// 两条同时占据置顶组。未改内容（同 text）场景源条目已被 `save_item`
+    /// 删旧留新，取消是幂等 no-op。
     ///
     /// 顺序：先剪贴板后 DB——剪贴板失败则整体未发生（无残留）；DB 失败时
     /// 剪贴板已有内容（用户可粘贴），重试保存自然重建结果项。
@@ -510,15 +515,15 @@ impl EditorSessionService {
 
         write_clipboard_suppressed(body).await?;
 
-        let hit_count = match item_ref {
+        let (hit_count, origin_pinned_until) = match item_ref {
             Some(id) => match crate::infra::data::clipboard::query_by_id(&pool, id).await {
-                Some(item) => item.hit_count,
+                Some(item) => (item.hit_count, item.pinned_until),
                 None => {
                     tracing::warn!(origin_ref = %id, "原剪贴板记录不存在，hit_count 从 0 开始");
-                    0
+                    (0, 0)
                 }
             },
-            None => 0,
+            None => (0, 0),
         };
 
         let new_item = crate::infra::data::clipboard::ClipboardItem {
@@ -528,6 +533,7 @@ impl EditorSessionService {
             created_at: chrono::Utc::now().timestamp(),
             source_app: None,
             hit_count,
+            pinned_until: origin_pinned_until,
         };
 
         crate::infra::data::clipboard::save_item(&pool, &new_item)
@@ -538,6 +544,16 @@ impl EditorSessionService {
                     detail: format!("保存失败: {e}"),
                 }
             })?;
+
+        // 置顶随编辑转移：内容被修改（源条目未被删旧留新）时取消源条目置顶。
+        // 失败仅 warn——新条目已带置顶，源条目重复置顶最多到下次取消，不阻断保存。
+        if origin_pinned_until > 0
+            && let Some(origin_id) = item_ref
+            && let Err(e) =
+                crate::infra::data::clipboard::set_pinned_until(&pool, origin_id, 0).await
+        {
+            tracing::warn!(error = %e, origin_ref = %origin_id, "编辑转移置顶：取消源条目置顶失败");
+        }
 
         tracing::info!(result_item_id = %new_item.id, "editor session commit: 剪贴板结果项已创建");
         Ok(new_item.id)
@@ -566,6 +582,7 @@ impl EditorSessionService {
                 created_at: chrono::Utc::now().timestamp(),
                 source_app: None,
                 hit_count: 0,
+                pinned_until: 0,
             };
             crate::infra::data::clipboard::save_item(&pool, &item)
                 .await

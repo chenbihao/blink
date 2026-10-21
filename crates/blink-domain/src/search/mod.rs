@@ -168,6 +168,10 @@ pub struct AppEntry {
     /// 非空 query / 其它引擎的项一律 false。老前端不读此字段视为 false，兼容。
     #[serde(default)]
     pub context_aware: bool,
+    /// 0.26.16：置顶到期时刻（Unix 秒，0 = 未置顶）——仅剪贴板历史条目携带。
+    /// 前端据此渲染置顶标识与剩余时间（`> now` 即置顶，惰性过期）。
+    #[serde(default)]
+    pub pinned_until: i64,
 }
 
 // 平台特定实现

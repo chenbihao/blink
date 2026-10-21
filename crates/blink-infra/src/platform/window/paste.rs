@@ -14,9 +14,14 @@ pub struct PasteTarget {
 }
 
 impl PasteTarget {
-    /// 在异步复制/隐藏之前快照目标；不接受 Blink 自己的顶层窗口。
-    pub fn capture(hwnd: isize) -> Option<Self> {
-        Self::identity(hwnd).filter(|target| target.pid != std::process::id())
+    /// 在异步复制/隐藏之前快照目标。
+    ///
+    /// 0.26.16：放行 Blink 自己的顶层窗口——从对话窗/便签等本体窗口唤起
+    /// 剪贴板后选条目上屏，目标是同进程窗口（`restore_foreground_g2` 对
+    /// 同进程窗口同样适用）。仅排除粘贴源主窗自身（`excluded_hwnd` 传
+    /// main 窗口 HWND；它此刻正在被隐藏，不能把粘贴键发回自己）。
+    pub fn capture(hwnd: isize, excluded_hwnd: Option<isize>) -> Option<Self> {
+        Self::identity(hwnd).filter(|target| Some(target.hwnd) != excluded_hwnd)
     }
 
     pub fn hwnd(self) -> isize {

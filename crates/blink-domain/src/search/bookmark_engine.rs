@@ -633,6 +633,7 @@ fn open_item(entry: &BookmarkEntry, score: f32) -> SearchItem {
         score_detail: None,
         context_aware: false,
         color_list_hex: None,
+        pinned_until: 0,
     }
 }
 

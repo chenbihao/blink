@@ -324,33 +324,49 @@ impl ClipboardEngine {
 
         let t1 = std::time::Instant::now();
 
-        // 合并文本 + 图片 + 文件，按 (created_at, id 字符串) 倒序——与各表 SQL 的
-        // ORDER BY created_at DESC, id DESC 逐字对齐（keyset 不重不漏的前提）。
-        let mut combined: Vec<(i64, String, ClipboardEntry)> = Vec::new();
+        // 合并文本 + 图片 + 文件，按 (置顶位, created_at, id 字符串) 倒序——与各表 SQL
+        // 的 `ORDER BY (pinned_until > now) DESC, created_at DESC, id DESC` 逐字对齐
+        // （keyset 不重不漏的前提）。置顶位是 `pinned_until > now` 的惰性快照。
+        let now = chrono::Utc::now().timestamp();
+        let mut combined: Vec<(bool, i64, String, ClipboardEntry)> = Vec::new();
         for meta in text_metas {
-            combined.push((meta.created_at, meta.id.clone(), ClipboardEntry::Text(meta)));
+            combined.push((
+                meta.pinned_until > now,
+                meta.created_at,
+                meta.id.clone(),
+                ClipboardEntry::Text(meta),
+            ));
         }
         for item in image_items {
             combined.push((
+                item.pinned_until > now,
                 item.created_at,
                 item.id.clone(),
                 ClipboardEntry::Image(item),
             ));
         }
         for meta in file_metas {
-            combined.push((meta.created_at, meta.id.clone(), ClipboardEntry::File(meta)));
+            combined.push((
+                meta.pinned_until > now,
+                meta.created_at,
+                meta.id.clone(),
+                ClipboardEntry::File(meta),
+            ));
         }
-        combined.sort_by_key(|(created_at, id, _)| std::cmp::Reverse((*created_at, id.clone())));
+        combined.sort_by_key(|(pinned, created_at, id, _)| {
+            std::cmp::Reverse((*pinned, *created_at, id.clone()))
+        });
 
         let has_more = combined.len() > batch;
         let page_end = combined.len().min(batch);
         let next_cursor = if has_more {
-            combined
-                .get(page_end - 1)
-                .map(|(created_at, id, _)| ClipboardCursor {
+            combined.get(page_end - 1).map(|(pinned, created_at, id, _)| {
+                ClipboardCursor {
                     created_at: *created_at,
                     id: id.clone(),
-                })
+                    pinned: *pinned,
+                }
+            })
         } else {
             None
         };
@@ -359,7 +375,7 @@ impl ClipboardEngine {
         let display_ids: Vec<&str> = combined
             .iter()
             .take(page_end)
-            .filter_map(|(_, _, entry)| match entry {
+            .filter_map(|(_, _, _, entry)| match entry {
                 ClipboardEntry::Text(meta) => Some(meta.id.as_str()),
                 _ => None,
             })
@@ -375,7 +391,7 @@ impl ClipboardEngine {
             .into_iter()
             .take(page_end)
             .enumerate()
-            .map(|(i, (_, _, entry))| match entry {
+            .map(|(i, (_, _, _, entry))| match entry {
                 ClipboardEntry::Text(meta) => {
                     let prefix = display.get(&meta.id);
                     to_search_item(meta, i, &lang, prefix)
@@ -475,6 +491,7 @@ fn to_search_item(
         score_detail: Some(format!("clip=0.9-{:.2}", index as f32 * 0.02)),
         context_aware: false,
         color_list_hex,
+        pinned_until: meta.pinned_until,
     }
 }
 
@@ -517,6 +534,7 @@ fn to_file_search_item(meta: ClipboardFileMeta, index: usize, lang: &str) -> Sea
         score_detail: Some(format!("clipfile=0.9-{:.2}", index as f32 * 0.02)),
         context_aware: false,
         color_list_hex: None,
+        pinned_until: meta.pinned_until,
     }
 }
 
@@ -600,6 +618,7 @@ fn to_image_search_item(meta: ClipboardImageListItem, index: usize, lang: &str) 
         score_detail: Some(format!("clipimg=0.9-{:.2}", index as f32 * 0.02)),
         context_aware: false,
         color_list_hex: None,
+        pinned_until: meta.pinned_until,
     }
 }
 
@@ -775,7 +794,8 @@ fn format_subtitle(meta: &ClipboardMeta, lang: &str, char_count: Option<usize>) 
 /// nucleo fuzzy 匹配 `ClipboardMeta` 列表，按 preview 字段打分。
 ///
 /// 与 `infra::data::clipboard::search` 逻辑一致，但作用于 `ClipboardMeta`（不含 text）。
-/// 匹配仅决定命中；截断前按时间/id 排序，与分页游标保持同序。
+/// 匹配仅决定命中；截断前按 (置顶位, 时间/id) 排序，与分页游标保持同序
+/// （0.26.16：置顶位加入排序键，SQL 与 Rust 比较器逐字对齐）。
 fn fuzzy_match_metas(metas: &[ClipboardMeta], query: &str, limit: usize) -> Vec<ClipboardMeta> {
     use nucleo::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
     use nucleo::{Config, Matcher, Utf32Str};
@@ -799,9 +819,11 @@ fn fuzzy_match_metas(metas: &[ClipboardMeta], query: &str, limit: usize) -> Vec<
         })
         .collect();
 
+    let now = chrono::Utc::now().timestamp();
     matched.sort_by(|a, b| {
-        b.created_at
-            .cmp(&a.created_at)
+        let (pa, pb) = (a.pinned_until > now, b.pinned_until > now);
+        pb.cmp(&pa)
+            .then_with(|| b.created_at.cmp(&a.created_at))
             .then_with(|| b.id.cmp(&a.id))
     });
     matched.into_iter().take(limit).collect()
@@ -811,7 +833,7 @@ fn fuzzy_match_metas(metas: &[ClipboardMeta], query: &str, limit: usize) -> Vec<
 ///
 /// 候选窗口有界（`candidate_limit`）；此处逐条解析 `paths_json`、对每条
 /// 完整路径（含文件名）匹配，任一命中即保留，解析后即弃不常驻。
-/// 输入行已按时间倒序，take `limit` 即可。
+/// 输入行已按 (置顶位, 时间) 倒序，take `limit` 即可。
 fn fuzzy_match_files(
     rows: Vec<ClipboardFileSearchRow>,
     query: &str,
@@ -847,6 +869,7 @@ fn fuzzy_match_files(
                 first_name: row.first_name,
                 created_at: row.created_at,
                 source_app: row.source_app,
+                pinned_until: row.pinned_until,
             })
         })
         .collect();
@@ -908,6 +931,7 @@ mod tests {
             created_at: chrono::Utc::now().timestamp(),
             source_app: None,
             hit_count: 0,
+            pinned_until: 0,
         };
         let si = to_search_item(meta, 0, "zh", None);
         assert_eq!(si.id, "clipboard:clip_123");
@@ -929,6 +953,7 @@ mod tests {
                 created_at: 0,
                 source_app: None,
                 hit_count: 0,
+                pinned_until: 0,
             };
             to_search_item(meta, i, "zh", None).score
         };
@@ -946,6 +971,7 @@ mod tests {
             created_at: chrono::Utc::now().timestamp() - 30,
             source_app: None,
             hit_count: 0,
+            pinned_until: 0,
         };
         assert!(format_subtitle(&meta, "zh", Some(500)).starts_with("刚刚"));
         assert!(format_subtitle(&meta, "zh", Some(500)).ends_with("500 chars"));
@@ -960,6 +986,7 @@ mod tests {
             created_at: chrono::Utc::now().timestamp() - 30,
             source_app: None,
             hit_count: 0,
+            pinned_until: 0,
         };
         assert!(format_subtitle(&meta, "en", Some(5)).starts_with("just now"));
         assert!(format_subtitle(&meta, "en", Some(5)).ends_with("5 chars"));
@@ -974,6 +1001,7 @@ mod tests {
             created_at: chrono::Utc::now().timestamp() - 30,
             source_app: None,
             source_path: None,
+            pinned_until: 0,
         };
         assert!(format_image_subtitle(&meta, "zh").ends_with("800x600 · PNG · 左侧悬浮查看图片"));
         assert!(
@@ -989,6 +1017,7 @@ mod tests {
             created_at: chrono::Utc::now().timestamp() - 300,
             source_app: None,
             hit_count: 0,
+            pinned_until: 0,
         };
         assert!(format_subtitle(&meta, "zh", Some(2)).contains("分钟前"));
     }
@@ -1001,6 +1030,7 @@ mod tests {
             created_at: chrono::Utc::now().timestamp() - 300,
             source_app: None,
             hit_count: 0,
+            pinned_until: 0,
         };
         assert!(format_subtitle(&meta, "en", Some(2)).contains("min ago"));
     }
@@ -1117,6 +1147,7 @@ mod tests {
             created_at: chrono::Utc::now().timestamp(),
             source_app: Some("explorer.exe".into()),
             source_path: Some("photo.jpg".into()),
+            pinned_until: 0,
         };
         let si = to_image_search_item(meta, 0, "zh");
         assert!(
@@ -1135,6 +1166,7 @@ mod tests {
             created_at: chrono::Utc::now().timestamp(),
             source_app: Some("chrome.exe".into()),
             source_path: None,
+            pinned_until: 0,
         };
         let si = to_image_search_item(meta, 0, "zh");
         assert!(
@@ -1158,6 +1190,7 @@ mod tests {
             created_at: chrono::Utc::now().timestamp(),
             source_app: Some("blink:screenshot".into()),
             source_path: None,
+            pinned_until: 0,
         };
         let si = to_image_search_item(meta, 0, "zh");
         assert!(
@@ -1211,6 +1244,7 @@ mod tests {
                     created_at: at,
                     source_app: None,
                     hit_count: 0,
+                    pinned_until: 0,
                 },
             )
             .await
@@ -1241,6 +1275,7 @@ mod tests {
                     created_at: at,
                     source_app: Some(app.into()),
                     source_path: None,
+                    pinned_until: 0,
                 },
             )
             .await
@@ -1260,6 +1295,7 @@ mod tests {
             first_name: "a.txt".into(),
             created_at: chrono::Utc::now().timestamp(),
             source_app: None,
+            pinned_until: 0,
         };
         let si = to_file_search_item(meta, 0, "zh");
         assert!(matches!(
@@ -1430,6 +1466,7 @@ mod tests {
                 created_at: chrono::Utc::now().timestamp() + 5,
                 source_app: None,
                 hit_count: 0,
+                pinned_until: 0,
             },
         )
         .await
@@ -1544,6 +1581,7 @@ mod tests {
                     created_at: at,
                     source_app: None,
                     hit_count: 0,
+                    pinned_until: 0,
                 },
             )
             .await
@@ -1603,6 +1641,7 @@ mod tests {
                     created_at: at,
                     source_app: None,
                     hit_count: 0,
+                    pinned_until: 0,
                 },
             )
             .await
@@ -1653,6 +1692,7 @@ mod tests {
                     created_at: at,
                     source_app: None,
                     hit_count: 0,
+                    pinned_until: 0,
                 },
             )
             .await

@@ -55,6 +55,7 @@ impl SearchEngine for MockSlowEngine {
             score_detail: Some("mock=0.5".into()),
             context_aware: false,
             color_list_hex: None,
+            pinned_until: 0,
         }]
     }
 }

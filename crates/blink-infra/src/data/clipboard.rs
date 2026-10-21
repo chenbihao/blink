@@ -44,6 +44,9 @@ pub struct ClipboardItem {
     pub created_at: i64,
     pub source_app: Option<String>,
     pub hit_count: u32,
+    /// 0.26.16：置顶到期时刻（Unix 秒，0 = 未置顶）。`> now` 即置顶，惰性过期。
+    #[serde(default)]
+    pub pinned_until: i64,
 }
 
 /// 剪贴板配置。
@@ -108,10 +111,18 @@ pub struct ClipboardConfig {
 /// （`ORDER BY created_at DESC, id DESC`），单一游标跨表通用。
 /// **比较必须用字符串 id 序**（与 SQL 一致），不能用数字后缀——
 /// 一次性加载时 tie-break 差异无感，流式分批下会造成漏条/重条（0.25.29 §3.17）。
+///
+/// 0.26.16：排序键头部加置顶位（`pinned_until > now` DESC），游标携带
+/// `pinned` 布尔以支持跨置顶组/普通组边界分页。旧 cursor JSON 无此字段时
+/// 视为 false（普通组，向前兼容）。置顶在两批之间到期会改变条目所属组，
+/// 极端时序下同条目可能被跳过——与「分页间隙新插入条目」同级漂移，可接受。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ClipboardCursor {
     pub created_at: i64,
     pub id: String,
+    /// 游标位置是否处于置顶组（构造时按 `pinned_until > now` 快照）。
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 fn default_max_items() -> u32 {
@@ -273,12 +284,27 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
             preview TEXT NOT NULL,
             created_at INTEGER NOT NULL,
             source_app TEXT,
-            hit_count INTEGER NOT NULL DEFAULT 0
+            hit_count INTEGER NOT NULL DEFAULT 0,
+            pinned_until INTEGER NOT NULL DEFAULT 0
         )",
     )
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
+
+    // 0.26.16：旧表迁移——已有 clipboard_history 表加 pinned_until 列。
+    // ALTER TABLE ADD COLUMN 幂等（IF NOT EXISTS 不支持，duplicate column 静默跳过）。
+    let migrate_result = sqlx::query(
+        "ALTER TABLE clipboard_history ADD COLUMN pinned_until INTEGER NOT NULL DEFAULT 0",
+    )
+    .execute(pool)
+    .await;
+    if let Err(e) = migrate_result {
+        let msg = e.to_string();
+        if !msg.contains("duplicate column") {
+            tracing::warn!(error = %msg, "clipboard_history 加 pinned_until 列失败");
+        }
+    }
 
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_clip_created ON clipboard_history(created_at)")
         .execute(pool)
@@ -286,15 +312,19 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
 
     // 覆盖索引：query_recent_meta / query_recent_days_meta 只 SELECT
-    // id, preview, created_at, source_app, hit_count——此索引让查询完全不碰
-    // 表 B-tree（text 列的 overflow page），对 1000+ 行 + 大 text 场景提速显著。
+    // id, preview, created_at, source_app, hit_count, pinned_until——此索引让查询
+    // 完全不碰表 B-tree（text 列的 overflow page），对 1000+ 行 + 大 text 场景提速显著。
+    // 0.26.16：v2 纳入 pinned_until（排序表达式读它），旧 v1 索引随即删除。
     sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_clip_meta_covering \
-         ON clipboard_history(created_at DESC, id, preview, source_app, hit_count)",
+        "CREATE INDEX IF NOT EXISTS idx_clip_meta_covering_v2 \
+         ON clipboard_history(created_at DESC, id, preview, source_app, hit_count, pinned_until)",
     )
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
+    let _ = sqlx::query("DROP INDEX IF EXISTS idx_clip_meta_covering")
+        .execute(pool)
+        .await;
 
     tracing::debug!("clipboard_history 表已初始化");
     Ok(())
@@ -310,9 +340,11 @@ pub async fn save_item(pool: &SqlitePool, item: &ClipboardItem) -> Result<(), St
     // P1-#15 fix: 删旧留新包在事务里，防止 DELETE 成功 INSERT 失败导致数据丢失
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
-    // 重复复制同一文本时保留历史命中权重，避免频率排序被重置。
-    let previous_hit_count: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(MAX(hit_count), 0) FROM clipboard_history WHERE text = ?1",
+    // 重复复制同一文本时保留历史命中权重与置顶状态，避免频率排序/置顶被重置
+    // （0.26.16：用户钉住的是内容，重新复制同内容不应丢置顶）。
+    let (previous_hit_count, previous_pinned_until): (i64, i64) = sqlx::query_as(
+        "SELECT COALESCE(MAX(hit_count), 0), COALESCE(MAX(pinned_until), 0) \
+         FROM clipboard_history WHERE text = ?1",
     )
     .bind(&item.text)
     .fetch_one(&mut *tx)
@@ -328,7 +360,7 @@ pub async fn save_item(pool: &SqlitePool, item: &ClipboardItem) -> Result<(), St
         .map_err(|e| e.to_string())?;
 
     sqlx::query(
-        "INSERT OR REPLACE INTO clipboard_history (id, text, preview, created_at, source_app, hit_count) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT OR REPLACE INTO clipboard_history (id, text, preview, created_at, source_app, hit_count, pinned_until) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
     )
     .bind(&item.id)
     .bind(&item.text)
@@ -336,6 +368,7 @@ pub async fn save_item(pool: &SqlitePool, item: &ClipboardItem) -> Result<(), St
     .bind(item.created_at)
     .bind(&item.source_app)
     .bind(item.hit_count.max(previous_hit_count.max(0) as u32))
+    .bind(item.pinned_until.max(previous_pinned_until))
     .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
@@ -344,24 +377,55 @@ pub async fn save_item(pool: &SqlitePool, item: &ClipboardItem) -> Result<(), St
     Ok(())
 }
 
-/// 查询最近的剪贴板条目。
-pub async fn query_recent(pool: &SqlitePool, limit: i64) -> Vec<ClipboardItem> {
-    sqlx::query_as::<_, (String, String, String, i64, Option<String>, u32)>(
-        "SELECT id, text, preview, created_at, source_app, hit_count FROM clipboard_history ORDER BY created_at DESC, id DESC LIMIT ?1",
-    )
-    .bind(limit)
-    .fetch_all(pool)
-    .await
-    .unwrap_or_default()
-    .into_iter()
-    .map(|(id, text, preview, created_at, source_app, hit_count)| ClipboardItem {
+/// 元数据查询行的解包形态（不含 text 列）。
+type MetaRow = (String, String, i64, Option<String>, u32, i64);
+/// 完整条目查询行的解包形态（含 text 列）。
+type ItemRow = (String, String, String, i64, Option<String>, u32, i64);
+
+fn meta_from_row(row: MetaRow) -> ClipboardMeta {
+    let (id, preview, created_at, source_app, hit_count, pinned_until) = row;
+    ClipboardMeta {
+        id,
+        preview,
+        created_at,
+        source_app,
+        hit_count,
+        pinned_until,
+    }
+}
+
+fn item_from_row(row: ItemRow) -> ClipboardItem {
+    let (id, text, preview, created_at, source_app, hit_count, pinned_until) = row;
+    ClipboardItem {
         id,
         text,
         preview,
         created_at,
         source_app,
         hit_count,
-    })
+        pinned_until,
+    }
+}
+
+/// 0.26.16：置顶组排序——未过期置顶条目排在普通条目之前，组内仍按
+/// `(created_at, id)` 倒序。各查询 SQL 的参数编号不同，此处只留文字契约：
+/// SQL 与 Rust 合并比较器必须逐字对齐（keyset 不重不漏的前提）。
+
+/// 查询最近的剪贴板条目。
+pub async fn query_recent(pool: &SqlitePool, limit: i64) -> Vec<ClipboardItem> {
+    let now = chrono::Utc::now().timestamp();
+    sqlx::query_as::<_, ItemRow>(
+        "SELECT id, text, preview, created_at, source_app, hit_count, pinned_until \
+         FROM clipboard_history \
+         ORDER BY (pinned_until > ?2) DESC, created_at DESC, id DESC LIMIT ?1",
+    )
+    .bind(limit)
+    .bind(now)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(item_from_row)
     .collect()
 }
 
@@ -370,27 +434,21 @@ pub async fn query_recent(pool: &SqlitePool, limit: i64) -> Vec<ClipboardItem> {
 /// 供 `search` 做 fuzzy 候选池——查近 30 天而非固定 200 条，
 /// 确保 `retention_days` 内的记录都能被搜到。
 pub async fn query_recent_days(pool: &SqlitePool, days: u32, limit: i64) -> Vec<ClipboardItem> {
-    let cutoff = chrono::Utc::now().timestamp() - (days as i64 * 86400);
-    sqlx::query_as::<_, (String, String, String, i64, Option<String>, u32)>(
-        "SELECT id, text, preview, created_at, source_app, hit_count \
-         FROM clipboard_history WHERE created_at > ?1 ORDER BY created_at DESC, id DESC LIMIT ?2",
+    let now = chrono::Utc::now().timestamp();
+    let cutoff = now - (days as i64 * 86400);
+    sqlx::query_as::<_, ItemRow>(
+        "SELECT id, text, preview, created_at, source_app, hit_count, pinned_until \
+         FROM clipboard_history WHERE created_at > ?1 \
+         ORDER BY (pinned_until > ?2) DESC, created_at DESC, id DESC LIMIT ?3",
     )
     .bind(cutoff)
+    .bind(now)
     .bind(limit)
     .fetch_all(pool)
     .await
     .unwrap_or_default()
     .into_iter()
-    .map(
-        |(id, text, preview, created_at, source_app, hit_count)| ClipboardItem {
-            id,
-            text,
-            preview,
-            created_at,
-            source_app,
-            hit_count,
-        },
-    )
+    .map(item_from_row)
     .collect()
 }
 
@@ -407,6 +465,8 @@ pub struct ClipboardMeta {
     pub created_at: i64,
     pub source_app: Option<String>,
     pub hit_count: u32,
+    /// 0.26.16：置顶到期时刻（Unix 秒，0 或已过期 = 未置顶）。
+    pub pinned_until: i64,
 }
 
 /// Display-only prefix for an already selected result batch. Candidate matching
@@ -455,33 +515,28 @@ pub async fn query_display_prefixes(
 ///
 /// 供搜索路径用——`query_recent_days` 的轻量版，不加载完整 `text` 列
 /// （长文本可达数十 KB/条，500 条 × text = MB 级数据传输 + 序列化开销）。
-/// 仅 SELECT `id, preview, created_at, source_app, hit_count`，足够 fuzzy
-/// 匹配 + 副行展示用。
+/// 仅 SELECT `id, preview, created_at, source_app, hit_count, pinned_until`，足够 fuzzy
+/// 匹配 + 副行展示 + 置顶排序用。
 pub async fn query_recent_days_meta(
     pool: &SqlitePool,
     days: u32,
     limit: i64,
 ) -> Vec<ClipboardMeta> {
-    let cutoff = chrono::Utc::now().timestamp() - (days as i64 * 86400);
-    sqlx::query_as::<_, (String, String, i64, Option<String>, u32)>(
-        "SELECT id, preview, created_at, source_app, hit_count \
-         FROM clipboard_history WHERE created_at > ?1 ORDER BY created_at DESC, id DESC LIMIT ?2",
+    let now = chrono::Utc::now().timestamp();
+    let cutoff = now - (days as i64 * 86400);
+    sqlx::query_as::<_, MetaRow>(
+        "SELECT id, preview, created_at, source_app, hit_count, pinned_until \
+         FROM clipboard_history WHERE created_at > ?1 \
+         ORDER BY (pinned_until > ?2) DESC, created_at DESC, id DESC LIMIT ?3",
     )
     .bind(cutoff)
+    .bind(now)
     .bind(limit)
     .fetch_all(pool)
     .await
     .unwrap_or_default()
     .into_iter()
-    .map(
-        |(id, preview, created_at, source_app, hit_count)| ClipboardMeta {
-            id,
-            preview,
-            created_at,
-            source_app,
-            hit_count,
-        },
-    )
+    .map(meta_from_row)
     .collect()
 }
 
@@ -490,57 +545,54 @@ pub async fn query_recent_days_meta(
 /// 供空 query 场景（Alt+C 刚进入剪贴板模式）用——只需最近 N 条的 preview + 元数据
 /// 做展示，不需要完整 text。`query_recent` 的轻量版。
 pub async fn query_recent_meta(pool: &SqlitePool, limit: i64) -> Vec<ClipboardMeta> {
-    sqlx::query_as::<_, (String, String, i64, Option<String>, u32)>(
-        "SELECT id, preview, created_at, source_app, hit_count \
-         FROM clipboard_history ORDER BY created_at DESC, id DESC LIMIT ?1",
+    let now = chrono::Utc::now().timestamp();
+    sqlx::query_as::<_, MetaRow>(
+        "SELECT id, preview, created_at, source_app, hit_count, pinned_until \
+         FROM clipboard_history \
+         ORDER BY (pinned_until > ?2) DESC, created_at DESC, id DESC LIMIT ?1",
     )
     .bind(limit)
+    .bind(now)
     .fetch_all(pool)
     .await
     .unwrap_or_default()
     .into_iter()
-    .map(
-        |(id, preview, created_at, source_app, hit_count)| ClipboardMeta {
-            id,
-            preview,
-            created_at,
-            source_app,
-            hit_count,
-        },
-    )
+    .map(meta_from_row)
     .collect()
 }
 
-/// 0.25.29：keyset 游标分页——查询严格早于 `cursor`（`(created_at, id)` 字符串序）
-/// 的元数据。与 `query_recent_meta` 排序键一致，不重不漏；新入库条目
-/// created_at 更大、落在游标之前，不影响后续批（这是弃用 OFFSET 的原因）。
+/// 0.25.29：keyset 游标分页——查询严格早于 `cursor` 的元数据。
+///
+/// 0.26.16：排序键头部加置顶位。游标条件为三元组比较——
+/// `(pinned_until > now)` 作为最高位：游标在置顶组时普通组条目全部靠后
+/// （`(0) < (1)` 恒真），游标在普通组时置顶组不再返回（`(1) < (0)` 恒假）。
+/// 与 `query_recent_meta` 排序键一致，不重不漏；新入库条目 created_at 更大、
+/// 落在游标之前，不影响后续批（这是弃用 OFFSET 的原因）。
 pub async fn query_recent_meta_after(
     pool: &SqlitePool,
     cursor: &ClipboardCursor,
     limit: i64,
 ) -> Vec<ClipboardMeta> {
-    sqlx::query_as::<_, (String, String, i64, Option<String>, u32)>(
-        "SELECT id, preview, created_at, source_app, hit_count \
+    let now = chrono::Utc::now().timestamp();
+    let cursor_pinned = i64::from(cursor.pinned);
+    sqlx::query_as::<_, MetaRow>(
+        "SELECT id, preview, created_at, source_app, hit_count, pinned_until \
          FROM clipboard_history \
-         WHERE (created_at < ?1 OR (created_at = ?1 AND id < ?2)) \
-         ORDER BY created_at DESC, id DESC LIMIT ?3",
+         WHERE ((pinned_until > ?3) < ?4 \
+                OR ((pinned_until > ?3) = ?4 \
+                    AND (created_at < ?1 OR (created_at = ?1 AND id < ?2)))) \
+         ORDER BY (pinned_until > ?3) DESC, created_at DESC, id DESC LIMIT ?5",
     )
     .bind(cursor.created_at)
     .bind(&cursor.id)
+    .bind(now)
+    .bind(cursor_pinned)
     .bind(limit)
     .fetch_all(pool)
     .await
     .unwrap_or_default()
     .into_iter()
-    .map(
-        |(id, preview, created_at, source_app, hit_count)| ClipboardMeta {
-            id,
-            preview,
-            created_at,
-            source_app,
-            hit_count,
-        },
-    )
+    .map(meta_from_row)
     .collect()
 }
 
@@ -552,31 +604,29 @@ pub async fn query_recent_days_meta_after(
     cursor: &ClipboardCursor,
     limit: i64,
 ) -> Vec<ClipboardMeta> {
-    let cutoff = chrono::Utc::now().timestamp() - (days as i64 * 86400);
-    sqlx::query_as::<_, (String, String, i64, Option<String>, u32)>(
-        "SELECT id, preview, created_at, source_app, hit_count \
+    let now = chrono::Utc::now().timestamp();
+    let cutoff = now - (days as i64 * 86400);
+    let cursor_pinned = i64::from(cursor.pinned);
+    sqlx::query_as::<_, MetaRow>(
+        "SELECT id, preview, created_at, source_app, hit_count, pinned_until \
          FROM clipboard_history \
          WHERE created_at > ?1 \
-           AND (created_at < ?2 OR (created_at = ?2 AND id < ?3)) \
-         ORDER BY created_at DESC, id DESC LIMIT ?4",
+           AND ((pinned_until > ?4) < ?5 \
+                OR ((pinned_until > ?4) = ?5 \
+                    AND (created_at < ?2 OR (created_at = ?2 AND id < ?3)))) \
+         ORDER BY (pinned_until > ?4) DESC, created_at DESC, id DESC LIMIT ?6",
     )
     .bind(cutoff)
     .bind(cursor.created_at)
     .bind(&cursor.id)
+    .bind(now)
+    .bind(cursor_pinned)
     .bind(limit)
     .fetch_all(pool)
     .await
     .unwrap_or_default()
     .into_iter()
-    .map(
-        |(id, preview, created_at, source_app, hit_count)| ClipboardMeta {
-            id,
-            preview,
-            created_at,
-            source_app,
-            hit_count,
-        },
-    )
+    .map(meta_from_row)
     .collect()
 }
 
@@ -629,22 +679,15 @@ pub async fn search(
 ///
 /// 返回完整 `ClipboardItem`（含 text），供编辑器等需要完整文本的场景用。
 pub async fn query_by_id(pool: &SqlitePool, id: &str) -> Option<ClipboardItem> {
-    sqlx::query_as::<_, (String, String, String, i64, Option<String>, u32)>(
-        "SELECT id, text, preview, created_at, source_app, hit_count FROM clipboard_history WHERE id = ?1",
+    sqlx::query_as::<_, ItemRow>(
+        "SELECT id, text, preview, created_at, source_app, hit_count, pinned_until FROM clipboard_history WHERE id = ?1",
     )
     .bind(id)
     .fetch_optional(pool)
     .await
     .ok()
     .flatten()
-    .map(|(id, text, preview, created_at, source_app, hit_count)| ClipboardItem {
-        id,
-        text,
-        preview,
-        created_at,
-        source_app,
-        hit_count,
-    })
+    .map(item_from_row)
 }
 
 /// 按 id 查询完整 text（激活时按需加载）。
@@ -739,16 +782,47 @@ pub async fn clear_all(pool: &SqlitePool) {
         .await;
 }
 
+/// 0.26.16：设置/取消置顶。`until` 为到期 Unix 秒（0 = 取消置顶）。
+/// 返回是否有行被更新（false = 条目不存在，调用方按无效引用报错）。
+/// 再次置顶即重置到期时间（续期语义），无需单独接口。
+///
+/// 置顶同时把 `created_at` 刷新到当前时间——后置顶的条目排置顶组最前
+/// （组内按时间倒序），顺带延长保留期起点；与图片复制置顶 `promote_image`
+/// 同模式。取消置顶不动时间（条目回到「最近操作时刻」的位置）。
+pub async fn set_pinned_until(pool: &SqlitePool, id: &str, until: i64) -> Result<bool, String> {
+    let now = chrono::Utc::now().timestamp();
+    let result = if until > 0 {
+        sqlx::query("UPDATE clipboard_history SET pinned_until = ?2, created_at = ?3 WHERE id = ?1")
+            .bind(id)
+            .bind(until)
+            .bind(now)
+            .execute(pool)
+            .await
+    } else {
+        sqlx::query("UPDATE clipboard_history SET pinned_until = ?2 WHERE id = ?1")
+            .bind(id)
+            .bind(until)
+            .execute(pool)
+            .await
+    }
+    .map_err(|e| e.to_string())?;
+    Ok(result.rows_affected() > 0)
+}
+
 /// 清理过期条目（按天）。启动时由 main.rs 调用。
+/// 0.26.16：未过期置顶条目豁免清理（用户显式钉住的内容不按保留期删除）。
 pub async fn cleanup_old(pool: &SqlitePool, days: u32) {
     if days == 0 {
         return;
     }
-    let cutoff = chrono::Utc::now().timestamp() - (days as i64 * 86400);
-    let result = sqlx::query("DELETE FROM clipboard_history WHERE created_at < ?1")
-        .bind(cutoff)
-        .execute(pool)
-        .await;
+    let now = chrono::Utc::now().timestamp();
+    let cutoff = now - (days as i64 * 86400);
+    let result =
+        sqlx::query("DELETE FROM clipboard_history WHERE created_at < ?1 AND pinned_until <= ?2")
+            .bind(cutoff)
+            .bind(now)
+            .execute(pool)
+            .await;
     match result {
         Ok(r) => {
             let rows = r.rows_affected();
@@ -760,19 +834,28 @@ pub async fn cleanup_old(pool: &SqlitePool, days: u32) {
     }
 }
 
-/// 超量清理：保留最新的 max_items 条（兑底，主要靠 cleanup_old 按天清理）。
+/// 超量清理：保留最新的 max_items 条（兜底，主要靠 cleanup_old 按天清理）。
+/// 0.26.16：置顶条目不参与容量计算与淘汰——上限针对可自然淘汰的普通条目，
+/// 置顶期间允许总量暂时超出（到期后自动回归）。
 pub async fn cleanup_excess(pool: &SqlitePool, max_items: u32) {
-    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM clipboard_history")
-        .fetch_one(pool)
-        .await
-        .unwrap_or((0,));
+    let now = chrono::Utc::now().timestamp();
+    let count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM clipboard_history WHERE pinned_until <= ?1",
+    )
+    .bind(now)
+    .fetch_one(pool)
+    .await
+    .unwrap_or((0,));
 
     if count.0 > max_items as i64 {
         let excess = count.0 - max_items as i64;
         let _ = sqlx::query(
-            "DELETE FROM clipboard_history WHERE id IN (SELECT id FROM clipboard_history ORDER BY created_at ASC, id ASC LIMIT ?1)",
+            "DELETE FROM clipboard_history WHERE id IN (\
+                SELECT id FROM clipboard_history WHERE pinned_until <= ?2 \
+                ORDER BY created_at ASC, id ASC LIMIT ?1)",
         )
         .bind(excess)
+        .bind(now)
         .execute(pool)
         .await;
         // tracing::info!(deleted = excess, "清理超量剪贴板历史");
@@ -850,6 +933,7 @@ mod tests {
             created_at,
             source_app: None,
             hit_count,
+            pinned_until: 0,
         }
     }
 
@@ -906,6 +990,7 @@ mod tests {
             cursor = Some(ClipboardCursor {
                 created_at: last.created_at,
                 id: last.id.clone(),
+                pinned: false,
             });
         }
         assert_eq!(
@@ -931,6 +1016,7 @@ mod tests {
             &ClipboardCursor {
                 created_at: first[0].created_at,
                 id: first[0].id.clone(),
+                pinned: false,
             },
             10,
         )
@@ -964,6 +1050,7 @@ mod tests {
             &ClipboardCursor {
                 created_at: first[0].created_at,
                 id: first[0].id.clone(),
+                pinned: false,
             },
             10,
         )
@@ -1269,5 +1356,185 @@ mod tests {
         assert_eq!(roundtrip.display_pages, 7);
         // 旧字段不写出，反序列化时走 default = 30
         assert_eq!(roundtrip.display_count, LEGACY_DISPLAY_COUNT_DEFAULT);
+    }
+
+    // ── 0.26.16 置顶 ────────────────────────────────────────────────────
+
+    fn pinned_item(id: &str, text: &str, created_at: i64, pinned_until: i64) -> ClipboardItem {
+        ClipboardItem {
+            pinned_until,
+            ..item(id, text, created_at, 0)
+        }
+    }
+
+    /// 置顶条目排普通条目之前；到期（pinned_until 已过）惰性回落普通组。
+    #[tokio::test]
+    async fn pin_orders_pinned_group_first_and_expires_lazily() {
+        let pool = test_pool().await;
+        let now = chrono::Utc::now().timestamp();
+        save_item(&pool, &pinned_item("clip_old", "oldest but pinned", 100, now + 3600))
+            .await
+            .unwrap();
+        save_item(&pool, &item("clip_new", "newest normal", 9000, 0))
+            .await
+            .unwrap();
+
+        let ids: Vec<String> = query_recent_meta(&pool, 10)
+            .await
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(ids, vec!["clip_old", "clip_new"], "置顶组在前，组内按时间倒序");
+
+        // 后置顶的排置顶组最前：对更晚创建的普通条目执行 set_pinned（刷新其时间）
+        save_item(&pool, &item("clip_late", "latecomer", 9500, 0))
+            .await
+            .unwrap();
+        assert!(set_pinned_until(&pool, "clip_late", now + 3600).await.unwrap());
+        let ids: Vec<String> = query_recent_meta(&pool, 10)
+            .await
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["clip_late", "clip_old", "clip_new"],
+            "set_pinned 刷新 created_at，后置顶的排置顶组最前"
+        );
+
+        // 到期后自然回落（无后台任务）——两条置顶一起过期，回归纯时间倒序
+        sqlx::query(
+            "UPDATE clipboard_history SET pinned_until = ?1 \
+             WHERE id IN ('clip_old', 'clip_late')",
+        )
+        .bind(now - 1)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let ids: Vec<String> = query_recent_meta(&pool, 10)
+            .await
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        // clip_late 置顶时 created_at 被刷新为当前时间，过期后仍按新时间排最前
+        assert_eq!(ids, vec!["clip_late", "clip_new", "clip_old"]);
+    }
+
+    /// set_pinned_until 写读闭环；未命中条目返回 false。
+    #[tokio::test]
+    async fn set_pinned_roundtrip_and_missing_entry() {
+        let pool = test_pool().await;
+        save_item(&pool, &item("clip_1", "a", 1, 0)).await.unwrap();
+        let until = chrono::Utc::now().timestamp() + 6 * 3600;
+        assert!(set_pinned_until(&pool, "clip_1", until).await.unwrap());
+        let row = query_by_id(&pool, "clip_1").await.unwrap();
+        assert_eq!(row.pinned_until, until);
+        assert!(row.created_at > 1, "置顶刷新 created_at（后置顶排最前 + 延长保留期）");
+        let created_at_when_pinned = row.created_at;
+        // 再次置顶 = 重置到期时间（续期语义）
+        let renewed = until + 3600;
+        assert!(set_pinned_until(&pool, "clip_1", renewed).await.unwrap());
+        assert_eq!(query_by_id(&pool, "clip_1").await.unwrap().pinned_until, renewed);
+        // 取消置顶（不动时间——条目回到「最近操作时刻」的位置）
+        assert!(set_pinned_until(&pool, "clip_1", 0).await.unwrap());
+        let row = query_by_id(&pool, "clip_1").await.unwrap();
+        assert_eq!(row.pinned_until, 0);
+        assert_eq!(row.created_at, created_at_when_pinned, "取消置顶不刷新时间");
+        assert!(!set_pinned_until(&pool, "ghost", until).await.unwrap());
+    }
+
+    /// 保留期与超量清理都豁免未过期置顶条目。
+    #[tokio::test]
+    async fn cleanup_exempts_unexpired_pins() {
+        let pool = test_pool().await;
+        let now = chrono::Utc::now().timestamp();
+        // 一条过期但已置顶 + 一条过期未置顶 + 一条新条目
+        save_item(&pool, &pinned_item("clip_pinned", "pinned old", 100, now + 3600))
+            .await
+            .unwrap();
+        save_item(&pool, &item("clip_stale", "stale old", 100, 0))
+            .await
+            .unwrap();
+        save_item(&pool, &item("clip_fresh", "fresh", now, 0))
+            .await
+            .unwrap();
+
+        cleanup_old(&pool, 1).await;
+        let ids: Vec<String> = query_recent(&pool, 10)
+            .await
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(ids, vec!["clip_pinned", "clip_fresh"], "过期置顶条目保留");
+
+        cleanup_excess(&pool, 1).await;
+        let ids: Vec<String> = query_recent(&pool, 10)
+            .await
+            .into_iter()
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["clip_pinned", "clip_fresh"],
+            "超量淘汰只针对未置顶条目（置顶期间允许总量超出）"
+        );
+    }
+
+    /// 重新复制同文本（删旧留新）时置顶状态随 hit_count 一并继承。
+    #[tokio::test]
+    async fn save_item_inherits_pinned_until() {
+        let pool = test_pool().await;
+        let now = chrono::Utc::now().timestamp();
+        let until = now + 12 * 3600;
+        save_item(&pool, &pinned_item("clip_1", "same", 1, until))
+            .await
+            .unwrap();
+        save_item(&pool, &item("clip_2", "same", 2, 0))
+            .await
+            .unwrap();
+        let rows = query_recent(&pool, 10).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, "clip_2");
+        assert_eq!(rows[0].pinned_until, until, "置顶状态跨重采集继承");
+    }
+
+    /// 置顶组 + 普通组混合下游标分页不重不漏（跨组边界）。
+    #[tokio::test]
+    async fn query_recent_meta_after_pages_across_pin_group_boundary() {
+        let pool = test_pool().await;
+        let now = chrono::Utc::now().timestamp();
+        save_item(&pool, &pinned_item("clip_pa", "pinned a", 100, now + 3600))
+            .await
+            .unwrap();
+        save_item(&pool, &pinned_item("clip_pb", "pinned b", 200, now + 3600))
+            .await
+            .unwrap();
+        for (id, at) in [("clip_x", 300), ("clip_y", 400), ("clip_z", 500)] {
+            save_item(&pool, &item(id, id, at, 0)).await.unwrap();
+        }
+
+        let mut collected = Vec::new();
+        let mut cursor: Option<ClipboardCursor> = None;
+        loop {
+            let batch = match &cursor {
+                Some(c) => query_recent_meta_after(&pool, c, 2).await,
+                None => query_recent_meta(&pool, 2).await,
+            };
+            if batch.is_empty() {
+                break;
+            }
+            let last = batch.last().unwrap();
+            collected.extend(batch.iter().map(|m| m.id.clone()));
+            cursor = Some(ClipboardCursor {
+                created_at: last.created_at,
+                id: last.id.clone(),
+                pinned: last.pinned_until > now,
+            });
+        }
+        assert_eq!(
+            collected,
+            vec!["clip_pb", "clip_pa", "clip_z", "clip_y", "clip_x"],
+            "置顶组先于普通组，组内时间倒序，跨组分页不重不漏"
+        );
     }
 }

@@ -1452,6 +1452,7 @@ mod tests {
             score_detail: None,
             context_aware: false,
             color_list_hex: None,
+            pinned_until: 0,
         }
     }
 

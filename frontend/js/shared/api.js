@@ -180,6 +180,12 @@ export function manageClipboardEntries(operation, entries) {
     return invoke("manage_clipboard_entries", {operation, entries});
 }
 
+/** 0.26.16：置顶/取消置顶剪贴板条目（列表管理操作，不隐藏主窗）。
+ * operation: "pin"（需带 hours）/ "unpin"。 */
+export function pinClipboardEntries(operation, entries, hours) {
+    return invoke("pin_clipboard_entries", {operation, entries, hours});
+}
+
 /** 0.17.0：删除指定剪贴板图片条目。imageId 为 clipboard_images 表 id。 */
 export function deleteClipboardImage(imageId) {
     return invoke("delete_clipboard_image", {imageId});

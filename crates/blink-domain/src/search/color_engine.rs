@@ -71,6 +71,7 @@ impl SearchEngine for ColorEngine {
             score_detail: Some("color=1.0".into()),
             context_aware: false,
             color_list_hex: None,
+            pinned_until: 0,
         }]
     }
 }

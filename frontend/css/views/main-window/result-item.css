@@ -359,3 +359,26 @@ body.alt-active #results li .item-badge {
     height: 20px;
     color: var(--accent);
 }
+
+/* 0.26.16：剪贴板置顶徽章——Lucide pin + 剩余时间，行尾常显弱化。
+   到期后由 tick 加 .expired 隐藏（排序归位由下次重查自然完成）。 */
+#results li .clip-pin-badge {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-3xs, 2px);
+    padding: var(--space-3xs, 2px) var(--space-2xs);
+    font-size: var(--text-sm);
+    color: var(--text-dim);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    border-radius: var(--radius-sm);
+    white-space: nowrap;
+}
+
+#results li .clip-pin-badge .icon {
+    color: var(--accent);
+}
+
+#results li .clip-pin-badge.expired {
+    display: none;
+}

@@ -82,6 +82,19 @@ let chipsEl = null;
 /** 0.25.23: chips 按钮列表（顺序同 KIND_ORDER）。 */
 let chipBtns = [];
 
+/** 0.26.16: 置顶剩余时间刷新 tick（模式激活期间常驻，退出即清除）。 */
+let pinTickTimer = null;
+
+function startPinTick() {
+    if (pinTickTimer) return;
+    pinTickTimer = setInterval(() => results.updatePinBadges(), 30_000);
+}
+
+function stopPinTick() {
+    clearInterval(pinTickTimer);
+    pinTickTimer = null;
+}
+
 /** 0.25.23: kind → i18n key（chips 文案）。 */
 const KIND_LABEL_KEYS = {
     all: "clipboard.kind_all",
@@ -266,6 +279,9 @@ export function enter({preserveQuery = false} = {}) {
     // 空 query 显示最近历史；非空 query 直接过滤剪贴板历史
     doSearch(initialQuery.trim());
 
+    // 0.26.16: 置顶剩余时间 30s 刷新（只更新徽章文本，不重查数据）
+    startPinTick();
+
     syncWindowSize();
 }
 
@@ -295,6 +311,8 @@ export function exit() {
     // 取消防抖
     clearTimeout(timer);
     seq++;
+    // 0.26.16: 清除置顶剩余时间 tick
+    stopPinTick();
     // 0.25.29: 重置流式状态（在途 loadMore 由 seq++ 失效）
     pageCursor = null;
     hasMore = false;

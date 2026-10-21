@@ -223,6 +223,7 @@ fn on_clipboard_change() {
                 created_at: now_ts(),
                 source_app,
                 hit_count: 0,
+                pinned_until: 0,
             };
             let pool = s.pool.clone();
             let max_items = s.max_items.load(std::sync::atomic::Ordering::Relaxed);
@@ -283,6 +284,7 @@ fn on_clipboard_change() {
                     created_at,
                     source_app,
                     source_path,
+                    pinned_until: 0,
                 })
             })
             .await;
