@@ -116,6 +116,7 @@ fn patched_source_fingerprint(patches_dir: &Path, header: &Path) -> std::io::Res
 
 /// 运行命令，失败 panic（带上下文）。
 fn run_ctx(cmd: &str, args: &[&str], cwd: &Path, desc: &str) {
+    let _timer = crate::build_log::BuildTimer::start(desc);
     let status = Command::new(cmd)
         .args(args)
         .current_dir(cwd)
@@ -236,11 +237,11 @@ fn ensure_patched_source(work_root: &Path, patches_dir: &Path, header: &Path) ->
     let marker_matches =
         std::fs::read_to_string(&marker).is_ok_and(|actual| actual == expected_marker);
     if marker_matches && llama_dir.join("CMakeLists.txt").exists() {
-        println!("📁 已存在补丁化的 FunASR 源码: {}", src_root.display());
+        tracing::info!("📁 已存在补丁化的 FunASR 源码: {}", src_root.display());
         return llama_dir;
     }
     if marker.exists() {
-        println!("♻️  FunASR 构建输入已变化，重新展开并应用补丁");
+        tracing::info!("♻️  FunASR 构建输入已变化，重新展开并应用补丁");
     }
 
     // 1. 下载 + 校验 zip
@@ -250,7 +251,7 @@ fn ensure_patched_source(work_root: &Path, patches_dir: &Path, header: &Path) ->
             .map(|h| h != FUNASR_ZIP_SHA256)
             .unwrap_or(true);
     if need_download {
-        println!(
+        tracing::info!(
             "⬇️  下载 FunASR 源码 {FUNASR_RELEASE_TAG} ({}...)",
             &FUNASR_COMMIT[..12]
         );
@@ -275,14 +276,14 @@ fn ensure_patched_source(work_root: &Path, patches_dir: &Path, header: &Path) ->
         actual, FUNASR_ZIP_SHA256,
         "FunASR 源码 zip SHA-256 不匹配：期望 {FUNASR_ZIP_SHA256}，实际 {actual}"
     );
-    println!("✅ 源码 zip SHA-256 校验通过");
+    tracing::info!("✅ 源码 zip SHA-256 校验通过");
 
     // 2. 解压（tar.exe 随 Windows 分发，支持 zip）
     if src_root.exists() {
         std::fs::remove_dir_all(&src_root).unwrap();
     }
     std::fs::create_dir_all(&src_root).unwrap();
-    println!("📦 解压源码...");
+    tracing::info!("📦 解压源码...");
     run_ctx(
         "tar",
         &[
@@ -337,7 +338,7 @@ fn ensure_patched_source(work_root: &Path, patches_dir: &Path, header: &Path) ->
     run_ctx("git", &add_args, &src_root, "git add 补丁目标");
     for (patch, _) in PATCH_INPUTS {
         let patch_path = patches_dir.join(patch);
-        println!("🩹 应用补丁 {patch}...");
+        tracing::info!("🩹 应用补丁 {patch}...");
         let status = Command::new("git")
             .args(["apply", "--whitespace=nowarn"])
             .arg(&patch_path)
@@ -351,7 +352,7 @@ fn ensure_patched_source(work_root: &Path, patches_dir: &Path, header: &Path) ->
     }
 
     std::fs::write(&marker, expected_marker).unwrap();
-    println!("✅ 源码补丁化完成: {}", src_root.display());
+    tracing::info!("✅ 源码补丁化完成: {}", src_root.display());
     llama_dir
 }
 
@@ -390,9 +391,9 @@ pub fn build_workers() {
     let vcvars = vcvars.unwrap();
     let cmake = find_tool("cmake", vs.clone());
     let ninja = find_tool("ninja", vs.clone());
-    println!("🔧 cmake: {}", cmake.display());
-    println!("🔧 ninja: {}", ninja.display());
-    println!("🔧 vcvars: {}", vcvars.display());
+    tracing::info!("🔧 cmake: {}", cmake.display());
+    tracing::info!("🔧 ninja: {}", ninja.display());
+    tracing::info!("🔧 vcvars: {}", vcvars.display());
 
     let llama_dir = ensure_patched_source(&work_root, &patches_dir, &header);
 
@@ -412,7 +413,7 @@ pub fn build_workers() {
         ninja.display(),
         llama_dir.display(),
     );
-    println!("⚙️  CMake configure...");
+    tracing::info!("⚙️  CMake configure...");
     run_cmd_line(&configure, &llama_dir, "cmake configure");
 
     // build（3 个 target）
@@ -424,7 +425,7 @@ pub fn build_workers() {
         build_dir.display(),
         targets.join(" "),
     );
-    println!("🔨 构建 {} 个 worker target...", WORKERS.len());
+    tracing::info!("🔨 构建 {} 个 worker target...", WORKERS.len());
     run_cmd_line(&build_cmd, &llama_dir, "cmake build");
 
     // 复制 + manifest
@@ -434,10 +435,11 @@ pub fn build_workers() {
         let built = build_dir.join("bin").join(format!("{target}.exe"));
         assert!(built.exists(), "构建产物缺失: {}", built.display());
         let dest = out_dir.join(out_name);
-        std::fs::copy(&built, &dest).unwrap();
+        let changed = crate::artifacts::copy_if_changed(&built, &dest)
+            .unwrap_or_else(|e| panic!("发布 worker {} 失败: {e}", dest.display()));
         let hash = sha256_file(&dest).unwrap();
         let size = std::fs::metadata(&dest).unwrap().len();
-        println!("✅ {} ({})", out_name, hash[..16].to_string());
+        tracing::info!(changed, "✅ {} ({})", out_name, hash[..16].to_string());
         files.insert(
             out_name.to_string(),
             serde_json::json!({
@@ -461,18 +463,12 @@ pub fn build_workers() {
             "blink_worker_protocol": "MIT (blink 仓库)",
         },
         "files": files,
-        "built_at_unix_ms": std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0),
     });
     let manifest_path = out_dir.join("manifest.json");
-    std::fs::write(
-        &manifest_path,
-        serde_json::to_string_pretty(&manifest).unwrap(),
-    )
-    .unwrap();
-    println!(
+    let changed = crate::artifacts::write_worker_manifest(&manifest_path, manifest)
+        .unwrap_or_else(|e| panic!("发布 worker manifest {} 失败: {e}", manifest_path.display()));
+    tracing::info!(
+        changed,
         "📦 worker 发布到 {}（manifest.json 含 SHA-256，安装期校验）",
         out_dir.display()
     );
@@ -483,6 +479,7 @@ pub fn build_workers() {
 /// 使用 `raw_arg` 绕过 Rust 的 Windows 参数转义——`cmd /s /c "..."` 语义
 /// 要求整行作为一个带内嵌引号的参数原样传递。
 fn run_cmd_line(line: &str, cwd: &Path, desc: &str) {
+    let _timer = crate::build_log::BuildTimer::start(desc);
     use std::os::windows::process::CommandExt;
     let status = Command::new("cmd")
         .raw_arg(format!("/d /s /c \"{line}\""))

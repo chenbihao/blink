@@ -5,6 +5,9 @@
 //!   cargo xtask release        构建 GGUF worker + 插件 + 资源校验 + cargo tauri build + updater latest.json
 //!   cargo xtask prebuild       一键首次开发前置：GGUF worker + debug 插件（产物就绪自动跳过）
 //!   cargo xtask release --debug 同上，但用 debug profile（DevTools 可用，F12 打开）
+//!   cargo xtask release --timings 同时生成主程序的 Cargo 构建耗时报告
+//!   cargo xtask release --fast 使用 Thin LTO / 16 codegen units 快速打包（产物更大）
+//!   cargo xtask release --no-bundle 只编译可执行文件，不打安装包、不读取签名私钥
 //!   cargo xtask release-check   仅运行 release 资源前置校验（不打包）
 //!   cargo xtask tiptap         打包 Tiptap IIFE 产物到 frontend/vendor/（调用 Node 脚本）
 //!   cargo xtask icons          拉取 Lucide 图标并生成 SVG sprite（调用 Python 脚本）
@@ -40,6 +43,8 @@ use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
+mod artifacts;
+mod build_log;
 mod funasr_worker;
 
 /// 自动发现所有 Rust 插件（扫描 plugins/examples/ 目录）。
@@ -78,6 +83,7 @@ fn workspace_root() -> PathBuf {
 
 /// 以 cwd 跑命令；失败则带上下文 panic（对齐项目「错误带上下文」规范）。
 fn run(cmd: &str, args: &[&str], cwd: impl AsRef<Path>) {
+    let _timer = build_log::BuildTimer::start(format!("{cmd} {}", args.join(" ")));
     let status = Command::new(cmd)
         .args(args)
         .current_dir(cwd)
@@ -94,16 +100,25 @@ fn run(cmd: &str, args: &[&str], cwd: impl AsRef<Path>) {
 struct StepProgress {
     total: usize,
     current: usize,
+    active: Option<build_log::BuildTimer>,
 }
 
 impl StepProgress {
     fn new(total: usize) -> Self {
-        Self { total, current: 0 }
+        Self {
+            total,
+            current: 0,
+            active: None,
+        }
     }
 
     fn advance(&mut self, title: &str) {
+        self.active.take();
         self.current += 1;
-        println!("\n[{}/{}] {}", self.current, self.total, title);
+        self.active = Some(build_log::BuildTimer::start(format!(
+            "[{}/{}] {title}",
+            self.current, self.total
+        )));
     }
 }
 
@@ -111,7 +126,7 @@ impl StepProgress {
 fn step_advance(step: &mut Option<StepProgress>, title: &str) {
     match step {
         Some(progress) => progress.advance(title),
-        None => println!("{title}"),
+        None => tracing::info!("{title}"),
     }
 }
 
@@ -126,7 +141,7 @@ fn build_plugins(copy_to_bin: bool, debug: bool, step: &mut Option<StepProgress>
     let builtin_dir = root.join("plugins").join("builtin");
 
     let rust_plugins = discover_rust_plugins();
-    println!(
+    tracing::info!(
         "🔨 发现 {} 个 Rust 插件: {:?}",
         rust_plugins.len(),
         rust_plugins
@@ -148,23 +163,23 @@ fn build_plugins(copy_to_bin: bool, debug: bool, step: &mut Option<StepProgress>
             args.push("--release");
         }
         run("cargo", &args, &root);
-        println!("  ✓ -> target/{profile}/{pkg}.exe");
+        tracing::info!("  ✓ -> target/{profile}/{pkg}.exe");
 
         if copy_to_bin {
             let dest_dir = builtin_dir.join(id).join("bin");
             std::fs::create_dir_all(&dest_dir)
                 .unwrap_or_else(|e| panic!("创建 {} 失败: {e}", dest_dir.display()));
             let dest = dest_dir.join(format!("{pkg}.exe"));
-            std::fs::copy(target_dir.join(format!("{pkg}.exe")), &dest)
+            let changed = artifacts::copy_if_changed(&target_dir.join(format!("{pkg}.exe")), &dest)
                 .unwrap_or_else(|e| panic!("拷贝 {pkg}.exe 失败: {e}"));
-            println!("     拷贝 -> {}", dest.display());
+            tracing::info!(changed, "     发布 -> {}", dest.display());
         }
     }
-    println!("🐍 脚本插件无需编译（Python/Node.js 源码已在 builtin下）");
+    tracing::info!("🐍 脚本插件无需编译（Python/Node.js 源码已在 builtin下）");
     if copy_to_bin {
-        println!("✅ 插件编译 + 拷贝到 bin 完成");
+        tracing::info!("✅ 插件编译 + 拷贝到 bin 完成");
     } else {
-        println!("✅ 插件编译完成（开发期无需拷贝到 bin）");
+        tracing::info!("✅ 插件编译完成（开发期无需拷贝到 bin）");
     }
 }
 
@@ -176,7 +191,7 @@ fn copy_plugins() {
     let builtin_dir = root.join("plugins").join("builtin");
 
     let rust_plugins = discover_rust_plugins();
-    println!("📦 拷贝 {} 个 Rust 插件到 bin ...", rust_plugins.len());
+    tracing::info!("📦 拷贝 {} 个 Rust 插件到 bin ...", rust_plugins.len());
 
     for id in &rust_plugins {
         let pkg = format!("blink-plugin-{id}");
@@ -188,10 +203,11 @@ fn copy_plugins() {
         std::fs::create_dir_all(&dest_dir)
             .unwrap_or_else(|e| panic!("创建 {} 失败: {e}", dest_dir.display()));
         let dest = dest_dir.join(format!("{pkg}.exe"));
-        std::fs::copy(&src, &dest).unwrap_or_else(|e| panic!("拷贝 {pkg}.exe 失败: {e}"));
-        println!("  {pkg}.exe -> {}", dest.display());
+        let changed = artifacts::copy_if_changed(&src, &dest)
+            .unwrap_or_else(|e| panic!("拷贝 {pkg}.exe 失败: {e}"));
+        tracing::info!(changed, "  {pkg}.exe -> {}", dest.display());
     }
-    println!("✅ 插件拷贝完成");
+    tracing::info!("✅ 插件拷贝完成");
 }
 
 /// 一键首次开发前置：生成 dev 模式缺失的两类构建产物（均不入 Git，新克隆必须先跑）。
@@ -207,7 +223,7 @@ fn prebuild() {
 
     step_advance(&mut None, "🔨 GGUF STT worker（funasr-worker）");
     if worker_products_valid(&worker_dir) {
-        println!(
+        tracing::info!(
             "✅ worker 产物已就绪（{}），跳过——强制重建: cargo xtask funasr-worker",
             worker_dir.display()
         );
@@ -218,7 +234,7 @@ fn prebuild() {
     step_advance(&mut None, "🔨 内置 Rust 插件（debug -> target/debug）");
     build_plugins(false, true, &mut None);
 
-    println!("✅ prebuild 完成，可运行 cargo tauri dev");
+    tracing::info!("✅ prebuild 完成，可运行 cargo tauri dev");
 }
 
 /// worker 构建产物是否就绪（manifest 存在且与目录逐文件哈希校验通过）。
@@ -242,14 +258,14 @@ fn fetch_models() {
     if !script.exists() {
         panic!("找不到模型目录拉取脚本: {}", script.display());
     }
-    println!("📋 从 LiteLLM 精选主流模型目录 ...");
+    tracing::info!("📋 从 LiteLLM 精选主流模型目录 ...");
     let (py_cmd, py_args) = which_python();
     let mut args = py_args.clone();
     args.push(script.to_str().unwrap().to_string());
     args.push(root.to_str().unwrap().to_string());
     let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     run(py_cmd.as_str(), &args_ref, &root);
-    println!("✅ 模型目录生成完成");
+    tracing::info!("✅ 模型目录生成完成");
 }
 
 // ── release 资源前置校验（0.22.6.4，0.22.10 收敛）─────────────────────────
@@ -328,7 +344,7 @@ const FORBIDDEN_DIRS: &[&str] = &[
 /// "Sync version from Git tag" 步骤写入两个配置文件），故此处不校验具体版本号，
 /// 只防止两个配置文件分叉（如 Cargo 0.22.6 但 Tauri 0.22.7）。
 fn check_version_consistency(failures: &mut Vec<String>) {
-    println!("📋 校验版本一致性（Cargo.toml ↔ tauri.conf.json）...");
+    tracing::info!("📋 校验版本一致性（Cargo.toml ↔ tauri.conf.json）...");
     let root = workspace_root();
 
     // Cargo.toml 版本
@@ -364,7 +380,7 @@ fn check_version_consistency(failures: &mut Vec<String>) {
     }
 
     if check_versions_match(&cargo_version, &tauri_version, failures) {
-        println!("  ✓ Cargo.toml = tauri.conf.json = {cargo_version}");
+        tracing::info!("  ✓ Cargo.toml = tauri.conf.json = {cargo_version}");
     }
 }
 
@@ -420,40 +436,59 @@ fn updater_local_key_path() -> PathBuf {
     home.join(".tauri").join("blink-updater.key")
 }
 
-/// `cargo tauri build`（0.25.10 起 createUpdaterArtifacts 开启，必须能拿到签名私钥）。
+/// `cargo tauri build`；生成安装包时提供 updater 私钥，--no-bundle 不访问私钥。
 ///
 /// 私钥解析优先级：环境变量（CI secret / 用户手动导出）→ 本地
 /// `~/.tauri/blink-updater.key`。都没有则 panic 给出可行动指引——与其让
 /// tauri build 在签名阶段报 cryptic 错误，不如在入口拦住。
 /// 私钥带密码时由调用方自行导出 TAURI_SIGNING_PRIVATE_KEY_PASSWORD（本仓库密钥无密码）。
-fn run_tauri_build(root: &Path, debug: bool) {
+fn run_tauri_build(root: &Path, debug: bool, timings: bool, fast: bool, no_bundle: bool) {
+    let _timer = build_log::BuildTimer::start("cargo tauri build");
     let mut cmd = Command::new("cargo");
     cmd.args(["tauri", "build"]);
     if debug {
         cmd.arg("--debug");
     }
+    if no_bundle {
+        cmd.arg("--no-bundle");
+    }
+    if timings {
+        cmd.args(["--", "--timings"]);
+    }
+    if fast {
+        // 只影响本次主程序构建及其依赖，不改正式 release profile 或全局环境。
+        cmd.env("CARGO_PROFILE_RELEASE_LTO", "thin")
+            .env("CARGO_PROFILE_RELEASE_CODEGEN_UNITS", "16");
+        tracing::info!(
+            lto = "thin",
+            codegen_units = 16,
+            "快速打包模式（产物体积会增加）"
+        );
+    }
     cmd.current_dir(root);
     // 空 env 视为未设置——CI secret 缺失时 GitHub 会注入空串，不能据此跳过回退
-    let env_key = std::env::var("TAURI_SIGNING_PRIVATE_KEY")
-        .ok()
-        .filter(|k| !k.trim().is_empty());
-    if let Some(key) = env_key {
-        cmd.env("TAURI_SIGNING_PRIVATE_KEY", key.trim());
-    } else {
-        let key_path = updater_local_key_path();
-        match std::fs::read_to_string(&key_path) {
-            Ok(key) => {
-                cmd.env("TAURI_SIGNING_PRIVATE_KEY", key.trim());
-                println!("🔑 已从 {} 加载 updater 签名私钥", key_path.display());
+    if !no_bundle {
+        let env_key = std::env::var("TAURI_SIGNING_PRIVATE_KEY")
+            .ok()
+            .filter(|k| !k.trim().is_empty());
+        if let Some(key) = env_key {
+            cmd.env("TAURI_SIGNING_PRIVATE_KEY", key.trim());
+        } else {
+            let key_path = updater_local_key_path();
+            match std::fs::read_to_string(&key_path) {
+                Ok(key) => {
+                    cmd.env("TAURI_SIGNING_PRIVATE_KEY", key.trim());
+                    tracing::info!("🔑 已从 {} 加载 updater 签名私钥", key_path.display());
+                }
+                Err(e) => panic!(
+                    "createUpdaterArtifacts 已开启但找不到 updater 签名私钥。\n\
+                     - 本地构建：`cargo tauri signer generate -w \"{}\"` 生成（或把已有私钥放到该路径）\n\
+                     - CI：在 GitHub secrets 配置 TAURI_SIGNING_PRIVATE_KEY\n\
+                     读取 {} 失败: {e}",
+                    key_path.display(),
+                    key_path.display()
+                ),
             }
-            Err(e) => panic!(
-                "createUpdaterArtifacts 已开启但找不到 updater 签名私钥。\n\
-                 - 本地构建：`cargo tauri signer generate -w \"{}\"` 生成（或把已有私钥放到该路径）\n\
-                 - CI：在 GitHub secrets 配置 TAURI_SIGNING_PRIVATE_KEY\n\
-                 读取 {} 失败: {e}",
-                key_path.display(),
-                key_path.display()
-            ),
         }
     }
     let status = cmd
@@ -555,7 +590,10 @@ fn generate_updater_latest_json() {
     let setup = nsis_dir.join(format!("Blink_{version}_x64-setup.exe"));
     let sig_path = nsis_dir.join(format!("Blink_{version}_x64-setup.exe.sig"));
     if !setup.exists() {
-        panic!("未找到 NSIS 安装包 {}，无法生成 latest.json", setup.display());
+        panic!(
+            "未找到 NSIS 安装包 {}，无法生成 latest.json",
+            setup.display()
+        );
     }
     let signature = std::fs::read_to_string(&sig_path).unwrap_or_else(|e| {
         panic!(
@@ -574,7 +612,7 @@ fn generate_updater_latest_json() {
     let out_path = bundle_dir.join("latest.json");
     std::fs::write(&out_path, format!("{json}\n"))
         .unwrap_or_else(|e| panic!("写入 {} 失败: {e}", out_path.display()));
-    println!(
+    tracing::info!(
         "✅ latest.json 已生成: {}（随 release 上传，publish 后对用户生效）",
         out_path.display()
     );
@@ -614,11 +652,11 @@ fn check_release_resources(step: &mut Option<StepProgress>) {
 
     if !failures.is_empty() {
         for f in &failures {
-            eprintln!("❌ {f}");
+            tracing::error!("❌ {f}");
         }
         panic!("release 资源校验失败：{} 个错误", failures.len());
     }
-    println!("✅ release 资源前置校验全部通过");
+    tracing::info!("✅ release 资源前置校验全部通过");
 }
 
 /// 校验 GGUF 常驻 worker 的可复现来源锁定与发布产物（0.22.7）。
@@ -629,7 +667,7 @@ fn check_release_resources(step: &mut Option<StepProgress>) {
 /// - `resources/bin/funasr-worker/manifest.json`：`cargo xtask funasr-worker`
 ///   的构建产物清单就位（exe 不入 Git，release 前必须先构建）。
 fn check_gguf_worker_supply_chain(failures: &mut Vec<String>) {
-    println!("🔒 校验 GGUF worker 供应链锁定...");
+    tracing::info!("🔒 校验 GGUF worker 供应链锁定...");
     let root = workspace_root();
 
     let lock_path = root.join("resources/stt/funasr-gguf/worker-lock.json");
@@ -746,7 +784,7 @@ fn check_gguf_worker_supply_chain(failures: &mut Vec<String>) {
 fn check_embedded_resources(failures: &mut Vec<String>) {
     let root = workspace_root();
 
-    println!("📋 校验嵌入资源（{} 项）...", EMBEDDED_RESOURCES.len());
+    tracing::info!("📋 校验嵌入资源（{} 项）...", EMBEDDED_RESOURCES.len());
     for (rel_path, desc, kind) in EMBEDDED_RESOURCES {
         let full = root.join(rel_path);
         if !full.exists() {
@@ -782,14 +820,14 @@ fn check_markdown_doc(content: &str, desc: &str, failures: &mut Vec<String>) {
         failures.push(format!("{desc}: 缺少一级标题或章节标题（# / ##）结构"));
         return;
     }
-    println!("  ✓ {desc}: Markdown 结构有效");
+    tracing::info!("  ✓ {desc}: Markdown 结构有效");
 }
 
 /// 普通 JSON 数据校验。
 fn check_json_valid(content: &str, desc: &str, failures: &mut Vec<String>) {
     match serde_json::from_str::<serde_json::Value>(content) {
         Ok(_) => {
-            println!("  ✓ {desc}: JSON 有效");
+            tracing::info!("  ✓ {desc}: JSON 有效");
         }
         Err(e) => {
             failures.push(format!("{desc}: JSON 解析失败: {e}"));
@@ -800,7 +838,7 @@ fn check_json_valid(content: &str, desc: &str, failures: &mut Vec<String>) {
 /// 校验必要许可文件存在。
 fn check_required_licenses(failures: &mut Vec<String>) {
     let root = workspace_root();
-    println!("📋 校验许可文件（{} 项）...", REQUIRED_LICENSES.len());
+    tracing::info!("📋 校验许可文件（{} 项）...", REQUIRED_LICENSES.len());
     for (rel_path, desc) in REQUIRED_LICENSES {
         let full = root.join(rel_path);
         if !full.exists() {
@@ -815,7 +853,7 @@ fn check_required_licenses(failures: &mut Vec<String>) {
             failures.push(format!("{desc}: 文件为空 ({rel_path})"));
             continue;
         }
-        println!("  ✓ {desc}");
+        tracing::info!("  ✓ {desc}");
     }
 }
 
@@ -823,7 +861,7 @@ fn check_required_licenses(failures: &mut Vec<String>) {
 fn check_exclusion_rules(failures: &mut Vec<String>) {
     let root = workspace_root();
     let resources_dir = root.join("resources");
-    println!("🚫 校验排除规则（resources/ 下无模型/staging/venv/cache/__pycache__）...");
+    tracing::info!("🚫 校验排除规则（resources/ 下无模型/staging/venv/cache/__pycache__）...");
 
     let mut found_forbidden: Vec<String> = Vec::new();
     // 只跳过已由 manifest 逐文件校验的 funasr-worker 目录；resources/bin 下
@@ -836,7 +874,7 @@ fn check_exclusion_rules(failures: &mut Vec<String>) {
     );
 
     if found_forbidden.is_empty() {
-        println!("  ✓ resources/ 目录干净（无禁止文件/目录）");
+        tracing::info!("  ✓ resources/ 目录干净（无禁止文件/目录）");
     } else {
         for item in &found_forbidden {
             failures.push(format!("排除规则违反: {item}"));
@@ -1008,7 +1046,7 @@ fn collect_relative_files(
 /// - 每个模型 SHA-256 非空、size_bytes > 0
 /// - 模型 SHA-256 强校验（允许 resolve/main/ URL，hash 锁定确保不可变性）
 fn check_onnx_asset_lock(failures: &mut Vec<String>) {
-    println!("🔒 校验 ONNX OCR asset-lock.json...");
+    tracing::info!("🔒 校验 ONNX OCR asset-lock.json...");
     let root = workspace_root();
     let lock_path = root.join("resources/ocr/paddleocr-onnx/asset-lock.json");
 
@@ -1084,7 +1122,7 @@ fn check_onnx_asset_lock(failures: &mut Vec<String>) {
     }
 
     if failures.is_empty() {
-        println!("  ✓ ONNX asset-lock.json 校验通过");
+        tracing::info!("  ✓ ONNX asset-lock.json 校验通过");
     }
 }
 
@@ -1095,7 +1133,7 @@ fn check_onnx_asset_lock(failures: &mut Vec<String>) {
 /// - `resources/` 下不含 corpus 目录或 WAV/manifest 文件
 /// - 打包产物不包含真实录音或私密 manifest
 fn check_corpus_privacy(failures: &mut Vec<String>) {
-    println!("🔒 校验 STT corpus 隐私守卫...");
+    tracing::info!("🔒 校验 STT corpus 隐私守卫...");
     let root = workspace_root();
 
     // 1. .gitignore 必须包含 testdata/stt/corpus/ 排除规则
@@ -1124,7 +1162,7 @@ fn check_corpus_privacy(failures: &mut Vec<String>) {
     }
 
     if found_privacy_violations.is_empty() {
-        println!("  ✓ corpus 隐私守卫通过");
+        tracing::info!("  ✓ corpus 隐私守卫通过");
     }
 }
 
@@ -1227,7 +1265,7 @@ fn fetch_icons() {
     if !script.exists() {
         panic!("找不到图标拉取脚本: {}", script.display());
     }
-    println!("🎨 拉取 Lucide 图标并生成 SVG sprite ...");
+    tracing::info!("🎨 拉取 Lucide 图标并生成 SVG sprite ...");
     // 优先使用 python3，回退到 python
     let (py_cmd, py_args) = which_python();
     let mut args = py_args.clone();
@@ -1235,7 +1273,7 @@ fn fetch_icons() {
     args.push(root.to_str().unwrap().to_string());
     let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     run(py_cmd.as_str(), &args_ref, &root);
-    println!("✅ 图标 sprite 生成完成");
+    tracing::info!("✅ 图标 sprite 生成完成");
 }
 
 /// 查找可用的 Python 解释器（python3 优先，回退 python，再回退 py launcher）。
@@ -1290,11 +1328,11 @@ fn bundle_tiptap() {
     if !script.exists() {
         panic!("找不到 Tiptap 打包脚本: {}", script.display());
     }
-    println!("📦 打包 Tiptap IIFE 产物 ...");
+    tracing::info!("📦 打包 Tiptap IIFE 产物 ...");
     // 优先使用 node，回退到 nodejs
     let node = which_node();
     run(node.as_str(), &[script.to_str().unwrap()], &root);
-    println!("✅ Tiptap 打包完成");
+    tracing::info!("✅ Tiptap 打包完成");
 }
 
 /// 查找可用的 Node.js 解释器。
@@ -1315,47 +1353,64 @@ fn which_node() -> String {
 }
 
 fn main() {
+    build_log::init();
     let args: Vec<String> = std::env::args().collect();
     let task = args.get(1).unwrap_or_else(|| {
-        panic!("用法: cargo xtask <prebuild|plugins|copy|release|release-check|funasr-worker|icons|tiptap|models|lint|test> [--debug]")
+        panic!("用法: cargo xtask <prebuild|plugins|copy|release|release-check|funasr-worker|icons|tiptap|models|lint|test> [--debug | --fast] [--timings] [--no-bundle]")
     });
+    let _timer = build_log::BuildTimer::start(format!("xtask {task}"));
 
     match task.as_str() {
         "plugins" => build_plugins(false, false, &mut None), // 开发期：仅编译，不复制到 bin
-        "copy" => copy_plugins(),                 // CI：仅拷贝已编译的 exe 到 bin
+        "copy" => copy_plugins(),                            // CI：仅拷贝已编译的 exe 到 bin
         "release" => {
             // --debug: 用 debug profile 打包，DevTools 可用（F12 打开），用于排查多屏幕等问题
             let debug = args.iter().any(|a| a == "--debug");
+            let timings = args.iter().any(|a| a == "--timings");
+            let fast = args.iter().any(|a| a == "--fast");
+            let no_bundle = args.iter().any(|a| a == "--no-bundle");
+            assert!(!(debug && fast), "--debug 与 --fast 不能同时使用");
             // 总步数 = 1（GGUF worker）+ 插件数（每插件一步）+ 1（资源校验）+ 1（Tauri 打包）
-            // + 1（updater latest.json，仅 release profile——debug 包不进更新链路）
+            // + 1（updater latest.json，仅非 debug 的安装包进更新链路）
             let plugin_count = discover_rust_plugins().len();
-            let total = 1 + plugin_count + 2 + usize::from(!debug);
+            let total = 1 + plugin_count + 2 + usize::from(!debug && !no_bundle);
             let mut step = Some(StepProgress::new(total));
-            println!(
-                "🚀 release 流程共 {total} 步：GGUF worker → 插件 ×{plugin_count} → 资源校验 → Tauri 打包 → latest.json"
+            let tail = if no_bundle {
+                "Tauri 编译（不打安装包）"
+            } else if debug {
+                "Tauri 打包（debug）"
+            } else {
+                "Tauri 打包 → latest.json"
+            };
+            tracing::info!(
+                "🚀 release 流程共 {total} 步：GGUF worker → 插件 ×{plugin_count} → 资源校验 → {tail}"
             );
             step_advance(&mut step, "🔨 构建 GGUF STT worker（funasr-worker）");
             funasr_worker::build_workers(); // release 唯一入口必须自行生成 gitignore 的 worker 产物
             build_plugins(true, debug, &mut step); // 打包期：编译 + 复制到 bin
             check_release_resources(&mut step); // release 资源前置校验
             let root = workspace_root();
-            if debug {
-                step_advance(&mut step, "📦 cargo tauri build --debug（DevTools 可用）");
-                run_tauri_build(&root, true);
-            } else {
-                step_advance(&mut step, "📦 cargo tauri build");
-                run_tauri_build(&root, false);
+            step_advance(
+                &mut step,
+                &format!(
+                    "📦 cargo tauri build{}{}",
+                    if debug { " --debug" } else { "" },
+                    if no_bundle { " --no-bundle" } else { "" },
+                ),
+            );
+            run_tauri_build(&root, debug, timings, fast, no_bundle);
+            if !debug && !no_bundle {
                 // 0.25.10：updater 静态清单（含 .sig 内容与资产 URL），随 release 上传
                 step_advance(&mut step, "📝 生成 updater latest.json");
                 generate_updater_latest_json();
             }
         }
         "release-check" => check_release_resources(&mut None), // 仅运行 release 资源前置校验
-        "prebuild" => prebuild(),                 // 一键首次开发前置（worker + debug 插件）
-        "icons" => fetch_icons(),                     // 拉取 Lucide 图标生成 sprite
-        "tiptap" => bundle_tiptap(),                  // 打包 Tiptap IIFE 产物
-        "models" => fetch_models(),                   // 从 LiteLLM 精选主流模型目录
-        "lint" => lint_frontend(),                    // 前端防新增检查（var hex fallback 冻结基线）
+        "prebuild" => prebuild(), // 一键首次开发前置（worker + debug 插件）
+        "icons" => fetch_icons(), // 拉取 Lucide 图标生成 sprite
+        "tiptap" => bundle_tiptap(), // 打包 Tiptap IIFE 产物
+        "models" => fetch_models(), // 从 LiteLLM 精选主流模型目录
+        "lint" => lint_frontend(), // 前端防新增检查（var hex fallback 冻结基线）
         "test" => run(
             "node",
             &["xtask/scripts/test-workspace.mjs"],
@@ -1364,7 +1419,7 @@ fn main() {
         "funasr-worker" => funasr_worker::build_workers(), // 构建 GGUF STT worker（0.22.7）
         other => {
             panic!(
-                "未知子命令: {other}\n用法: cargo xtask <prebuild|plugins|copy|release|release-check|funasr-worker|icons|tiptap|models|lint|test> [--debug]"
+                "未知子命令: {other}\n用法: cargo xtask <prebuild|plugins|copy|release|release-check|funasr-worker|icons|tiptap|models|lint|test> [--debug | --fast] [--timings] [--no-bundle]"
             )
         }
     }
@@ -1440,7 +1495,7 @@ fn lint_frontend() {
     let mut files = Vec::new();
     collect_css_files(&css_dir, &mut files);
 
-    println!(
+    tracing::info!(
         "🔍 检查 CSS hex fallback（基线 {} 个文件 / 总量上限）...",
         VAR_HEX_FALLBACK_BASELINE.len()
     );
@@ -1469,10 +1524,10 @@ fn lint_frontend() {
     }
 
     if violations.is_empty() {
-        println!("✅ hex fallback 基线检查通过");
+        tracing::info!("✅ hex fallback 基线检查通过");
     } else {
         for v in &violations {
-            eprintln!("❌ {v}");
+            tracing::error!("❌ {v}");
         }
         panic!(
             "lint 失败：{} 个文件超出 hex fallback 基线",
@@ -1688,7 +1743,10 @@ edition = "2024"
             v["platforms"]["windows-x86_64"]["url"],
             "https://github.com/chenbihao/blink/releases/download/v0.25.10/Blink_0.25.10_x64-setup.exe"
         );
-        assert_eq!(v["platforms"]["windows-x86_64"]["signature"], "dW50cnVzdGVk...c2ln");
+        assert_eq!(
+            v["platforms"]["windows-x86_64"]["signature"],
+            "dW50cnVzdGVk...c2ln"
+        );
         assert_eq!(v["pub_date"], "2026-10-06T00:00:00Z");
         assert!(v["notes"].is_string());
         // 仅声明当前发布平台，避免插件在未知平台上误判
@@ -1698,7 +1756,8 @@ edition = "2024"
     /// 0.25.10：repository 提取（latest.json 资产基址）。
     #[test]
     fn extract_toml_repository_finds_package_repository() {
-        let toml = "[package]\nname = \"blink\"\nrepository = \"https://github.com/chenbihao/blink\"\n";
+        let toml =
+            "[package]\nname = \"blink\"\nrepository = \"https://github.com/chenbihao/blink\"\n";
         assert_eq!(
             extract_toml_repository(toml),
             Some("https://github.com/chenbihao/blink".to_string())
@@ -1717,11 +1776,17 @@ edition = "2024"
         assert_eq!(super::epoch_to_rfc3339(0), "1970-01-01T00:00:00Z");
         assert_eq!(super::epoch_to_rfc3339(86400), "1970-01-02T00:00:00Z");
         // 已知锚点：2024-01-01 00:00:00 UTC
-        assert_eq!(super::epoch_to_rfc3339(1_704_067_200), "2024-01-01T00:00:00Z");
+        assert_eq!(
+            super::epoch_to_rfc3339(1_704_067_200),
+            "2024-01-01T00:00:00Z"
+        );
         // 闰世纪边界：2000-03-01 00:00:00 UTC（2000 年是闰年）
         assert_eq!(super::epoch_to_rfc3339(951_868_800), "2000-03-01T00:00:00Z");
         // 当天内时分秒
-        assert_eq!(super::epoch_to_rfc3339(1_704_067_200 + 3661), "2024-01-01T01:01:01Z");
+        assert_eq!(
+            super::epoch_to_rfc3339(1_704_067_200 + 3661),
+            "2024-01-01T01:01:01Z"
+        );
     }
 
     /// 负向测试：当 Cargo.toml 与 tauri.conf.json 版本分叉时，

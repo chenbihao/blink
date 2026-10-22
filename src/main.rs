@@ -354,1608 +354,8 @@ fn main() {
                 responder.respond(response);
             });
         })
-        .setup(|app| {
-            // 启动总耗时（setup 结束时手动记录，因为 setup 在同步上下文，没有 runtime 句柄）
-            let startup_start = std::time::Instant::now();
-
-            // 初始化 DB 四层拆分（0.12.0 §2.2）——config/history/ai/cache 各独立 pool
-            let pools = tauri::async_runtime::block_on(infra::data::pools::init_all())
-                .expect("failed to init db pools");
-
-            // 0.16.4：注册全局 cache pool（blink-clipimg 协议懒加载缩略图用）
-            infra::data::clipboard_images::set_pool(pools.cache.clone());
-            // 0.26.9：注册全局 history pool（blink-clipimg /file-preview/<id> 用）
-            let _ = FILE_PREVIEW_POOL.set(pools.history.clone());
-
-            // 初始化配置（配置库）
-            let config_start = std::time::Instant::now();
-            tauri::async_runtime::block_on(app::config::init_config(&pools.config))
-                .expect("failed to init config");
-            // 记录配置加载耗时（缓存库）
-            let config_elapsed = config_start.elapsed().as_secs_f64() * 1000.0;
-            tauri::async_runtime::block_on(infra::utils::perf::record_blocking(
-                &pools.cache,
-                infra::utils::perf::MetricCategory::Startup,
-                "config_load",
-                config_elapsed,
-                None,
-            ));
-
-            // 读取应用配置(快照)（配置库）
-            let app_config = tauri::async_runtime::block_on(app::config::get_config(&pools.config));
-
-            // 日志级别 reload 到配置值（init 时为默认 error）
-            infra::utils::logging::update_level(&app_config.log_level);
-            // AI HTTP 请求/响应体日志开关 reload（0.21.16，默认关）
-            infra::utils::http_log::set_body_log_enabled(app_config.ai_http_body_log);
-
-            // pools 交给 Tauri 管理(command 层用 app.state::<DbPools>() 取)
-            app.manage(pools.clone());
-
-            // 0.14.6 §2.2：创建 DomainEnv 桥接器（TauriDomainEnv）
-            // 各 service 构造后通过 set_* 注入（OnceLock 解决构造顺序倒挂）
-            let domain_env = std::sync::Arc::new(app::domain_env::TauriDomainEnv::new(
-                app.handle().clone(),
-                pools.clone(),
-            ));
-
-            // 同步开机自启（确保注册表 Run 项与配置一致，覆盖用户在 app 外改动的情况）
-            //
-            // dev 模式跳过 enable：tauri-plugin-autostart 的 enable() 用 current_exe()
-            // 决定注册哪个 exe，dev 下拿到的是 target\debug\blink.exe（PE console 子系统），
-            // 写入 Run 键后开机会为它分配控制台窗口。dev 下改为主动 disable，清除可能残留
-            // 的 debug exe 注册项；release 下正常按配置同步。配置 DB 仍记录 auto_start 偏好，
-            // 下次跑 release 时同步逻辑会恢复注册表。
-            {
-                use tauri_plugin_autostart::ManagerExt;
-                let manager = app.autolaunch();
-                let result = if cfg!(debug_assertions) {
-                    manager.disable()
-                } else if app_config.auto_start {
-                    manager.enable()
-                } else {
-                    manager.disable()
-                };
-                if let Err(error) = result {
-                    tracing::warn!(%error, desired = app_config.auto_start, "启动时自启动状态同步失败");
-                }
-            }
-
-            // 主窗口启动即隐藏；注册焦点事件
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.hide();
-                // 拦截 Alt+Space 系统菜单 + 启用系统级圆角（Win11+ DWM）
-                if let Ok(hwnd) = w.hwnd() {
-                    // hwnd 来自 Tauri(windows 0.61)，转成本项目依赖的 windows 0.62 HWND
-                    let hwnd = windows::Win32::Foundation::HWND(hwnd.0 as _);
-                    infra::platform::window::install_sysmenu_blocker(hwnd);
-                    infra::platform::window::enable_rounded_corners(hwnd);
-                }
-                w.on_window_event(move |event| {
-                    if let WindowEvent::Focused(focused) = event {
-                        infra::platform::window::on_focused(*focused);
-                    }
-                });
-            }
-
-            // 0.17.3：首次启动弹出独立引导窗口（主窗口照常 hide）。
-            // 0.22.13 版本号化：新引导发布时 ONBOARDING_VERSION 自增，
-            // 未看过最新版的老用户补看一次。
-            if app_config.onboarding_version < crate::domain::config::ONBOARDING_VERSION {
-                infra::platform::window::show_welcome_window(app.handle());
-            }
-
-            // 0.26.20 更新提醒状态：启动一次 DB 读，managed cell 供唤起路径盖章
-            // （零 IO）与后台任务写入；后台静默检查任务（首查延迟 2min）随后拉起。
-            let update_reminder_state = tauri::async_runtime::block_on(
-                app::update_reminder::load_state(&pools.config),
-            );
-            tracing::debug!(
-                auto = update_reminder_state.auto_check_enabled,
-                latest = %update_reminder_state.latest_version,
-                "更新提醒状态已加载"
-            );
-            app.manage(std::sync::Arc::new(std::sync::RwLock::new(
-                update_reminder_state.clone(),
-            )));
-            // 后台静默检查：≥2min 首查、24h 节流、失败仅 warn（不进启动热路径）
-            app::update_reminder::spawn_background_task(app.handle().clone());
-
-            // 托盘菜单：显示主窗口 + 设置 + 便签管理 + 关于 + 检查更新 + 退出
-            //（按当前语言构建，运行时切语言/更新提示变化会重建）
-            let menu = app::tray::build_menu(
-                app,
-                &app_config.language,
-                app::update_reminder::tray_version_hint(&update_reminder_state),
-            )?;
-            TrayIconBuilder::new()
-                .icon(app.default_window_icon().unwrap().clone())
-                .tooltip("Blink")
-                .menu(&menu)
-                .on_menu_event(|app, event| match event.id().as_ref() {
-                    // 0.17.2：托盘菜单第一项"显示主窗口"，走 invoke 全流程拉起搜索框
-                    "show_main" => app::window_orchestrator::invoke(app),
-                    "settings" => open_settings(app),
-                    "sticky_manager" => {
-                        let _ = crate::infra::platform::window::show_sticky_manager_window(app);
-                    }
-                    // 0.18.4：托盘新增"AI 对话窗口"项，复用 chord Alt+Q 的 show_chat_window 链路
-                    "chat_window" => {
-                        let _ = crate::infra::platform::window::show_chat_window(app, None);
-                    }
-                    "about" => open_about(app),
-                    // 0.26.20：检查更新——打开设置关于 tab（打开即静默自动检查并渲染）
-                    "check_update" => app::update_reminder::open_settings_about(app),
-                    // 0.19.17：输入钩子逃生舱——Alt+Space 失效时从此手动恢复
-                    "recover_hook" => {
-                        tracing::info!("托盘菜单：用户请求恢复输入钩子");
-                        crate::infra::platform::hotkey::InputController::request_manual_recovery();
-                    }
-                    // 0.23.2：主动退出统一入口——有活动编辑会话时先请求一次汇总确认（§3.5）
-                    "quit" => crate::app::editor::request_user_exit(app),
-                    _ => {}
-                })
-                // 0.17.2：托盘图标左键单击拉起主窗口（符合 Windows 惯例）
-                .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click {
-                        button: MouseButton::Left,
-                        button_state: MouseButtonState::Up,
-                        ..
-                    } = event
-                    {
-                        app::window_orchestrator::invoke(tray.app_handle());
-                    }
-                })
-                .build(app)?;
-
-            // 加载 builtin 插件
-            // 全局代理配置(engine:_global_proxy → {http,https})，进程启动时 env 注入，ureq/reqwest 原生读取
-            let global_proxy = tauri::async_runtime::block_on(app::config::get_engine_config(&pools.config, "_global_proxy"));
-            let proxy = global_proxy.and_then(|v| {
-                let http = v.get("http").and_then(|s| s.as_str()).map(|s| s.to_string());
-                let https = v.get("https").and_then(|s| s.as_str()).map(|s| s.to_string());
-                if http.is_some() || https.is_some() { Some((http.unwrap_or_default(), https.unwrap_or_default())) }
-                else { None }
-            });
-            let plugins_dir = if cfg!(debug_assertions) {
-                domain::plugin::builtin_plugins_dir()
-            } else {
-                app.path()
-                    .resource_dir()
-                    .map(|d| d.join("plugins").join("builtin"))
-                    .unwrap_or_else(|_| domain::plugin::builtin_plugins_dir())
-            };
-            let plugins = domain::plugin::load_builtin_plugins(&plugins_dir, proxy.clone());
-            // 0.25.20：dev 额外加载 examples 示例插件（echo-python / echo-node
-            // 验证托管脚本解释器链路；release 包不含 examples 资源——编译期
-            // 排除，与 examples_plugins_dir 的 cfg 对齐）。
-            #[cfg(debug_assertions)]
-            let plugins = {
-                let mut plugins = plugins;
-                let examples = domain::plugin::load_builtin_plugins(
-                    &domain::plugin::examples_plugins_dir(),
-                    proxy.clone(),
-                );
-                tracing::debug!(count = examples.len(), "已加载 examples 示例插件");
-                plugins.extend(examples);
-                plugins
-            };
-            // 构造意图路由 RuleRouter,从插件 manifest 注入规则(合并用户自定义 triggers)。
-            let router = std::sync::Arc::new(domain::intent::RuleRouter::new(app_config.surface_takeover_enabled));
-            // 0.24.2 §3.7：SuggestionCoordinator 由编排层（SearchService）持有，
-            // producers 在此注册（Keyword → Context → Ai 注册序即同分稳定排序优先序）。
-            // runtime cell 与 SearchService/KeywordProducer 共享——热更新一处生效。
-            let suggestion_runtime = std::sync::Arc::new(std::sync::RwLock::new(
-                domain::intent::suggestion::coordinator::SuggestionRuntimeConfig {
-                    autosuggest_enabled: app_config.autosuggest_enabled,
-                    min_score: app_config.autosuggest_min_score,
-                    ..Default::default()
-                },
-            ));
-            let ai_registry_cell = std::sync::Arc::new(std::sync::RwLock::new(
-                None::<std::sync::Arc<domain::ai::AIProviderRegistry>>,
-            ));
-            // 0.24.8：禁用态共享 cell（SearchService 与 ContextProducer 同源）——
-            // 打开类建议的 action/binding 禁用判定与 result 侧一致，设置页保存即热生效。
-            let disabled_builtin_actions =
-                std::sync::Arc::new(std::sync::RwLock::new(Vec::<String>::new()));
-            let disabled_context_bindings =
-                std::sync::Arc::new(std::sync::RwLock::new(Vec::<String>::new()));
-            let mut suggestion_coordinator = domain::intent::suggestion::coordinator::SuggestionCoordinator::new();
-            suggestion_coordinator.register(std::sync::Arc::new(
-                domain::intent::suggestion::keyword::KeywordProducer::from_router(
-                    router.clone(),
-                    suggestion_runtime.clone(),
-                ),
-            ));
-            suggestion_coordinator.register(std::sync::Arc::new(
-                domain::intent::suggestion::context::ContextProducer::new(
-                    router.clone(),
-                    disabled_builtin_actions.clone(),
-                    disabled_context_bindings.clone(),
-                ),
-            ));
-            suggestion_coordinator.register(std::sync::Arc::new(
-                domain::intent::suggestion::ai::AiProducer::new(
-                    ai_registry_cell.clone(),
-                    router.clone(),
-                ),
-            ));
-            // 0.26.20：更新提醒 producer（纯读快照 available_update，空 query 独占；
-            // Coordinator 特判仅占空缺槽位）。数据由 window_orchestrator 唤起时盖章。
-            suggestion_coordinator.register(std::sync::Arc::new(
-                domain::intent::suggestion::update::UpdateProducer,
-            ));
-
-            // 无条件构造 PluginEngine（空 plugins 也是合法态）。
-            // 早期用 Option<Arc<PluginEngine>> 表示"无插件"，但导致：
-            // - Tauri state 类型每处易拼错（`try_state::<Arc<PE>>` vs `state::<Option<Arc<PE>>>`）
-            // - 消费点 15 处充斥 `as_ref()` / `if let Some(pe)` 样板
-            // PluginEngine::new 无必须条件，plugins=vec![] 时各方法均安全（空迭代 / find_plugin 返 None）。
-            tracing::info!(count = plugins.len(), "PluginEngine 已构造");
-            let plugin_engine = std::sync::Arc::new(domain::plugin::PluginEngine::new(plugins.clone(), pools.config.clone(), proxy));
-            domain_env.set_plugin_engine(plugin_engine.clone());
-            // 0.4→0.5 配置迁移（首次运行时执行一次，后续 marker 跳过；空 plugins 时循环空转）
-            tauri::async_runtime::block_on(app::config::migrate_0_4_to_0_5(&pools.config, &plugins));
-            // 0.9.5 camelCase→snake_case 迁移（前端重构统一字段命名，存量 DB 需改写）
-            // 此函数读写 config 表，必须用配置库 pool
-            tauri::async_runtime::block_on(infra::data::config::migrate_camelcase_to_snake(&pools.config));
-            // 加载/初始化每个插件配置(不存在则写默认 {enabled, settings:null})。
-            tauri::async_runtime::block_on(plugin_engine.init_configs());
-            // 0.25.16:存量插件密钥搬迁——settings 里明文存的密钥字段转存 CM,SQLite 只留占位。
-            // 必须在设置页 get_plugins 之前(防明文回显);幂等由构造保证,无 marker。
-            tauri::async_runtime::block_on(plugin_engine.migrate_secret_fields_to_cm());
-
-            // 0.8.2 §3.4：把 PluginEngine 作为 PluginSettingResolver 后置注入 RuleRouter,
-            // 让 Context 触发能读插件 target_lang(如翻译)。同步 app_language 快照。
-            router.set_setting_resolver(plugin_engine.clone() as std::sync::Arc<dyn domain::plugin::PluginSettingResolver>);
-            router.set_app_language(app_config.language.clone());
-
-            // 0.8.5 §6.4：注入本体 engine 的 keyword 规则（先注入 engine，再注入插件——
-            // engine 优先级更高，命中即独占返回；插件 Takeover 走各自 manifest triggers）。
-            domain::search::register_engine_rules(&router);
-
-            // 注入规则到 RuleRouter（合并 manifest triggers + 用户自定义 triggers）
-            for plugin in &plugins {
-                // 0.26.17：args.hints 静态 manifest 数据，对全部插件注册（含禁用——
-                // 禁用过滤由规则移除承载；跳过注册会让"启动时禁用、后来启用"的
-                // 插件拿不到 hints，只能重启恢复）。
-                router.set_plugin_args_hints(plugin.id(), plugin.manifest().arg_hints().to_vec());
-                if !plugin_engine.is_enabled(plugin.id()) {
-                    tracing::debug!(plugin = %plugin.id(), "插件已禁用,跳过规则注入");
-                    continue;
-                }
-                // 读取配置（含自定义 triggers）
-                let config = plugin_engine.get_config(plugin.id()).unwrap_or_default();
-                let effective_triggers = config.effective_triggers(&plugin.manifest().triggers);
-                router.reload_plugin_triggers(plugin.id(), &effective_triggers);
-            }
-
-            // 0.26.12：快捷超链配置。`seeded=false`（从未生成）写入种子表并置位；
-            // 用户清空（seeded=true + 空表）不会回生。分片损坏时空表启动、不覆盖
-            // 存储值（weblinks 是用户自建数据，损坏不丢原件）。注册放在插件规则
-            // 注入之后——engine 路由优先级与注册顺序无关，后注入只为冲突校验能
-            // 覆盖插件触发词；运行期残留冲突 warn 跳过。
-            let mut weblinks_config = match tauri::async_runtime::block_on(
-                domain::config::store::ConfigStore::get_checked::<domain::config::shards::WebLinksConfig>(&pools.config),
-            ) {
-                Ok(cfg) => cfg,
-                Err(e) => {
-                    tracing::warn!(error = %e, "weblinks 配置分片损坏，空表启动（不覆盖存储值）");
-                    domain::config::shards::WebLinksConfig { entries: Vec::new(), seeded: true }
-                }
-            };
-            if !weblinks_config.seeded {
-                weblinks_config = domain::config::shards::WebLinksConfig::seed();
-                if let Err(e) = tauri::async_runtime::block_on(
-                    domain::config::store::ConfigStore::set(&pools.config, &weblinks_config),
-                ) {
-                    tracing::warn!(error = %e, "weblinks 种子表写入失败（不影响本次会话）");
-                }
-            }
-            if weblinks_config.upgrade_home_urls() {
-                if let Err(error) = tauri::async_runtime::block_on(
-                    domain::config::store::ConfigStore::set(&pools.config, &weblinks_config),
-                ) {
-                    tracing::warn!(%error, "超链默认主页升级写入失败（本次会话仍生效）");
-                }
-            }
-            let skipped = domain::search::register_weblinks_rules(&router, &weblinks_config);
-            if !skipped.is_empty() {
-                tracing::warn!(?skipped, "weblinks keyword 与现有触发词冲突，已跳过注册");
-            }
-
-            // 0.26.13：浏览器书签配置。分片损坏时默认配置启动、不覆盖存储值
-            //（与 weblinks 同策略，注册放最后承接冲突校验）。
-            let bookmarks_config =
-                match tauri::async_runtime::block_on(domain::config::store::ConfigStore::get_checked::<domain::config::shards::BookmarksConfig>(&pools.config)) {
-                    Ok(cfg) => cfg,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "bookmarks 配置分片损坏，默认配置启动（不覆盖存储值）");
-                        domain::config::shards::BookmarksConfig::default()
-                    }
-                };
-            let skipped = domain::search::register_bookmark_rules(&router, &bookmarks_config);
-            if !skipped.is_empty() {
-                tracing::warn!(?skipped, "bookmarks keyword 与现有触发词冲突，已跳过注册");
-            }
-
-            // 构造三层搜索引擎配置（应用搜索 / 文件搜索 / 计算器）
-            let start_menu_config = tauri::async_runtime::block_on(app::config::get_start_menu_config(&pools.config));
-            let file_config = tauri::async_runtime::block_on(app::config::get_file_search_config(&pools.config));
-            let calc_config = tauri::async_runtime::block_on(app::config::get_calc_config(&pools.config));
-            tracing::info!(
-                app_search = start_menu_config.enabled,
-                file_search = file_config.enabled,
-                data_source = %file_config.data_source,
-                calc = calc_config.enabled,
-                weblinks = weblinks_config.entries.len(),
-                bookmarks = bookmarks_config.enabled,
-                bookmarks_keyword = %bookmarks_config.keyword,
-                "搜索引擎配置"
-            );
-
-            // 构造 SearchService(多路引擎 + 意图路由)。command 层经 app.state 取用。
-            let engine_configs = domain::search::EngineConfigs {
-                start_menu: start_menu_config,
-                file: file_config,
-                calc: calc_config,
-                weblinks: weblinks_config,
-                bookmarks: bookmarks_config,
-            };
-            let search_service = std::sync::Arc::new(domain::search::SearchService::new(
-                domain_env.clone() as std::sync::Arc<dyn domain::event::EventPort>,
-                pools.history.clone(),
-                domain::search::build_engines(engine_configs, pools.history.clone(), pools.cache.clone()),
-                plugin_engine.clone(),
-                router.clone(),
-                suggestion_runtime.clone(),
-                suggestion_coordinator,
-                ai_registry_cell.clone(),
-                disabled_builtin_actions.clone(),
-                disabled_context_bindings.clone(),
-            ));
-            domain_env.set_search_service(search_service.clone());
-            app.manage(search_service.clone());
-            // 初始化 SearchService 的 max_results 内存值（来自 AppConfig，搜索热路径零 IO）
-            search_service.update_max_results(app_config.max_results as usize);
-            // 初始化内置动作 disable 列表（0.8.0 §1.3）
-            search_service.update_disabled_builtin_actions(app_config.disabled_builtin_actions.clone());
-            // 初始化 Suggestion 运行时配置（0.8.1 §2.5；0.24.2 加 secondary 门槛；
-            // 0.24.5 加展示策略开关组）。这些字段不在 AppConfig 门面里，
-            // 直接读分片（启动一次 DB 读）。
-            let suggestion_cfg = tauri::async_runtime::block_on(
-                domain::config::store::ConfigStore::get::<domain::config::shards::SuggestionConfig>(&pools.config),
-            );
-            search_service.update_suggestion_config(
-                domain::intent::suggestion::coordinator::SuggestionRuntimeConfig {
-                    autosuggest_enabled: app_config.autosuggest_enabled,
-                    min_score: app_config.autosuggest_min_score,
-                    secondary_min_rank: suggestion_cfg.secondary_min_rank,
-                    suppress_repeated: suggestion_cfg.suppress_repeated,
-                    completion_enabled: suggestion_cfg.completion_enabled,
-                    context_suggestion_enabled: suggestion_cfg.context_suggestion_enabled,
-                    ai_suggestion_enabled: suggestion_cfg.ai_suggestion_enabled,
-                    secondary_enabled: suggestion_cfg.secondary_enabled,
-                },
-            );
-            // 初始化 context binding 禁用列表（0.8.3 §4.6）
-            search_service.update_disabled_context_bindings(
-                app_config.disabled_context_bindings.clone(),
-            );
-            // 初始化界面语言快照（0.8.1）— 供 empty_arg_hint 等 LocalizableText 解析用
-            // 自动发现开启时语言初始化会发起后台任务，不能在同步 setup 线程调用。
-            tauri::async_runtime::block_on(async {
-                search_service.update_language(app_config.language.clone());
-            });
-            // 0.25.29：display_pages 已退役（流式加载首屏 = page_size × 2），不再接线
-            search_service.update_clipboard_search_enabled(app_config.clipboard.search_enabled);
-            search_service.update_clipboard_retention_days(app_config.clipboard.retention_days);
-            search_service.update_clipboard_candidate_limit(app_config.clipboard.candidate_limit);
-            // 0.20.1: 同步 page_size 到 ClipboardEngine（effective_limit = display_pages × page_size）
-            search_service.update_clipboard_page_size(app_config.page_size);
-            // 启动后台清理（0.12.0 §2.2.4）：搜索历史 + 剪贴板历史 + AI 审计日志
-            // 缓存库（performance_metrics / icon_cache）的清理在各自 init 时已 spawn。
-            pools.spawn_startup_cleanup(infra::data::CleanupParams {
-                search_history_enabled: app_config.search_history_enabled,
-                search_history_days: app_config.search_history_days,
-                clipboard_enabled: app_config.clipboard.enabled,
-                clipboard_retention_days: app_config.clipboard.retention_days,
-            });
-            // 注入 ContextConfig 内存缓存：invoke 热键回调零 IO 读它（热更新见 update_context_config）
-            let context_config = tauri::async_runtime::block_on(app::config::get_context_config(&pools.config));
-            let context_config_arc = std::sync::Arc::new(std::sync::RwLock::new(context_config));
-            app.manage(context_config_arc.clone());
-
-            // 0.9.2.1：注册剪贴板变化 hook,让主窗口打开时用户在其内部（或其他 app）
-            // Ctrl+C 后 AwarenessSnapshot 里的 Clipboard 项也能局部刷新——之前 snapshot
-            // 只在 window::invoke 时一次性 collect,主窗口保持打开期间就一直是老快照。
-            //
-            // 门控与 context::collect() 保持一致：总开关 + clipboard_enabled + 前台敏感应用
-            // 检查（复用 collect 内部逻辑,避免密码管理器 Ctrl+C 悄悄写入 snapshot）。
-            //
-            // hook 在 clipboard listener 线程被同步调用（消息循环）,只做轻量 RwLock 读 +
-            // upsert_text；两者都不阻塞。
-            {
-                let ctx_arc = context_config_arc.clone();
-                let ss = search_service.clone();
-                let app_handle = app.handle().clone();
-                infra::platform::clipboard::set_change_hook(Box::new(move |text: &str| {
-                    let cfg = { ctx_arc.read().unwrap().clone() };
-                    // 总开关 / 剪贴板开关 —— 与 collect() 前两道门一致
-                    if !cfg.enabled || !cfg.clipboard_enabled {
-                        return;
-                    }
-                    // 前台敏感应用（如密码管理器）—— 与 collect() 第三道门一致。
-                    // 只有敏感时才丢弃；非敏感或拿不到前台照常回写。
-                    if let Some(fg) = infra::platform::context::foreground_app()
-                        && cfg.is_sensitive(&fg.process_name) {
-                            tracing::debug!(app = %fg.process_name, "剪贴板变化 hook：前台敏感,跳过 snapshot 回写");
-                            return;
-                        }
-                    ss.update_clipboard_text(Some(text.to_string()));
-                    tracing::debug!(len = text.chars().count(), "剪贴板变化 → snapshot 已局部刷新");
-                    // 通知主窗口用当前 query 重跑一次（刷 Context Ghost / AI 四筛子）。
-                    // 只在主窗口可见时发——隐藏时窗口收不到 emit（Tauri 2 hidden webview
-                    // drop event,见 [[tauri-hidden-webview-emit-dropped]]）,而且下一次
-                    // invoke 会 collect() 重拍快照,不需要 push。
-                    if infra::platform::window::is_visible()
-                        && let Err(e) = app_handle.emit(EventNames::AWARENESS_UPDATED, ()) {
-                            tracing::debug!(?e, "emit blink://awareness-updated 失败");
-                        }
-                }));
-            }
-            // RuleRouter 单独注册供设置页 API 用（triggers 热更新）
-            app.manage(router.clone());
-
-            // 0.8.5 Chord：构建 registry（注册 stub 动作）
-            let chord_registry = std::sync::Arc::new(crate::domain::chord::build_default_registry());
-            // 0.9.7 Capability 能力协议层（inventory 自动收集 5 个样板能力）
-            let capability_registry = std::sync::Arc::new(crate::domain::capability::CapabilityRegistry::new());
-            // 0.22.18：初始化有界审计队列（tokio runtime 上下文中）
-            tauri::async_runtime::block_on(async {
-                crate::domain::capability::CapabilityRegistry::init_audit_writer();
-            });
-            domain_env.set_cap_registry(capability_registry.clone());
-
-            // 0.13.7:注册插件 tool 到 CapabilityRegistry——插件语义是「纯计算→返回结果」，
-            // 天然属于 Capability 范畴（入参→出参，不碰 UI）。0.13.7 从旧 ActionRegistry 迁入。
-            // 遍历所有已加载插件的 manifest.tools，为每个 tool 创建 PluginCapabilityAdapter 并注册。
-            {
-                let mut plugin_tool_count = 0usize;
-                for plugin_handle in plugin_engine.all_plugins() {
-                    let manifest = plugin_handle.manifest();
-                    if manifest.tools.is_empty() {
-                        continue;
-                    }
-                    for tool_def in &manifest.tools {
-                        let adapter = crate::domain::plugin::PluginCapabilityAdapter::new(
-                            plugin_handle.clone(),
-                            tool_def,
-                        );
-                        if capability_registry.get(adapter.id()).is_some() {
-                            tracing::warn!(
-                                plugin = %manifest.id,
-                                tool = %adapter.id(),
-                                "插件 tool id 与已有 Capability 冲突,跳过"
-                            );
-                            continue;
-                        }
-                        let adapter_id = adapter.id().to_string();
-                        tracing::info!(
-                            plugin = %manifest.id,
-                            tool = %adapter_id,
-                            danger = ?tool_def.danger_class,
-                            "注册插件 tool（Capability）"
-                        );
-                        // 0.21.13：register 返回 Result，插件注册前已用 get() 检查去重。
-                        if let Err(e) = capability_registry.register(std::sync::Arc::new(adapter)) {
-                            tracing::error!(
-                                plugin = %manifest.id,
-                                tool = %adapter_id,
-                                error = %e,
-                                "插件 tool 注册失败（id 冲突）"
-                            );
-                            continue;
-                        }
-                        plugin_tool_count += 1;
-                    }
-                }
-                if plugin_tool_count > 0 {
-                    tracing::info!(
-                        count = plugin_tool_count,
-                        total = capability_registry.len(),
-                        "插件 tool 注册完成（CapabilityRegistry）"
-                    );
-                }
-            }
-
-            // 0.17.11: CM→keyring 密钥迁移（一次性,幂等）
-            // 必须在 AIConfig 读取前执行——AIConfig 加载会触发密钥读取,需先迁到 keyring 新命名。
-            tauri::async_runtime::block_on(
-                crate::infra::platform::secret::migrate::migrate_legacy_cm_to_keyring(&pools.config),
-            );
-
-            // 0.25.15: keyring v1 命名({pid}/key.blink)→v2 命名(blink:{module}:{subject}:{purpose})
-            // 启动期自动收编,幂等自愈(0.25.16-fix 去 marker——枚举全量+Rust 过滤,
-            // 见 migrate_v2.rs 头注释);同样必须在 AIConfig/密钥读取前执行。
-            // 顺序:v0→新命名(v1)在前——从 0.17.11 前直接升级的用户经它落地即已是 v2。
-            tauri::async_runtime::block_on(
-                crate::infra::platform::secret::migrate_v2::migrate_keyring_v1_to_v2(),
-            );
-
-            // 0.9.2 Phase 5b:AIProviderRegistry 用 RigFactory 真接 rig-core。
-            // AI 配置分片(第 7 分片,独立于 AppConfig 门面);默认 enabled=false,老用户零副作用。
-            let ai_config = tauri::async_runtime::block_on(
-                app::config::ConfigStore::get::<app::ai_config::AIConfig>(&pools.config),
-            );
-            // 0.12 §2.7: 初始化 AIConfig 内存缓存（供 CloudSttEngine 等非 async 上下文读取）
-            app::ai_config::init_ai_cache(ai_config.clone());
-            let ai_registry = std::sync::Arc::new(
-                crate::domain::ai::AIProviderRegistry::from_config(
-                    crate::domain::ai::default_factory(),
-                    &ai_config,
-                ),
-            );
-            // 注入共享 registry cell(0.9.2 setter 注入,规避 search_service 先于 ai_registry
-            // 构造的顺序倒挂)。0.24.2 起该 cell 与 AiProducer 共享——availability
-            // 判定与 produce 文本分类读同一份；未注入时 AskAi 候选被 eligibility 排除。
-            search_service.set_ai_registry(ai_registry.clone());
-            tracing::info!(
-                enabled = ai_config.enabled,
-                providers = ai_config.providers.len(),
-                pool_size = ai_registry.size(),
-                "AIProviderRegistry 已构造(5b RigFactory)"
-            );
-
-            // PluginEngine：clone 一份给 AppContext，原值继续 manage
-            let plugin_engine_for_ctx = plugin_engine.clone();
-
-            // 0.10: VoiceService(hold-to-talk 管线编排)
-            // 初始化 STT 配置缓存（供 STT 引擎同步读取）
-            let mut stt_config = tauri::async_runtime::block_on(
-                app::config::ConfigStore::get::<app::stt_config::SttConfig>(&pools.config),
-            );
-            // 启动期一次性迁移 STT 云端配置（0.12 cloud 引用模式 → 独立 cloud_provider 模式）
-            if stt_config.apply_migration(&crate::domain::config::ai_config::stt_migration_providers(&ai_config)) {
-                let _ = tauri::async_runtime::block_on(
-                    app::config::ConfigStore::set::<app::stt_config::SttConfig>(
-                        &pools.config,
-                        &stt_config,
-                    ),
-                );
-                tracing::info!("STT 云端配置迁移已持久化到配置库");
-            }
-            // 0.23.7/0.23.9：旧库中非法的 VAD 窗口组合和 Recognition 参数安全
-            // 归一化并持久化，保证引擎与设置页读到的恒为有效组合（缺字段时
-            // serde 默认 VAD=8/12/12、Recognition=3000/700/5/700）。
-            if stt_config.local_engine.sanitize() {
-                let _ = tauri::async_runtime::block_on(
-                    app::config::ConfigStore::set::<app::stt_config::SttConfig>(
-                        &pools.config,
-                        &stt_config,
-                    ),
-                );
-                tracing::info!("STT VAD/Recognition 配置已归一化并持久化");
-            }
-            app::stt_config::init_cache(stt_config);
-
-            let voice_service = std::sync::Arc::new(app::voice::VoiceService::new(app.handle().clone()));
-
-            // 后台服务编排:按依赖拓扑顺序启动。
-            // 0.8.6 §8.2.3：AppContext 持有全部核心服务引用（真依赖容器）。
-            let ctx = app::service::AppContext {
-                app: app.handle().clone(),
-                pools: pools.clone(),
-                config: app_config,
-                ai_config: ai_config.clone(),
-                search_service: search_service.clone(),
-                plugin_engine: plugin_engine_for_ctx,
-                router: router.clone(),
-                chord_registry: chord_registry.clone(),
-                capability_registry: capability_registry.clone(),
-                ai_registry: ai_registry.clone(),
-                voice_service: voice_service.clone(),
-            };
-            let services = app::service::all_services();
-            let svc_start = std::time::Instant::now();
-            for svc in &services {
-                if let Err(e) = tauri::async_runtime::block_on(svc.start(&ctx)) {
-                    tracing::error!(service = svc.name(), error = %e, "service start failed");
-                }
-            }
-            // 记录服务初始化耗时
-            let svc_elapsed = svc_start.elapsed().as_secs_f64() * 1000.0;
-            tauri::async_runtime::block_on(infra::utils::perf::record_blocking(
-                &pools.cache,
-                infra::utils::perf::MetricCategory::Startup,
-                "services_init",
-                svc_elapsed,
-                None,
-            ));
-            // 记录启动总耗时（setup 在同步上下文，需用 block_on）
-            let startup_total_ms = startup_start.elapsed().as_secs_f64() * 1000.0;
-            tauri::async_runtime::block_on(infra::utils::perf::record_blocking(
-                &pools.cache,
-                infra::utils::perf::MetricCategory::Startup,
-                "total",
-                startup_total_ms,
-                None,
-            ));
-
-            // 0.12.1 Phase 3B-1: chat AgentProvider 懒构造；memory 归 ChatService 所有。
-            // 0.13.0: McpClientManager 管理 MCP server 子进程生命周期，传入 ChatService
-            // 供 ensure_provider() 拉 MCP tool 进对话窗口 tool 池。
-            // 0.17.8: PendingConfirms 使用 with_persistence，注入 config_pool + AiPermissionConfig。
-            let ai_permission_config =
-                tauri::async_runtime::block_on(
-                    crate::domain::config::app_config::get_ai_permission_config(&pools.config),
-                );
-            let pending_confirms = std::sync::Arc::new(
-                domain::ai::tool_adapter::PendingConfirms::with_persistence(
-                    pools.config.clone(),
-                    ai_permission_config,
-                ),
-            );
-            let mcp_client = std::sync::Arc::new(domain::mcp::McpClientManager::new());
-            let chat_service = std::sync::Arc::new(
-                tauri::async_runtime::block_on(domain::ai::chat_service::ChatService::new(
-                    domain_env.clone() as std::sync::Arc<dyn domain::event::EventPort>,
-                    domain_env.clone() as std::sync::Arc<dyn domain::event::CapabilityEnv>,
-                    // 0.21: AI tool 经 Registry 调 GUI starter 能力需真实 gui_surface 运行时
-                    Some(
-                        domain_env.clone()
-                            as std::sync::Arc<dyn domain::capability::SurfacePort>,
-                    ),
-                    ai_registry.clone(),
-                    capability_registry.clone(),
-                    pending_confirms.clone(),
-                    mcp_client.clone(),
-                    pools.ai.clone(),
-                    pools.config.clone(),
-                )),
-            );
-            domain_env.set_chat_service(chat_service.clone());
-
-            // 注册到 Tauri state（command 层 app.state 取用）
-            app.manage(plugin_engine);
-            app.manage(chord_registry);
-            // 0.9.7 Capability 能力协议层（Step 4 起 AI tool 池消费）
-            app.manage(capability_registry.clone());
-            // 0.21.5: 首次启动生成 AI 推荐 allowlist（静默，不提示用户）
-            tauri::async_runtime::block_on(
-                crate::domain::config::ai_capability_access::AiCapabilityAccessStore::ensure_recommended(
-                    &pools.config,
-                    capability_registry.as_ref(),
-                ),
-            );
-            // 0.21.10: 首次启动生成 MCP 默认暴露集合（无风险能力，静默）
-            tauri::async_runtime::block_on(
-                crate::domain::mcp::server_config::McpServerModeConfigStore::ensure_default_exposure(
-                    &pools.config,
-                    capability_registry.as_ref(),
-                ),
-            );
-            // 0.9.1 Phase 5a：AI Provider registry(Phase 5b 起 SearchService 消费)
-            app.manage(ai_registry);
-            // 0.10: VoiceService(command 层 cancel_voice_recording / is_voice_recording 消费)
-            app.manage(voice_service);
-            // 0.12.0 §2.4: 对话窗口危险确认闭环（tool_adapter call 挂起 + confirm_chat_action 唤醒）
-            app.manage(pending_confirms);
-            app.manage(chat_service);
-            // 0.13.0: MCP client 管理器（command 层 app.state 取用）
-            app.manage(mcp_client.clone());
-            // 0.14.6 §2.2：DomainEnv 注册为 managed state（command 层 app.state 取用）
-            app.manage(domain_env);
-            // 0.19.13: 保留 clone 供 McpServerRuntime 构造用
-            let domain_env_for_mcp = app
-                .state::<std::sync::Arc<app::domain_env::TauriDomainEnv>>()
-                .inner()
-                .clone();
-            let cap_registry_for_mcp = app
-                .state::<std::sync::Arc<domain::capability::CapabilityRegistry>>()
-                .inner()
-                .clone();
-
-            // 0.13.3: 启动时扫描 Skill 目录（非阻塞，后台执行）
-            {
-                let ai_config = app::ai_config::get_ai_config();
-                if ai_config.chat_config.skill_config.enabled {
-                    let skill_config = ai_config.chat_config.skill_config;
-                    let app_clone = app.handle().clone();
-                    tauri::async_runtime::spawn(async move {
-                        use tauri::Manager;
-                        if let Some(cs) = app_clone
-                            .try_state::<std::sync::Arc<domain::ai::chat_service::ChatService>>()
-                        {
-                            cs.apply_skill_config(&skill_config);
-                            let count = cs.skill_registry().count();
-                            if count > 0 {
-                                tracing::info!(count, "启动时 Skill 扫描完成");
-                            }
-                        }
-                    });
-                }
-            }
-
-            // 后台预热次级窗口（1s 延迟，不阻塞启动；WebView2 冷启动 300~400ms → 预热后 show <50ms）
-            infra::platform::window::preheat_secondary_windows(app.handle().clone());
-
-            // 0.25.20：清扫脚本解释器孤儿 staging（上次安装中断的残留；
-            // 独立线程，不阻塞主链路）
-            app::commands::startup_sweep();
-            // 0.26.14：清扫托管 Everything 运行时孤儿 staging
-            app::commands::managed_runtime_startup_sweep();
-
-            // 0.22.3: 构造进程级 EngineManager（全进程唯一实例）
-            //
-            // - 编译期注册 FunASR + PaddleOCR adapter
-            // - TauriEventPort 负责通用事件投影 + 旧 FunASR 兼容投影
-            // - service_epoch 在构造时生成，Blink 实例生命周期内不变
-            // - 0.22.3: 安装走 RuntimeProvider transaction（ProviderDescriptor + PythonVenvProvider）
-            // - 0.22.4: 同时注册 paddleocr adapter + OcrCoordinator（OcrBackendRouter）
-            // - 0.22.7.4: funasr 为 GGUF 常驻 worker 实现（ManagedBinary +
-            //   StdioWorker），旧 Python/PyTorch 链路已删除
-            let funasr_adapter = crate::app::local_engine::funasr::make_funasr_adapter();
-            let paddleocr_adapter = crate::app::local_engine::paddleocr::make_paddleocr_adapter();
-            let engine_registry = std::sync::Arc::new(
-                crate::app::local_engine::EngineRegistry::new_with_adapters(vec![
-                    funasr_adapter,
-                    paddleocr_adapter,
-                ]),
-            );
-            // 会话内 operation 日志回放存储——与环境/模型安装共用同一个 EventPort。
-            let operation_log_store = std::sync::Arc::new(
-                crate::app::local_engine::OperationLogStore::new(),
-            );
-            app.manage(operation_log_store.clone());
-            let event_port = crate::app::local_engine::make_event_port(
-                app.handle().clone(),
-                operation_log_store.clone(),
-            );
-
-            // 构造 provider descriptors map（安装事务用）。
-            // funasr = ManagedBinary（GGUF worker）；paddleocr = OnnxRuntime（0.22.8）。
-            // 0.22.10：PythonVenv provider 已退役，legacy manifest 只读不写。
-            let funasr_descriptor =
-                crate::app::local_engine::funasr::make_funasr_provider_descriptor();
-            let paddleocr_descriptor =
-                crate::app::local_engine::paddleocr::make_paddleocr_onnx_provider_descriptor();
-            let mut provider_descriptors = std::collections::HashMap::new();
-            provider_descriptors.insert(funasr_descriptor.engine_id.clone(), funasr_descriptor);
-            provider_descriptors.insert(
-                paddleocr_descriptor.engine_id.clone(),
-                paddleocr_descriptor,
-            );
-
-            // 单一 EngineManager：环境部署 + 模型资产 + 进程生命周期 + 事件。
-            // 模型目录与安装 worker 在构造时注入——不再有平级的 ModelService。
-            // 模型状态从磁盘 manifest 按需读取（结构校验，不做全量 hash）。
-            let local_engine_service =
-                crate::app::local_engine::EngineManager::new_with_providers(
-                    engine_registry,
-                    event_port,
-                    provider_descriptors,
-                    crate::app::local_engine::model_installer::make_funasr_model_registry(),
-                    std::sync::Arc::new(
-                        crate::app::local_engine::funasr::FunasrGgufModelInstallWorker::new(),
-                    ),
-                );
-            app.manage(local_engine_service.clone());
-            // 0.22.9 Handoff 08：注入 selected 模型存储（跨 runtime 切换事务的
-            // 配置提交端口——DB 持久化 + 缓存 + 事件广播）
-            local_engine_service.set_selected_store(std::sync::Arc::new(
-                crate::app::local_engine::selected_store::SttSelectedModelStore::new(
-                    app.handle().clone(),
-                ),
-            ));
-            tracing::info!(
-                epoch = local_engine_service.epoch().0,
-                "EngineManager 已构造（funasr + paddleocr adapter 与模型目录已注册）"
-            );
-
-            // 0.22.16 Handoff 04（0.23.12 迁移到统一 ResourceStore）：构造一次性文件转写编排服务
-            //
-            // AudioTranscriptionService 是唯一 app 层转写编排器：
-            // 消费 audio_ref → 解析资源 → 冻结 STT 身份 → 阻塞池解码规范化 →
-            // 调用现有 transport → 返回稳定结构化结果。
-            //
-            // 依赖：DefaultResourceStore（进程级，TauriDomainEnv 持有同一实例）、
-            // EngineConnectionAdapter（桥接 EngineManager）、
-            // SttCloudEgressAuthorizer（云端外发授权）。
-            // 注入到 domain_env 供 command 层 / capability 层取用。
-            //
-            // store 同时注册为 managed state，供本地 UI pick_audio_file 签发 audio_ref
-            //（AudioPickSession 记录 pick 会话撤销组，见 audio_transcribe.rs）。
-            {
-                let env = app
-                    .state::<std::sync::Arc<app::domain_env::TauriDomainEnv>>()
-                    .inner()
-                    .clone();
-                let resource_store = std::sync::Arc::clone(
-                    crate::domain::event::CapabilityEnv::resource_store(&*env)
-                        .expect("TauriDomainEnv 持有统一 ResourceStore"),
-                );
-                let engine_conn = std::sync::Arc::new(
-                    crate::app::audio_transcription_service::EngineConnectionAdapter::new(
-                        local_engine_service.clone(),
-                    ),
-                );
-                let cloud_auth = std::sync::Arc::new(
-                    crate::app::audio_transcription_service::SttCloudEgressAuthorizer::new(),
-                );
-                let transcription_service =
-                    std::sync::Arc::new(
-                        crate::app::audio_transcription_service::AudioTranscriptionService::new(
-                            resource_store.clone(),
-                            engine_conn,
-                            cloud_auth,
-                            crate::app::audio_transcription_service::TranscriptionConfig::default(),
-                        ),
-                    );
-                // 注册为 managed state（command 层通过 app.state 取用）
-                app.manage(transcription_service.clone());
-                // 统一 ResourceStore 也注册为 managed state——
-                // UI 可信入口通过它签发 audio_ref，不暴露给前端
-                app.manage(resource_store);
-                app.manage(app::commands::AudioPickSession::default());
-                env.set_audio_transcription(
-                    transcription_service as std::sync::Arc<
-                        dyn crate::domain::stt::transcribe::AudioTranscriptionPort,
-                    >,
-                );
-                tracing::info!("AudioTranscriptionService 已构造并注入 domain_env（ResourceStore 音频腿）");
-            }
-
-            // 0.22.6.6: 后台扫描遗留 lease——基于证据的 fail-closed 恢复
-            //
-            // 不阻塞 Alt+Space 主链路——在 spawn 的 async task 中执行。
-            // 所有阻塞操作（进程查询、文件扫描）均移至 spawn_blocking。
-            //
-            // 恢复策略（fail-closed）：
-            // 1. 扫描 lease 文件（spawn_blocking）
-            // 2. 对每个 lease 构造 ProcessEvidence（spawn_blocking 中查询 OS）
-            // 3. 尝试 health 验证（async reqwest）
-            // 4. 调用 decide_recovery 纯函数决策
-            // 5. PidNotFound → 清除 stale lease
-            //    其他 DoNotAdopt → 只产结构化诊断日志，不自动 kill/adopt
-            //    Adoptable → 记录 info 日志（仍不自动接管，由用户在设置页确认）
-            {
-                tauri::async_runtime::spawn(async move {
-                    // 延迟 2s 避免与启动竞争——扫描不紧急
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
-                    // 0.22.6.6: lease 文件扫描移至 spawn_blocking（同步 IO）
-                    let leases = tokio::task::spawn_blocking(|| {
-                        crate::infra::local_engine::lease::scan_leases()
-                    })
-                    .await
-                    .unwrap_or_default();
-
-                    if leases.is_empty() {
-                        tracing::debug!("lease 扫描: 无遗留 lease");
-                        return;
-                    }
-
-                    tracing::warn!(
-                        count = leases.len(),
-                        "lease 扫描: 发现遗留 lease（上次 Blink 可能非正常退出）"
-                    );
-
-                    for lease in &leases {
-                        tracing::warn!(
-                            engine_id = %lease.engine_id,
-                            instance_id = %lease.instance_id,
-                            pid = lease.pid,
-                            endpoint = %lease.endpoint,
-                            "遗留 lease 发现——开始基于证据的恢复决策"
-                        );
-
-                        // 0.22.6.6: 在 spawn_blocking 中查询进程身份
-                        // （OpenProcess / QueryFullProcessImageNameW / GetProcessTimes 均为阻塞调用）
-                        let pid = lease.pid;
-                        let process_evidence =
-                            tokio::task::spawn_blocking(move || {
-                                crate::infra::local_engine::lease_recovery::build_process_evidence(pid)
-                            })
-                            .await
-                            .unwrap_or_else(|e| {
-                                tracing::warn!(
-                                    engine_id = %lease.engine_id,
-                                    pid = lease.pid,
-                                    error = %e,
-                                    "spawn_blocking 查询进程身份失败"
-                                );
-                                crate::infra::local_engine::lease::ProcessEvidence {
-                                    pid_exists: false,
-                                    actual_executable: None,
-                                    actual_creation_time_ms: None,
-                                }
-                            });
-
-                        // 尝试 health 验证（async reqwest）
-                        let health_evidence =
-                            crate::infra::local_engine::lease_recovery::probe_health_evidence(
-                                &lease.endpoint,
-                            )
-                            .await;
-
-                        // 调用纯函数 decide_recovery
-                        let decision = crate::infra::local_engine::lease::decide_recovery(
-                            lease,
-                            &process_evidence,
-                            health_evidence.as_ref(),
-                        );
-
-                        match &decision {
-                            crate::infra::local_engine::lease::RecoveryDecision::Adoptable {
-                                engine_id,
-                                instance_id,
-                                pid,
-                            } => {
-                                // 全部证据闭合——但仍不自动接管
-                                // 由用户在设置页确认是否手动停止/接管
-                                tracing::info!(
-                                    engine_id = %engine_id,
-                                    instance_id = %instance_id,
-                                    pid,
-                                    "lease 恢复决策: Adoptable（全部证据闭合）——不自动接管，需用户在设置页确认"
-                                );
-                            }
-                            crate::infra::local_engine::lease::RecoveryDecision::DoNotAdopt(diag) => {
-                                use crate::infra::local_engine::lease::RecoveryReason::*;
-                                match &diag.reason {
-                                    PidNotFound => {
-                                        tracing::info!(
-                                            engine_id = %diag.engine_id,
-                                            pid = diag.pid,
-                                            reason = "PidNotFound",
-                                            detail = %diag.detail,
-                                            "lease 恢复决策: PID 不存在——清除 stale lease"
-                                        );
-                                        // 清除 stale lease（spawn_blocking 中的同步 IO）
-                                        let engine_id = lease.engine_id.clone();
-                                        let instance_id = lease.instance_id.clone();
-                                        if let Err(e) =
-                                            tokio::task::spawn_blocking(move || {
-                                                crate::infra::local_engine::lease::remove_lease(
-                                                    &engine_id,
-                                                    &instance_id,
-                                                )
-                                            })
-                                            .await
-                                            .unwrap_or_else(|e| {
-                                                Err(crate::infra::local_engine::lease::LeaseError::Io(
-                                                    format!("spawn_blocking 失败: {e}"),
-                                                ))
-                                            })
-                                        {
-                                            tracing::warn!(
-                                                engine_id = %lease.engine_id,
-                                                error = %e,
-                                                "清除 stale lease 失败"
-                                            );
-                                        }
-                                    }
-                                    _ => {
-                                        // 其他原因——只产结构化诊断，不自动 kill/adopt
-                                        tracing::warn!(
-                                            engine_id = %diag.engine_id,
-                                            instance_id = %diag.instance_id,
-                                            pid = diag.pid,
-                                            reason = ?diag.reason,
-                                            detail = %diag.detail,
-                                            "lease 恢复决策: DoNotAdopt——不接管，需用户在设置页确认"
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                });
-            }
-
-            // 0.22.8-D: 构造 OcrCoordinator 并安装为全局 OcrBackendRouter
-            //
-            // - OcrCoordinator 持有 OnnxOcrExecutor（in-process ONNX 识别）
-            // - 路由 windows/paddleocr/auto 三种模式
-            // - in-flight tracker + singleflight + idle TTL
-            // - ocr_image Capability 和截图 OCR 通过 router() 获取实例
-            // Task 18: 保存 Arc 用于 app 退出时 shutdown
-            let onnx_executor =
-                crate::app::local_engine::ocr_coordinator::build_onnx_executor_from_deployment();
-            let ocr_coordinator = crate::app::local_engine::ocr_coordinator::OcrCoordinator::new(
-                onnx_executor,
-            );
-            // 0.22.9：接线 EngineManager 弱引用——OCR 懒启动成功 / idle 回收时
-            // 把引擎卡片状态同步为 Running / Stopped（best effort）
-            ocr_coordinator.attach_engine_service(&local_engine_service);
-            // Task 18: 注册为 managed state，供 shutdown 时使用
-            app.manage(ocr_coordinator.clone());
-            crate::domain::ocr::router::install_router(ocr_coordinator);
-            tracing::info!("OcrCoordinator 已安装为 OcrBackendRouter");
-
-            // 0.22.4 / Task 15: 初始化 OcrConfig 缓存——从 SQLite 读取，而非 default
-            // 使用 load_and_init_cache helper——与测试路径调用相同逻辑
-            {
-                let ocr_config = tauri::async_runtime::block_on(
-                    crate::domain::config::ocr_config::load_and_init_cache(&pools.config),
-                );
-                tracing::info!(
-                    backend = ?ocr_config.backend,
-                    model = ?ocr_config.paddle_model,
-                    lifecycle = ?ocr_config.lifecycle,
-                    compute_preference = ?ocr_config.compute_preference,
-                    "OcrConfig 已从 SQLite 加载"
-                );
-            }
-
-            // 0.10: 自动启动 funasr-server（懒加载，延迟 5s 避免与启动竞争资源）
-            //
-            // 0.22.3: 改为调用 EngineManager.start("funasr")
-            // 0.22.6 H4: 自启语义——只有语音功能启用、本地模式、选择模型可用且
-            // auto_start=true 时启动；读取/保存本身不隐式启动。
-            // 是否立即启动由显式 start action 决定。
-            //
-            // 0.22.6 phase B: AdapterConfig 从 config_source 唯一入口构造
-            // （与 commands/repair 共享同一份规则，含 device=cuda→Cpu 归一化）。
-            // setup 本身只做轻量恢复；此处的启动是用户显式偏好（auto_start_server），
-            // 且全程异步后台执行，不进入 Alt+Space 主链路。
-            {
-                let stt_config = app::stt_config::get_stt_config();
-                if stt_config.enabled
-                    && stt_config.mode == app::stt_config::SttMode::Local
-                    && stt_config.local_engine.auto_start_server
-                    && stt_config.local_stt_selection.is_some()
-                {
-                    let svc = local_engine_service.clone();
-                    tauri::async_runtime::spawn(async move {
-                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                        tracing::info!("自动启动 funasr-server（auto_start_server 已开启）");
-
-                        let engine_id = crate::infra::local_engine::runtime::EngineId::new(
-                            crate::app::local_engine::funasr::FUNASR_ENGINE_ID,
-                        )
-                        .expect("funasr engine id is valid");
-                        let adapter_config = match crate::app::local_engine::config_source::adapter_config_for_engine(&engine_id) {
-                            Some(c) => c,
-                            None => {
-                                tracing::error!("自动启动: 无法从配置真源构造 AdapterConfig");
-                                return;
-                            }
-                        };
-
-                        // 0.22.3: 环境检查 + 安装统一走 EngineManager
-                        match svc.ensure_installed(&engine_id, adapter_config.clone()).await {
-                            Ok(_) => {}
-                            Err(e) => {
-                                tracing::error!(%e, "自动启动: 环境安装失败");
-                                return;
-                            }
-                        }
-
-                        match svc.start(&engine_id, adapter_config).await {
-                            Ok(()) => {
-                                tracing::info!("funasr-server 已通过 EngineManager 自动启动");
-                            }
-                            Err(e) => {
-                                tracing::error!(%e, "funasr-server 自动启动失败");
-                            }
-                        }
-                    });
-                }
-            }
-
-            // 0.13.7: MCP server 不在启动时自动拉起——改为 lazy connect。
-            // 对话窗口首次可见后台预热；prompt 侧最多等待 5 秒并复用同一连接任务。
-            // 设置页的「测试连接」按钮也可手动探测。
-
-            // 持有服务列表,保证其生命周期与 app 一致。
-            app.manage(services);
-
-            // 0.23.1：单 EditorSession 服务（会话身份/窗口绑定/保存分派；
-            // 依赖的 DomainEnv/连接池在运行时经 app.state 解析，此处只注入 handle）
-            app.manage(std::sync::Arc::new(app::editor::EditorSessionService::new(
-                app.handle().clone(),
-            )));
-
-            // 修复：编辑器恢复草稿存储（原子持久化 + 单调 revision 水位；
-            // 与保存目标完全分离，只写 %APPDATA%\blink\editor-drafts）
-            app.manage(std::sync::Arc::new(app::editor_draft::EditorDraftStore::new()));
-
-            // 0.23.4：编辑器 AI 整理服务（全局单活跃经 ChatService tracker；
-            // provider 池与活跃槽在运行时经 app.state 解析）
-            if let Some(chat) = app
-                .try_state::<std::sync::Arc<domain::ai::chat_service::ChatService>>()
-                .map(|c| c.inner().clone())
-            {
-                app.manage(std::sync::Arc::new(
-                    app::editor_transform::EditorTransformService::new(app.handle().clone(), chat),
-                ));
-            } else {
-                tracing::warn!("editor transform: ChatService 不可用，整理功能未启用");
-            }
-
-            // 0.16.7：便签服务（domain 层，框架无关；command 层经 app.state 取用）
-            let sticky_service = std::sync::Arc::new(
-                domain::sticky::StickyService::new(pools.history.clone()),
-            );
-            app.manage(sticky_service.clone());
-
-            // 0.21.14：窗口事件回调注册——infra 层通过 Tauri state 消费，
-            // 不反向依赖 domain/app。
-            // chat 窗口 CloseRequested → abort active request
-            app.manage(app::ChatCloseCallback(std::sync::Arc::new(|app: &tauri::AppHandle| {
-                use tauri::Manager;
-                if let Some(cs) =
-                    app.try_state::<std::sync::Arc<domain::ai::chat_service::ChatService>>()
-                {
-                    cs.abort_active();
-                }
-            })));
-            // welcome 窗口 CloseRequested → 标记完成当前版引导（0.22.13 版本号化）
-            app.manage(app::WelcomeCloseCallback(std::sync::Arc::new(|app: &tauri::AppHandle| {
-                use tauri::Manager;
-                let pools = app.state::<crate::infra::data::DbPools>().inner().clone();
-                tauri::async_runtime::spawn(async move {
-                    let version = crate::domain::config::ONBOARDING_VERSION;
-                    let _ = app::config::update_onboarding_version(&pools.config, version).await;
-                    tracing::info!(version, "welcome window: CloseRequested -> onboarding_version");
-                });
-            })));
-            // sticky spare close → trash_note + emit STICKY_TRASHED
-            app.manage(app::StickySpareCloseCallback(std::sync::Arc::new(
-                |app: &tauri::AppHandle, sticky_id: &str| {
-                    use tauri::{Emitter, Manager};
-                    let sticky_id = sticky_id.to_string();
-                    let app = app.clone();
-                    Box::pin(async move {
-                        if let Some(svc) = app
-                            .try_state::<std::sync::Arc<domain::sticky::StickyService>>()
-                        {
-                            if let Err(e) = svc.trash_note(&sticky_id).await {
-                                tracing::warn!(error = %e, "预热便签关闭时移入回收站失败");
-                            } else {
-                                let _ = app.emit(
-                                    domain::event_names::EventNames::STICKY_TRASHED,
-                                    serde_json::json!({ "stickyId": sticky_id }),
-                                );
-                            }
-                        }
-                    })
-                },
-            )));
-
-            // 0.16.13：便签恢复逻辑已提取为 StickyRecoveryService，纳入 all_services() 编排。
-            // 见 src/app/service.rs::StickyRecoveryService。
-
-            // 0.19.13: MCP Server Runtime——主进程 Streamable HTTP MCP Server 生命周期管理。
-            // 在 CapabilityRegistry、EventPort/CapabilityEnv、pools.ai 都就绪后构造。
-            // 启动时按配置自动启动 listener（如果 enabled=true）。
-            let mcp_server_runtime = std::sync::Arc::new(
-                app::mcp_server_runtime::McpServerRuntime::new(
-                    cap_registry_for_mcp,
-                    domain_env_for_mcp.clone() as std::sync::Arc<dyn domain::event::CapabilityEnv>,
-                    domain_env_for_mcp.clone() as std::sync::Arc<dyn domain::event::EventPort>,
-                    pools.ai.clone(),
-                ),
-            );
-            app.manage(mcp_server_runtime.clone());
-
-            // 后台加载配置并按需启动 listener（不阻塞启动流程）
-            {
-                let runtime = mcp_server_runtime.clone();
-                let config_pool = pools.config.clone();
-                tauri::async_runtime::spawn(async move {
-                    let config = domain::mcp::McpServerModeConfigStore::load(&config_pool)
-                        .await
-                        .unwrap_or_default();
-                    runtime.apply_config(&config).await;
-                });
-            }
-
-            Ok(())
-        })
-        .invoke_handler(tauri::generate_handler![
-            app::commands::hide_window,
-            app::commands::hide_settings_window,
-
-            app::commands::search_apps,
-            app::commands::report_suggestion_adoption,
-            app::commands::reset_suggestion_session,
-            app::commands::launch_app,
-            app::commands::run_builtin_action,
-            app::commands::confirm_chat_action,
-            app::commands::hide_chat_window,
-            app::commands::take_chat_prefill,
-            app::commands::ack_chat_prefill,
-            app::commands::chat_prompt,
-            app::commands::chat_abort,
-            app::commands::clear_main_ai_active,
-            app::commands::promote_ephemeral_conversation,
-            app::commands::get_chat_status,
-            app::commands::get_chat_models,
-            app::commands::select_chat_model,
-            app::commands::set_model_reasoning_effort,
-            // 0.17.9: 主窗口 AI 独立模型选择
-            app::commands::get_ephemeral_models,
-            app::commands::select_ephemeral_model,
-            app::commands::start_chat_stt,
-            app::commands::stop_chat_stt,
-            app::commands::list_chat_conversations,
-            app::commands::delete_chat_conversation,
-            app::commands::rename_chat_conversation,
-            app::commands::get_chat_messages,
-            app::commands::get_conversation_system_prompt, // 0.12.7 §6.5
-            app::commands::open_settings_tab,
-            app::commands::get_guide_markdown, // 0.25.28 丝滑小妙招
-            app::commands::save_text_file,
-            app::commands::generate_conversation_title,
-            app::commands::truncate_messages,
-            app::commands::list_conversation_groups,
-            app::commands::create_conversation_group,
-            app::commands::rename_conversation_group,
-            app::commands::delete_conversation_group,
-            app::commands::update_conversation_group_system_prompt,
-            app::commands::move_conversation_to_group,
-            app::commands::set_group_sort_order,
-            app::commands::set_group_expanded,
-            app::commands::list_builtin_actions,
-            app::commands::list_context_bindings,
-            // 0.21.4：功能目录聚合与批量 binding 操作
-            app::commands::list_feature_catalog,
-            app::commands::apply_binding_ops,
-            // 0.21.6：MCP 能力摘要
-            app::commands::get_catalog_mcp_summary,
-            app::commands::trigger_chord,
-            app::commands::list_chord_actions,
-            app::commands::list_all_chord_actions,
-            app::commands::get_awareness_text,
-            app::commands::register_main_input_view,
-            app::commands::update_main_input_context,
-app::commands::screenshot_copy,
-app::commands::screenshot_copy_region,
-app::commands::screenshot_copy_rgba,
-            app::commands::screenshot_cancel,
-            app::commands::screenshot_pin,
-            app::commands::screenshot_pin_region,
-            app::commands::screenshot_pin_hide,
-            app::commands::screenshot_pin_transform,
-            app::commands::screenshot_pin_move,
-            app::commands::screenshot_pin_refresh,
-            app::commands::screenshot_pin_refresh_by_label,
-            app::commands::screenshot_pin_get_rect,
-            app::commands::pin_work_area,
-            app::commands::win32_left_button_down,
-            // 多 Pin N+1 + pin 保存
-            app::commands::pin_spare_ready,
-            app::commands::pin_save_clipboard,
-            app::commands::pin_save_as,
-            app::commands::screenshot_save,
-            app::commands::image_editor_copy,
-            app::commands::image_editor_pin,
-            app::commands::image_editor_save,
-            app::commands::image_editor_cancel,
-            // 0.20.x：pin 来源编辑器的勾按钮——编辑结果替换回原 pin 窗口
-            app::commands::image_editor_apply_to_pin,
-            // 0.20.4：多来源图片编辑入口
-            app::commands::open_image_editor_from_clipboard,
-            app::commands::open_image_editor_from_history,
-            app::commands::open_image_editor_from_pin,
-            app::commands::screenshot_save_replay_file,
-            app::commands::screenshot_set_annotation_mode,
-            app::commands::screenshot_window_list,
-            app::commands::screenshot_control_hints,
-            app::commands::screenshot_set_capture_exclusion,
-            app::commands::screenshot_capture_band,
-            app::commands::screenshot_capture_probe,
-            app::commands::screenshot_cursor_position,
-            app::commands::screenshot_forward_wheel,
-            app::commands::list_system_fonts,
-app::commands::ocr_image,
-app::commands::cancel_ocr_request, // 0.22.4
-app::commands::ocr_diagnose,
-            app::commands::get_ocr_config, // 0.22.4
-            app::commands::set_ocr_config, // 0.22.4
-            // 0.22.4: PaddleOCR 管理命令
-            app::commands::install_paddleocr,
-            app::commands::repair_paddleocr,
-            app::commands::start_paddleocr,
-            app::commands::stop_paddleocr,
-            app::commands::get_paddleocr_status,
-            app::commands::translate_text,
-            app::commands::translate_lines,
-            app::commands::analyze_palette,
-app::commands::generate_palette_schemes,
-            app::commands::hide_screenshot_overlay,
-            app::commands::get_storage_info,
-            app::commands::clear_history,
-            app::commands::clear_ai_audit,
-            app::commands::clear_all_conversations,
-            app::commands::open_data_folder,
-            app::commands::retry_migration,
-            app::commands::clear_cache_db,
-            app::commands::optimize_storage,
-            app::commands::get_cleanup_info,
-            app::commands::cleanup_all_data,
-            app::commands::get_app_info,
-            app::commands::check_update,
-            app::commands::install_update, // 0.25.10 应用内一键更新
-            app::commands::dismiss_update_version, // 0.26.20 版本提示已读屏蔽
-            app::commands::show_theme_debug_cmd, // 0.25.11 主题调试台入口
-            app::commands::debug_uia_focus, // 0.25.21 焦点控件 UIA 诊断
-            app::commands::resize_window,
-            app::commands::get_main_window_layout_state,
-            app::commands::get_config,
-            app::commands::set_config,
-            app::commands::reset_config,
-            app::commands::complete_onboarding,
-            app::commands::record_hotkey,
-            app::commands::ack_hotkey_recording_ready,
-            app::commands::get_global_hotkey_statuses,
-            app::commands::retry_global_hotkey,
-            app::commands::open_log_file,
-            app::commands::open_log_dir,
-            app::commands::get_log_info,
-            app::commands::get_start_menu_config,
-            app::commands::get_system_entry_status,
-            app::commands::refresh_system_entries,
-            app::commands::get_calc_config,
-            app::commands::probe_everything,
-            app::commands::get_bookmarks_status,
-            app::commands::refresh_bookmarks,
-            app::commands::get_engine_config,
-            app::commands::get_plugins,
-            app::commands::get_plugin_secret_hint,
-            app::commands::clear_plugin_secret,
-            app::commands::search_weather_locations,
-            app::commands::get_context_config,
-            app::commands::open_containing_folder,
-            app::commands::open_lnk_target,
-            app::commands::copy_to_clipboard,
-            app::commands::paste_to_input,
-            app::commands::reset_item_history,
-            app::commands::list_running_processes,
-            app::commands::show_context_menu,
-            app::commands::hide_context_menu,
-            app::commands::context_menu_action,
-            app::commands::take_context_menu_payload,
-            app::commands::script_interpreters_status,
-            app::commands::install_script_interpreter,
-            app::commands::uninstall_script_interpreter,
-            // 0.26.14：托管 Everything 运行时
-            app::commands::get_file_search_status,
-            app::commands::install_managed_everything,
-            app::commands::uninstall_managed_everything,
-            app::commands::start_managed_everything,
-            app::commands::stop_managed_everything,
-            app::commands::install_everything_service,
-            // 0.26.19：关于页开源与许可声明
-            app::commands::get_license_notices,
-            app::commands::open_file_dialog,
-            app::commands::pick_directory_dialog,
-app::commands::get_clipboard_history,
-app::commands::search_clipboard,
-app::commands::search_clipboard_history,
-            app::commands::get_clipboard_text,
-            app::commands::get_clipboard_text_batch,
-            app::commands::record_clipboard_hit,
-            app::commands::delete_clipboard_item,
-            app::commands::delete_clipboard_items_batch,
-            app::commands::manage_clipboard_entries,
-            app::commands::pin_clipboard_entries,
-            app::commands::delete_clipboard_image,
-            app::commands::clear_clipboard_history,
-            // 0.26.9 剪贴板文件条目
-            app::commands::get_clipboard_file_entry,
-            app::commands::save_clipboard_file_image,
-            app::commands::get_clipboard_file_preview_status,
-            // 0.26.10 右键智能操作
-            app::commands::get_clipboard_item_actions,
-            app::commands::report_clipboard_item_action,
-            app::commands::clear_clipboard_images,
-            // 0.17.8: AI 权限记忆管理
-            app::commands::clear_all_permission_memory,
-            app::commands::get_clipboard_stats,
-            // 0.16.4 剪贴板图片
-            app::commands::copy_clipboard_image,
-            // 0.16.5 剪贴板图片 pin
-            app::commands::pin_clipboard_image,
-            // 0.16.3 内容编辑器（0.23.1 会话化重构）
-            app::commands::open_content_editor,
-            app::commands::get_content_editor_session,
-            app::commands::commit_content_editor,
-            app::commands::end_content_editor,
-            app::commands::resolve_editor_exit,
-            // 修复：编辑器恢复草稿（与 Ctrl+S 分离的持久化通道）
-            app::commands::save_editor_draft,
-            app::commands::load_editor_draft,
-            app::commands::list_editor_drafts,
-            app::commands::clear_editor_draft,
-            app::commands::orphan_editor_draft,
-            app::commands::archive_editor_draft,
-            // 0.23.3 编辑器连续听写
-            app::commands::start_editor_voice,
-            app::commands::pause_editor_voice,
-            app::commands::resume_editor_voice,
-            app::commands::stop_editor_voice,
-            app::commands::get_editor_voice_snapshot,
-            app::commands::focus_content_editor,
-            // 0.23.4 编辑器 AI 整理
-            app::commands::start_editor_transform,
-            app::commands::cancel_editor_transform,
-            app::commands::get_perf_overview,
-            app::commands::get_perf_percentiles,
-            app::commands::get_perf_slow_queries,
-            app::commands::get_perf_recent,
-            app::commands::export_perf_report,
-            app::commands::clear_perf_data,
-app::commands::open_url,
-// 0.18.6: 命令执行 MVP（`> ` 前缀调起终端）
-app::commands::run_in_terminal,
-app::commands::toggle_default_trigger,
-            app::commands::add_custom_trigger,
-            app::commands::delete_custom_trigger,
-            app::commands::get_config_section,
-            app::commands::set_config_section,
-            app::commands::list_browser_search_sources, // 0.26.21 浏览器搜索引擎导入
-            app::commands::scan_browser_search_engines,
-            app::commands::save_ai_secret,
-            app::commands::delete_ai_secret,
-            app::commands::has_ai_secret,
-            app::commands::get_ai_secret_hint,
-            app::commands::test_ai_provider,
-            app::commands::fetch_ai_models,
-            app::commands::get_system_prompt_info,
-            // 0.10 STT / 语音
-            app::commands::get_stt_config,
-            app::commands::set_stt_config,
-            // 0.22.6 phase B: 旧 STT 模型命令（list_stt_models/download_stt_model/
-            // delete_stt_model）已删除——未发版且前端 0 引用，
-            // 模型生命周期统一走 list_engine_models/install_engine_model/
-            // delete_engine_model + set_local_stt_selection。
-            // 0.22.6 H4: 新 STT 选择命令
-            app::commands::list_selectable_stt_models,
-            app::commands::set_local_stt_selection,
-            app::commands::cancel_voice_recording,
-            app::commands::is_voice_recording,
-            app::commands::list_audio_devices,
-            app::commands::start_audio_test,
-            app::commands::stop_audio_test,
-            // 0.23.9: Coordinator 诊断快照（VAD 调试页消费）
-            app::commands::get_coordinator_trace,
-            // 0.22.6 phase B: 旧 FunASR lifecycle 兼容命令已删除
-            // （get_funasr_env/get_funasr_log_history/setup_python_env/
-            //   start_funasr_server/stop_funasr_server/diagnose_stt/
-            //   get_stt_space_usage/cleanup_stt_space/open_stt_folder），
-            // 统一走通用 local_engine 命令；test_cloud_stt（云端诊断）保留。
-            app::commands::test_cloud_stt,
-            app::commands::save_stt_secret,
-            app::commands::delete_stt_secret,
-            app::commands::has_stt_secret,
-            app::commands::get_stt_secret_hint,
-            app::commands::resize_voice_overlay,
-            // 0.22.16 Handoff 06：本地 UI 音频转写（picker + invoke 同一 Capability）
-            app::commands::pick_audio_file,
-            app::commands::pick_audio_file_for_vad_debug,
-            app::commands::transcribe_audio_file,
-            app::commands::debug_vad_audio_file,
-            app::commands::clone_audio_ref_for_vad_debug,
-            app::commands::read_audio_for_playback,
-            app::commands::pick_chat_audio_attachment,
-            app::commands::remove_chat_audio_attachment,
-            app::commands::revoke_chat_audio_attachments,
-            app::commands::get_default_hotkey,
-            // 0.13.0 MCP client
-            app::commands::list_mcp_servers,
-            app::commands::upsert_mcp_server,
-            app::commands::delete_mcp_server,
-            app::commands::set_mcp_server_enabled,
-            app::commands::start_mcp_server,
-            app::commands::stop_mcp_server,
-            app::commands::reconnect_mcp_server,
-            app::commands::test_mcp_connection,
-app::commands::ensure_mcp_connected,
-            app::commands::get_mcp_server_tools,
-            app::commands::set_mcp_server_disabled_tools,
-            app::commands::get_mcp_tool_pool_size,
-            app::commands::get_mcp_tool_names,
-            // 0.13.6 MCP 导入增强
-            app::commands::detect_mcp_config_file,
-            app::commands::import_mcp_from_agent,
-            app::commands::import_mcp_from_json,
-            app::commands::batch_import_mcp_servers,
-            app::commands::batch_set_mcp_enabled,
-            // 0.13.6 上下文窗口状态
-            app::commands::get_context_window_status,
-            app::commands::compress_context_now,
-            // 0.21.19 摘要压缩
-            app::commands::get_context_summary,
-            // 0.13.4 MCP server（暴露 Blink 能力）
-            app::commands::get_mcp_server_config,
-            app::commands::set_mcp_server_config,
-            app::commands::list_exposable_capabilities,
-            // 0.19.13 MCP server 运行时状态
-            app::commands::get_mcp_server_runtime_status,
-            // 0.13.3 Skill 约定式
-            app::commands::list_skills,
-            app::commands::refresh_skills,
-            app::commands::open_skill_dir,
-            // 0.13.6 Skill 导入 + 粒度开关
-            app::commands::import_skill,
-            // 0.13.7 外部来源枚举（导入面板用）
-            app::commands::list_external_skill_sources,
-            app::commands::set_skill_enabled,
-            app::commands::open_dir_in_explorer,
-            // 0.13.6 聊天窗口展现优化
-            app::commands::get_mcp_tool_sources,
-            // Composer bar 悬浮预览快照
-            app::commands::get_composer_bar_snapshot,
-            // 0.13.6 CLI 能力识别
-            app::commands::recognize_cli_tool,
-            // Skill 编辑/删除
-            app::commands::save_skill_md,
-            app::commands::get_skill_content,
-            app::commands::delete_skill,
-            // 0.16.7 便签
-            app::commands::create_sticky_note,
-            app::commands::get_sticky_note,
-            app::commands::list_sticky_notes,
-            app::commands::update_sticky_content,
-            app::commands::update_sticky_appearance,
-            app::commands::update_sticky_geometry,
-            app::commands::set_sticky_visible,
-            app::commands::set_sticky_always_on_top,
-            app::commands::delete_sticky_note,
-            app::commands::get_sticky_stats,
-            app::commands::show_sticky_window_cmd,
-            app::commands::destroy_sticky_window_cmd,
-            app::commands::show_sticky_manager_cmd,
-            // 0.17.7 便签回收站
-            app::commands::trash_sticky_note,
-            app::commands::restore_sticky_note,
-            app::commands::list_trashed_sticky_notes,
-            app::commands::clear_trashed_sticky_notes,
-            // 0.20.0 便签原子关闭
-            app::commands::close_sticky_note,
-            // 0.18.3 便签预热
-            app::commands::sticky_spare_ready,
-            // P0-2 便签关闭 ack
-            app::commands::sticky_close_ack,
-            // 0.21.5: AI Capability Access
-            app::commands::get_ai_capability_access,
-            app::commands::toggle_ai_capability,
-            app::commands::toggle_ai_capabilities,
-            app::commands::reset_ai_capability_access,
-            // 0.22.5: 通用本地引擎管理命令
-            app::commands::get_local_engine_catalog,
-            app::commands::get_local_engine_status,
-            app::commands::get_local_engine_logs,
-            app::commands::install_local_engine,
-            app::commands::start_local_engine,
-app::commands::stop_local_engine,
-// 0.22.6.6: 手动停止孤儿引擎进程
-app::commands::stop_orphan_engine,
-app::commands::repair_local_engine,
-            // 0.22.5 H2: storage / cleanup / cancel
-            app::commands::get_local_engine_storage,
-            app::commands::cleanup_local_engine,
-            app::commands::cancel_local_engine_operation,
-            // 0.22.6 H4: 引擎偏好命令
-            app::commands::get_local_engine_preferences,
-            app::commands::set_local_engine_preferences,
-            // 0.22.6 H4: 只读运行时诊断与打开目录命令
-            app::commands::get_runtime_foundation_status,
-            app::commands::get_engine_diagnostics,
-            app::commands::open_engine_folder,
-            app::commands::open_runtime_folder,
-            // 0.22.6 H5: 模型生命周期命令
-            app::commands::list_engine_models,
-            app::commands::install_engine_model,
-            app::commands::delete_engine_model,
-            app::commands::repair_engine_model,
-            app::commands::cancel_model_operation,
-        ])
+        .setup(setup_app)
+        .invoke_handler(invoke_handler())
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app, event| {
@@ -2067,4 +467,1628 @@ fn percent_decode(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+// 保持独立的增量检查边界，避免 Builder / IPC 注册改动重算完整初始化函数。
+fn setup_app(app: &mut tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error::Error>> {
+    // 启动总耗时（setup 结束时手动记录，因为 setup 在同步上下文，没有 runtime 句柄）
+    let startup_start = std::time::Instant::now();
+
+    // 初始化 DB 四层拆分（0.12.0 §2.2）——config/history/ai/cache 各独立 pool
+    let pools = tauri::async_runtime::block_on(infra::data::pools::init_all())
+        .expect("failed to init db pools");
+
+    // 0.16.4：注册全局 cache pool（blink-clipimg 协议懒加载缩略图用）
+    infra::data::clipboard_images::set_pool(pools.cache.clone());
+    // 0.26.9：注册全局 history pool（blink-clipimg /file-preview/<id> 用）
+    let _ = FILE_PREVIEW_POOL.set(pools.history.clone());
+
+    // 初始化配置（配置库）
+    let config_start = std::time::Instant::now();
+    tauri::async_runtime::block_on(app::config::init_config(&pools.config))
+        .expect("failed to init config");
+    // 记录配置加载耗时（缓存库）
+    let config_elapsed = config_start.elapsed().as_secs_f64() * 1000.0;
+    tauri::async_runtime::block_on(infra::utils::perf::record_blocking(
+        &pools.cache,
+        infra::utils::perf::MetricCategory::Startup,
+        "config_load",
+        config_elapsed,
+        None,
+    ));
+
+    // 读取应用配置(快照)（配置库）
+    let app_config = tauri::async_runtime::block_on(app::config::get_config(&pools.config));
+
+    // 日志级别 reload 到配置值（init 时为默认 error）
+    infra::utils::logging::update_level(&app_config.log_level);
+    // AI HTTP 请求/响应体日志开关 reload（0.21.16，默认关）
+    infra::utils::http_log::set_body_log_enabled(app_config.ai_http_body_log);
+
+    // pools 交给 Tauri 管理(command 层用 app.state::<DbPools>() 取)
+    app.manage(pools.clone());
+
+    // 0.14.6 §2.2：创建 DomainEnv 桥接器（TauriDomainEnv）
+    // 各 service 构造后通过 set_* 注入（OnceLock 解决构造顺序倒挂）
+    let domain_env = std::sync::Arc::new(app::domain_env::TauriDomainEnv::new(
+        app.handle().clone(),
+        pools.clone(),
+    ));
+
+    // 同步开机自启（确保注册表 Run 项与配置一致，覆盖用户在 app 外改动的情况）
+    //
+    // dev 模式跳过 enable：tauri-plugin-autostart 的 enable() 用 current_exe()
+    // 决定注册哪个 exe，dev 下拿到的是 target\debug\blink.exe（PE console 子系统），
+    // 写入 Run 键后开机会为它分配控制台窗口。dev 下改为主动 disable，清除可能残留
+    // 的 debug exe 注册项；release 下正常按配置同步。配置 DB 仍记录 auto_start 偏好，
+    // 下次跑 release 时同步逻辑会恢复注册表。
+    {
+        use tauri_plugin_autostart::ManagerExt;
+        let manager = app.autolaunch();
+        let result = if cfg!(debug_assertions) {
+            manager.disable()
+        } else if app_config.auto_start {
+            manager.enable()
+        } else {
+            manager.disable()
+        };
+        if let Err(error) = result {
+            tracing::warn!(%error, desired = app_config.auto_start, "启动时自启动状态同步失败");
+        }
+    }
+
+    // 主窗口启动即隐藏；注册焦点事件
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.hide();
+        // 拦截 Alt+Space 系统菜单 + 启用系统级圆角（Win11+ DWM）
+        if let Ok(hwnd) = w.hwnd() {
+            // hwnd 来自 Tauri(windows 0.61)，转成本项目依赖的 windows 0.62 HWND
+            let hwnd = windows::Win32::Foundation::HWND(hwnd.0 as _);
+            infra::platform::window::install_sysmenu_blocker(hwnd);
+            infra::platform::window::enable_rounded_corners(hwnd);
+        }
+        w.on_window_event(move |event| {
+            if let WindowEvent::Focused(focused) = event {
+                infra::platform::window::on_focused(*focused);
+            }
+        });
+    }
+
+    // 0.17.3：首次启动弹出独立引导窗口（主窗口照常 hide）。
+    // 0.22.13 版本号化：新引导发布时 ONBOARDING_VERSION 自增，
+    // 未看过最新版的老用户补看一次。
+    if app_config.onboarding_version < crate::domain::config::ONBOARDING_VERSION {
+        infra::platform::window::show_welcome_window(app.handle());
+    }
+
+    // 0.26.20 更新提醒状态：启动一次 DB 读，managed cell 供唤起路径盖章
+    // （零 IO）与后台任务写入；后台静默检查任务（首查延迟 2min）随后拉起。
+    let update_reminder_state =
+        tauri::async_runtime::block_on(app::update_reminder::load_state(&pools.config));
+    tracing::debug!(
+        auto = update_reminder_state.auto_check_enabled,
+        latest = %update_reminder_state.latest_version,
+        "更新提醒状态已加载"
+    );
+    app.manage(std::sync::Arc::new(std::sync::RwLock::new(
+        update_reminder_state.clone(),
+    )));
+    // 后台静默检查：≥2min 首查、24h 节流、失败仅 warn（不进启动热路径）
+    app::update_reminder::spawn_background_task(app.handle().clone());
+
+    // 托盘菜单：显示主窗口 + 设置 + 便签管理 + 关于 + 检查更新 + 退出
+    //（按当前语言构建，运行时切语言/更新提示变化会重建）
+    let menu = app::tray::build_menu(
+        app,
+        &app_config.language,
+        app::update_reminder::tray_version_hint(&update_reminder_state),
+    )?;
+    TrayIconBuilder::new()
+        .icon(app.default_window_icon().unwrap().clone())
+        .tooltip("Blink")
+        .menu(&menu)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            // 0.17.2：托盘菜单第一项"显示主窗口"，走 invoke 全流程拉起搜索框
+            "show_main" => app::window_orchestrator::invoke(app),
+            "settings" => open_settings(app),
+            "sticky_manager" => {
+                let _ = crate::infra::platform::window::show_sticky_manager_window(app);
+            }
+            // 0.18.4：托盘新增"AI 对话窗口"项，复用 chord Alt+Q 的 show_chat_window 链路
+            "chat_window" => {
+                let _ = crate::infra::platform::window::show_chat_window(app, None);
+            }
+            "about" => open_about(app),
+            // 0.26.20：检查更新——打开设置关于 tab（打开即静默自动检查并渲染）
+            "check_update" => app::update_reminder::open_settings_about(app),
+            // 0.19.17：输入钩子逃生舱——Alt+Space 失效时从此手动恢复
+            "recover_hook" => {
+                tracing::info!("托盘菜单：用户请求恢复输入钩子");
+                crate::infra::platform::hotkey::InputController::request_manual_recovery();
+            }
+            // 0.23.2：主动退出统一入口——有活动编辑会话时先请求一次汇总确认（§3.5）
+            "quit" => crate::app::editor::request_user_exit(app),
+            _ => {}
+        })
+        // 0.17.2：托盘图标左键单击拉起主窗口（符合 Windows 惯例）
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                app::window_orchestrator::invoke(tray.app_handle());
+            }
+        })
+        .build(app)?;
+
+    // 加载 builtin 插件
+    // 全局代理配置(engine:_global_proxy → {http,https})，进程启动时 env 注入，ureq/reqwest 原生读取
+    let global_proxy = tauri::async_runtime::block_on(app::config::get_engine_config(
+        &pools.config,
+        "_global_proxy",
+    ));
+    let proxy = global_proxy.and_then(|v| {
+        let http = v
+            .get("http")
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string());
+        let https = v
+            .get("https")
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string());
+        if http.is_some() || https.is_some() {
+            Some((http.unwrap_or_default(), https.unwrap_or_default()))
+        } else {
+            None
+        }
+    });
+    let plugins_dir = if cfg!(debug_assertions) {
+        domain::plugin::builtin_plugins_dir()
+    } else {
+        app.path()
+            .resource_dir()
+            .map(|d| d.join("plugins").join("builtin"))
+            .unwrap_or_else(|_| domain::plugin::builtin_plugins_dir())
+    };
+    let plugins = domain::plugin::load_builtin_plugins(&plugins_dir, proxy.clone());
+    // 0.25.20：dev 额外加载 examples 示例插件（echo-python / echo-node
+    // 验证托管脚本解释器链路；release 包不含 examples 资源——编译期
+    // 排除，与 examples_plugins_dir 的 cfg 对齐）。
+    #[cfg(debug_assertions)]
+    let plugins = {
+        let mut plugins = plugins;
+        let examples = domain::plugin::load_builtin_plugins(
+            &domain::plugin::examples_plugins_dir(),
+            proxy.clone(),
+        );
+        tracing::debug!(count = examples.len(), "已加载 examples 示例插件");
+        plugins.extend(examples);
+        plugins
+    };
+    // 构造意图路由 RuleRouter,从插件 manifest 注入规则(合并用户自定义 triggers)。
+    let router = std::sync::Arc::new(domain::intent::RuleRouter::new(
+        app_config.surface_takeover_enabled,
+    ));
+    // 0.24.2 §3.7：SuggestionCoordinator 由编排层（SearchService）持有，
+    // producers 在此注册（Keyword → Context → Ai 注册序即同分稳定排序优先序）。
+    // runtime cell 与 SearchService/KeywordProducer 共享——热更新一处生效。
+    let suggestion_runtime = std::sync::Arc::new(std::sync::RwLock::new(
+        domain::intent::suggestion::coordinator::SuggestionRuntimeConfig {
+            autosuggest_enabled: app_config.autosuggest_enabled,
+            min_score: app_config.autosuggest_min_score,
+            ..Default::default()
+        },
+    ));
+    let ai_registry_cell = std::sync::Arc::new(std::sync::RwLock::new(
+        None::<std::sync::Arc<domain::ai::AIProviderRegistry>>,
+    ));
+    // 0.24.8：禁用态共享 cell（SearchService 与 ContextProducer 同源）——
+    // 打开类建议的 action/binding 禁用判定与 result 侧一致，设置页保存即热生效。
+    let disabled_builtin_actions =
+        std::sync::Arc::new(std::sync::RwLock::new(Vec::<String>::new()));
+    let disabled_context_bindings =
+        std::sync::Arc::new(std::sync::RwLock::new(Vec::<String>::new()));
+    let mut suggestion_coordinator =
+        domain::intent::suggestion::coordinator::SuggestionCoordinator::new();
+    suggestion_coordinator.register(std::sync::Arc::new(
+        domain::intent::suggestion::keyword::KeywordProducer::from_router(
+            router.clone(),
+            suggestion_runtime.clone(),
+        ),
+    ));
+    suggestion_coordinator.register(std::sync::Arc::new(
+        domain::intent::suggestion::context::ContextProducer::new(
+            router.clone(),
+            disabled_builtin_actions.clone(),
+            disabled_context_bindings.clone(),
+        ),
+    ));
+    suggestion_coordinator.register(std::sync::Arc::new(
+        domain::intent::suggestion::ai::AiProducer::new(ai_registry_cell.clone(), router.clone()),
+    ));
+    // 0.26.20：更新提醒 producer（纯读快照 available_update，空 query 独占；
+    // Coordinator 特判仅占空缺槽位）。数据由 window_orchestrator 唤起时盖章。
+    suggestion_coordinator.register(std::sync::Arc::new(
+        domain::intent::suggestion::update::UpdateProducer,
+    ));
+
+    // 无条件构造 PluginEngine（空 plugins 也是合法态）。
+    // 早期用 Option<Arc<PluginEngine>> 表示"无插件"，但导致：
+    // - Tauri state 类型每处易拼错（`try_state::<Arc<PE>>` vs `state::<Option<Arc<PE>>>`）
+    // - 消费点 15 处充斥 `as_ref()` / `if let Some(pe)` 样板
+    // PluginEngine::new 无必须条件，plugins=vec![] 时各方法均安全（空迭代 / find_plugin 返 None）。
+    tracing::info!(count = plugins.len(), "PluginEngine 已构造");
+    let plugin_engine = std::sync::Arc::new(domain::plugin::PluginEngine::new(
+        plugins.clone(),
+        pools.config.clone(),
+        proxy,
+    ));
+    domain_env.set_plugin_engine(plugin_engine.clone());
+    // 0.4→0.5 配置迁移（首次运行时执行一次，后续 marker 跳过；空 plugins 时循环空转）
+    tauri::async_runtime::block_on(app::config::migrate_0_4_to_0_5(&pools.config, &plugins));
+    // 0.9.5 camelCase→snake_case 迁移（前端重构统一字段命名，存量 DB 需改写）
+    // 此函数读写 config 表，必须用配置库 pool
+    tauri::async_runtime::block_on(infra::data::config::migrate_camelcase_to_snake(
+        &pools.config,
+    ));
+    // 加载/初始化每个插件配置(不存在则写默认 {enabled, settings:null})。
+    tauri::async_runtime::block_on(plugin_engine.init_configs());
+    // 0.25.16:存量插件密钥搬迁——settings 里明文存的密钥字段转存 CM,SQLite 只留占位。
+    // 必须在设置页 get_plugins 之前(防明文回显);幂等由构造保证,无 marker。
+    tauri::async_runtime::block_on(plugin_engine.migrate_secret_fields_to_cm());
+
+    // 0.8.2 §3.4：把 PluginEngine 作为 PluginSettingResolver 后置注入 RuleRouter,
+    // 让 Context 触发能读插件 target_lang(如翻译)。同步 app_language 快照。
+    router.set_setting_resolver(
+        plugin_engine.clone() as std::sync::Arc<dyn domain::plugin::PluginSettingResolver>
+    );
+    router.set_app_language(app_config.language.clone());
+
+    // 0.8.5 §6.4：注入本体 engine 的 keyword 规则（先注入 engine，再注入插件——
+    // engine 优先级更高，命中即独占返回；插件 Takeover 走各自 manifest triggers）。
+    domain::search::register_engine_rules(&router);
+
+    // 注入规则到 RuleRouter（合并 manifest triggers + 用户自定义 triggers）
+    for plugin in &plugins {
+        // 0.26.17：args.hints 静态 manifest 数据，对全部插件注册（含禁用——
+        // 禁用过滤由规则移除承载；跳过注册会让"启动时禁用、后来启用"的
+        // 插件拿不到 hints，只能重启恢复）。
+        router.set_plugin_args_hints(plugin.id(), plugin.manifest().arg_hints().to_vec());
+        if !plugin_engine.is_enabled(plugin.id()) {
+            tracing::debug!(plugin = %plugin.id(), "插件已禁用,跳过规则注入");
+            continue;
+        }
+        // 读取配置（含自定义 triggers）
+        let config = plugin_engine.get_config(plugin.id()).unwrap_or_default();
+        let effective_triggers = config.effective_triggers(&plugin.manifest().triggers);
+        router.reload_plugin_triggers(plugin.id(), &effective_triggers);
+    }
+
+    // 0.26.12：快捷超链配置。`seeded=false`（从未生成）写入种子表并置位；
+    // 用户清空（seeded=true + 空表）不会回生。分片损坏时空表启动、不覆盖
+    // 存储值（weblinks 是用户自建数据，损坏不丢原件）。注册放在插件规则
+    // 注入之后——engine 路由优先级与注册顺序无关，后注入只为冲突校验能
+    // 覆盖插件触发词；运行期残留冲突 warn 跳过。
+    let mut weblinks_config =
+        match tauri::async_runtime::block_on(domain::config::store::ConfigStore::get_checked::<
+            domain::config::shards::WebLinksConfig,
+        >(&pools.config))
+        {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                tracing::warn!(error = %e, "weblinks 配置分片损坏，空表启动（不覆盖存储值）");
+                domain::config::shards::WebLinksConfig {
+                    entries: Vec::new(),
+                    seeded: true,
+                }
+            }
+        };
+    if !weblinks_config.seeded {
+        weblinks_config = domain::config::shards::WebLinksConfig::seed();
+        if let Err(e) = tauri::async_runtime::block_on(domain::config::store::ConfigStore::set(
+            &pools.config,
+            &weblinks_config,
+        )) {
+            tracing::warn!(error = %e, "weblinks 种子表写入失败（不影响本次会话）");
+        }
+    }
+    if weblinks_config.upgrade_home_urls() {
+        if let Err(error) = tauri::async_runtime::block_on(domain::config::store::ConfigStore::set(
+            &pools.config,
+            &weblinks_config,
+        )) {
+            tracing::warn!(%error, "超链默认主页升级写入失败（本次会话仍生效）");
+        }
+    }
+    let skipped = domain::search::register_weblinks_rules(&router, &weblinks_config);
+    if !skipped.is_empty() {
+        tracing::warn!(?skipped, "weblinks keyword 与现有触发词冲突，已跳过注册");
+    }
+
+    // 0.26.13：浏览器书签配置。分片损坏时默认配置启动、不覆盖存储值
+    //（与 weblinks 同策略，注册放最后承接冲突校验）。
+    let bookmarks_config =
+        match tauri::async_runtime::block_on(domain::config::store::ConfigStore::get_checked::<
+            domain::config::shards::BookmarksConfig,
+        >(&pools.config))
+        {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                tracing::warn!(error = %e, "bookmarks 配置分片损坏，默认配置启动（不覆盖存储值）");
+                domain::config::shards::BookmarksConfig::default()
+            }
+        };
+    let skipped = domain::search::register_bookmark_rules(&router, &bookmarks_config);
+    if !skipped.is_empty() {
+        tracing::warn!(?skipped, "bookmarks keyword 与现有触发词冲突，已跳过注册");
+    }
+
+    // 构造三层搜索引擎配置（应用搜索 / 文件搜索 / 计算器）
+    let start_menu_config =
+        tauri::async_runtime::block_on(app::config::get_start_menu_config(&pools.config));
+    let file_config =
+        tauri::async_runtime::block_on(app::config::get_file_search_config(&pools.config));
+    let calc_config = tauri::async_runtime::block_on(app::config::get_calc_config(&pools.config));
+    tracing::info!(
+        app_search = start_menu_config.enabled,
+        file_search = file_config.enabled,
+        data_source = %file_config.data_source,
+        calc = calc_config.enabled,
+        weblinks = weblinks_config.entries.len(),
+        bookmarks = bookmarks_config.enabled,
+        bookmarks_keyword = %bookmarks_config.keyword,
+        "搜索引擎配置"
+    );
+
+    // 构造 SearchService(多路引擎 + 意图路由)。command 层经 app.state 取用。
+    let engine_configs = domain::search::EngineConfigs {
+        start_menu: start_menu_config,
+        file: file_config,
+        calc: calc_config,
+        weblinks: weblinks_config,
+        bookmarks: bookmarks_config,
+    };
+    let search_service = std::sync::Arc::new(domain::search::SearchService::new(
+        domain_env.clone() as std::sync::Arc<dyn domain::event::EventPort>,
+        pools.history.clone(),
+        domain::search::build_engines(engine_configs, pools.history.clone(), pools.cache.clone()),
+        plugin_engine.clone(),
+        router.clone(),
+        suggestion_runtime.clone(),
+        suggestion_coordinator,
+        ai_registry_cell.clone(),
+        disabled_builtin_actions.clone(),
+        disabled_context_bindings.clone(),
+    ));
+    domain_env.set_search_service(search_service.clone());
+    app.manage(search_service.clone());
+    // 初始化 SearchService 的 max_results 内存值（来自 AppConfig，搜索热路径零 IO）
+    search_service.update_max_results(app_config.max_results as usize);
+    // 初始化内置动作 disable 列表（0.8.0 §1.3）
+    search_service.update_disabled_builtin_actions(app_config.disabled_builtin_actions.clone());
+    // 初始化 Suggestion 运行时配置（0.8.1 §2.5；0.24.2 加 secondary 门槛；
+    // 0.24.5 加展示策略开关组）。这些字段不在 AppConfig 门面里，
+    // 直接读分片（启动一次 DB 读）。
+    let suggestion_cfg = tauri::async_runtime::block_on(domain::config::store::ConfigStore::get::<
+        domain::config::shards::SuggestionConfig,
+    >(&pools.config));
+    search_service.update_suggestion_config(
+        domain::intent::suggestion::coordinator::SuggestionRuntimeConfig {
+            autosuggest_enabled: app_config.autosuggest_enabled,
+            min_score: app_config.autosuggest_min_score,
+            secondary_min_rank: suggestion_cfg.secondary_min_rank,
+            suppress_repeated: suggestion_cfg.suppress_repeated,
+            completion_enabled: suggestion_cfg.completion_enabled,
+            context_suggestion_enabled: suggestion_cfg.context_suggestion_enabled,
+            ai_suggestion_enabled: suggestion_cfg.ai_suggestion_enabled,
+            secondary_enabled: suggestion_cfg.secondary_enabled,
+        },
+    );
+    // 初始化 context binding 禁用列表（0.8.3 §4.6）
+    search_service.update_disabled_context_bindings(app_config.disabled_context_bindings.clone());
+    // 初始化界面语言快照（0.8.1）— 供 empty_arg_hint 等 LocalizableText 解析用
+    // 自动发现开启时语言初始化会发起后台任务，不能在同步 setup 线程调用。
+    tauri::async_runtime::block_on(async {
+        search_service.update_language(app_config.language.clone());
+    });
+    // 0.25.29：display_pages 已退役（流式加载首屏 = page_size × 2），不再接线
+    search_service.update_clipboard_search_enabled(app_config.clipboard.search_enabled);
+    search_service.update_clipboard_retention_days(app_config.clipboard.retention_days);
+    search_service.update_clipboard_candidate_limit(app_config.clipboard.candidate_limit);
+    // 0.20.1: 同步 page_size 到 ClipboardEngine（effective_limit = display_pages × page_size）
+    search_service.update_clipboard_page_size(app_config.page_size);
+    // 启动后台清理（0.12.0 §2.2.4）：搜索历史 + 剪贴板历史 + AI 审计日志
+    // 缓存库（performance_metrics / icon_cache）的清理在各自 init 时已 spawn。
+    pools.spawn_startup_cleanup(infra::data::CleanupParams {
+        search_history_enabled: app_config.search_history_enabled,
+        search_history_days: app_config.search_history_days,
+        clipboard_enabled: app_config.clipboard.enabled,
+        clipboard_retention_days: app_config.clipboard.retention_days,
+    });
+    // 注入 ContextConfig 内存缓存：invoke 热键回调零 IO 读它（热更新见 update_context_config）
+    let context_config =
+        tauri::async_runtime::block_on(app::config::get_context_config(&pools.config));
+    let context_config_arc = std::sync::Arc::new(std::sync::RwLock::new(context_config));
+    app.manage(context_config_arc.clone());
+
+    // 0.9.2.1：注册剪贴板变化 hook,让主窗口打开时用户在其内部（或其他 app）
+    // Ctrl+C 后 AwarenessSnapshot 里的 Clipboard 项也能局部刷新——之前 snapshot
+    // 只在 window::invoke 时一次性 collect,主窗口保持打开期间就一直是老快照。
+    //
+    // 门控与 context::collect() 保持一致：总开关 + clipboard_enabled + 前台敏感应用
+    // 检查（复用 collect 内部逻辑,避免密码管理器 Ctrl+C 悄悄写入 snapshot）。
+    //
+    // hook 在 clipboard listener 线程被同步调用（消息循环）,只做轻量 RwLock 读 +
+    // upsert_text；两者都不阻塞。
+    {
+        let ctx_arc = context_config_arc.clone();
+        let ss = search_service.clone();
+        let app_handle = app.handle().clone();
+        infra::platform::clipboard::set_change_hook(Box::new(move |text: &str| {
+            let cfg = { ctx_arc.read().unwrap().clone() };
+            // 总开关 / 剪贴板开关 —— 与 collect() 前两道门一致
+            if !cfg.enabled || !cfg.clipboard_enabled {
+                return;
+            }
+            // 前台敏感应用（如密码管理器）—— 与 collect() 第三道门一致。
+            // 只有敏感时才丢弃；非敏感或拿不到前台照常回写。
+            if let Some(fg) = infra::platform::context::foreground_app()
+                && cfg.is_sensitive(&fg.process_name)
+            {
+                tracing::debug!(app = %fg.process_name, "剪贴板变化 hook：前台敏感,跳过 snapshot 回写");
+                return;
+            }
+            ss.update_clipboard_text(Some(text.to_string()));
+            tracing::debug!(
+                len = text.chars().count(),
+                "剪贴板变化 → snapshot 已局部刷新"
+            );
+            // 通知主窗口用当前 query 重跑一次（刷 Context Ghost / AI 四筛子）。
+            // 只在主窗口可见时发——隐藏时窗口收不到 emit（Tauri 2 hidden webview
+            // drop event,见 [[tauri-hidden-webview-emit-dropped]]）,而且下一次
+            // invoke 会 collect() 重拍快照,不需要 push。
+            if infra::platform::window::is_visible()
+                && let Err(e) = app_handle.emit(EventNames::AWARENESS_UPDATED, ())
+            {
+                tracing::debug!(?e, "emit blink://awareness-updated 失败");
+            }
+        }));
+    }
+    // RuleRouter 单独注册供设置页 API 用（triggers 热更新）
+    app.manage(router.clone());
+
+    // 0.8.5 Chord：构建 registry（注册 stub 动作）
+    let chord_registry = std::sync::Arc::new(crate::domain::chord::build_default_registry());
+    // 0.9.7 Capability 能力协议层（inventory 自动收集 5 个样板能力）
+    let capability_registry =
+        std::sync::Arc::new(crate::domain::capability::CapabilityRegistry::new());
+    // 0.22.18：初始化有界审计队列（tokio runtime 上下文中）
+    tauri::async_runtime::block_on(async {
+        crate::domain::capability::CapabilityRegistry::init_audit_writer();
+    });
+    domain_env.set_cap_registry(capability_registry.clone());
+
+    // 0.13.7:注册插件 tool 到 CapabilityRegistry——插件语义是「纯计算→返回结果」，
+    // 天然属于 Capability 范畴（入参→出参，不碰 UI）。0.13.7 从旧 ActionRegistry 迁入。
+    // 遍历所有已加载插件的 manifest.tools，为每个 tool 创建 PluginCapabilityAdapter 并注册。
+    {
+        let mut plugin_tool_count = 0usize;
+        for plugin_handle in plugin_engine.all_plugins() {
+            let manifest = plugin_handle.manifest();
+            if manifest.tools.is_empty() {
+                continue;
+            }
+            for tool_def in &manifest.tools {
+                let adapter = crate::domain::plugin::PluginCapabilityAdapter::new(
+                    plugin_handle.clone(),
+                    tool_def,
+                );
+                if capability_registry.get(adapter.id()).is_some() {
+                    tracing::warn!(
+                        plugin = %manifest.id,
+                        tool = %adapter.id(),
+                        "插件 tool id 与已有 Capability 冲突,跳过"
+                    );
+                    continue;
+                }
+                let adapter_id = adapter.id().to_string();
+                tracing::info!(
+                    plugin = %manifest.id,
+                    tool = %adapter_id,
+                    danger = ?tool_def.danger_class,
+                    "注册插件 tool（Capability）"
+                );
+                // 0.21.13：register 返回 Result，插件注册前已用 get() 检查去重。
+                if let Err(e) = capability_registry.register(std::sync::Arc::new(adapter)) {
+                    tracing::error!(
+                        plugin = %manifest.id,
+                        tool = %adapter_id,
+                        error = %e,
+                        "插件 tool 注册失败（id 冲突）"
+                    );
+                    continue;
+                }
+                plugin_tool_count += 1;
+            }
+        }
+        if plugin_tool_count > 0 {
+            tracing::info!(
+                count = plugin_tool_count,
+                total = capability_registry.len(),
+                "插件 tool 注册完成（CapabilityRegistry）"
+            );
+        }
+    }
+
+    // 0.17.11: CM→keyring 密钥迁移（一次性,幂等）
+    // 必须在 AIConfig 读取前执行——AIConfig 加载会触发密钥读取,需先迁到 keyring 新命名。
+    tauri::async_runtime::block_on(
+        crate::infra::platform::secret::migrate::migrate_legacy_cm_to_keyring(&pools.config),
+    );
+
+    // 0.25.15: keyring v1 命名({pid}/key.blink)→v2 命名(blink:{module}:{subject}:{purpose})
+    // 启动期自动收编,幂等自愈(0.25.16-fix 去 marker——枚举全量+Rust 过滤,
+    // 见 migrate_v2.rs 头注释);同样必须在 AIConfig/密钥读取前执行。
+    // 顺序:v0→新命名(v1)在前——从 0.17.11 前直接升级的用户经它落地即已是 v2。
+    tauri::async_runtime::block_on(
+        crate::infra::platform::secret::migrate_v2::migrate_keyring_v1_to_v2(),
+    );
+
+    // 0.9.2 Phase 5b:AIProviderRegistry 用 RigFactory 真接 rig-core。
+    // AI 配置分片(第 7 分片,独立于 AppConfig 门面);默认 enabled=false,老用户零副作用。
+    let ai_config = tauri::async_runtime::block_on(app::config::ConfigStore::get::<
+        app::ai_config::AIConfig,
+    >(&pools.config));
+    // 0.12 §2.7: 初始化 AIConfig 内存缓存（供 CloudSttEngine 等非 async 上下文读取）
+    app::ai_config::init_ai_cache(ai_config.clone());
+    let ai_registry = std::sync::Arc::new(crate::domain::ai::AIProviderRegistry::from_config(
+        crate::domain::ai::default_factory(),
+        &ai_config,
+    ));
+    // 注入共享 registry cell(0.9.2 setter 注入,规避 search_service 先于 ai_registry
+    // 构造的顺序倒挂)。0.24.2 起该 cell 与 AiProducer 共享——availability
+    // 判定与 produce 文本分类读同一份；未注入时 AskAi 候选被 eligibility 排除。
+    search_service.set_ai_registry(ai_registry.clone());
+    tracing::info!(
+        enabled = ai_config.enabled,
+        providers = ai_config.providers.len(),
+        pool_size = ai_registry.size(),
+        "AIProviderRegistry 已构造(5b RigFactory)"
+    );
+
+    // PluginEngine：clone 一份给 AppContext，原值继续 manage
+    let plugin_engine_for_ctx = plugin_engine.clone();
+
+    // 0.10: VoiceService(hold-to-talk 管线编排)
+    // 初始化 STT 配置缓存（供 STT 引擎同步读取）
+    let mut stt_config = tauri::async_runtime::block_on(app::config::ConfigStore::get::<
+        app::stt_config::SttConfig,
+    >(&pools.config));
+    // 启动期一次性迁移 STT 云端配置（0.12 cloud 引用模式 → 独立 cloud_provider 模式）
+    if stt_config.apply_migration(&crate::domain::config::ai_config::stt_migration_providers(
+        &ai_config,
+    )) {
+        let _ = tauri::async_runtime::block_on(app::config::ConfigStore::set::<
+            app::stt_config::SttConfig,
+        >(&pools.config, &stt_config));
+        tracing::info!("STT 云端配置迁移已持久化到配置库");
+    }
+    // 0.23.7/0.23.9：旧库中非法的 VAD 窗口组合和 Recognition 参数安全
+    // 归一化并持久化，保证引擎与设置页读到的恒为有效组合（缺字段时
+    // serde 默认 VAD=8/12/12、Recognition=3000/700/5/700）。
+    if stt_config.local_engine.sanitize() {
+        let _ = tauri::async_runtime::block_on(app::config::ConfigStore::set::<
+            app::stt_config::SttConfig,
+        >(&pools.config, &stt_config));
+        tracing::info!("STT VAD/Recognition 配置已归一化并持久化");
+    }
+    app::stt_config::init_cache(stt_config);
+
+    let voice_service = std::sync::Arc::new(app::voice::VoiceService::new(app.handle().clone()));
+
+    // 后台服务编排:按依赖拓扑顺序启动。
+    // 0.8.6 §8.2.3：AppContext 持有全部核心服务引用（真依赖容器）。
+    let ctx = app::service::AppContext {
+        app: app.handle().clone(),
+        pools: pools.clone(),
+        config: app_config,
+        ai_config: ai_config.clone(),
+        search_service: search_service.clone(),
+        plugin_engine: plugin_engine_for_ctx,
+        router: router.clone(),
+        chord_registry: chord_registry.clone(),
+        capability_registry: capability_registry.clone(),
+        ai_registry: ai_registry.clone(),
+        voice_service: voice_service.clone(),
+    };
+    let services = app::service::all_services();
+    let svc_start = std::time::Instant::now();
+    for svc in &services {
+        if let Err(e) = tauri::async_runtime::block_on(svc.start(&ctx)) {
+            tracing::error!(service = svc.name(), error = %e, "service start failed");
+        }
+    }
+    // 记录服务初始化耗时
+    let svc_elapsed = svc_start.elapsed().as_secs_f64() * 1000.0;
+    tauri::async_runtime::block_on(infra::utils::perf::record_blocking(
+        &pools.cache,
+        infra::utils::perf::MetricCategory::Startup,
+        "services_init",
+        svc_elapsed,
+        None,
+    ));
+    // 记录启动总耗时（setup 在同步上下文，需用 block_on）
+    let startup_total_ms = startup_start.elapsed().as_secs_f64() * 1000.0;
+    tauri::async_runtime::block_on(infra::utils::perf::record_blocking(
+        &pools.cache,
+        infra::utils::perf::MetricCategory::Startup,
+        "total",
+        startup_total_ms,
+        None,
+    ));
+
+    // 0.12.1 Phase 3B-1: chat AgentProvider 懒构造；memory 归 ChatService 所有。
+    // 0.13.0: McpClientManager 管理 MCP server 子进程生命周期，传入 ChatService
+    // 供 ensure_provider() 拉 MCP tool 进对话窗口 tool 池。
+    // 0.17.8: PendingConfirms 使用 with_persistence，注入 config_pool + AiPermissionConfig。
+    let ai_permission_config = tauri::async_runtime::block_on(
+        crate::domain::config::app_config::get_ai_permission_config(&pools.config),
+    );
+    let pending_confirms =
+        std::sync::Arc::new(domain::ai::tool_adapter::PendingConfirms::with_persistence(
+            pools.config.clone(),
+            ai_permission_config,
+        ));
+    let mcp_client = std::sync::Arc::new(domain::mcp::McpClientManager::new());
+    let chat_service = std::sync::Arc::new(tauri::async_runtime::block_on(
+        domain::ai::chat_service::ChatService::new(
+            domain_env.clone() as std::sync::Arc<dyn domain::event::EventPort>,
+            domain_env.clone() as std::sync::Arc<dyn domain::event::CapabilityEnv>,
+            // 0.21: AI tool 经 Registry 调 GUI starter 能力需真实 gui_surface 运行时
+            Some(domain_env.clone() as std::sync::Arc<dyn domain::capability::SurfacePort>),
+            ai_registry.clone(),
+            capability_registry.clone(),
+            pending_confirms.clone(),
+            mcp_client.clone(),
+            pools.ai.clone(),
+            pools.config.clone(),
+        ),
+    ));
+    domain_env.set_chat_service(chat_service.clone());
+
+    // 注册到 Tauri state（command 层 app.state 取用）
+    app.manage(plugin_engine);
+    app.manage(chord_registry);
+    // 0.9.7 Capability 能力协议层（Step 4 起 AI tool 池消费）
+    app.manage(capability_registry.clone());
+    // 0.21.5: 首次启动生成 AI 推荐 allowlist（静默，不提示用户）
+    tauri::async_runtime::block_on(
+        crate::domain::config::ai_capability_access::AiCapabilityAccessStore::ensure_recommended(
+            &pools.config,
+            capability_registry.as_ref(),
+        ),
+    );
+    // 0.21.10: 首次启动生成 MCP 默认暴露集合（无风险能力，静默）
+    tauri::async_runtime::block_on(
+        crate::domain::mcp::server_config::McpServerModeConfigStore::ensure_default_exposure(
+            &pools.config,
+            capability_registry.as_ref(),
+        ),
+    );
+    // 0.9.1 Phase 5a：AI Provider registry(Phase 5b 起 SearchService 消费)
+    app.manage(ai_registry);
+    // 0.10: VoiceService(command 层 cancel_voice_recording / is_voice_recording 消费)
+    app.manage(voice_service);
+    // 0.12.0 §2.4: 对话窗口危险确认闭环（tool_adapter call 挂起 + confirm_chat_action 唤醒）
+    app.manage(pending_confirms);
+    app.manage(chat_service);
+    // 0.13.0: MCP client 管理器（command 层 app.state 取用）
+    app.manage(mcp_client.clone());
+    // 0.14.6 §2.2：DomainEnv 注册为 managed state（command 层 app.state 取用）
+    app.manage(domain_env);
+    // 0.19.13: 保留 clone 供 McpServerRuntime 构造用
+    let domain_env_for_mcp = app
+        .state::<std::sync::Arc<app::domain_env::TauriDomainEnv>>()
+        .inner()
+        .clone();
+    let cap_registry_for_mcp = app
+        .state::<std::sync::Arc<domain::capability::CapabilityRegistry>>()
+        .inner()
+        .clone();
+
+    // 0.13.3: 启动时扫描 Skill 目录（非阻塞，后台执行）
+    {
+        let ai_config = app::ai_config::get_ai_config();
+        if ai_config.chat_config.skill_config.enabled {
+            let skill_config = ai_config.chat_config.skill_config;
+            let app_clone = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                use tauri::Manager;
+                if let Some(cs) =
+                    app_clone.try_state::<std::sync::Arc<domain::ai::chat_service::ChatService>>()
+                {
+                    cs.apply_skill_config(&skill_config);
+                    let count = cs.skill_registry().count();
+                    if count > 0 {
+                        tracing::info!(count, "启动时 Skill 扫描完成");
+                    }
+                }
+            });
+        }
+    }
+
+    // 后台预热次级窗口（1s 延迟，不阻塞启动；WebView2 冷启动 300~400ms → 预热后 show <50ms）
+    infra::platform::window::preheat_secondary_windows(app.handle().clone());
+
+    // 0.25.20：清扫脚本解释器孤儿 staging（上次安装中断的残留；
+    // 独立线程，不阻塞主链路）
+    app::commands::startup_sweep();
+    // 0.26.14：清扫托管 Everything 运行时孤儿 staging
+    app::commands::managed_runtime_startup_sweep();
+
+    // 0.22.3: 构造进程级 EngineManager（全进程唯一实例）
+    //
+    // - 编译期注册 FunASR + PaddleOCR adapter
+    // - TauriEventPort 负责通用事件投影 + 旧 FunASR 兼容投影
+    // - service_epoch 在构造时生成，Blink 实例生命周期内不变
+    // - 0.22.3: 安装走 RuntimeProvider transaction（ProviderDescriptor + PythonVenvProvider）
+    // - 0.22.4: 同时注册 paddleocr adapter + OcrCoordinator（OcrBackendRouter）
+    // - 0.22.7.4: funasr 为 GGUF 常驻 worker 实现（ManagedBinary +
+    //   StdioWorker），旧 Python/PyTorch 链路已删除
+    let funasr_adapter = crate::app::local_engine::funasr::make_funasr_adapter();
+    let paddleocr_adapter = crate::app::local_engine::paddleocr::make_paddleocr_adapter();
+    let engine_registry =
+        std::sync::Arc::new(crate::app::local_engine::EngineRegistry::new_with_adapters(
+            vec![funasr_adapter, paddleocr_adapter],
+        ));
+    // 会话内 operation 日志回放存储——与环境/模型安装共用同一个 EventPort。
+    let operation_log_store =
+        std::sync::Arc::new(crate::app::local_engine::OperationLogStore::new());
+    app.manage(operation_log_store.clone());
+    let event_port = crate::app::local_engine::make_event_port(
+        app.handle().clone(),
+        operation_log_store.clone(),
+    );
+
+    // 构造 provider descriptors map（安装事务用）。
+    // funasr = ManagedBinary（GGUF worker）；paddleocr = OnnxRuntime（0.22.8）。
+    // 0.22.10：PythonVenv provider 已退役，legacy manifest 只读不写。
+    let funasr_descriptor = crate::app::local_engine::funasr::make_funasr_provider_descriptor();
+    let paddleocr_descriptor =
+        crate::app::local_engine::paddleocr::make_paddleocr_onnx_provider_descriptor();
+    let mut provider_descriptors = std::collections::HashMap::new();
+    provider_descriptors.insert(funasr_descriptor.engine_id.clone(), funasr_descriptor);
+    provider_descriptors.insert(paddleocr_descriptor.engine_id.clone(), paddleocr_descriptor);
+
+    // 单一 EngineManager：环境部署 + 模型资产 + 进程生命周期 + 事件。
+    // 模型目录与安装 worker 在构造时注入——不再有平级的 ModelService。
+    // 模型状态从磁盘 manifest 按需读取（结构校验，不做全量 hash）。
+    let local_engine_service = crate::app::local_engine::EngineManager::new_with_providers(
+        engine_registry,
+        event_port,
+        provider_descriptors,
+        crate::app::local_engine::model_installer::make_funasr_model_registry(),
+        std::sync::Arc::new(crate::app::local_engine::funasr::FunasrGgufModelInstallWorker::new()),
+    );
+    app.manage(local_engine_service.clone());
+    // 0.22.9 Handoff 08：注入 selected 模型存储（跨 runtime 切换事务的
+    // 配置提交端口——DB 持久化 + 缓存 + 事件广播）
+    local_engine_service.set_selected_store(std::sync::Arc::new(
+        crate::app::local_engine::selected_store::SttSelectedModelStore::new(app.handle().clone()),
+    ));
+    tracing::info!(
+        epoch = local_engine_service.epoch().0,
+        "EngineManager 已构造（funasr + paddleocr adapter 与模型目录已注册）"
+    );
+
+    // 0.22.16 Handoff 04（0.23.12 迁移到统一 ResourceStore）：构造一次性文件转写编排服务
+    //
+    // AudioTranscriptionService 是唯一 app 层转写编排器：
+    // 消费 audio_ref → 解析资源 → 冻结 STT 身份 → 阻塞池解码规范化 →
+    // 调用现有 transport → 返回稳定结构化结果。
+    //
+    // 依赖：DefaultResourceStore（进程级，TauriDomainEnv 持有同一实例）、
+    // EngineConnectionAdapter（桥接 EngineManager）、
+    // SttCloudEgressAuthorizer（云端外发授权）。
+    // 注入到 domain_env 供 command 层 / capability 层取用。
+    //
+    // store 同时注册为 managed state，供本地 UI pick_audio_file 签发 audio_ref
+    //（AudioPickSession 记录 pick 会话撤销组，见 audio_transcribe.rs）。
+    {
+        let env = app
+            .state::<std::sync::Arc<app::domain_env::TauriDomainEnv>>()
+            .inner()
+            .clone();
+        let resource_store = std::sync::Arc::clone(
+            crate::domain::event::CapabilityEnv::resource_store(&*env)
+                .expect("TauriDomainEnv 持有统一 ResourceStore"),
+        );
+        let engine_conn = std::sync::Arc::new(
+            crate::app::audio_transcription_service::EngineConnectionAdapter::new(
+                local_engine_service.clone(),
+            ),
+        );
+        let cloud_auth = std::sync::Arc::new(
+            crate::app::audio_transcription_service::SttCloudEgressAuthorizer::new(),
+        );
+        let transcription_service = std::sync::Arc::new(
+            crate::app::audio_transcription_service::AudioTranscriptionService::new(
+                resource_store.clone(),
+                engine_conn,
+                cloud_auth,
+                crate::app::audio_transcription_service::TranscriptionConfig::default(),
+            ),
+        );
+        // 注册为 managed state（command 层通过 app.state 取用）
+        app.manage(transcription_service.clone());
+        // 统一 ResourceStore 也注册为 managed state——
+        // UI 可信入口通过它签发 audio_ref，不暴露给前端
+        app.manage(resource_store);
+        app.manage(app::commands::AudioPickSession::default());
+        env.set_audio_transcription(
+            transcription_service
+                as std::sync::Arc<dyn crate::domain::stt::transcribe::AudioTranscriptionPort>,
+        );
+        tracing::info!("AudioTranscriptionService 已构造并注入 domain_env（ResourceStore 音频腿）");
+    }
+
+    // 0.22.6.6: 后台扫描遗留 lease——基于证据的 fail-closed 恢复
+    //
+    // 不阻塞 Alt+Space 主链路——在 spawn 的 async task 中执行。
+    // 所有阻塞操作（进程查询、文件扫描）均移至 spawn_blocking。
+    //
+    // 恢复策略（fail-closed）：
+    // 1. 扫描 lease 文件（spawn_blocking）
+    // 2. 对每个 lease 构造 ProcessEvidence（spawn_blocking 中查询 OS）
+    // 3. 尝试 health 验证（async reqwest）
+    // 4. 调用 decide_recovery 纯函数决策
+    // 5. PidNotFound → 清除 stale lease
+    //    其他 DoNotAdopt → 只产结构化诊断日志，不自动 kill/adopt
+    //    Adoptable → 记录 info 日志（仍不自动接管，由用户在设置页确认）
+    {
+        tauri::async_runtime::spawn(async move {
+            // 延迟 2s 避免与启动竞争——扫描不紧急
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+            // 0.22.6.6: lease 文件扫描移至 spawn_blocking（同步 IO）
+            let leases =
+                tokio::task::spawn_blocking(|| crate::infra::local_engine::lease::scan_leases())
+                    .await
+                    .unwrap_or_default();
+
+            if leases.is_empty() {
+                tracing::debug!("lease 扫描: 无遗留 lease");
+                return;
+            }
+
+            tracing::warn!(
+                count = leases.len(),
+                "lease 扫描: 发现遗留 lease（上次 Blink 可能非正常退出）"
+            );
+
+            for lease in &leases {
+                tracing::warn!(
+                    engine_id = %lease.engine_id,
+                    instance_id = %lease.instance_id,
+                    pid = lease.pid,
+                    endpoint = %lease.endpoint,
+                    "遗留 lease 发现——开始基于证据的恢复决策"
+                );
+
+                // 0.22.6.6: 在 spawn_blocking 中查询进程身份
+                // （OpenProcess / QueryFullProcessImageNameW / GetProcessTimes 均为阻塞调用）
+                let pid = lease.pid;
+                let process_evidence = tokio::task::spawn_blocking(move || {
+                    crate::infra::local_engine::lease_recovery::build_process_evidence(pid)
+                })
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(
+                        engine_id = %lease.engine_id,
+                        pid = lease.pid,
+                        error = %e,
+                        "spawn_blocking 查询进程身份失败"
+                    );
+                    crate::infra::local_engine::lease::ProcessEvidence {
+                        pid_exists: false,
+                        actual_executable: None,
+                        actual_creation_time_ms: None,
+                    }
+                });
+
+                // 尝试 health 验证（async reqwest）
+                let health_evidence =
+                    crate::infra::local_engine::lease_recovery::probe_health_evidence(
+                        &lease.endpoint,
+                    )
+                    .await;
+
+                // 调用纯函数 decide_recovery
+                let decision = crate::infra::local_engine::lease::decide_recovery(
+                    lease,
+                    &process_evidence,
+                    health_evidence.as_ref(),
+                );
+
+                match &decision {
+                    crate::infra::local_engine::lease::RecoveryDecision::Adoptable {
+                        engine_id,
+                        instance_id,
+                        pid,
+                    } => {
+                        // 全部证据闭合——但仍不自动接管
+                        // 由用户在设置页确认是否手动停止/接管
+                        tracing::info!(
+                            engine_id = %engine_id,
+                            instance_id = %instance_id,
+                            pid,
+                            "lease 恢复决策: Adoptable（全部证据闭合）——不自动接管，需用户在设置页确认"
+                        );
+                    }
+                    crate::infra::local_engine::lease::RecoveryDecision::DoNotAdopt(diag) => {
+                        use crate::infra::local_engine::lease::RecoveryReason::*;
+                        match &diag.reason {
+                            PidNotFound => {
+                                tracing::info!(
+                                    engine_id = %diag.engine_id,
+                                    pid = diag.pid,
+                                    reason = "PidNotFound",
+                                    detail = %diag.detail,
+                                    "lease 恢复决策: PID 不存在——清除 stale lease"
+                                );
+                                // 清除 stale lease（spawn_blocking 中的同步 IO）
+                                let engine_id = lease.engine_id.clone();
+                                let instance_id = lease.instance_id.clone();
+                                if let Err(e) = tokio::task::spawn_blocking(move || {
+                                    crate::infra::local_engine::lease::remove_lease(
+                                        &engine_id,
+                                        &instance_id,
+                                    )
+                                })
+                                .await
+                                .unwrap_or_else(|e| {
+                                    Err(crate::infra::local_engine::lease::LeaseError::Io(format!(
+                                        "spawn_blocking 失败: {e}"
+                                    )))
+                                }) {
+                                    tracing::warn!(
+                                        engine_id = %lease.engine_id,
+                                        error = %e,
+                                        "清除 stale lease 失败"
+                                    );
+                                }
+                            }
+                            _ => {
+                                // 其他原因——只产结构化诊断，不自动 kill/adopt
+                                tracing::warn!(
+                                    engine_id = %diag.engine_id,
+                                    instance_id = %diag.instance_id,
+                                    pid = diag.pid,
+                                    reason = ?diag.reason,
+                                    detail = %diag.detail,
+                                    "lease 恢复决策: DoNotAdopt——不接管，需用户在设置页确认"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    // 0.22.8-D: 构造 OcrCoordinator 并安装为全局 OcrBackendRouter
+    //
+    // - OcrCoordinator 持有 OnnxOcrExecutor（in-process ONNX 识别）
+    // - 路由 windows/paddleocr/auto 三种模式
+    // - in-flight tracker + singleflight + idle TTL
+    // - ocr_image Capability 和截图 OCR 通过 router() 获取实例
+    // Task 18: 保存 Arc 用于 app 退出时 shutdown
+    let onnx_executor =
+        crate::app::local_engine::ocr_coordinator::build_onnx_executor_from_deployment();
+    let ocr_coordinator =
+        crate::app::local_engine::ocr_coordinator::OcrCoordinator::new(onnx_executor);
+    // 0.22.9：接线 EngineManager 弱引用——OCR 懒启动成功 / idle 回收时
+    // 把引擎卡片状态同步为 Running / Stopped（best effort）
+    ocr_coordinator.attach_engine_service(&local_engine_service);
+    // Task 18: 注册为 managed state，供 shutdown 时使用
+    app.manage(ocr_coordinator.clone());
+    crate::domain::ocr::router::install_router(ocr_coordinator);
+    tracing::info!("OcrCoordinator 已安装为 OcrBackendRouter");
+
+    // 0.22.4 / Task 15: 初始化 OcrConfig 缓存——从 SQLite 读取，而非 default
+    // 使用 load_and_init_cache helper——与测试路径调用相同逻辑
+    {
+        let ocr_config = tauri::async_runtime::block_on(
+            crate::domain::config::ocr_config::load_and_init_cache(&pools.config),
+        );
+        tracing::info!(
+            backend = ?ocr_config.backend,
+            model = ?ocr_config.paddle_model,
+            lifecycle = ?ocr_config.lifecycle,
+            compute_preference = ?ocr_config.compute_preference,
+            "OcrConfig 已从 SQLite 加载"
+        );
+    }
+
+    // 0.10: 自动启动 funasr-server（懒加载，延迟 5s 避免与启动竞争资源）
+    //
+    // 0.22.3: 改为调用 EngineManager.start("funasr")
+    // 0.22.6 H4: 自启语义——只有语音功能启用、本地模式、选择模型可用且
+    // auto_start=true 时启动；读取/保存本身不隐式启动。
+    // 是否立即启动由显式 start action 决定。
+    //
+    // 0.22.6 phase B: AdapterConfig 从 config_source 唯一入口构造
+    // （与 commands/repair 共享同一份规则，含 device=cuda→Cpu 归一化）。
+    // setup 本身只做轻量恢复；此处的启动是用户显式偏好（auto_start_server），
+    // 且全程异步后台执行，不进入 Alt+Space 主链路。
+    {
+        let stt_config = app::stt_config::get_stt_config();
+        if stt_config.enabled
+            && stt_config.mode == app::stt_config::SttMode::Local
+            && stt_config.local_engine.auto_start_server
+            && stt_config.local_stt_selection.is_some()
+        {
+            let svc = local_engine_service.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                tracing::info!("自动启动 funasr-server（auto_start_server 已开启）");
+
+                let engine_id = crate::infra::local_engine::runtime::EngineId::new(
+                    crate::app::local_engine::funasr::FUNASR_ENGINE_ID,
+                )
+                .expect("funasr engine id is valid");
+                let adapter_config =
+                    match crate::app::local_engine::config_source::adapter_config_for_engine(
+                        &engine_id,
+                    ) {
+                        Some(c) => c,
+                        None => {
+                            tracing::error!("自动启动: 无法从配置真源构造 AdapterConfig");
+                            return;
+                        }
+                    };
+
+                // 0.22.3: 环境检查 + 安装统一走 EngineManager
+                match svc
+                    .ensure_installed(&engine_id, adapter_config.clone())
+                    .await
+                {
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::error!(%e, "自动启动: 环境安装失败");
+                        return;
+                    }
+                }
+
+                match svc.start(&engine_id, adapter_config).await {
+                    Ok(()) => {
+                        tracing::info!("funasr-server 已通过 EngineManager 自动启动");
+                    }
+                    Err(e) => {
+                        tracing::error!(%e, "funasr-server 自动启动失败");
+                    }
+                }
+            });
+        }
+    }
+
+    // 0.13.7: MCP server 不在启动时自动拉起——改为 lazy connect。
+    // 对话窗口首次可见后台预热；prompt 侧最多等待 5 秒并复用同一连接任务。
+    // 设置页的「测试连接」按钮也可手动探测。
+
+    // 持有服务列表,保证其生命周期与 app 一致。
+    app.manage(services);
+
+    // 0.23.1：单 EditorSession 服务（会话身份/窗口绑定/保存分派；
+    // 依赖的 DomainEnv/连接池在运行时经 app.state 解析，此处只注入 handle）
+    app.manage(std::sync::Arc::new(app::editor::EditorSessionService::new(
+        app.handle().clone(),
+    )));
+
+    // 修复：编辑器恢复草稿存储（原子持久化 + 单调 revision 水位；
+    // 与保存目标完全分离，只写 %APPDATA%\blink\editor-drafts）
+    app.manage(std::sync::Arc::new(
+        app::editor_draft::EditorDraftStore::new(),
+    ));
+
+    // 0.23.4：编辑器 AI 整理服务（全局单活跃经 ChatService tracker；
+    // provider 池与活跃槽在运行时经 app.state 解析）
+    if let Some(chat) = app
+        .try_state::<std::sync::Arc<domain::ai::chat_service::ChatService>>()
+        .map(|c| c.inner().clone())
+    {
+        app.manage(std::sync::Arc::new(
+            app::editor_transform::EditorTransformService::new(app.handle().clone(), chat),
+        ));
+    } else {
+        tracing::warn!("editor transform: ChatService 不可用，整理功能未启用");
+    }
+
+    // 0.16.7：便签服务（domain 层，框架无关；command 层经 app.state 取用）
+    let sticky_service =
+        std::sync::Arc::new(domain::sticky::StickyService::new(pools.history.clone()));
+    app.manage(sticky_service.clone());
+
+    // 0.21.14：窗口事件回调注册——infra 层通过 Tauri state 消费，
+    // 不反向依赖 domain/app。
+    // chat 窗口 CloseRequested → abort active request
+    app.manage(app::ChatCloseCallback(std::sync::Arc::new(
+        |app: &tauri::AppHandle| {
+            use tauri::Manager;
+            if let Some(cs) =
+                app.try_state::<std::sync::Arc<domain::ai::chat_service::ChatService>>()
+            {
+                cs.abort_active();
+            }
+        },
+    )));
+    // welcome 窗口 CloseRequested → 标记完成当前版引导（0.22.13 版本号化）
+    app.manage(app::WelcomeCloseCallback(std::sync::Arc::new(
+        |app: &tauri::AppHandle| {
+            use tauri::Manager;
+            let pools = app.state::<crate::infra::data::DbPools>().inner().clone();
+            tauri::async_runtime::spawn(async move {
+                let version = crate::domain::config::ONBOARDING_VERSION;
+                let _ = app::config::update_onboarding_version(&pools.config, version).await;
+                tracing::info!(
+                    version,
+                    "welcome window: CloseRequested -> onboarding_version"
+                );
+            });
+        },
+    )));
+    // sticky spare close → trash_note + emit STICKY_TRASHED
+    app.manage(app::StickySpareCloseCallback(std::sync::Arc::new(
+        |app: &tauri::AppHandle, sticky_id: &str| {
+            use tauri::{Emitter, Manager};
+            let sticky_id = sticky_id.to_string();
+            let app = app.clone();
+            Box::pin(async move {
+                if let Some(svc) = app.try_state::<std::sync::Arc<domain::sticky::StickyService>>()
+                {
+                    if let Err(e) = svc.trash_note(&sticky_id).await {
+                        tracing::warn!(error = %e, "预热便签关闭时移入回收站失败");
+                    } else {
+                        let _ = app.emit(
+                            domain::event_names::EventNames::STICKY_TRASHED,
+                            serde_json::json!({ "stickyId": sticky_id }),
+                        );
+                    }
+                }
+            })
+        },
+    )));
+
+    // 0.16.13：便签恢复逻辑已提取为 StickyRecoveryService，纳入 all_services() 编排。
+    // 见 src/app/service.rs::StickyRecoveryService。
+
+    // 0.19.13: MCP Server Runtime——主进程 Streamable HTTP MCP Server 生命周期管理。
+    // 在 CapabilityRegistry、EventPort/CapabilityEnv、pools.ai 都就绪后构造。
+    // 启动时按配置自动启动 listener（如果 enabled=true）。
+    let mcp_server_runtime = std::sync::Arc::new(app::mcp_server_runtime::McpServerRuntime::new(
+        cap_registry_for_mcp,
+        domain_env_for_mcp.clone() as std::sync::Arc<dyn domain::event::CapabilityEnv>,
+        domain_env_for_mcp.clone() as std::sync::Arc<dyn domain::event::EventPort>,
+        pools.ai.clone(),
+    ));
+    app.manage(mcp_server_runtime.clone());
+
+    // 后台加载配置并按需启动 listener（不阻塞启动流程）
+    {
+        let runtime = mcp_server_runtime.clone();
+        let config_pool = pools.config.clone();
+        tauri::async_runtime::spawn(async move {
+            let config = domain::mcp::McpServerModeConfigStore::load(&config_pool)
+                .await
+                .unwrap_or_default();
+            runtime.apply_config(&config).await;
+        });
+    }
+
+    Ok(())
+}
+
+// 所有命令仍由同一个 handler 注册；独立函数便于复用未变化的检查结果。
+fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
+    tauri::generate_handler![
+        app::commands::hide_window,
+        app::commands::hide_settings_window,
+        app::commands::search_apps,
+        app::commands::report_suggestion_adoption,
+        app::commands::reset_suggestion_session,
+        app::commands::launch_app,
+        app::commands::run_builtin_action,
+        app::commands::confirm_chat_action,
+        app::commands::hide_chat_window,
+        app::commands::take_chat_prefill,
+        app::commands::ack_chat_prefill,
+        app::commands::chat_prompt,
+        app::commands::chat_abort,
+        app::commands::clear_main_ai_active,
+        app::commands::promote_ephemeral_conversation,
+        app::commands::get_chat_status,
+        app::commands::get_chat_models,
+        app::commands::select_chat_model,
+        app::commands::set_model_reasoning_effort,
+        // 0.17.9: 主窗口 AI 独立模型选择
+        app::commands::get_ephemeral_models,
+        app::commands::select_ephemeral_model,
+        app::commands::start_chat_stt,
+        app::commands::stop_chat_stt,
+        app::commands::list_chat_conversations,
+        app::commands::delete_chat_conversation,
+        app::commands::rename_chat_conversation,
+        app::commands::get_chat_messages,
+        app::commands::get_conversation_system_prompt, // 0.12.7 §6.5
+        app::commands::open_settings_tab,
+        app::commands::get_guide_markdown, // 0.25.28 丝滑小妙招
+        app::commands::save_text_file,
+        app::commands::generate_conversation_title,
+        app::commands::truncate_messages,
+        app::commands::list_conversation_groups,
+        app::commands::create_conversation_group,
+        app::commands::rename_conversation_group,
+        app::commands::delete_conversation_group,
+        app::commands::update_conversation_group_system_prompt,
+        app::commands::move_conversation_to_group,
+        app::commands::set_group_sort_order,
+        app::commands::set_group_expanded,
+        app::commands::list_builtin_actions,
+        app::commands::list_context_bindings,
+        // 0.21.4：功能目录聚合与批量 binding 操作
+        app::commands::list_feature_catalog,
+        app::commands::apply_binding_ops,
+        // 0.21.6：MCP 能力摘要
+        app::commands::get_catalog_mcp_summary,
+        app::commands::trigger_chord,
+        app::commands::list_chord_actions,
+        app::commands::list_all_chord_actions,
+        app::commands::get_awareness_text,
+        app::commands::register_main_input_view,
+        app::commands::update_main_input_context,
+        app::commands::screenshot_copy,
+        app::commands::screenshot_copy_region,
+        app::commands::screenshot_copy_rgba,
+        app::commands::screenshot_cancel,
+        app::commands::screenshot_pin,
+        app::commands::screenshot_pin_region,
+        app::commands::screenshot_pin_hide,
+        app::commands::screenshot_pin_transform,
+        app::commands::screenshot_pin_move,
+        app::commands::screenshot_pin_refresh,
+        app::commands::screenshot_pin_refresh_by_label,
+        app::commands::screenshot_pin_get_rect,
+        app::commands::pin_work_area,
+        app::commands::win32_left_button_down,
+        // 多 Pin N+1 + pin 保存
+        app::commands::pin_spare_ready,
+        app::commands::pin_save_clipboard,
+        app::commands::pin_save_as,
+        app::commands::screenshot_save,
+        app::commands::image_editor_copy,
+        app::commands::image_editor_pin,
+        app::commands::image_editor_save,
+        app::commands::image_editor_cancel,
+        // 0.20.x：pin 来源编辑器的勾按钮——编辑结果替换回原 pin 窗口
+        app::commands::image_editor_apply_to_pin,
+        // 0.20.4：多来源图片编辑入口
+        app::commands::open_image_editor_from_clipboard,
+        app::commands::open_image_editor_from_history,
+        app::commands::open_image_editor_from_pin,
+        app::commands::screenshot_save_replay_file,
+        app::commands::screenshot_set_annotation_mode,
+        app::commands::screenshot_window_list,
+        app::commands::screenshot_control_hints,
+        app::commands::screenshot_set_capture_exclusion,
+        app::commands::screenshot_capture_band,
+        app::commands::screenshot_capture_probe,
+        app::commands::screenshot_cursor_position,
+        app::commands::screenshot_forward_wheel,
+        app::commands::list_system_fonts,
+        app::commands::ocr_image,
+        app::commands::cancel_ocr_request, // 0.22.4
+        app::commands::ocr_diagnose,
+        app::commands::get_ocr_config, // 0.22.4
+        app::commands::set_ocr_config, // 0.22.4
+        // 0.22.4: PaddleOCR 管理命令
+        app::commands::install_paddleocr,
+        app::commands::repair_paddleocr,
+        app::commands::start_paddleocr,
+        app::commands::stop_paddleocr,
+        app::commands::get_paddleocr_status,
+        app::commands::translate_text,
+        app::commands::translate_lines,
+        app::commands::analyze_palette,
+        app::commands::generate_palette_schemes,
+        app::commands::hide_screenshot_overlay,
+        app::commands::get_storage_info,
+        app::commands::clear_history,
+        app::commands::clear_ai_audit,
+        app::commands::clear_all_conversations,
+        app::commands::open_data_folder,
+        app::commands::retry_migration,
+        app::commands::clear_cache_db,
+        app::commands::optimize_storage,
+        app::commands::get_cleanup_info,
+        app::commands::cleanup_all_data,
+        app::commands::get_app_info,
+        app::commands::check_update,
+        app::commands::install_update,         // 0.25.10 应用内一键更新
+        app::commands::dismiss_update_version, // 0.26.20 版本提示已读屏蔽
+        app::commands::show_theme_debug_cmd,   // 0.25.11 主题调试台入口
+        app::commands::debug_uia_focus,        // 0.25.21 焦点控件 UIA 诊断
+        app::commands::resize_window,
+        app::commands::get_main_window_layout_state,
+        app::commands::get_config,
+        app::commands::set_config,
+        app::commands::reset_config,
+        app::commands::complete_onboarding,
+        app::commands::record_hotkey,
+        app::commands::ack_hotkey_recording_ready,
+        app::commands::get_global_hotkey_statuses,
+        app::commands::retry_global_hotkey,
+        app::commands::open_log_file,
+        app::commands::open_log_dir,
+        app::commands::get_log_info,
+        app::commands::get_start_menu_config,
+        app::commands::get_system_entry_status,
+        app::commands::refresh_system_entries,
+        app::commands::get_calc_config,
+        app::commands::probe_everything,
+        app::commands::get_bookmarks_status,
+        app::commands::refresh_bookmarks,
+        app::commands::get_engine_config,
+        app::commands::get_plugins,
+        app::commands::get_plugin_secret_hint,
+        app::commands::clear_plugin_secret,
+        app::commands::search_weather_locations,
+        app::commands::get_context_config,
+        app::commands::open_containing_folder,
+        app::commands::open_lnk_target,
+        app::commands::copy_to_clipboard,
+        app::commands::paste_to_input,
+        app::commands::reset_item_history,
+        app::commands::list_running_processes,
+        app::commands::show_context_menu,
+        app::commands::hide_context_menu,
+        app::commands::context_menu_action,
+        app::commands::take_context_menu_payload,
+        app::commands::script_interpreters_status,
+        app::commands::install_script_interpreter,
+        app::commands::uninstall_script_interpreter,
+        // 0.26.14：托管 Everything 运行时
+        app::commands::get_file_search_status,
+        app::commands::install_managed_everything,
+        app::commands::uninstall_managed_everything,
+        app::commands::start_managed_everything,
+        app::commands::stop_managed_everything,
+        app::commands::install_everything_service,
+        // 0.26.19：关于页开源与许可声明
+        app::commands::get_license_notices,
+        app::commands::open_file_dialog,
+        app::commands::pick_directory_dialog,
+        app::commands::get_clipboard_history,
+        app::commands::search_clipboard,
+        app::commands::search_clipboard_history,
+        app::commands::get_clipboard_text,
+        app::commands::get_clipboard_text_batch,
+        app::commands::record_clipboard_hit,
+        app::commands::delete_clipboard_item,
+        app::commands::delete_clipboard_items_batch,
+        app::commands::manage_clipboard_entries,
+        app::commands::pin_clipboard_entries,
+        app::commands::delete_clipboard_image,
+        app::commands::clear_clipboard_history,
+        // 0.26.9 剪贴板文件条目
+        app::commands::get_clipboard_file_entry,
+        app::commands::save_clipboard_file_image,
+        app::commands::get_clipboard_file_preview_status,
+        // 0.26.10 右键智能操作
+        app::commands::get_clipboard_item_actions,
+        app::commands::report_clipboard_item_action,
+        app::commands::clear_clipboard_images,
+        // 0.17.8: AI 权限记忆管理
+        app::commands::clear_all_permission_memory,
+        app::commands::get_clipboard_stats,
+        // 0.16.4 剪贴板图片
+        app::commands::copy_clipboard_image,
+        // 0.16.5 剪贴板图片 pin
+        app::commands::pin_clipboard_image,
+        // 0.16.3 内容编辑器（0.23.1 会话化重构）
+        app::commands::open_content_editor,
+        app::commands::get_content_editor_session,
+        app::commands::commit_content_editor,
+        app::commands::end_content_editor,
+        app::commands::resolve_editor_exit,
+        // 修复：编辑器恢复草稿（与 Ctrl+S 分离的持久化通道）
+        app::commands::save_editor_draft,
+        app::commands::load_editor_draft,
+        app::commands::list_editor_drafts,
+        app::commands::clear_editor_draft,
+        app::commands::orphan_editor_draft,
+        app::commands::archive_editor_draft,
+        // 0.23.3 编辑器连续听写
+        app::commands::start_editor_voice,
+        app::commands::pause_editor_voice,
+        app::commands::resume_editor_voice,
+        app::commands::stop_editor_voice,
+        app::commands::get_editor_voice_snapshot,
+        app::commands::focus_content_editor,
+        // 0.23.4 编辑器 AI 整理
+        app::commands::start_editor_transform,
+        app::commands::cancel_editor_transform,
+        app::commands::get_perf_overview,
+        app::commands::get_perf_percentiles,
+        app::commands::get_perf_slow_queries,
+        app::commands::get_perf_recent,
+        app::commands::export_perf_report,
+        app::commands::clear_perf_data,
+        app::commands::open_url,
+        // 0.18.6: 命令执行 MVP（`> ` 前缀调起终端）
+        app::commands::run_in_terminal,
+        app::commands::toggle_default_trigger,
+        app::commands::add_custom_trigger,
+        app::commands::delete_custom_trigger,
+        app::commands::get_config_section,
+        app::commands::set_config_section,
+        app::commands::list_browser_search_sources, // 0.26.21 浏览器搜索引擎导入
+        app::commands::scan_browser_search_engines,
+        app::commands::save_ai_secret,
+        app::commands::delete_ai_secret,
+        app::commands::has_ai_secret,
+        app::commands::get_ai_secret_hint,
+        app::commands::test_ai_provider,
+        app::commands::fetch_ai_models,
+        app::commands::get_system_prompt_info,
+        // 0.10 STT / 语音
+        app::commands::get_stt_config,
+        app::commands::set_stt_config,
+        // 0.22.6 phase B: 旧 STT 模型命令（list_stt_models/download_stt_model/
+        // delete_stt_model）已删除——未发版且前端 0 引用，
+        // 模型生命周期统一走 list_engine_models/install_engine_model/
+        // delete_engine_model + set_local_stt_selection。
+        // 0.22.6 H4: 新 STT 选择命令
+        app::commands::list_selectable_stt_models,
+        app::commands::set_local_stt_selection,
+        app::commands::cancel_voice_recording,
+        app::commands::is_voice_recording,
+        app::commands::list_audio_devices,
+        app::commands::start_audio_test,
+        app::commands::stop_audio_test,
+        // 0.23.9: Coordinator 诊断快照（VAD 调试页消费）
+        app::commands::get_coordinator_trace,
+        // 0.22.6 phase B: 旧 FunASR lifecycle 兼容命令已删除
+        // （get_funasr_env/get_funasr_log_history/setup_python_env/
+        //   start_funasr_server/stop_funasr_server/diagnose_stt/
+        //   get_stt_space_usage/cleanup_stt_space/open_stt_folder），
+        // 统一走通用 local_engine 命令；test_cloud_stt（云端诊断）保留。
+        app::commands::test_cloud_stt,
+        app::commands::save_stt_secret,
+        app::commands::delete_stt_secret,
+        app::commands::has_stt_secret,
+        app::commands::get_stt_secret_hint,
+        app::commands::resize_voice_overlay,
+        // 0.22.16 Handoff 06：本地 UI 音频转写（picker + invoke 同一 Capability）
+        app::commands::pick_audio_file,
+        app::commands::pick_audio_file_for_vad_debug,
+        app::commands::transcribe_audio_file,
+        app::commands::debug_vad_audio_file,
+        app::commands::clone_audio_ref_for_vad_debug,
+        app::commands::read_audio_for_playback,
+        app::commands::pick_chat_audio_attachment,
+        app::commands::remove_chat_audio_attachment,
+        app::commands::revoke_chat_audio_attachments,
+        app::commands::get_default_hotkey,
+        // 0.13.0 MCP client
+        app::commands::list_mcp_servers,
+        app::commands::upsert_mcp_server,
+        app::commands::delete_mcp_server,
+        app::commands::set_mcp_server_enabled,
+        app::commands::start_mcp_server,
+        app::commands::stop_mcp_server,
+        app::commands::reconnect_mcp_server,
+        app::commands::test_mcp_connection,
+        app::commands::ensure_mcp_connected,
+        app::commands::get_mcp_server_tools,
+        app::commands::set_mcp_server_disabled_tools,
+        app::commands::get_mcp_tool_pool_size,
+        app::commands::get_mcp_tool_names,
+        // 0.13.6 MCP 导入增强
+        app::commands::detect_mcp_config_file,
+        app::commands::import_mcp_from_agent,
+        app::commands::import_mcp_from_json,
+        app::commands::batch_import_mcp_servers,
+        app::commands::batch_set_mcp_enabled,
+        // 0.13.6 上下文窗口状态
+        app::commands::get_context_window_status,
+        app::commands::compress_context_now,
+        // 0.21.19 摘要压缩
+        app::commands::get_context_summary,
+        // 0.13.4 MCP server（暴露 Blink 能力）
+        app::commands::get_mcp_server_config,
+        app::commands::set_mcp_server_config,
+        app::commands::list_exposable_capabilities,
+        // 0.19.13 MCP server 运行时状态
+        app::commands::get_mcp_server_runtime_status,
+        // 0.13.3 Skill 约定式
+        app::commands::list_skills,
+        app::commands::refresh_skills,
+        app::commands::open_skill_dir,
+        // 0.13.6 Skill 导入 + 粒度开关
+        app::commands::import_skill,
+        // 0.13.7 外部来源枚举（导入面板用）
+        app::commands::list_external_skill_sources,
+        app::commands::set_skill_enabled,
+        app::commands::open_dir_in_explorer,
+        // 0.13.6 聊天窗口展现优化
+        app::commands::get_mcp_tool_sources,
+        // Composer bar 悬浮预览快照
+        app::commands::get_composer_bar_snapshot,
+        // 0.13.6 CLI 能力识别
+        app::commands::recognize_cli_tool,
+        // Skill 编辑/删除
+        app::commands::save_skill_md,
+        app::commands::get_skill_content,
+        app::commands::delete_skill,
+        // 0.16.7 便签
+        app::commands::create_sticky_note,
+        app::commands::get_sticky_note,
+        app::commands::list_sticky_notes,
+        app::commands::update_sticky_content,
+        app::commands::update_sticky_appearance,
+        app::commands::update_sticky_geometry,
+        app::commands::set_sticky_visible,
+        app::commands::set_sticky_always_on_top,
+        app::commands::delete_sticky_note,
+        app::commands::get_sticky_stats,
+        app::commands::show_sticky_window_cmd,
+        app::commands::destroy_sticky_window_cmd,
+        app::commands::show_sticky_manager_cmd,
+        // 0.17.7 便签回收站
+        app::commands::trash_sticky_note,
+        app::commands::restore_sticky_note,
+        app::commands::list_trashed_sticky_notes,
+        app::commands::clear_trashed_sticky_notes,
+        // 0.20.0 便签原子关闭
+        app::commands::close_sticky_note,
+        // 0.18.3 便签预热
+        app::commands::sticky_spare_ready,
+        // P0-2 便签关闭 ack
+        app::commands::sticky_close_ack,
+        // 0.21.5: AI Capability Access
+        app::commands::get_ai_capability_access,
+        app::commands::toggle_ai_capability,
+        app::commands::toggle_ai_capabilities,
+        app::commands::reset_ai_capability_access,
+        // 0.22.5: 通用本地引擎管理命令
+        app::commands::get_local_engine_catalog,
+        app::commands::get_local_engine_status,
+        app::commands::get_local_engine_logs,
+        app::commands::install_local_engine,
+        app::commands::start_local_engine,
+        app::commands::stop_local_engine,
+        // 0.22.6.6: 手动停止孤儿引擎进程
+        app::commands::stop_orphan_engine,
+        app::commands::repair_local_engine,
+        // 0.22.5 H2: storage / cleanup / cancel
+        app::commands::get_local_engine_storage,
+        app::commands::cleanup_local_engine,
+        app::commands::cancel_local_engine_operation,
+        // 0.22.6 H4: 引擎偏好命令
+        app::commands::get_local_engine_preferences,
+        app::commands::set_local_engine_preferences,
+        // 0.22.6 H4: 只读运行时诊断与打开目录命令
+        app::commands::get_runtime_foundation_status,
+        app::commands::get_engine_diagnostics,
+        app::commands::open_engine_folder,
+        app::commands::open_runtime_folder,
+        // 0.22.6 H5: 模型生命周期命令
+        app::commands::list_engine_models,
+        app::commands::install_engine_model,
+        app::commands::delete_engine_model,
+        app::commands::repair_engine_model,
+        app::commands::cancel_model_operation,
+    ]
 }
