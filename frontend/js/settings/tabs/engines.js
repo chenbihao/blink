@@ -65,12 +65,10 @@ async function loadEngineConfig() {
 
         const enabledEl = document.getElementById("file-search-enabled");
         const portEl = document.getElementById("everything-port");
-        const managedPortEl = document.getElementById("managed-everything-port");
         const maxResultsEl = document.getElementById("everything-max-results");
 
         if (enabledEl) enabledEl.checked = enabled;
         if (portEl) portEl.value = port;
-        if (managedPortEl) managedPortEl.value = fileSearch.managed_everything_port || 52819;
         if (maxResultsEl) maxResultsEl.value = maxResults;
 
         refreshFileSearchStatus();
@@ -108,6 +106,8 @@ function initCalcConfig() {
  * 初始化文件搜索配置：任一字段变更即保存；探测按钮独立。
  * 0.26.15 移除「搜索模式」选择：来源决策收敛为自动（用户 Everything → 内置引擎 → 本地），
  * UI 固定写 data_source:"auto"；托管 Everything 的安装/启停在 managed-everything.js。
+ * 0.26.23 单端口收敛：仅保留「Everything 端口」（探测/连接已有服务），
+ * 托管实例监听端口内部自动分配，只经状态徽章展示。
  */
 function initFileSearchConfig() {
     // 探测 Everything 状态
@@ -115,10 +115,9 @@ function initFileSearchConfig() {
 
     const enabledEl = document.getElementById("file-search-enabled");
     const portEl = document.getElementById("everything-port");
-    const managedPortEl = document.getElementById("managed-everything-port");
     const maxResultsEl = document.getElementById("everything-max-results");
 
-    [enabledEl, portEl, managedPortEl, maxResultsEl].forEach((el) => {
+    [enabledEl, portEl, maxResultsEl].forEach((el) => {
         el?.addEventListener("change", saveFileSearchConfig);
     });
 }
@@ -129,10 +128,10 @@ async function saveFileSearchConfig(event) {
     const patch = {enabled, data_source: "auto", max_results: maxResults};
     // 编辑对象由控件身份决定，连接状态刷新不能改变正在保存的端口归属。
     const targetId = event?.currentTarget?.id;
-    if (targetId === "everything-port" || targetId === "managed-everything-port") {
+    if (targetId === "everything-port") {
         const port = Number(document.getElementById(targetId).value);
         if (!Number.isInteger(port) || port < 1 || port > 65535) return;
-        patch[targetId === "everything-port" ? "everything_port" : "managed_everything_port"] = port;
+        patch.everything_port = port;
     }
 
     try {
@@ -199,18 +198,10 @@ function renderFileSearchStatus(payload) {
 }
 
 /**
- * 两个端口各有固定入口：探测/轮询只刷新状态，不重写用户正在编辑的偏好。
+ * 端口行只剩用户端口徽章（0.26.23 单端口收敛）：探测/轮询只刷新状态，
+ * 不重写用户正在编辑的偏好；托管实例状态徽章归 renderManagedEverything。
  */
 function renderPortRow(payload) {
-    const managedRow = document.getElementById("managed-everything-port-row");
-    if (managedRow) managedRow.hidden = !payload.installed;
-    const managedBadge = document.getElementById("managed-everything-port-status");
-    if (managedBadge) {
-        managedBadge.textContent = payload.running
-            ? t("engine.managed.status.running", {port: payload.port})
-            : t("engine.managed.status.installed", {version: payload.version || ""});
-        managedBadge.className = "status-badge " + (payload.running ? "status-available" : "status-unknown");
-    }
     const badge = document.getElementById("everything-status");
     if (badge) {
         badge.dataset.badgeState = payload.userProbing ? "probing"

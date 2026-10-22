@@ -10,8 +10,8 @@ function element(id) {
         removeAttribute(name) { delete this[name]; },
     };
 }
-const ids = ['file-search-enabled', 'everything-port', 'managed-everything-port', 'everything-max-results',
-    'everything-status', 'managed-everything-port-status', 'managed-everything-port-row', 'probe-everything',
+const ids = ['file-search-enabled', 'everything-port', 'everything-max-results',
+    'everything-status', 'probe-everything',
     'file-search-active-source', 'bookmarks-enabled', 'bookmarks-keyword', 'bookmarks-mix', 'bookmarks-error',
     'bookmarks-browser-chrome', 'bookmarks-browser-edge', 'bookmarks-browser-brave', 'bookmarks-status', 'bookmarks-refresh',
     'start-menu-enabled', 'start-menu-scan-depth', 'start-menu-include-uwp', 'start-menu-include-system',
@@ -28,7 +28,7 @@ globalThis.addEventListener = () => {};
 const intervals = [];
 globalThis.setInterval = callback => { intervals.push(callback); return intervals.length; };
 
-let fileConfig = {enabled: true, everything_port: 80, managed_everything_port: 54000, max_results: 20};
+let fileConfig = {enabled: true, everything_port: 80, max_results: 20};
 let fileStatus = {userAvailable: false, userPort: 80, installed: true, running: true, port: 52822, activeSource: 'managed'};
 let bookmarkStatus = {enabled: true, scanning: false, entries: 5, failedFiles: 0, truncated: false};
 let readBookmarks = async () => structuredClone(bookmarkStatus);
@@ -58,20 +58,14 @@ const change = id => control(id).listeners.get('change')({currentTarget: control
 const clickRefresh = () => control('bookmarks-refresh').listeners.get('click')();
 const poll = async () => { intervals[0](); await flush(); };
 
-test('用户实例离线时仍可修改其端口；托管偏好与实际端口分别展示', async () => {
+test('用户实例离线时仍可修改其端口，补丁不含已收敛的托管端口字段', async () => {
     assert.equal(control('everything-port').value, 80);
-    assert.equal(control('managed-everything-port').value, 54000);
-    assert.equal(control('managed-everything-port-row').hidden, false);
-    assert.match(control('managed-everything-port-status').textContent, /52822/);
     control('everything-port').value = '7788';
     await change('everything-port');
     assert.equal(saves.at(-1).value.everything_port, 7788);
     assert.equal(Object.hasOwn(saves.at(-1).value, 'managed_everything_port'), false);
-    control('managed-everything-port').value = '55000';
-    await change('managed-everything-port');
-    assert.equal(saves.at(-1).value.managed_everything_port, 55000);
-    assert.equal(Object.hasOwn(saves.at(-1).value, 'everything_port'), false);
-    assert.equal(control('managed-everything-port').value, '55000', '状态轮询不覆盖下次启动偏好');
+    // 状态轮询不回填/不覆盖用户正在编辑的端口（0.26.23 单端口收敛）
+    await poll();
     assert.equal(control('everything-port').value, '7788');
 });
 

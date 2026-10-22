@@ -385,6 +385,8 @@ async fn set_config_value(
                 for (key, field) in src {
                     dst.insert(key.clone(), field.clone());
                 }
+                // 0.26.23 删除托管端口字段：顺手剔除存量 KV 中的残留旧 key。
+                dst.remove("managed_everything_port");
             }
             let fs: crate::app::config::FileSearchConfig =
                 serde_json::from_value(merged).map_err(|e| e.to_string())?;

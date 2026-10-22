@@ -602,7 +602,7 @@ impl FileEngine {
         match self
             .runtime
             .ensure_started(
-                cfg.managed_everything_port,
+                super::everything_runtime::DEFAULT_MANAGED_PORT,
                 super::everything_runtime::SEARCH_START_BUDGET,
             )
             .await
@@ -710,7 +710,6 @@ impl SearchEngine for FileEngine {
                     SourceOrder::Auto | SourceOrder::ManagedOnly
                 )
                 && runtime.snapshot().installed;
-            let port = cfg.managed_everything_port;
             let auto = resolve_source_order(&cfg.data_source) == SourceOrder::Auto;
             drop(cfg);
             if !needed {
@@ -725,7 +724,8 @@ impl SearchEngine for FileEngine {
                 user_source.refresh(true).await;
                 if user_source.snapshot().await.1 == Some(true) { return; }
             }
-            match runtime.ensure_started(port, TEST_START_BUDGET).await {
+            // 托管监听端口内部固定（0.26.23 单端口收敛），不再读用户配置。
+            match runtime.ensure_started(super::everything_runtime::DEFAULT_MANAGED_PORT, TEST_START_BUDGET).await {
                 Ok(ready_port) => {
                     tracing::info!(port = ready_port, "启动时托管 Everything 实例已拉起");
                 }
@@ -849,12 +849,14 @@ mod tests {
     fn managed_fields_default_on_with_dedicated_port() {
         let cfg = FileSearchConfig::default();
         assert!(cfg.managed_everything_enabled, "auto 链默认启用托管实例");
-        assert_eq!(cfg.managed_everything_port, 52819);
         // 旧分片（无 managed 字段）反序列化必须得到默认值
         let legacy = r#"{"enabled":true,"data_source":"auto","everything_port":80}"#;
         let cfg: FileSearchConfig = serde_json::from_str(legacy).unwrap();
         assert!(cfg.managed_everything_enabled);
-        assert_eq!(cfg.managed_everything_port, 52819);
+        // 0.26.23 删除托管端口字段：存量 JSON 残留旧 key 时忽略不报错
+        let stale = r#"{"enabled":true,"data_source":"auto","everything_port":80,"managed_everything_port":53000}"#;
+        let cfg: FileSearchConfig = serde_json::from_str(stale).unwrap();
+        assert_eq!(cfg.everything_port, 80);
     }
 
     #[test]

@@ -5,7 +5,7 @@
 //! `EventNames::MANAGED_RUNTIME_INSTALL` 事件实时推送（与脚本解释器同构）。
 
 use crate::app::command_error::CommandError;
-use crate::domain::search::everything_runtime::TEST_START_BUDGET;
+use crate::domain::search::everything_runtime::{DEFAULT_MANAGED_PORT, TEST_START_BUDGET};
 use crate::infra::event_names::EventNames;
 use crate::infra::managed_runtime::{self, KIND_EVERYTHING};
 use tauri::Manager;
@@ -128,10 +128,8 @@ pub async fn start_managed_everything(app: tauri::AppHandle) -> Result<u16, Comm
         ));
     };
     rt.resume();
-    let config = crate::app::config::get_file_search_config(
-        &app.state::<crate::infra::data::DbPools>().config,
-    ).await;
-    rt.ensure_started(config.managed_everything_port, TEST_START_BUDGET)
+    // 托管监听端口内部固定（0.26.23 单端口收敛），不再读用户配置。
+    rt.ensure_started(DEFAULT_MANAGED_PORT, TEST_START_BUDGET)
         .await
         .map_err(|e| CommandError::new("managed_runtime_start", e.to_string(), true))
 }
@@ -203,10 +201,7 @@ pub async fn install_everything_service(app: tauri::AppHandle) -> Result<(), Com
     .map_err(|e| CommandError::new("managed_runtime_service", e, true))?;
     if let Some(rt) = rt {
         rt.resume();
-        let config = crate::app::config::get_file_search_config(
-            &app.state::<crate::infra::data::DbPools>().config,
-        ).await;
-        rt.ensure_started(config.managed_everything_port, TEST_START_BUDGET)
+        rt.ensure_started(DEFAULT_MANAGED_PORT, TEST_START_BUDGET)
             .await
             .map_err(|e| CommandError::new("managed_runtime_start", e.to_string(), true))?;
     }

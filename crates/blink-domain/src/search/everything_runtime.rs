@@ -35,6 +35,8 @@ use tokio_util::sync::CancellationToken;
 
 /// 托管实例名（`-instance blink`）：窗口标题/进程身份/单实例守卫键。
 pub const INSTANCE_NAME: &str = "blink";
+/// 托管实例偏好端口：0.26.23 单端口收敛后由内部固定（不再走用户配置），
+/// 起始避让见 [`PORT_SCAN_COUNT`]；实际监听端口以运行时快照为准。
 pub const DEFAULT_MANAGED_PORT: u16 = 52819;
 /// 端口探测区间长度：从偏好端口向上尝试 N 个。
 pub const PORT_SCAN_COUNT: u16 = 20;

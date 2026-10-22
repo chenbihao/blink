@@ -319,6 +319,8 @@ pub struct FileSearchConfig {
     pub enabled: bool,
     #[serde(default = "default_data_source")]
     pub data_source: String,
+    /// 探测/连接已有 Everything 服务的 HTTP 端口（0.26.23 起为唯一用户端口：
+    /// 托管实例监听端口内部从 `DEFAULT_MANAGED_PORT` 起避让分配，不再暴露配置）。
     #[serde(default = "default_file_search_everything_port")]
     pub everything_port: u16,
     #[serde(default = "default_file_search_max_results")]
@@ -335,9 +337,6 @@ pub struct FileSearchConfig {
     /// 设置页一键下载受管 1.4 便携版）。默认开——链路仍先探测用户实例。
     #[serde(default = "default_true")]
     pub managed_everything_enabled: bool,
-    /// 0.26.14：托管实例偏好端口（占用时向上扫描 20 个）。
-    #[serde(default = "default_managed_everything_port")]
-    pub managed_everything_port: u16,
 }
 
 impl Default for FileSearchConfig {
@@ -352,7 +351,6 @@ impl Default for FileSearchConfig {
             local_cache_ttl_sec: 300,
             local_max_results: 50,
             managed_everything_enabled: true,
-            managed_everything_port: default_managed_everything_port(),
         }
     }
 }
@@ -804,10 +802,6 @@ fn default_local_cache_ttl() -> u64 {
 
 fn default_local_max_results() -> u32 {
     50
-}
-
-fn default_managed_everything_port() -> u16 {
-    52819
 }
 
 // ── AiPermissionConfig（0.17.8）──────────────────────────────────────────────────
