@@ -25,6 +25,7 @@ globalThis.document = {getElementById: () => null};
 const hints = [], outputs = [], edits = [];
 const ss = {scrollSession: session, editorSession: {reset() {}}, _showTransientHint: s => hints.push(s)};
 ss._enterCanvasImageEditor = image => edits.push(image);
+ss._compositeSelection = async () => edits.at(-1);
 function frame(top) {
     const result = new ImageData(36, 90);
     for (let y = 0; y < 90; y++) for (let x = 0; x < 36; x++) {
@@ -66,7 +67,7 @@ const stubs = {
     '../ss-state.js': `export const ss = globalThis.scrollLifecycleHarness.ss;`,
     '../../shared/api.js': null,
     '../ss-hover.js': `export const findWindowForRect = () => ({hwnd: 1, targetX: 1, targetY: 1});`,
-    './diagnostics.js': `export const bindScrollDiagnostics = () => {}; export const recordScrollDiagnostic = () => {}; export const recordScrollEvent = () => {}; export const resetScrollDiagnostics = () => {}; export const scrollDiagnosticsEnabled = () => false;`,
+    './diagnostics.js': `export const bindScrollDiagnostics = () => {}; export const recordScrollDiagnostic = () => {}; export const recordScrollEvent = () => {}; export const resetScrollDiagnostics = () => {}; export const canRetainScrollReplayFrame = () => false;`,
     '../ss-editor-policy.js': `export const isLongScreenshotPan = () => false;`,
     '../ss-output.js': `export const encodeImageDataPng = async image => image; export const outputScreenshotPng = async (action, image) => globalThis.scrollLifecycleHarness.output(image);`,
     '../ss-selection-geometry.js': `export const cssPointToScreen = (x, y) => ({x,y}); export const cssRectToBitmap = r => r;`,
@@ -118,7 +119,7 @@ try {
     await begin();
     for (let i = 1; i <= 12; i++) {
         h.top = i * 18;
-        await advance(33);
+        await advance(100);
         assert.equal(session.scrollCurrentTop, h.top);
     }
     assert.equal(session.scrollFrames.reduce((sum, item) => sum + item.image.height, 0), 306);
@@ -141,13 +142,44 @@ try {
 
     // 完成进编辑与直接输出必须使用同一末段快照；重复点击不能重复输出。
     await begin(); wheel();
+    const editingClient = session.trackingClient, editingPipeline = session.continuousCapture;
+    session.scrollReplayFrames = [{frame: frame(0)}];
+    session.scrollReplayBytes = frame(0).data.byteLength;
     const editing = enterScrollEdit();
     await advance(1500); await editing;
     assert.equal(session.scrollCapturePhase, 'editing');
     assert.equal(edits.at(-1).height, 108);
+    assert.equal(editingClient.closed, true); assert.equal(editingPipeline.closed, true);
+    assert.equal(session.trackingClient, null); assert.equal(session.continuousCapture, null);
+    assert.deepEqual(session.scrollFrames, []); assert.deepEqual(session.scrollReplayFrames, []);
+    assert.equal(session.scrollReplayBytes, 0);
+    const editingCaptures = h.captures;
+    await advance(1000);
+    assert.equal(h.captures, editingCaptures, '编辑态不能继续后台采集');
+    h.output = () => { throw new Error('edited output failed'); };
+    await assert.rejects(outputLongImage('save'), /edited output failed/);
+    assert.equal(session.scrollCapturePhase, 'editing');
+    assert.equal(session.trackingClient, null, '编辑态输出失败应保留编辑底图，不重建采集 Worker');
+    h.output = image => outputs.push(image);
     const count = outputs.length;
     await Promise.all([outputLongImage('save'), outputLongImage('copy')]);
     assert.equal(outputs.length, count + 1);
+    assert.deepEqual(outputs.at(-1).data, edits.at(-1).data, '采集资源释放后仍从编辑器底图输出');
+
+    // 编辑器接管失败前不能丢弃采集片段；恢复后仍能完成同一长图。
+    await begin(); wheel();
+    const enterEditor = ss._enterCanvasImageEditor;
+    ss._enterCanvasImageEditor = () => { throw new Error('editor unavailable'); };
+    const failedEdit = assert.rejects(enterScrollEdit(), /editor unavailable/);
+    await advance(1500); await failedEdit;
+    assert.equal(session.scrollCapturePhase, 'capturing');
+    assert.ok(session.scrollFrames.length > 0);
+    assert.equal(session.trackingClient.closed, false);
+    ss._enterCanvasImageEditor = enterEditor;
+    const retriedEdit = enterScrollEdit();
+    await advance(1500); await retriedEdit;
+    assert.equal(edits.at(-1).height, 108);
+    assert.equal(session.scrollCapturePhase, 'editing');
 
     // 输出失败必须恢复到可重试状态，保留已确认尾段。
     await begin(); wheel();

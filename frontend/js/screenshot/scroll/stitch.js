@@ -54,8 +54,8 @@ function sampledSad(prevFrame, currFrame, shift, sampleRows = 24, sampleCols = 2
     let samples = 0;
 
     // H8 优化：Uint32Array 视图——2 次读取替代 6 次 Uint8Array 读取
-    const prev32 = new Uint32Array(prev.buffer, prev.byteOffset, prev.byteLength >> 2);
-    const curr32 = new Uint32Array(curr.buffer, curr.byteOffset, curr.byteLength >> 2);
+    const prev32 = precomputed?.prev32 || new Uint32Array(prev.buffer, prev.byteOffset, prev.byteLength >> 2);
+    const curr32 = precomputed?.curr32 || new Uint32Array(curr.buffer, curr.byteOffset, curr.byteLength >> 2);
     const prevStride32 = prevFrame.width;
     const currStride32 = currFrame.width;
 
@@ -89,12 +89,10 @@ function sampledSad(prevFrame, currFrame, shift, sampleRows = 24, sampleCols = 2
  * 固定层（吸顶/置底/悬浮按钮）与空白死行 ≈ 0；内容行因滚动差异显著。
  * 供 informative unchanged 判定与鲁棒打分的双侧掩码使用。
  */
-function computeRowChange(prevFrame, currFrame, xs) {
+function computeRowChange(prevFrame, currFrame, xs, views) {
     const h = Math.min(prevFrame.height, currFrame.height);
-    const prev = prevFrame.data;
-    const curr = currFrame.data;
-    const prev32 = new Uint32Array(prev.buffer, prev.byteOffset, prev.byteLength >> 2);
-    const curr32 = new Uint32Array(curr.buffer, curr.byteOffset, curr.byteLength >> 2);
+    const prev32 = views.prev32;
+    const curr32 = views.curr32;
     const result = new Float32Array(h);
     const samplesPerRow = xs.length * 3;
     for (let y = 0; y < h; y++) {
@@ -120,7 +118,7 @@ function computeRowChange(prevFrame, currFrame, xs) {
  * 经 prev 侧 y+shift 进入比较对，只查 curr 侧挡不住（spike 实测）。
  * 有效行不足或重叠过小时返回 Infinity（宁缺毋滥，交给全量验证拒绝）。
  */
-function sampledRobustSad(prevFrame, currFrame, shift, rowChange, xs) {
+function sampledRobustSad(prevFrame, currFrame, shift, rowChange, xs, views) {
     const h = Math.min(prevFrame.height, currFrame.height);
     const overlap = h - shift;
     if (overlap <= 8 || overlap < h * ROBUST_MIN_OVERLAP_RATIO) return Infinity;
@@ -130,18 +128,16 @@ function sampledRobustSad(prevFrame, currFrame, shift, rowChange, xs) {
     );
     const usableH = Math.max(1, overlap - marginY * 2);
     // 采样行去重：小重叠时 48 个采样位会重复命中同一行
-    const ys = [];
+    const prev32 = views.prev32;
+    const curr32 = views.curr32;
+    const rowSads = views.rowSads;
+    rowSads.length = 0;
+    const samplesPerRow = xs.length * 3;
+    let lastY = -1;
     for (let sy = 0; sy < ROBUST_SAMPLE_ROWS; sy++) {
         const y = marginY + Math.min(usableH - 1, Math.floor((sy + 0.5) * usableH / ROBUST_SAMPLE_ROWS));
-        if (ys.at(-1) !== y) ys.push(y);
-    }
-    const prev = prevFrame.data;
-    const curr = currFrame.data;
-    const prev32 = new Uint32Array(prev.buffer, prev.byteOffset, prev.byteLength >> 2);
-    const curr32 = new Uint32Array(curr.buffer, curr.byteOffset, curr.byteLength >> 2);
-    const rowSads = [];
-    const samplesPerRow = xs.length * 3;
-    for (const y of ys) {
+        if (lastY === y) continue;
+        lastY = y;
         const prevY = y + shift;
         if (rowChange[y] <= ROW_CHANGE_EPS || rowChange[prevY] <= ROW_CHANGE_EPS) continue;
         const prevRowBase32 = prevY * prevFrame.width;
@@ -160,11 +156,10 @@ function sampledRobustSad(prevFrame, currFrame, shift, rowChange, xs) {
     if (!rowSads.length) return Infinity;
     rowSads.sort((a, b) => a - b);
     const keep = Math.ceil(rowSads.length * (1 - ROBUST_TRIM_RATIO));
-    const taken = rowSads.slice(0, keep);
-    if (taken.length < ROBUST_MIN_VALID_ROWS) return Infinity;
+    if (keep < ROBUST_MIN_VALID_ROWS) return Infinity;
     let total = 0;
-    for (const value of taken) total += value;
-    return total / taken.length;
+    for (let i = 0; i < keep; i++) total += rowSads[i];
+    return total / keep;
 }
 
 /**
@@ -174,7 +169,7 @@ function sampledRobustSad(prevFrame, currFrame, shift, rowChange, xs) {
  * 混叠位移。不截尾、不设行数下限（判别力来自全部内容行，包括空白行）；
  * 内容行过少时退回普通全量分，避免统计空心化。
  */
-function sampledContentSad(prevFrame, currFrame, shift, rowChange, xs, sampleRows) {
+function sampledContentSad(prevFrame, currFrame, shift, rowChange, xs, sampleRows, views) {
     const h = Math.min(prevFrame.height, currFrame.height);
     const overlap = h - shift;
     if (overlap <= 8) return Infinity;
@@ -183,10 +178,8 @@ function sampledContentSad(prevFrame, currFrame, shift, rowChange, xs, sampleRow
         Math.max(16, Math.floor(h * 0.18)),
     );
     const usableH = Math.max(1, overlap - marginY * 2);
-    const prev = prevFrame.data;
-    const curr = currFrame.data;
-    const prev32 = new Uint32Array(prev.buffer, prev.byteOffset, prev.byteLength >> 2);
-    const curr32 = new Uint32Array(curr.buffer, curr.byteOffset, curr.byteLength >> 2);
+    const prev32 = views.prev32;
+    const curr32 = views.curr32;
     const samplesPerRow = xs.length * 3;
     let sad = 0;
     let rows = 0;
@@ -211,7 +204,7 @@ function sampledContentSad(prevFrame, currFrame, shift, rowChange, xs, sampleRow
     if (rows < 6) {
         // 内容行不足（近乎全空白/全固定层）：退回普通全量口径
         return shift >= 0
-            ? sampledSad(prevFrame, currFrame, shift, sampleRows, xs.length, {xs})
+            ? sampledSad(prevFrame, currFrame, shift, sampleRows, xs.length, views)
             : sampledSad(currFrame, prevFrame, -shift, sampleRows, xs.length, {xs});
     }
     return sad / rows;
@@ -246,10 +239,16 @@ export function estimateVerticalShift(prevFrame, currFrame, options = {}) {
         xs[sx] = Math.min(w - 1, Math.floor((sx + 0.5) * w / sampleCols));
     }
 
-    // 行级同位差异一次计算，informative unchanged 与鲁棒打分共用
-    const rowChange = useRobust ? computeRowChange(prevFrame, currFrame, xs) : null;
+    // 一次匹配会扫描上千个位移，视图与行分数暂存仅建一次；不减少候选或采样点。
+    const forwardViews = {xs, rowSads: [],
+        prev32: new Uint32Array(prevFrame.data.buffer, prevFrame.data.byteOffset, prevFrame.data.byteLength >> 2),
+        curr32: new Uint32Array(currFrame.data.buffer, currFrame.data.byteOffset, currFrame.data.byteLength >> 2)};
+    const backwardViews = {xs, rowSads: [], prev32: forwardViews.curr32, curr32: forwardViews.prev32};
 
-    const sameScore = sampledSad(prevFrame, currFrame, 0, sampleRows, sampleCols);
+    // 行级同位差异一次计算，informative unchanged 与鲁棒打分共用
+    const rowChange = useRobust ? computeRowChange(prevFrame, currFrame, xs, forwardViews) : null;
+
+    const sameScore = sampledSad(prevFrame, currFrame, 0, sampleRows, sampleCols, forwardViews);
     // 0.24.10：稀疏内容滚动时全局均分可能低于阈值，只凭均分会把“滚动了但
     // 内容稀疏”误判为“没滚动”（空白页采集永不前进）。行变化行数足够说明
     // 画面确实变了：继续搜索，搜不出可接受位移再回退 unchanged（保持
@@ -285,12 +284,12 @@ export function estimateVerticalShift(prevFrame, currFrame, options = {}) {
     const scoreAt = (direction, distance) => {
         if (direction > 0) {
             return useRobust
-                ? sampledRobustSad(prevFrame, currFrame, distance, rowChange, xs)
-                : sampledSad(prevFrame, currFrame, distance, sampleRows, sampleCols, {xs});
+                ? sampledRobustSad(prevFrame, currFrame, distance, rowChange, xs, forwardViews)
+                : sampledSad(prevFrame, currFrame, distance, sampleRows, sampleCols, forwardViews);
         }
         return useRobust
-            ? sampledRobustSad(currFrame, prevFrame, distance, rowChange, xs)
-            : sampledSad(currFrame, prevFrame, distance, sampleRows, sampleCols, {xs});
+            ? sampledRobustSad(currFrame, prevFrame, distance, rowChange, xs, backwardViews)
+            : sampledSad(currFrame, prevFrame, distance, sampleRows, sampleCols, backwardViews);
     };
 
     // H8 优化：粗到细搜索——先以 step=4 找大致位置，再 ±3 精细搜索
@@ -349,8 +348,8 @@ export function estimateVerticalShift(prevFrame, currFrame, options = {}) {
     let rival = null;
     if (useRobust) {
         const contentScoreOf = (shift) => shift > 0
-            ? sampledContentSad(prevFrame, currFrame, shift, rowChange, xs, ROBUST_SAMPLE_ROWS)
-            : sampledContentSad(currFrame, prevFrame, -shift, rowChange, xs, ROBUST_SAMPLE_ROWS);
+            ? sampledContentSad(prevFrame, currFrame, shift, rowChange, xs, ROBUST_SAMPLE_ROWS, forwardViews)
+            : sampledContentSad(currFrame, prevFrame, -shift, rowChange, xs, ROBUST_SAMPLE_ROWS, backwardViews);
         const ambiguityRatio = options.ambiguityRatio ?? 1.12;
         const ambiguityDelta = options.ambiguityDelta ?? 1.5;
         const ambiguityDistance = options.ambiguityDistance ?? Math.max(12, h * 0.12);
@@ -576,6 +575,7 @@ function measureDetailedPositionedOverlap(frames, currFrame, candidateTop,
     let detailTileCount = 0;
     let mismatchedTileCount = 0;
     let detailScoreTotal = 0;
+    const capturedData = currFrame.data;
     for (let tileY = 0; tileY < overlapRows; tileY += tileSize) {
         const tileHeight = Math.min(tileSize, overlapRows - tileY);
         for (let tileX = 0; tileX < width; tileX += tileSize) {
@@ -591,28 +591,30 @@ function measureDetailedPositionedOverlap(frames, currFrame, candidateTop,
                 const confirmed = rowSources[tileY + dy];
                 const capturedY = Math.floor(documentY - candidateTop);
                 if (!confirmed || capturedY < 0 || capturedY >= currFrame.height) return null;
+                const confirmedData = confirmed.image.data;
+                let confirmedIndex = (confirmed.sourceY * confirmed.image.width + tileX) * 4;
+                let capturedIndex = (capturedY * currFrame.width + tileX) * 4;
                 for (let dx = 0; dx < tileWidth; dx++) {
-                    const x = tileX + dx;
-                    const confirmedIndex = (confirmed.sourceY * confirmed.image.width + x) * 4;
-                    const capturedIndex = (capturedY * currFrame.width + x) * 4;
-                    const confirmedLuma = confirmed.image.data[confirmedIndex] * 0.299
-                        + confirmed.image.data[confirmedIndex + 1] * 0.587
-                        + confirmed.image.data[confirmedIndex + 2] * 0.114;
-                    const capturedLuma = currFrame.data[capturedIndex] * 0.299
-                        + currFrame.data[capturedIndex + 1] * 0.587
-                        + currFrame.data[capturedIndex + 2] * 0.114;
+                    const r = confirmedData[confirmedIndex], g = confirmedData[confirmedIndex + 1],
+                        b = confirmedData[confirmedIndex + 2];
+                    const cr = capturedData[capturedIndex], cg = capturedData[capturedIndex + 1],
+                        cb = capturedData[capturedIndex + 2];
+                    const confirmedLuma = r * 0.299 + g * 0.587 + b * 0.114;
+                    let capturedLuma = confirmedLuma;
+                    // 已对齐正文的大部分像素完全相同：亮度只算一次，RGB 不再重复读取。
+                    if (r !== cr || g !== cg || b !== cb) {
+                        capturedLuma = cr * 0.299 + cg * 0.587 + cb * 0.114;
+                        sad += Math.abs(r - cr);
+                        sad += Math.abs(g - cg);
+                        sad += Math.abs(b - cb);
+                    }
                     confirmedMin = Math.min(confirmedMin, confirmedLuma);
                     confirmedMax = Math.max(confirmedMax, confirmedLuma);
                     capturedMin = Math.min(capturedMin, capturedLuma);
                     capturedMax = Math.max(capturedMax, capturedLuma);
-                    sad += Math.abs(confirmed.image.data[confirmedIndex] - currFrame.data[capturedIndex]);
-                    sad += Math.abs(
-                        confirmed.image.data[confirmedIndex + 1] - currFrame.data[capturedIndex + 1],
-                    );
-                    sad += Math.abs(
-                        confirmed.image.data[confirmedIndex + 2] - currFrame.data[capturedIndex + 2],
-                    );
                     samples += 3;
+                    confirmedIndex += 4;
+                    capturedIndex += 4;
                 }
             }
             totalTileCount++;
@@ -1063,12 +1065,14 @@ export function extractRows(frame, startRow, rowCount) {
     if (count === 0) return null;
     const rowBytes = frame.width * 4;
     const data = frame.data.slice(start * rowBytes, (start + count) * rowBytes);
-    return new ImageData(new Uint8ClampedArray(data), frame.width, count);
+    // slice 已取得自有像素，不能再通过 typed-array 构造器复制一次。
+    return new ImageData(data, frame.width, count);
 }
 
-function tileRgbSad(first, firstY, second, secondY, x, width, height) {
+function tileRgbSad(first, firstY, second, secondY, x, width, height, ceiling = Infinity) {
     let total = 0;
     let samples = 0;
+    const maximumTotal = ceiling * width * height * 3;
     for (let dy = 0; dy < height; dy++) {
         for (let dx = 0; dx < width; dx++) {
             const ai = ((firstY + dy) * first.width + x + dx) * 4;
@@ -1076,6 +1080,8 @@ function tileRgbSad(first, firstY, second, secondY, x, width, height) {
             total += Math.abs(first.data[ai] - second.data[bi]);
             total += Math.abs(first.data[ai + 1] - second.data[bi + 1]);
             total += Math.abs(first.data[ai + 2] - second.data[bi + 2]);
+            // 剩余差值非负，已不可能满足门槛时提前结束；通过门槛的精确分值不变。
+            if (total > maximumTotal && total / (width * height * 3) > ceiling) return Infinity;
             samples += 3;
         }
     }
@@ -1111,21 +1117,25 @@ export function suppressFixedViewportLayers(previous, current, shift, options = 
     const sameThreshold = options.sameThreshold ?? 1.5;
     const alignedThreshold = options.alignedThreshold ?? 8;
     const detailThreshold = options.detailThreshold ?? 12;
-    const result = new ImageData(new Uint8ClampedArray(current.data), current.width, current.height);
+    let result = current;
     let fixedTileCount = 0;
     for (let y = 0; y < current.height; y += tileSize) {
         const tileHeight = Math.min(tileSize, current.height - y);
         for (let x = 0; x < current.width; x += tileSize) {
             const tileWidth = Math.min(tileSize, current.width - x);
-            if (tileLumaRange(current, y, x, tileWidth, tileHeight) < detailThreshold) continue;
-            const same = tileRgbSad(previous, y, current, y, x, tileWidth, tileHeight);
+            const same = tileRgbSad(previous, y, current, y, x, tileWidth, tileHeight, sameThreshold);
             if (same > sameThreshold) continue;
+            if (tileLumaRange(current, y, x, tileWidth, tileHeight) < detailThreshold) continue;
             const alignedY = y + shift;
             const hasAlignedSource = alignedY >= 0
                 && alignedY + tileHeight <= previous.height;
             if (hasAlignedSource) {
-                const aligned = tileRgbSad(previous, alignedY, current, y, x, tileWidth, tileHeight);
+                const aligned = tileRgbSad(previous, alignedY, current, y, x, tileWidth, tileHeight,
+                    Math.max(alignedThreshold, same * 3 + 4));
                 if (aligned < alignedThreshold || aligned < same * 3 + 4) continue;
+                if (result === current) {
+                    result = new ImageData(new Uint8ClampedArray(current.data), current.width, current.height);
+                }
                 const rowBytes = tileWidth * 4;
                 for (let dy = 0; dy < tileHeight; dy++) {
                     const sourceStart = ((alignedY + dy) * previous.width + x) * 4;

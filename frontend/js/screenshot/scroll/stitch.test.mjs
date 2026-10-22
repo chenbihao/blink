@@ -22,17 +22,87 @@ const {
     createPositionedProbe,
     createVerticalReference,
     estimateVerticalShift,
+    extractRows,
     extractPositionedViewport,
     planPositionedIncrement,
     relocalizeFromKeyframes,
     relocalizeFromPositionedContent,
     selectRelocalizationCandidate,
     scrollCommitFits,
+    suppressFixedViewportLayers,
     validatePositionedOverlap,
 } = await import(
 'data:text/javascript;base64,'
 + Buffer.from(await readFile(new URL('./stitch.js', import.meta.url))).toString('base64')
     );
+
+// 裁剪必须持有独立像素；消除二次复制不能退化为原帧的可变视图。
+{
+    const source = new ImageData(new Uint8ClampedArray([1,2,3,4,5,6,7,8]), 1, 2);
+    const rows = extractRows(source, 1, 1);
+    assert.deepEqual([...rows.data], [5,6,7,8]);
+    rows.data[0] = 99;
+    assert.equal(source.data[4], 5);
+    source.data[5] = 88;
+    assert.equal(rows.data[1], 6);
+}
+
+// 保留直观的逐像素参考口径，验证提前拒绝/惰性复制不改变固定层分类或像素。
+function referenceFixedLayers(previous, current, shift, options = {}) {
+    if (!shift) return {frame: current, fixedTileCount: 0};
+    const size = options.tileSize ?? 8;
+    const result = new ImageData(current.data.slice(), current.width, current.height);
+    let fixedTileCount = 0;
+    for (let y = 0; y < current.height; y += size) for (let x = 0; x < current.width; x += size) {
+        const w = Math.min(size, current.width - x), h = Math.min(size, current.height - y);
+        let min = 255, max = 0, same = 0, aligned = 0;
+        const alignedY = y + shift, hasSource = alignedY >= 0 && alignedY + h <= previous.height;
+        for (let dy = 0; dy < h; dy++) for (let dx = 0; dx < w; dx++) {
+            const i = ((y + dy) * current.width + x + dx) * 4;
+            const gray = current.data[i] * .299 + current.data[i + 1] * .587 + current.data[i + 2] * .114;
+            min = Math.min(min, gray); max = Math.max(max, gray);
+            for (let c = 0; c < 3; c++) {
+                same += Math.abs(previous.data[i + c] - current.data[i + c]);
+                if (hasSource) aligned += Math.abs(previous.data[((alignedY + dy) * previous.width + x + dx) * 4 + c] - current.data[i + c]);
+            }
+        }
+        same /= w * h * 3; aligned /= w * h * 3;
+        if (max - min < (options.detailThreshold ?? 12) || same > (options.sameThreshold ?? 1.5)) continue;
+        if (hasSource) {
+            if (aligned < (options.alignedThreshold ?? 8) || aligned < same * 3 + 4) continue;
+            for (let dy = 0; dy < h; dy++) {
+                const from = ((alignedY + dy) * previous.width + x) * 4;
+                result.data.set(previous.data.subarray(from, from + w * 4), ((y + dy) * current.width + x) * 4);
+            }
+        }
+        fixedTileCount++;
+    }
+    return {frame: result, fixedTileCount};
+}
+{
+    let seed = 42;
+    const random = () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed >>> 24; };
+    for (let n = 0; n < 80; n++) {
+        const width = 9 + n % 17, height = 17 + n % 23;
+        const previous = new ImageData(width, height), current = new ImageData(width, height);
+        for (let i = 0; i < previous.data.length; i++) previous.data[i] = random();
+        current.data.set(previous.data);
+        for (let y = Math.floor(height / 2); y < height; y++) for (let x = 0; x < width; x++) {
+            const i = (y * width + x) * 4;
+            current.data[i] = random(); current.data[i + 1] = random(); current.data[i + 2] = random();
+        }
+        const shift = (n % 2 ? -1 : 1) * (1 + n % 10);
+        const options = {tileSize: 3 + n % 7, sameThreshold: n % 3 ? 1.5 : 1 / 3};
+        const before = current.data.slice();
+        const expected = referenceFixedLayers(previous, current, shift, options);
+        const actual = suppressFixedViewportLayers(previous, current, shift, options);
+        assert.equal(actual.fixedTileCount, expected.fixedTileCount);
+        assert.deepEqual(actual.frame.data, expected.frame.data);
+        assert.deepEqual(current.data, before, '固定层修补不得污染匹配保留的原始截图');
+    }
+    const blank = new ImageData(19, 23);
+    assert.equal(suppressFixedViewportLayers(blank, blank, 5).frame, blank, '没有固定层修补时不复制整张视口');
+}
 
 {
     const frames = [{top: -80, image: new ImageData(2, 100)}, {top: 20, image: new ImageData(2, 80)}];

@@ -142,4 +142,34 @@ const cachedBeforeReset = createdCanvases;
 resetPreviewRendering(); assert.equal(canvas.classList.contains('is-pending'), false);
 updatePreview();
 assert.equal(createdCanvases, cachedBeforeReset + 1, '会话重置后不得复用旧会话的呈现状态');
+
+// 非整数缩放比例、负坐标和很薄的追加片段共用像素边界；滚动窗口同样按整像素移动。
+globalThis.previewMonitor = {x: 0, y: 0, w: 1000, h: 200};
+globalThis.previewScale = 1;
+for (const width of [799, 1244, 1920]) {
+    const frames = [];
+    let top = -811;
+    for (const height of [789, 1, 2, 7, 139, 83, 619, 57, 900]) {
+        frames.push({image: {width, height}, preview: new ImageData(120, Math.ceil(height * 120 / width)), top});
+        top += height;
+    }
+    state.scrollFrames = frames;
+    state.scrollBandH = 789;
+    for (const currentTop of [-811, 143, top - 789]) {
+        state.scrollCurrentTop = currentTop;
+        resetPreviewRendering(); draws.length = 0;
+        updatePreview();
+        assert.ok(draws.length > 0);
+        let edge = draws[0][1];
+        assert.ok(edge <= 0, '确认内容应覆盖预览的顶行');
+        for (const [x, y, w, h] of draws) {
+            assert.equal(x, 0); assert.equal(w, 120);
+            assert.ok(Number.isInteger(y) && Number.isInteger(h) && h > 0,
+                '小数边缘会产生透明混合，零高度片段无需绘制');
+            assert.equal(y, edge, '相邻片段必须共享边界，不能出现漏行或重叠');
+            edge = y + h;
+        }
+        assert.ok(edge >= canvas.height, '确认内容应覆盖预览的底行');
+    }
+}
 console.log('scroll preview tests passed');

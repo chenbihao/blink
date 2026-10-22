@@ -35,7 +35,7 @@ const source = (await readFile(new URL('./diagnostics.js', import.meta.url), 'ut
     .replace("'../ss-state.js'", JSON.stringify(stateUrl))
     .replace("'./preview.js'", JSON.stringify(dataUrl('export function positionScrollDiagnostics() {}')));
 const {exportScrollReplay, resetScrollDiagnostics, recordScrollDiagnostic,
-    recordScrollEvent, buildCalibrationSummary} = await import(dataUrl(source));
+    recordScrollEvent, buildCalibrationSummary, canRetainScrollReplayFrame} = await import(dataUrl(source));
 
 const frame = {width: 1, height: 1, data: new Uint8ClampedArray([0, 0, 0, 255])};
 const decision = {
@@ -96,6 +96,12 @@ for (let i = 0; i < 1100; i++) recordScrollDiagnostic(session, frame, decision, 
 });
 assert.equal(session.scrollReplayFrames.length, 256);
 assert.equal(session.scrollReplayBytes, 256 * 4);
+assert.equal(canRetainScrollReplayFrame(session, frame.data.byteLength), false, '帧数用尽后不得分配待丢弃的像素副本');
+assert.equal(canRetainScrollReplayFrame({scrollReplayFrames: [], scrollReplayBytes: 256 * 1024 * 1024}, 4), false);
+const noPixels = {}; resetScrollDiagnostics(noPixels);
+recordScrollDiagnostic(noPixels, null, decision, {timing: {captureMs: 1}});
+assert.equal(noPixels.scrollReplayFrames.length, 0, '预算拒绝后的纯元数据不能伪装成可导出的空帧');
+assert.equal(noPixels.scrollTimingSamples.length, 1);
 assert.equal(session.scrollTimingSamples.length, 1024);
 assert.equal(session.scrollDroppedTimingSamples, 76);
 for (let i = 0; i < 1100; i++) recordScrollEvent(session, 'wheel');

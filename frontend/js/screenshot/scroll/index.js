@@ -37,7 +37,7 @@ import {
     queueManualWheel,
     waitForVisualSettle,
 } from './capture-driver.js';
-import {bindScrollDiagnostics, recordScrollDiagnostic, recordScrollEvent, resetScrollDiagnostics, scrollDiagnosticsEnabled,} from './diagnostics.js';
+import {bindScrollDiagnostics, canRetainScrollReplayFrame, recordScrollDiagnostic, recordScrollEvent, resetScrollDiagnostics,} from './diagnostics.js';
 import {isLongScreenshotPan} from '../ss-editor-policy.js';
 import {encodeImageDataPng, outputScreenshotPng} from '../ss-output.js';
 import {cssPointToScreen, cssRectToBitmap} from '../ss-selection-geometry.js';
@@ -265,7 +265,7 @@ function createContinuousPipeline() {
             if (!current()) throw new Error('长截图采集会话已失效');
             metadata.trackingReset = firstObservation;
             firstObservation = false;
-            const diagnosticFrame = scrollDiagnosticsEnabled()
+            const diagnosticFrame = canRetainScrollReplayFrame(session, frame.data.byteLength)
                 ? new ImageData(frame.data.slice(), frame.width, frame.height) : null;
             const startedAt = performance.now();
             const result = await client.process(frame, {
@@ -453,15 +453,16 @@ async function enterScrollEditOnce() {
         return;
     }
 
-    // 清除捕获排除
-    try {
-        await screenshotSetCaptureExclusion(false, session.scrollInputToken);
-    } catch (e) {
-        console.warn('[scroll] 清除捕获排除失败', e);
-    }
+    // 编辑入口同步取得自有底图；成功前保留已确认片段和捕获排除，失败仍可重试收尾。
+    if (typeof ss._enterCanvasImageEditor !== 'function') throw new Error('长图编辑入口尚未就绪');
+    ss._enterCanvasImageEditor(longImage, longImage.width, longImage.height, IMAGE_SOURCE.LONG_SCREENSHOT, session.scrollSourceMonitor);
     if (session.lifecycleId !== lifecycleId) return;
     session.scrollCapturePhase = 'editing';
     session.captureFinalizing = false;
+    const releasedFrameCount = session.scrollFrames.length;
+    const releasedReplayBytes = session.scrollReplayBytes;
+    session.releaseCaptureResources();
+    resetPreviewRendering();
 
     // 切回默认工具栏
     const scrollTb = document.getElementById('scroll-toolbar');
@@ -470,16 +471,20 @@ async function enterScrollEditOnce() {
 
     // 隐藏预览
     if (ss.scrollPreviewCanvas) ss.scrollPreviewCanvas.classList.add('hidden');
+    document.getElementById('scroll-diagnostics')?.classList.add('hidden');
     hideCaptureFrame();
 
-    // 调用 index.js 提供的来源无关编辑入口
-    if (ss._enterCanvasImageEditor) {
-        ss._enterCanvasImageEditor(longImage, longImage.width, longImage.height, IMAGE_SOURCE.LONG_SCREENSHOT, session.scrollSourceMonitor);
+    try {
+        await screenshotSetCaptureExclusion(false, session.scrollInputToken);
+    } catch (e) {
+        console.warn('[scroll] 清除捕获排除失败', e);
     }
+    if (session.lifecycleId !== lifecycleId) return;
     console.info('[scroll] enter editing', {
         w: longImage.width,
         h: longImage.height,
-        sourceMonitor: session.scrollSourceMonitor
+        sourceMonitor: session.scrollSourceMonitor,
+        releasedFrameCount, releasedReplayBytes,
     });
 }
 
@@ -712,7 +717,8 @@ async function outputLongImageOnce(action) {
     // 否则直接合成 scrollFrames
     let pngData = null;
 
-    if (session.scrollCapturePhase === 'editing' && ss._compositeSelection) {
+    if (session.scrollCapturePhase === 'editing') {
+        if (typeof ss._compositeSelection !== 'function') throw new Error('长图编辑输出尚未就绪');
         pngData = await ss._compositeSelection();
     } else {
         const longImage = await compositeLongImage();

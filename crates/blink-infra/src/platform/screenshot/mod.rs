@@ -616,6 +616,23 @@ pub fn decode_png_to_rgba(png_data: &[u8]) -> Result<(Vec<u8>, u32, u32), String
 mod tests {
     use super::*;
 
+    #[test]
+    fn pixel_swap_preserves_green_alpha_and_tail_for_aligned_and_unaligned_buffers() {
+        let pixels = [1, 2, 3, 4, 250, 100, 20, 0, 99];
+        let expected = [3, 2, 1, 4, 20, 100, 250, 0, 99];
+        let mut aligned = pixels.to_vec();
+        swap_rgba_bgra_in_place(&mut aligned);
+        assert_eq!(aligned, expected);
+        swap_rgba_bgra_in_place(&mut aligned);
+        assert_eq!(aligned, pixels);
+        let mut unaligned = vec![42];
+        unaligned.extend_from_slice(&pixels);
+        swap_rgba_bgra_in_place(&mut unaligned[1..]);
+        assert_eq!(&unaligned[1..], &expected);
+        assert_eq!(unaligned[0], 42);
+        swap_rgba_bgra_in_place(&mut []);
+    }
+
     /// 构造 4x3 的 RGBA 位图，每像素 R=col*10, G=row*10, B=0, A=255。
     fn sample_4x3() -> Vec<u8> {
         let mut v = Vec::with_capacity(4 * 3 * 4);

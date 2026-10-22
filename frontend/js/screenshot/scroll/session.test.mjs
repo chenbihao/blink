@@ -45,4 +45,28 @@ attached.exitHandler = (restore) => {
 attached.exit(false);
 assert.equal(restoreSelection, false, '跨模块退出应经过 session 的唯一生命周期入口');
 
+// 编辑器接管后释放采集像素和 Worker，但输出/取消仍需保留来源几何与会话身份。
+session.scrollCapturePhase = 'editing';
+session.scrollSourceMonitor = {x: -1920, y: 0, w: 1920, h: 1080};
+session.scrollBandX = -1200;
+session.scrollFrames = [{image: {data: new Uint8ClampedArray(1024)}}];
+session.scrollLastFrame = session.scrollFrames[0].image;
+session.scrollKeyframes = [session.scrollLastFrame];
+session.scrollReplayFrames = [session.scrollLastFrame];
+session.scrollReplayBytes = 1024;
+let disposedPipeline = 0, disposedClient = 0;
+session.continuousCapture = {dispose() { disposedPipeline++; }};
+session.trackingClient = {dispose() { disposedClient++; }};
+const editingLifecycle = session.lifecycleId, editingGeneration = session.captureGeneration;
+session.releaseCaptureResources(); session.releaseCaptureResources();
+assert.equal(disposedPipeline, 1); assert.equal(disposedClient, 1);
+assert.equal(session.trackingClient, null); assert.equal(session.continuousCapture, null);
+assert.deepEqual(session.scrollFrames, []); assert.deepEqual(session.scrollKeyframes, []);
+assert.equal(session.scrollLastFrame, null); assert.deepEqual(session.scrollReplayFrames, []);
+assert.equal(session.scrollReplayBytes, 0);
+assert.equal(session.scrollCapturePhase, 'editing'); assert.equal(session.active, true);
+assert.equal(session.scrollBandX, -1200); assert.equal(session.scrollSourceMonitor.x, -1920);
+assert.equal(session.lifecycleId, editingLifecycle);
+assert.ok(session.captureGeneration > editingGeneration, '旧采集/滚轮任务不得继续执行');
+
 console.log('scroll session tests passed');

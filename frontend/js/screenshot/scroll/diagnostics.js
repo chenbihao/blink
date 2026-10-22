@@ -22,6 +22,13 @@ export function scrollDiagnosticsEnabled() {
     return ss.screenshotConfig.scrollDebug === true;
 }
 
+/** 分配诊断像素副本前先检查预算；预算满后继续保留元数据。 */
+export function canRetainScrollReplayFrame(session, bytes) {
+    return bytes > 0 && scrollDiagnosticsEnabled()
+        && (session.scrollReplayFrames?.length || 0) < MAX_REPLAY_FRAMES
+        && (session.scrollReplayBytes || 0) + bytes <= MAX_REPLAY_BYTES;
+}
+
 /// 配置读完后刷新面板可见性（index.js 的 get_config_section .then 回调调用）。
 export function refreshDiagnosticsVisibility() {
     setPanelVisible(scrollDiagnosticsEnabled());
@@ -80,8 +87,7 @@ export function recordScrollDiagnostic(session, frame, decision, metadata = {}) 
     session.scrollDecisions.push(decision);
     if (session.scrollDecisions.length > MAX_REPLAY_FRAMES) session.scrollDecisions.shift();
     const frameBytes = frame?.data?.byteLength || 0;
-    if (session.scrollReplayFrames.length < MAX_REPLAY_FRAMES
-        && session.scrollReplayBytes + frameBytes <= MAX_REPLAY_BYTES) {
+    if (frame && canRetainScrollReplayFrame(session, frameBytes)) {
         session.scrollReplayFrames.push({
             frame,
             discontinuity: metadata.discontinuity === true,

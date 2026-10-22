@@ -1,4 +1,8 @@
 //! 采样与单提交者解耦。FIFO 保留中间重叠帧，按实际保留字节/帧数限流。
+const ACTIVE_PERIOD_MS = 100;
+const IDLE_PERIOD_MS = 250;
+const MIN_REST_MS = 16;
+
 export class ContinuousScrollCapture {
     constructor(options) {
         this.options = options;
@@ -20,6 +24,9 @@ export class ContinuousScrollCapture {
         this.maxBytes = options.maxBytes ?? 96 * 1024 * 1024;
         this.peakBufferedBytes = 0;
         this.peakBufferedFrames = 0;
+        this.lastCaptureStartedAt = -Infinity;
+        this.captureCostMs = 0;
+        this.processingCostMs = 0;
         this.now = options.now || (() => performance.now());
         this.setTimer = options.setTimer || ((callback, ms) => setTimeout(callback, ms));
         this.clearTimer = options.clearTimer || (id => clearTimeout(id));
@@ -28,7 +35,14 @@ export class ContinuousScrollCapture {
     start() { if (!this.closed) { this.paused = false; this.wake(); } }
     wake() {
         this.motionUntil = this.now() + 450;
-        if (!this.closed && !this.paused) this.schedule(0);
+        // 频繁 wheel 只唤醒空闲采样，不能绕过活跃频率上限或重复等待同一抓帧。
+        if (!this.closed && !this.paused && !this.captureTask) this.schedule(this.nextDelay());
+    }
+    nextDelay() {
+        if (this.pressured) return Math.max(ACTIVE_PERIOD_MS, this.processingCostMs);
+        const basePeriod = this.now() < this.motionUntil ? ACTIVE_PERIOD_MS : IDLE_PERIOD_MS;
+        const period = Math.max(basePeriod, this.captureCostMs * 2, this.processingCostMs * 1.25);
+        return Math.max(0, this.lastCaptureStartedAt + period - this.now());
     }
     schedule(ms) {
         if (this.timer) this.clearTimer(this.timer);
@@ -36,13 +50,16 @@ export class ContinuousScrollCapture {
         this.timer = this.setTimer(() => {
             this.timer = 0;
             void this.capture().catch(error => this.options.onError?.(error)).finally(() => {
-                this.schedule(this.now() < this.motionUntil ? 33 : 250);
+                this.schedule(Math.max(MIN_REST_MS, this.nextDelay()));
             });
         }, ms);
     }
     stats() { return {frames: this.heldFrames, bytes: this.heldBytes, pressured: this.pressured}; }
     diagnostics() {
-        return {mode: 'continuous-gdi-worker', activeIntervalMs: 33, idleIntervalMs: 250,
+        return {mode: 'continuous-gdi-worker', pacing: 'adaptive-start-period',
+            activeIntervalMs: ACTIVE_PERIOD_MS, idleIntervalMs: IDLE_PERIOD_MS,
+            maxActiveFps: 1000 / ACTIVE_PERIOD_MS, captureCostMs: this.captureCostMs,
+            processingCostMs: this.processingCostMs,
             maxBufferedFrames: this.maxFrames, maxBufferedBytes: this.maxBytes,
             peakBufferedFrames: this.peakBufferedFrames, peakBufferedBytes: this.peakBufferedBytes};
     }
@@ -67,8 +84,11 @@ export class ContinuousScrollCapture {
             let queued = false;
             try {
                 const captureStartedAt = this.now();
+                this.lastCaptureStartedAt = captureStartedAt;
                 const inputMetadata = this.options.metadata?.() || {};
                 const captured = await this.options.capture();
+                const captureCost = this.now() - captureStartedAt;
+                this.captureCostMs = this.captureCostMs ? this.captureCostMs * 0.75 + captureCost * 0.25 : captureCost;
                 if (this.closed) return {reason: 'aborted'};
                 if (!captured.frame) throw new Error(captured.reason || '完整帧采集失败');
                 const details = {...inputMetadata, ...metadata, captureStartedAt, capturedAt: this.now(),
@@ -96,7 +116,11 @@ export class ContinuousScrollCapture {
             while (this.queue.length && !this.closed) {
                 const entry = this.queue.shift();
                 try {
+                    const processingStartedAt = this.now();
                     const result = await this.options.process(entry.frame, entry.metadata);
+                    const processingCost = this.now() - processingStartedAt;
+                    this.processingCostMs = this.processingCostMs
+                        ? this.processingCostMs * 0.75 + processingCost * 0.25 : processingCost;
                     if (!this.closed) {
                         if (result.moved) this.motionUntil = this.now() + 450;
                         this.options.onResult?.(result, entry.metadata);
@@ -153,7 +177,7 @@ export class ContinuousScrollCapture {
             } finally {
                 if (!wasPaused && revision === this.pauseRevision && !this.closed) {
                     this.paused = false;
-                    this.schedule(33);
+                    this.schedule(Math.max(MIN_REST_MS, this.nextDelay()));
                 }
             }
         }).finally(() => { this.controlCount--; });

@@ -256,7 +256,7 @@ export function compositeSelection(callback) {
 /** 0.18.3：导出合成函数，供「翻译并 pin」后台合成译文 PNG 用。 */
 export {compositeSelectionBytes};
 
-// M10 优化：复用合成 canvas，避免每次 compositeSelectionBytes / encodeImageDataPng 都 createElement
+// 普通选区合成复用画布；长图直接编码使用任务自有画布，完成后释放大尺寸像素。
 let _compositeCanvas = null;
 
 /** M10 优化：获取复用的 canvas（尺寸不匹配时自动 resize + 清空） */
@@ -276,9 +276,18 @@ function getCompositeCanvas(w, h) {
 /** 将 ImageData 编码为后端输出接口统一接收的 PNG 字节。 */
 export async function encodeImageDataPng(imageData) {
     if (!imageData) return null;
-    const canvas = getCompositeCanvas(imageData.width, imageData.height);
-    canvas.getContext('2d').putImageData(imageData, 0, 0);
-    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+    const canvas = document.createElement('canvas');
+    let blob;
+    try {
+        canvas.width = imageData.width;
+        canvas.height = imageData.height;
+        canvas.getContext('2d').putImageData(imageData, 0, 0);
+        blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+    } finally {
+        // toBlob 完成后 Blob 已持有编码结果，无须等输出 IPC 才释放画布。
+        canvas.width = 0;
+        canvas.height = 0;
+    }
     return blob ? new Uint8Array(await blob.arrayBuffer()) : null;
 }
 

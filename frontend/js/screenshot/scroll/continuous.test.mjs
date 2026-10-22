@@ -31,9 +31,10 @@ function setup(overrides = {}) {
 // 连续采样与输入事件无关；空闲降频，唤醒不会等待旧的空闲定时器。
 {
     const h = setup(); h.pipeline.start(); await h.advance(1000);
-    assert.deepEqual(h.captures.slice(0,4), [0,33,66,99]);
+    assert.deepEqual(h.captures.slice(0,4), [0,100,200,300]);
     assert.ok(h.captures.slice(1).some((at,i) => at - h.captures[i] === 250));
-    const before = h.captures.length; h.pipeline.wake(); await h.advance(0);
+    await h.advance(150);
+    const before = h.captures.length; h.pipeline.wake(); await h.advance(100);
     assert.equal(h.captures.length, before + 1);
     await h.pipeline.pauseAndDrain();
     assert.deepEqual(h.pipeline.stats(), {frames: 0, bytes: 0, pressured: false});
@@ -51,13 +52,13 @@ function setup(overrides = {}) {
         handled.push({frame, metadata}); active--;
         return {moved: true};
     }});
-    h.pipeline.start(); await h.advance(200);
+    h.pipeline.start(); await h.advance(400);
     assert.equal(h.captures.length, 3);
     assert.deepEqual(h.pipeline.stats(), {frames: 3, bytes: 12, pressured: true});
     assert.equal(h.pressures.length, 1);
     gate.resolve(); await flush();
     assert.deepEqual(handled.map(item => item.frame), [1,2,3]);
-    await h.advance(33);
+    await h.advance(500);
     assert.equal(handled[3].metadata.discontinuity, true, '采样中断后不能假定帧连续');
     assert.equal(peak, 1, '只能有一个处理/提交者');
     h.pipeline.dispose();
@@ -69,7 +70,7 @@ function setup(overrides = {}) {
         if (frame === 1) await gate.promise;
         order.push(frame); return {moved: true, frame};
     }});
-    h.pipeline.start(); await h.advance(66);
+    h.pipeline.start(); await h.advance(200);
     const sample = h.pipeline.sample({finalizing: true});
     const drain = h.pipeline.pauseAndDrain();
     await flush(); assert.deepEqual(order, []);
@@ -85,10 +86,51 @@ function setup(overrides = {}) {
     const gate = deferred(), committed = [];
     const h = setup({process: async () => { await gate.promise; return {moved: true}; },
         onResult: result => committed.push(result)});
-    h.pipeline.start(); await h.advance(66); h.pipeline.dispose();
+    h.pipeline.start(); await h.advance(200); h.pipeline.dispose();
     gate.resolve(); await h.pipeline.drain();
     assert.equal(committed.length, 0);
     assert.equal(h.pipeline.stats().bytes, 0);
     assert.equal(h.pipeline.stats().frames, 0);
+}
+// 密集输入不能通过 wake 绕过采样上限，更不能并发抓屏。
+{
+    const h = setup({process: async () => ({moved: true})});
+    h.pipeline.start(); await h.advance(0);
+    for (let i = 0; i < 100; i++) { h.pipeline.wake(); await h.advance(10); }
+    assert.ok(h.captures.length <= 11, '一秒内的后台采样不能超过约 10fps');
+    assert.ok(h.captures.slice(1).every((at, i) => at - h.captures[i] >= 100));
+    h.pipeline.dispose();
+}
+// 采集本身较慢时按耗时留出休息；输入风暴不能取消休息，强制收尾仍能立即新采样。
+{
+    const gate = deferred(); let calls = 0;
+    const h = setup({capture: async () => {
+        calls++; if (calls === 1) await gate.promise;
+        return {frame: calls};
+    }, process: async () => ({moved: true})});
+    h.pipeline.start(); await h.advance(120);
+    gate.resolve(); await flush();
+    assert.equal(h.pipeline.diagnostics().captureCostMs, 120);
+    for (let i = 0; i < 11; i++) { h.pipeline.wake(); await h.advance(10); }
+    assert.equal(calls, 1, '耗时 120ms 的抓屏完成后至少休息约 120ms');
+    await h.advance(10); assert.equal(calls, 2);
+    await h.pipeline.sample({finalizing: true});
+    assert.equal(calls, 3, '完成收尾不必等待常规采样周期');
+    h.pipeline.dispose();
+}
+// 匹配线程变慢时同样主动降频，避免一直采集到缓冲耗尽才减速。
+{
+    const gate = deferred(); let first = true;
+    const h = setup({process: async () => {
+        if (first) { first = false; await gate.promise; }
+        return {moved: true};
+    }});
+    h.pipeline.start(); await h.advance(160);
+    gate.resolve(); await flush();
+    assert.ok(h.pipeline.diagnostics().processingCostMs > 100);
+    const before = h.captures.length;
+    h.pipeline.wake(); await h.advance(40);
+    assert.equal(h.captures.length, before, '慢处理反馈要影响下一次采样，而不是堆更多原图');
+    h.pipeline.dispose();
 }
 console.log('scroll continuous capture tests passed');

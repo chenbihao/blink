@@ -71,14 +71,30 @@ export class ScrollCaptureSession {
         return this.exitHandler?.(restoreSelection);
     }
 
-    reset() {
-        this.continuousCapture?.dispose();
-        this.trackingClient?.dispose();
+    /** 编辑器接管像素后即可释放采集资源；保留来源几何与 editing 状态供输出/取消使用。 */
+    releaseCaptureResources() {
+        this.invalidate();
+        const pipeline = this.continuousCapture;
+        const client = this.trackingClient;
         this.continuousCapture = null;
         this.trackingClient = null;
-        this.lifecycleId++;
-        this.invalidate();
+        pipeline?.dispose();
+        client?.dispose();
         if (this._scrollCaptureTimer) clearTimeout(this._scrollCaptureTimer);
+        this._scrollCaptureTimer = 0;
+        this.autoScroll = false;
+        this.scrollFrames = [];
+        this.scrollLastFrame = null;
+        this.scrollKeyframes = [];
+        this.scrollReplayFrames = [];
+        this.scrollReplayBytes = 0;
+        this.scrollPendingJump = null;
+        this.lastMovementResult = null;
+    }
+
+    reset() {
+        this.lifecycleId++;
+        this.releaseCaptureResources();
         for (const [key, value] of Object.entries(SESSION_DEFAULTS)) {
             this[key] = value === null && [
                 'scrollFrames', 'scrollKeyframes', 'scrollDecisions', 'scrollReplayFrames',

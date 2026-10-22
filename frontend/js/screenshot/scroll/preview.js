@@ -266,10 +266,10 @@ function renderPreview(options = {}) {
 
     const locatorTop = (locatorDocumentTop - displayTop) * scale;
     const locatorH = ss.scrollBandH * scale;
-    const sourceOffset = Math.max(
+    const sourceOffset = Math.round(Math.max(
         0,
         Math.min(previewH - canvas.height, locatorTop + locatorH / 2 - canvas.height / 2),
-    );
+    ));
     const hasCandidate = Number.isFinite(options.candidateTop);
     const candidateTop = hasCandidate ? options.candidateTop : null;
     const previous = lastRendering;
@@ -287,9 +287,11 @@ function renderPreview(options = {}) {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     const orderedFrames = [...ss.scrollFrames].sort((a, b) => a.top - b.top);
     for (const captured of orderedFrames) {
-        const scaledTop = (captured.top - displayTop) * scale - sourceOffset;
-        const scaledH = captured.image.height * scale;
-        if (scaledTop + scaledH <= 0 || scaledTop >= canvas.height) continue;
+        // 相邻片段共用同一条整数像素边界，避免小数边缘的透明度混合露出横线。
+        const scaledTop = Math.round((captured.top - displayTop) * scale) - sourceOffset;
+        const scaledBottom = Math.round((captured.top + captured.image.height - displayTop) * scale) - sourceOffset;
+        const scaledH = scaledBottom - scaledTop;
+        if (scaledH <= 0 || scaledBottom <= 0 || scaledTop >= canvas.height) continue;
         const tmp = canvasForSegment(captured);
         ctx.drawImage(tmp, 0, scaledTop, PREVIEW_W, scaledH);
     }

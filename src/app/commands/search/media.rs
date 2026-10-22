@@ -2026,18 +2026,9 @@ pub async fn screenshot_capture_band(
 ) -> Result<tauri::ipc::Response, String> {
     let bytes = tokio::task::spawn_blocking(move || {
         let bgra = crate::infra::platform::screenshot::capture_region(x, y, w, h)?;
-        // H5 优化：u32 位运算批量 swap R↔B，替代 chunks_exact_mut(4).swap(0, 2)
-        // BGRA [B,G,R,A] 在 little-endian 下 = u32 0xAARRGGBB
-        // RGBA [R,G,B,A]            = u32 0xAABBGGRR
-        // 差别仅 R/B 位置对换 → mask 0x00FF00FF 提出 R/B 两字节交换
         let mut rgba = bgra;
-        for chunk in rgba.chunks_exact_mut(4) {
-            let px = u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-            let rb = px & 0x00FF00FF;
-            let ga = px & 0xFF00FF00;
-            let swapped = ga | (rb << 16) | (rb >> 16);
-            chunk.copy_from_slice(&swapped.to_ne_bytes());
-        }
+        // 共用对齐 u32 快路径，避免 dev 下逐像素构造/复制四字节数组的高开销。
+        crate::infra::platform::screenshot::swap_rgba_bgra_in_place(&mut rgba);
         Ok::<Vec<u8>, String>(rgba)
     })
     .await

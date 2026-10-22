@@ -70,7 +70,7 @@ await runAutoScrollController({
 });
 assert.equal(forwarded, 5, '分级重试五次后才判定到底并停止注入滚轮');
 assert.equal(unchangedCaptures, 10, '每次注入后 unchanged 应延迟复核一次再决定继续滚动');
-assert.equal(predicted, 5, '每次自动滚轮都应先给预览预测反馈');
+assert.equal(predicted, 5, '每次自动滚轮都应先给待采集边框反馈');
 assert.deepEqual(forwardModes.slice(0, 3), [
     {positionCursor: true, forceMessage: false},
     {positionCursor: true, forceMessage: false},
@@ -136,5 +136,33 @@ await runAutoScrollController({
 assert.equal(lateSession.autoWheelDelta, -480);
 assert.equal(lateSession.autoLowConfidenceCount, 8);
 assert.equal(lateSession._scrollCapturing, true);
+
+// 困难画面保护：连续低置信必须逐步减速并暂停，不能无限注入滚轮。
+active = true;
+const guardedSession = {scrollTrackingState: 'tracking', scrollBandH: 300,
+    autoWheelDelta: -180, autoLowConfidenceCount: 0};
+const guardedDeltas = [];
+await runAutoScrollController({
+    generation: 5, session: guardedSession, isActive: () => active,
+    waitForSettle: async () => ({stable: true}), delay: async () => {},
+    forwardWheel: async () => { guardedDeltas.push(guardedSession.autoWheelDelta); },
+    captureFrame: async () => ({moved: true, positionShift: 120, decision: {confidence: 0.4}}),
+    stop: async reason => { stopReason = reason; active = false; },
+});
+assert.deepEqual(guardedDeltas, [-180, -120, -90]);
+assert.match(stopReason, /连续低置信/);
+
+// 无法完成跨帧确认时只复核当前画面，不继续滚离最后可靠区域。
+active = true;
+let pendingCaptures = 0, pendingWheels = 0;
+await runAutoScrollController({
+    generation: 6, session: {...guardedSession, autoLowConfidenceCount: 0}, isActive: () => active,
+    waitForSettle: async () => ({stable: true}), delay: async () => {},
+    forwardWheel: async () => { pendingWheels++; },
+    captureFrame: async () => { pendingCaptures++; return {moved: false, reason: 'pending-confirmation'}; },
+    stop: async reason => { stopReason = reason; active = false; },
+});
+assert.equal(pendingWheels, 1); assert.equal(pendingCaptures, 3);
+assert.match(stopReason, /无法可靠配准/);
 
 console.log('scroll auto tests passed');
