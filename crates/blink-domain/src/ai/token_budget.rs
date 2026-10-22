@@ -235,6 +235,32 @@ pub fn estimate_text_tokens(text: &str) -> usize {
     cjk.saturating_add(other.div_ceil(4))
 }
 
+/// UTF-8 安全的 token 前缀截断（0.27.2，read_clipboard 护栏消费；0.27.9 附件续读复用）。
+///
+/// 返回 `text` 的最长前缀（按字符边界切，绝不在多字节字符中间断开），且满足
+/// `estimate_text_tokens(prefix) <= max_tokens`。成本模型与 `estimate_text_tokens`
+/// 逐字符一致（CJK 1 token、其他 4 char/token 向上取整），二者对同一前缀的估算自洽。
+/// `max_tokens = 0` 返回空串。
+pub fn utf8_safe_token_prefix(text: &str, max_tokens: usize) -> String {
+    let mut cjk = 0usize;
+    let mut other = 0usize;
+    let mut end = 0usize;
+    for (idx, ch) in text.char_indices() {
+        let (next_cjk, next_other) = if is_cjk(ch) {
+            (cjk + 1, other)
+        } else {
+            (cjk, other + 1)
+        };
+        if next_cjk.saturating_add(next_other.div_ceil(4)) > max_tokens {
+            break;
+        }
+        cjk = next_cjk;
+        other = next_other;
+        end = idx + ch.len_utf8();
+    }
+    text[..end].to_string()
+}
+
 // ── 预算类型 ──────────────────────────────────────────────────────────────────
 
 /**
@@ -768,6 +794,56 @@ mod tests {
     fn estimate_text_tokens_punctuation_and_whitespace() {
         // 纯标点和空格：15 chars → div_ceil(15, 4) = 4
         assert_eq!(estimate_text_tokens("  , . ; : ! ?  "), 4);
+    }
+
+    // ── utf8_safe_token_prefix（0.27.2）──
+
+    #[test]
+    fn token_prefix_zero_budget_returns_empty() {
+        assert_eq!(utf8_safe_token_prefix("abc", 0), "");
+    }
+
+    #[test]
+    fn token_prefix_within_budget_returns_whole_text() {
+        assert_eq!(utf8_safe_token_prefix("你好世界", 10), "你好世界");
+        assert_eq!(utf8_safe_token_prefix("hello", 5), "hello");
+    }
+
+    #[test]
+    fn token_prefix_cjk_exact_budget() {
+        // 5 个 CJK = 5 tokens；预算 3 → 前 3 字
+        assert_eq!(utf8_safe_token_prefix("你好世界啊", 3), "你好世");
+    }
+
+    #[test]
+    fn token_prefix_ascii_groups_by_four() {
+        // 8 ASCII = 2 tokens；预算 1 → 前 4 字符（1 token 组的边界）
+        assert_eq!(utf8_safe_token_prefix("abcdefgh", 1), "abcd");
+        // 预算 2 → 全部
+        assert_eq!(utf8_safe_token_prefix("abcdefgh", 2), "abcdefgh");
+    }
+
+    #[test]
+    fn token_prefix_mixed_never_splits_multibyte() {
+        // 混合文本截断点必须落在字符边界——对截断结果重估不超预算且是合法 UTF-8 前缀
+        let text = "abc你好def世界xyz混合文本";
+        for budget in 0..estimate_text_tokens(text) + 2 {
+            let prefix = utf8_safe_token_prefix(text, budget);
+            assert!(text.starts_with(&prefix), "prefix 必须是原文前缀");
+            assert!(
+                estimate_text_tokens(&prefix) <= budget,
+                "prefix 估算 {tokens} 须 ≤ 预算 {budget}",
+                tokens = estimate_text_tokens(&prefix)
+            );
+        }
+    }
+
+    #[test]
+    fn token_prefix_estimate_consistent_with_estimator() {
+        // 逐字符成本模型与整体估算自洽：任意文本任意预算，前缀估算 ≤ 预算 < 追加下一字符后的估算
+        let text = "中English混合 content 123！";
+        let prefix = utf8_safe_token_prefix(text, 4);
+        assert!(estimate_text_tokens(&prefix) <= 4);
     }
 
     #[test]

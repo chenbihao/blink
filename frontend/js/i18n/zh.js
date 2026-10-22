@@ -572,6 +572,8 @@ export const zh = {
     "context.clipboard": "采集剪贴板文本",
     "context.selection": "划词感知（选中文本）",
     "context.selection.hint": "鼠标划选文本后自动抓取，唤起 Blink 时作为上下文使用。局限：仅 Windows；依赖应用支持 UIA TextPattern，浏览器（Chrome/Edge/Firefox）、Office、VS Code、原生 Win32 支持较好，部分 Electron 应用（如新版 QQ/微信/Discord）、终端、游戏可能抓不到；无选区时可先复制文本，Blink 会自动读剪贴板。",
+    "context.fileSelection": "文件选中感知",
+    "context.fileSelection.hint": "在资源管理器或桌面选中文件后唤起 Blink，自动提供复制路径、资源管理器定位等建议。仅采集文件路径，不读取文件内容。",
 
     // ── Chord 交互面板（0.8.5.1 §6.6）──
     "chord.lede": "主窗可见且未开始输入时，按住 Alt 可触发快捷动作（区域截图 / 语音输入 / 剪贴板历史）",
@@ -1393,6 +1395,7 @@ export const zh = {
     "statusbar.paging": "{{key:PageUp}}{{key:PageDown}} 翻页 · {page}/{pageCount}",
     "suggestion.origin.selection": "来自划词",
     "suggestion.origin.clipboard": "来自剪贴板",
+    "suggestion.origin.fileSelection": "来自文件选中",
 
     // ── Smart Tab 建议系统（0.24）──
     // SuggestionBar 行文案：display 之外按 kind 覆盖（AskAi 后端 display 硬编码
@@ -1407,6 +1410,10 @@ export const zh = {
     "suggestionbar.openPath_with": "打开路径 “{text}”",
     "suggestionbar.revealInExplorer": "资源管理器定位",
     "suggestionbar.revealInExplorer_with": "资源管理器定位 “{text}”",
+    // 复制路径（0.27.3 文件选中感知）：display 是首项显示名，多选显示数量
+    "suggestionbar.copyPaths": "复制路径",
+    "suggestionbar.copyPaths_with": "复制路径 “{text}”",
+    "suggestionbar.copyPaths_many": "复制 {count} 个路径",
     "suggestionbar.update_available": "Blink {version} 可用",
     "suggestionbar.update_dismiss": "关闭（本版本不再提示）",
 

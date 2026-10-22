@@ -110,6 +110,11 @@ pub struct AwarenessSnapshot {
     /// （「自动检查开 && 检测到新版 && 未 dismiss」三条件成立时的版本号），
     /// `collect` 不填、infra 不做判定；Suggestion 域的 UpdateProducer 纯读此字段。
     pub available_update: Option<String>,
+    /// 文件选中状态（0.27.3 §8.8）——仅驻内存，不持久化；日志只记数量/来源 PID。
+    /// 由 window_orchestrator 在 show 后经 Shell COM worker 异步回填
+    /// （`SearchService::update_file_selection_if_fresh`，带代次核验）；
+    /// 前置开关关闭或敏感应用门控命中时恒为 `None`。
+    pub file_selection: Option<crate::platform::selection::files::FileSelectionState>,
 }
 
 impl Default for AwarenessSnapshot {
@@ -119,6 +124,7 @@ impl Default for AwarenessSnapshot {
             foreground_app: None,
             texts: Vec::new(),
             available_update: None,
+            file_selection: None,
         }
     }
 }
@@ -305,6 +311,8 @@ pub fn collect(cfg: &CollectParams) -> AwarenessSnapshot {
         texts,
         // 更新提醒由 app 层在 collect 之后盖章（见字段注释），此处恒 None
         available_update: None,
+        // 文件选中由 orchestrator 在 show 后经 Shell COM worker 异步回填（0.27.3）
+        file_selection: None,
     }
 }
 

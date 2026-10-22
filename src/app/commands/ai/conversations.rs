@@ -230,9 +230,9 @@ pub async fn generate_conversation_title(
         e.to_string()
     })?;
 
-    // 3. 构造精简 prompt
-    let system_prompt =
-        "请用 6-10 个字概括以下用户消息，作为对话标题。只输出标题文本，不要加引号或标点符号。";
+    // 3. 构造精简 prompt（0.27.2：system prompt 迁至 domain::ai::prompt 纯函数，
+    //    保持原输出语义；此处只做输入截断）
+    let system_prompt = crate::domain::ai::prompt::conversation_title_system_prompt();
     let user_content: String = first_message.chars().take(500).collect();
 
     let req = CompletionRequest {

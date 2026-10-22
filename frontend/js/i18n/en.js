@@ -572,6 +572,8 @@ export const en = {
     "context.clipboard": "Capture clipboard text",
     "context.selection": "Selection awareness",
     "context.selection.hint": "Auto-captures text you highlight with the mouse and passes it as context when you summon Blink. Limitations: Windows only; requires apps to support UIA TextPattern — browsers (Chrome/Edge/Firefox), Office, VS Code and native Win32 work well; some Electron apps (newer QQ/WeChat/Discord), terminals and games may fail. If no selection is grabbed, just copy the text — Blink will read your clipboard.",
+    "context.fileSelection": "File selection awareness",
+    "context.fileSelection.hint": "Select files in Explorer or on the desktop, then summon Blink to get copy-path and reveal-in-Explorer suggestions. Only file paths are captured; file contents are never read.",
 
     // ── Chord panel (0.8.5.1 §6.6) ──
     "chord.lede": "When the main window is visible and no input has started, hold Alt to trigger quick actions (Screenshot / Voice input / Clipboard).",
@@ -1400,6 +1402,7 @@ export const en = {
     "statusbar.paging": "{{key:PageUp}}{{key:PageDown}} page · {page}/{pageCount}",
     "suggestion.origin.selection": "from selection",
     "suggestion.origin.clipboard": "from clipboard",
+    "suggestion.origin.fileSelection": "from file selection",
 
     // ── Smart Tab suggestion system (0.24) ──
     "suggestionbar.ask_ai": "Ask AI",
@@ -1412,6 +1415,11 @@ export const en = {
     "suggestionbar.openPath_with": "Open path \"{text}\"",
     "suggestionbar.revealInExplorer": "Reveal in Explorer",
     "suggestionbar.revealInExplorer_with": "Reveal \"{text}\"",
+    // Copy paths (0.27.3 file selection): display is the first item name,
+    // multi-select shows a count
+    "suggestionbar.copyPaths": "Copy path",
+    "suggestionbar.copyPaths_with": "Copy path \"{text}\"",
+    "suggestionbar.copyPaths_many": "Copy {count} paths",
     "suggestionbar.update_available": "Blink {version} available",
     "suggestionbar.update_dismiss": "Dismiss (won't show again for this version)",
 

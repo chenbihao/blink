@@ -283,6 +283,7 @@ cargo test --bin blink
 
 - [Wox](https://github.com/Wox-launcher/Wox) — Windows 上的先驱 Launcher
 - [Alfred](https://www.alfredapp.com/) — 证明了全局输入框可以成为人机交互的第一入口
+- [Lertaro](https://github.com/Lertaro/Lertaro) — Windows 上的开源文件搜索与效率启动器
 - [Raycast](https://www.raycast.com/) — 现代化 Launcher 体验，插件生态的标杆
 - [Flow Launcher](https://www.flowlauncher.com/) — Windows 上的开源 Launcher，社区驱动的典范
 - [uTools](https://u.tools/) — 国产效率工具，本地化体验的参考
@@ -291,6 +292,7 @@ cargo test --bin blink
 - [Ditto](https://github.com/sabrogden/Ditto) — 超好用的剪贴板管理工具
 - [QuickLook](https://github.com/QL-Win/QuickLook) — 文件快捷预览
 - [PixPin](https://pixpin.com/) — 我愿称为最强截图应用
+- [ScreenToGif](https://github.com/NickeManarin/ScreenToGif) — GIF 区域录制与轻量编辑体验的参考
  
 ---
 

@@ -274,6 +274,8 @@ const OPEN_TARGET_PREVIEW_MAX = 40;
  * 带原文预览（"问 AI “xxx"），与 translate 行的"翻译划词 “xxx"" 信息密度对齐。
  * 打开类（0.24.8）同理：display 是目标文本（URL/路径），按 kind 拼 i18n 标签
  * + 截断预览（"打开链接 “example.com/…""）。
+ * copyPaths（0.27.3）：display 是首项显示名；数量从 action args 派生
+ * （write_clipboard.text 按换行分割），多选时显示数量文案（§5.3.5 数量文案）。
  */
 function rowText(sug) {
     if (sug.kind === "askAi") {
@@ -284,6 +286,17 @@ function rowText(sug) {
         return t("suggestionbar.ask_ai_with", {text: preview});
     }
     if (sug.kind === "completion") return t("suggestionbar.completion_to", {target: sug.display});
+    if (sug.kind === "copyPaths") {
+        const text = sug.action?.invokeCapability?.args?.text || "";
+        const count = text ? text.split(/\r?\n/).length : 0;
+        if (count > 1) return t("suggestionbar.copyPaths_many", {count});
+        const target = sug.display || "";
+        if (!target) return t("suggestionbar.copyPaths");
+        const preview = target.length > OPEN_TARGET_PREVIEW_MAX
+            ? target.slice(0, OPEN_TARGET_PREVIEW_MAX) + "…" : target;
+        const withText = t("suggestionbar.copyPaths_with", {text: preview});
+        return withText === "suggestionbar.copyPaths_with" ? t("suggestionbar.copyPaths") : withText;
+    }
     if (sug.kind === "openUrl" || sug.kind === "openPath" || sug.kind === "revealInExplorer") {
         const bareKey = `suggestionbar.${sug.kind}`;
         const withKey = `${bareKey}_with`;
@@ -305,5 +318,6 @@ function iconFor(sug) {
     if (sug.kind === "openUrl") return "globe";
     if (sug.kind === "openPath") return "folder-open";
     if (sug.kind === "revealInExplorer") return "folder-search";
+    if (sug.kind === "copyPaths") return "copy";
     return "zap";
 }

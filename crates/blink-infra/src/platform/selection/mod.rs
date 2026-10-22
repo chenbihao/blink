@@ -1,6 +1,6 @@
 //! 选中文本感知（0.8.0 §1.1）：抓取鼠标选中文本。
 //!
-//! 两条路径：
+//! 三条路径：
 //! 1. **划词监听**（主）：全局鼠标钩子在「划词瞬间」抓取（焦点未失、选区未退化），
 //!    缓存最近选区，绕开 Electron 应用失焦退化问题。见 `listener.rs`。
 //! 2. **UIA 抓取原语**：三段式策略，见 `windows.rs`。
@@ -8,12 +8,16 @@
 //!    - `capture_focused_element()` + `extract_selection_from_element()`：拆分模式，
 //!      供 `window::invoke` 使用——show() 前快速捕获焦点元素（<5ms），show() 后异步提取。
 //!      避免慢应用 UIA（100-500ms）阻塞窗口显示。
+//! 3. **Shell 文件选中**（0.27.3）：`files.rs`——IShellWindows 冻结视图 →
+//!    SelectedItems → 文件系统项投影。Explorer/桌面/Win11 标签页。
 //!
 //! 三段式策略：`GetFocusedElement`(O(1)) → 祖先链 `FindFirst(Ancestors)`(O(深度))
 //! → 焦点子树 `FindFirst(Descendants)`(O(焦点子树))。无 FindAll 全树回退。
 //! 带计时日志与阈值告警。
 //!
 //! 缓存独立于 SearchService（避免 infra→domain 反向依赖），由 `window::invoke` 合并进 snapshot。
+
+pub mod files;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{OnceLock, RwLock};

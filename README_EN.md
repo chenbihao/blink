@@ -285,6 +285,7 @@ cargo test --bin blink
 
 - [Wox](https://github.com/Wox-launcher/Wox) — The pioneer launcher on Windows
 - [Alfred](https://www.alfredapp.com/) — Proved that a global input box can be the first entry for human-computer interaction
+- [Lertaro](https://github.com/Lertaro/Lertaro) — Open-source file search and productivity launcher for Windows
 - [Raycast](https://www.raycast.com/) — Modern launcher experience, gold standard for plugin ecosystems
 - [Flow Launcher](https://www.flowlauncher.com/) — Open-source launcher on Windows, a model of community-driven development
 - [uTools](https://u.tools/) — Homegrown efficiency tool, reference for localized experience
@@ -293,6 +294,7 @@ cargo test --bin blink
 - [Ditto](https://github.com/sabrogden/Ditto) — A super handy clipboard management tool
 - [QuickLook](https://github.com/QL-Win/QuickLook) — Quick file preview
 - [PixPin](https://pixpin.com/) — I'd call it the most powerful screenshot app
+- [ScreenToGif](https://github.com/NickeManarin/ScreenToGif) — A reference for GIF region recording and lightweight editing
 
 ---
 

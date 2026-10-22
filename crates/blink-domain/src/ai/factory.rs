@@ -145,8 +145,12 @@ pub(crate) fn build_openai_client(
     // 0.21.16/0.43: 注入 LoggingHttpClient——trace 级别打印真实请求/响应体（wire JSON），
     // 排查 provider 兼容问题（如本地 qwen 思考块）。平时零开销透传。
     // 0.43: OpenAIConfig + connect(http)——client 不再携带 HTTP 泛型参数。
+    // 0.27.1: 显式 Route::Chat——OpenAIConfig::new 默认 OPENAI dialect（completion_route
+    // = Responses），第三方 OpenAICompatible 网关普遍无 /responses 端点会 404。本产品
+    // 协议承诺是 /chat/completions，此处显式覆盖 dialect 默认（wire 测试见 mod wire_tests）。
     Ok(openai::OpenAIConfig::new(key)
         .with_base_url(url)
+        .with_route(openai::Route::Chat)
         .connect(blink_infra::utils::http_log::LoggingHttpClient::default()))
 }
 
@@ -347,7 +351,7 @@ mod tests {
         }
     }
 
-    fn sample_model() -> ModelEntry {
+    pub(super) fn sample_model() -> ModelEntry {
         ModelEntry {
             id: "gpt-4o-mini".into(),
             display_name: "M1".into(),
@@ -419,5 +423,226 @@ mod tests {
             result.is_ok(),
             "OllamaHttp 应成功构造 provider(无需密钥,client 构造不连接服务器)"
         );
+    }
+}
+
+// ── 0.27.1 wire 测试：本地 TcpListener 捕获真实 HTTP method/path/body ─────────
+//
+// 静态结论（rig-core 0.43.0 源码核验）：`OpenAIConfig::new` 默认 OPENAI dialect，
+// `Quirks::completion_route = Route::Responses`——factory 不显式覆盖路由时，
+// OpenAICompatible 请求会打 `/responses` 而非 `/chat/completions`。本组测试钉住
+// `build_openai_client` 显式 `Route::Chat` 的实际 wire 行为（不走 mock client，
+// 真实走 rig 编码 + LoggingHttpClient + reqwest 传输，仅端点换成本地捕获桩）。
+#[cfg(test)]
+mod wire_tests {
+    use super::*;
+    use crate::ai::message::{ChatMessage, CompletionRequest};
+    use crate::ai::provider::{AIProvider, StreamChunk};
+    use crate::schema::ToolSchema;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{SocketAddr, TcpListener, TcpStream};
+    use std::sync::{Arc, Mutex};
+
+    /// 捕获到的一次请求。
+    #[derive(Debug, Clone)]
+    struct CapturedRequest {
+        method: String,
+        path: String,
+        body: String,
+    }
+
+    /// 单用途 HTTP 捕获桩：同步服务 `responses.len()` 个请求后自行退出。
+    /// 每连接读请求行 + headers + Content-Length body，回写 `responses[i]`（完整响应字节）。
+    fn spawn_capture_server(responses: Vec<Vec<u8>>) -> (SocketAddr, Arc<Mutex<Vec<CapturedRequest>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
+        let addr = listener.local_addr().expect("local_addr");
+        let captured: Arc<Mutex<Vec<CapturedRequest>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = captured.clone();
+        std::thread::spawn(move || {
+            for response in responses {
+                let Ok((stream, _)) = listener.accept() else { break };
+                let mut reader = BufReader::new(stream);
+                let Some(req) = read_http_request(&mut reader) else { break };
+                sink.lock().unwrap().push(req);
+                let _ = reader.get_mut().write_all(&response);
+                let _ = reader.get_mut().flush();
+            }
+        });
+        (addr, captured)
+    }
+
+    /// 读单个 HTTP/1.1 请求（请求行 + headers + Content-Length body）。
+    fn read_http_request(reader: &mut BufReader<TcpStream>) -> Option<CapturedRequest> {
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).ok()?;
+        let mut parts = request_line.split_whitespace();
+        let method = parts.next()?.to_string();
+        let path = parts.next()?.to_string();
+        let mut content_length = 0usize;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).ok()?;
+            if line == "\r\n" || line.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':')
+                && name.trim().eq_ignore_ascii_case("content-length")
+            {
+                content_length = value.trim().parse().unwrap_or(0);
+            }
+        }
+        let mut body = vec![0u8; content_length];
+        if content_length > 0 {
+            reader.read_exact(&mut body).expect("读请求体");
+        }
+        Some(CapturedRequest {
+            method,
+            path,
+            body: String::from_utf8_lossy(&body).into_owned(),
+        })
+    }
+
+    /// 标准非流式 chat completion 响应（200 + JSON + Connection: close）。
+    fn chat_completion_response(content: &str) -> Vec<u8> {
+        let body = format!(
+            r#"{{"id":"wire-1","object":"chat.completion","created":1,"model":"wire-model","choices":[{{"index":0,"message":{{"role":"assistant","content":{content}}},"finish_reason":"stop"}}],"usage":{{"prompt_tokens":5,"completion_tokens":4,"total_tokens":9}}}}"#
+        );
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .into_bytes()
+    }
+
+    /// 标准 SSE 流式响应（3 个内容 chunk + [DONE]）。
+    fn sse_stream_response() -> Vec<u8> {
+        // frame() 只产 JSON 载荷，"data: " 前缀由拼接层统一加。
+        let frame = |delta: &str, finish: &str| {
+            format!(
+                r#"{{"id":"wire-s","object":"chat.completion.chunk","created":1,"model":"wire-model","choices":[{{"index":0,"delta":{delta},"finish_reason":{finish}}}]}}"#
+            )
+        };
+        let body = format!(
+            "data: {}\n\ndata: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+            frame(r#"{"role":"assistant","content":"Hel"}"#, "null"),
+            frame(r#"{"content":"lo"}"#, "null"),
+            frame("{}", "\"stop\""),
+        );
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .into_bytes()
+    }
+
+    fn sample_wire_request() -> CompletionRequest {
+        CompletionRequest {
+            messages: vec![
+                ChatMessage::system("你是测试助手"),
+                ChatMessage::user("say hi"),
+            ],
+            tools: Vec::new(),
+            max_tokens: Some(64),
+            temperature: Some(0.0),
+            timeout_ms: Some(5_000),
+        }
+    }
+
+    fn build_provider(base_url: &str) -> Arc<dyn AIProvider> {
+        let model = super::tests::sample_model();
+        build_openai_compatible("sk-wire-test", Some(base_url), &model).expect("构造 wire provider")
+    }
+
+    /// 普通生成走 POST /chat/completions（不是 /responses），body 携带 model 与消息。
+    #[tokio::test]
+    async fn normal_completion_posts_to_chat_completions() {
+        let (addr, captured) = spawn_capture_server(vec![chat_completion_response("\"hello from wire\"")]);
+        let provider = build_provider(&format!("http://{addr}/v1"));
+
+        let resp = provider.complete(sample_wire_request()).await.expect("complete 应成功");
+        assert_eq!(resp.text.as_deref(), Some("hello from wire"));
+
+        let reqs = captured.lock().unwrap();
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0].method, "POST");
+        assert_eq!(reqs[0].path, "/v1/chat/completions", "必须显式 Chat 路由，禁止落 dialect 默认 Responses");
+        let body: serde_json::Value = serde_json::from_str(&reqs[0].body).expect("请求体是 JSON");
+        assert_eq!(body["model"], "gpt-4o-mini");
+        assert!(body["messages"].as_array().is_some_and(|m| !m.is_empty()));
+    }
+
+    /// 工具定义随请求体下发（tools 数组真实编码进 wire）。
+    #[tokio::test]
+    async fn tool_definitions_ride_the_request_body() {
+        let (addr, captured) = spawn_capture_server(vec![chat_completion_response("\"ok\"")]);
+        let provider = build_provider(&format!("http://{addr}/v1"));
+
+        let mut req = sample_wire_request();
+        req.tools = vec![ToolSchema::empty("open_settings", "打开设置")];
+        provider.complete(req).await.expect("带工具 complete 应成功");
+
+        let reqs = captured.lock().unwrap();
+        let body: serde_json::Value = serde_json::from_str(&reqs[0].body).expect("请求体是 JSON");
+        let tools = body["tools"].as_array().expect("tools 应随 wire 下发");
+        assert!(tools.iter().any(|t| t["function"]["name"] == "open_settings"));
+    }
+
+    /// 流式生成同样走 Chat 路由，SSE 帧被正确解析聚合。
+    #[tokio::test]
+    async fn streaming_posts_to_chat_completions_and_parses_sse() {
+        let (addr, captured) = spawn_capture_server(vec![sse_stream_response()]);
+        let provider = build_provider(&format!("http://{addr}/v1"));
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        provider
+            .stream(sample_wire_request(), tx)
+            .await
+            .expect("stream 应成功");
+        let mut text = String::new();
+        while let Some(chunk) = rx.recv().await {
+            match chunk {
+                StreamChunk::Text(t) => text.push_str(&t),
+                StreamChunk::Done { .. } => break,
+            }
+        }
+        assert_eq!(text, "Hello");
+
+        let reqs = captured.lock().unwrap();
+        assert_eq!(reqs[0].path, "/v1/chat/completions", "流式同样必须 Chat 路由");
+        // 流式请求 body 声明 stream=true
+        let body: serde_json::Value = serde_json::from_str(&reqs[0].body).expect("请求体是 JSON");
+        assert_eq!(body["stream"], true, "流式请求应带 stream=true");
+    }
+
+    /// base_url 拼接不产生重复 /v1：带 /v1、带尾斜杠 /v1/ 均只出现一次 v1 段。
+    #[tokio::test]
+    async fn base_url_join_never_duplicates_v1() {
+        for base in ["/v1", "/v1/"] {
+            let (addr, captured) = spawn_capture_server(vec![chat_completion_response("\"ok\"")]);
+            let provider = build_provider(&format!("http://{addr}{base}"));
+            provider.complete(sample_wire_request()).await.expect("complete 应成功");
+
+            let reqs = captured.lock().unwrap();
+            let v1_count = reqs[0].path.matches("v1").count();
+            assert_eq!(
+                v1_count, 1,
+                "base={base} 时路径 {path} 不应出现重复 v1 段",
+                path = reqs[0].path
+            );
+            assert_eq!(reqs[0].path, "/v1/chat/completions", "base={base} 应归一为 /v1/chat/completions");
+        }
+    }
+
+    /// 无 /v1 前缀的 base（部分网关根路径部署）直接拼 /chat/completions。
+    #[tokio::test]
+    async fn base_url_without_v1_suffix_appends_chat_path() {
+        let (addr, captured) = spawn_capture_server(vec![chat_completion_response("\"ok\"")]);
+        let provider = build_provider(&format!("http://{addr}"));
+        provider.complete(sample_wire_request()).await.expect("complete 应成功");
+
+        let reqs = captured.lock().unwrap();
+        assert_eq!(reqs[0].path, "/chat/completions");
     }
 }

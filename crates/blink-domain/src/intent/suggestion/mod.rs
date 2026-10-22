@@ -81,6 +81,10 @@ pub enum SuggestionKind {
     /// （Coordinator 特判，见 coordinate 步骤 5），不受降频抑制（显式 dismiss 是
     /// 唯一消失通道）。
     UpdateAvailable,
+    /// 复制文件路径（0.27.3 文件选中感知）：Explorer/桌面选中 N 项 → 一次写入
+    /// 全部路径。采纳动作 `InvokeCapability("write_clipboard", {text: paths 换行连接})`。
+    /// rank 0.90（§5.3.5；高于打开类 reveal，低于 OpenUrl——复制是文件场景首意图）。
+    CopyPaths,
 }
 
 /// 类型化采纳动作（0.24 §3.5）。
@@ -136,6 +140,8 @@ pub enum SuggestionOrigin {
     /// 0.26.10：剪贴板历史条目右键显式询问——仅标记历史来源供遥测区分，
     /// 不进入 Coordinator（不按 `origin.is_some()` 判定环境建议、不参与双槽竞争）。
     ClipboardItem,
+    /// 0.27.3：Explorer/桌面文件选中（Shell COM 采集，`FileSelectionState`）。
+    FileSelection,
 }
 
 /// 零 cost 转换：数据侧 `AwarenessSource` → 前端契约 `SuggestionOrigin`（0.8.3 收尾）。

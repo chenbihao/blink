@@ -964,9 +964,11 @@ impl RuleRouter {
             Some(SuggestionOrigin::Selection) => ("translate-selection", 0.92),
             Some(SuggestionOrigin::Clipboard) => ("translate-clipboard", 0.82),
             // 0.26.10：历史条目显式询问不进入本路径（context 建议 origin 只来自
-            // AwarenessSource 映射），防御性兜底同 Selection 语义
-            Some(SuggestionOrigin::ClipboardItem) => ("translate-context", 0.92),
-            None => ("translate-context", 0.92),
+            // AwarenessSource 映射），防御性兜底同 Selection 语义；
+            // 0.27.3 FileSelection 同理——文件选中不走翻译 context 路径
+            Some(SuggestionOrigin::ClipboardItem)
+            | Some(SuggestionOrigin::FileSelection)
+            | None => ("translate-context", 0.92),
         };
         let when = best_ctx.when;
         // 指纹来源文本：按 origin 从 snapshot 取（与 display/replacement 同源）

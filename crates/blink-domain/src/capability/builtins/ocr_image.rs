@@ -1,12 +1,16 @@
-//! `ocr_image` Capability（0.11.7-c，0.11.7-f 走 backend 注入，0.22.4 走 router）。
+//! `ocr_image` Capability（0.11.7-c，0.11.7-f 走 backend 注入，0.22.4 走 router，0.27.2 detail 投影）。
 //!
-//! 接收 PNG 字节，返回 OCR 识别结果（文本 + 行级坐标）。
+//! 接收 PNG 字节，返回 OCR 识别结果。
 //! 通过 `OcrBackendRouter` 路由到 windows/paddleocr/auto 后端。
 //!
 //! **0.22.4**：
 //! - 优先使用 `OcrBackendRouter`（支持 windows/paddleocr/auto 路由）。
 //! - 可选参数 `screenshot_session` / `screenshot_revision` 携带截图来源信息。
 //! - `StructuredOcrError` 正确映射到 `CapabilityError`（不全部拍平为 Internal）。
+//!
+//! **0.27.2 输出瘦身**：LLM/MCP 等工具消费方默认 `detail=text`（仅正文 + 引擎/降级
+//! 元数据），`lines` 补行级坐标，`full` 保留原结构（截图 overlay 交互显式传 full）。
+//! 两条返回分支（router / 直连 backend）共用同一投影；未知 detail 值 InvalidArgs。
 
 use std::sync::Arc;
 
@@ -20,8 +24,64 @@ use crate::capability::{
 };
 use crate::ocr::error::OcrErrorCategory;
 
-/// `ocr_image` — 识别图片中的文字，返回文本 + 行级坐标。
+/// `ocr_image` — 识别图片中的文字，返回识别文本和每行文字的位置坐标。
 pub struct OcrImage;
+
+/// 输出详略档位（0.27.2）。缺省 `text`——工具消费方只需正文；交互层显式要坐标。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OcrDetail {
+    /// 仅 `text` + 引擎/降级元数据。
+    Text,
+    /// `text` + `lines`（行序/行文本/行坐标）。
+    Lines,
+    /// 完整 `OcrResult` 原结构（words/char_ranges/char_boxes 等）。
+    Full,
+}
+
+impl OcrDetail {
+    /// 从 args 解析 `detail`。缺省 `Text`；未知值 `InvalidArgs`。
+    fn parse(args: &Value) -> Result<Self, CapabilityError> {
+        match args.get("detail").and_then(Value::as_str) {
+            None => Ok(Self::Text),
+            Some("text") => Ok(Self::Text),
+            Some("lines") => Ok(Self::Lines),
+            Some("full") => Ok(Self::Full),
+            Some(other) => Err(CapabilityError::InvalidArgs {
+                detail: format!("ocr_image: 未知 detail 值: {other}（可选 full|lines|text）"),
+            }),
+        }
+    }
+}
+
+/// OCR 结果按 detail 投影（0.27.2，两条返回分支共用）。
+///
+/// - `Full`：`OcrResult` 原样序列化。
+/// - `Lines`：删 `words` / `char_ranges` / `char_boxes`。
+/// - `Text`：再删 `lines`——只留正文与引擎/降级元数据（backend_used /
+///   backend_fallback_reason / backend_degrade_hint，可诊断降级）。
+pub(crate) fn project_ocr_json(result: &OcrResult, detail: OcrDetail) -> Value {
+    let mut value = serde_json::to_value(result).unwrap_or_else(|_| {
+        Value::String(result.text.clone())
+    });
+    let Some(obj) = value.as_object_mut() else {
+        return value;
+    };
+    match detail {
+        OcrDetail::Full => {}
+        OcrDetail::Lines => {
+            obj.remove("words");
+            obj.remove("char_ranges");
+            obj.remove("char_boxes");
+        }
+        OcrDetail::Text => {
+            obj.remove("words");
+            obj.remove("char_ranges");
+            obj.remove("char_boxes");
+            obj.remove("lines");
+        }
+    }
+    value
+}
 
 #[async_trait::async_trait]
 impl Capability for OcrImage {
@@ -32,7 +92,7 @@ impl Capability for OcrImage {
     fn schema(&self) -> CapabilitySchema {
         CapabilitySchema {
             name: "ocr_image".into(),
-            description: "识别图片中的文字，返回识别文本和每行文字的位置坐标。支持中文和英文。图片来源：image_ref（来自截图/剪贴板等能力返回的引用）或 png（原始 PNG 字节数组），二选一。".into(),
+            description: "识别图片中的文字，返回识别文本和每行文字的位置坐标。支持中文和英文。图片来源：image_ref（来自截图/剪贴板等能力返回的引用）或 png（原始 PNG 字节数组），二选一。detail 控制返回详略：text（默认，仅识别正文）、lines（正文+行级坐标）、full（完整结构含词级/字符级数据）。".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -44,6 +104,11 @@ impl Capability for OcrImage {
                         "type": "array",
                         "items": {"type": "integer"},
                         "description": "PNG 图片字节数组（与 image_ref 二选一）"
+                    },
+                    "detail": {
+                        "type": "string",
+                        "enum": ["full", "lines", "text"],
+                        "description": "返回详略档位，缺省 text：text=仅识别正文；lines=正文+每行坐标；full=完整结构（含词级/字符级数据，截图交互用）"
                     },
                     "screenshot_session": {
                         "type": "integer",
@@ -75,6 +140,9 @@ impl Capability for OcrImage {
         args: Value,
         ctx: &InvokeContext<'_>,
     ) -> Result<CapabilityResult, CapabilityError> {
+        // 0.27.2：detail 先于其他解析——未知值直接拒绝，不浪费 OCR 配额
+        let detail = OcrDetail::parse(&args)?;
+
         // 提取 PNG 字节：image_ref 或 png 二选一（0.19.4；0.23.12 迁 ResourceStore）
         // resolve_png_input 返回 Bytes（Arc-backed），零拷贝
         let store = ctx.env.resource_store();
@@ -148,9 +216,9 @@ impl Capability for OcrImage {
             result.backend_fallback_reason = route_result.decision.fallback_reason.clone();
             // 显式 PaddleOCR 未安装降级 WinRT 时附用户提示，前端 toast 展示
             result.backend_degrade_hint = paddleocr_degrade_hint(&route_result.decision);
+            // 0.27.2：按 detail 投影（默认 text 瘦输出；overlay 显式 full）
             return Ok(CapabilityResult::Text {
-                content: serde_json::to_string(&result as &OcrResult)
-                    .unwrap_or_else(|_| result.text.clone()),
+                content: project_ocr_json(&result, detail).to_string(),
                 desc: None,
             });
         }
@@ -165,8 +233,7 @@ impl Capability for OcrImage {
             })?;
 
         Ok(CapabilityResult::Text {
-            content: serde_json::to_string(&result as &OcrResult)
-                .unwrap_or_else(|_| result.text.clone()),
+            content: project_ocr_json(&result, detail).to_string(),
             desc: None,
         })
     }
@@ -289,6 +356,105 @@ mod tests {
     #[test]
     fn id_is_ocr_image() {
         assert_eq!(OcrImage.id(), "ocr_image");
+    }
+
+    // ── 0.27.2 detail 解析与投影 ──────────────────────────────────────
+
+    #[test]
+    fn detail_parse_defaults_to_text_and_rejects_unknown() {
+        assert_eq!(
+            OcrDetail::parse(&json!({})).unwrap(),
+            OcrDetail::Text,
+            "缺省 detail = text"
+        );
+        assert_eq!(OcrDetail::parse(&json!({"detail": "text"})).unwrap(), OcrDetail::Text);
+        assert_eq!(OcrDetail::parse(&json!({"detail": "lines"})).unwrap(), OcrDetail::Lines);
+        assert_eq!(OcrDetail::parse(&json!({"detail": "full"})).unwrap(), OcrDetail::Full);
+        let err = OcrDetail::parse(&json!({"detail": "everything"})).unwrap_err();
+        assert!(
+            matches!(err, CapabilityError::InvalidArgs { ref detail } if detail.contains("未知 detail")),
+            "未知 detail 应 InvalidArgs，实际 {err:?}"
+        );
+    }
+
+    fn sample_ocr_result() -> OcrResult {
+        use super::super::ocr_engine::{OcrLine, OcrRect, OcrWord};
+        OcrResult {
+            text: "第一行\n第二行".into(),
+            lines: vec![OcrLine {
+                text: "第一行".into(),
+                bounding_rect: OcrRect { x: 1, y: 2, w: 30, h: 10 },
+                word_indices: vec![0],
+                font_height: None,
+            }],
+            words: vec![OcrWord {
+                text: "第一行".into(),
+                bounding_rect: OcrRect { x: 1, y: 2, w: 30, h: 10 },
+                line_index: 0,
+            }],
+            text_angle: None,
+            char_ranges: vec![(0, 3)],
+            char_boxes: Vec::new(),
+            backend_used: None,
+            backend_fallback_reason: None,
+            backend_degrade_hint: None,
+        }
+    }
+
+    /// text 投影：无 lines/words/char_ranges/char_boxes，保留正文。
+    #[test]
+    fn project_text_keeps_only_text_body() {
+        let v = project_ocr_json(&sample_ocr_result(), OcrDetail::Text);
+        assert_eq!(v["text"], "第一行\n第二行");
+        assert!(v.get("lines").is_none(), "text 档不得含 lines");
+        assert!(v.get("words").is_none());
+        assert!(v.get("char_ranges").is_none());
+        assert!(v.get("char_boxes").is_none());
+    }
+
+    /// lines 投影：保留行序/坐标，去词级/字符级。
+    #[test]
+    fn project_lines_keeps_line_structure() {
+        let v = project_ocr_json(&sample_ocr_result(), OcrDetail::Lines);
+        assert_eq!(v["text"], "第一行\n第二行");
+        let lines = v["lines"].as_array().expect("lines 档保留 lines");
+        assert_eq!(lines[0]["text"], "第一行");
+        assert_eq!(lines[0]["rect"]["x"], 1);
+        assert!(v.get("words").is_none());
+        assert!(v.get("char_ranges").is_none());
+    }
+
+    /// full 投影：完整原结构（words/char_ranges 保留）。
+    #[test]
+    fn project_full_keeps_original_structure() {
+        let v = project_ocr_json(&sample_ocr_result(), OcrDetail::Full);
+        assert!(v["words"].as_array().is_some_and(|w| !w.is_empty()));
+        assert!(v["char_ranges"].as_array().is_some_and(|w| !w.is_empty()));
+        assert!(v["lines"].as_array().is_some_and(|l| !l.is_empty()));
+    }
+
+    /// 降级元数据（backend_degrade_hint 等）在 text 档也保留——可诊断性不瘦掉。
+    #[test]
+    fn project_text_keeps_degrade_metadata() {
+        use crate::ocr::config::OcrBackendKind;
+        let mut result = sample_ocr_result();
+        result.backend_used = Some(OcrBackendKind::Windows);
+        result.backend_degrade_hint = Some("已降级为 Windows OCR".into());
+        let v = project_ocr_json(&result, OcrDetail::Text);
+        assert_eq!(v["backend_used"], "windows");
+        assert_eq!(v["backend_degrade_hint"], "已降级为 Windows OCR");
+    }
+
+    #[test]
+    fn schema_has_detail_enum_defaulting_text() {
+        let s = OcrImage.schema();
+        assert_eq!(
+            s.parameters["properties"]["detail"]["enum"],
+            json!(["full", "lines", "text"])
+        );
+        // detail 不进 required——缺省走 text
+        let required = s.parameters.get("required");
+        assert!(required.is_none() || required.unwrap().as_array().unwrap().is_empty());
     }
 
     #[test]

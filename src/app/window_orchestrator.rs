@@ -4,8 +4,12 @@
 //! `windows.rs` 只保留参数化 Win32 / Tauri 窗口 primitive，不反向依赖 domain。
 //!
 //! **关键函数**：
-//! - `invoke()`：热键唤起编排（采集快照 → 更新 SearchService → show_main_window → 异步选区）
+//! - `invoke()`：热键唤起编排（采集快照 → 更新 SearchService → show_main_window → 异步选区/文件选中）
 //! - `hide_chat_window()`：隐藏 chat 窗口编排（abort_active → hide_chat_window_primitive）
+//!
+//! **0.27.3 代次保护**：show 后的异步回写（UIA 选区 / Shell 文件选中）携带
+//! `update_snapshot` 后的快照代次，回写前经 `*_if_fresh` 核对——唤起 A→关闭→B
+//! 场景旧结果不覆盖新快照。
 
 use std::sync::Arc;
 
@@ -16,6 +20,10 @@ use crate::domain::event_names::EventNames;
 use crate::domain::search::SearchService;
 use crate::infra::platform::context::CollectParams;
 use crate::infra::platform::window;
+
+/// 文件选中采集 worker 占位（§3.2 有界并发：同一时刻至多一个 COM 采集线程）。
+static FILE_SELECTION_ACTIVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// 唤起编排：采集上下文快照 → 更新 SearchService → show 主窗口 → 异步提取选区。
 ///
@@ -78,7 +86,8 @@ pub fn invoke_with_placement(app: &AppHandle, placement: window::MainWindowPlace
     // - show() 之后：spawn 线程做三段式 TextPattern 提取（可能 100-500ms）
     // 这样窗口显示不被 UIA 阻塞——慢应用上用户不再感到"卡一下才出来"。
     //
-    // 提取完成后通过 update_selected_text 回填 + emit awareness-updated 触发前端 retrigger。
+    // 提取完成后通过 update_selected_text_if_fresh 回填（带代次核验，0.27.3）
+    // + emit awareness-updated 触发前端 retrigger。
     let focused_element = if context_cfg.selection_enabled
         && matches!(placement, window::MainWindowPlacement::Launcher)
     {
@@ -99,9 +108,31 @@ pub fn invoke_with_placement(app: &AppHandle, placement: window::MainWindowPlace
         None
     };
 
-    if let Some(search_service) = app.try_state::<Arc<SearchService>>() {
-        search_service.update_snapshot(snapshot.clone());
-    }
+    // 0.27.3：文件选中冻结（show 前）。前台是 Explorer（窗口/桌面同宿主 explorer.exe）
+    // 且总开关与子开关都开时，记录冻结 HWND；Shell COM 采集在 show 后的 STA 线程执行。
+    // 敏感门控已由 collect() 完成过（敏感前台 → 快照空 → foreground_app None）。
+    let file_selection_hwnd = if context_cfg.enabled
+        && context_cfg.file_selection_enabled
+        && matches!(placement, window::MainWindowPlacement::Launcher)
+    {
+        snapshot
+            .foreground_app
+            .as_ref()
+            .filter(|fg| {
+                fg.hwnd != 0 && fg.process_name.eq_ignore_ascii_case("explorer.exe")
+            })
+            .map(|fg| fg.hwnd)
+    } else {
+        None
+    };
+
+    let search_service = app.try_state::<Arc<SearchService>>().map(|s| s.inner().clone());
+    let snapshot_generation = if let Some(ss) = &search_service {
+        ss.update_snapshot(snapshot.clone());
+        Some(ss.current_snapshot_generation())
+    } else {
+        None
+    };
 
     // 3. 调 infra primitive：定位 → show → set_focus → emit SHOWN
     if let Err(e) = window::show_main_window_with_placement(app, placement) {
@@ -118,10 +149,10 @@ pub fn invoke_with_placement(app: &AppHandle, placement: window::MainWindowPlace
     //
     // 提取完成后回填 SearchService 快照 + emit awareness-updated 触发前端 retrigger，
     // 让翻译 Ghost 等依赖选区的建议在选区就绪后自动出现。
+    // 0.27.3：回写走代次核验——期间发生新 invoke 则本轮结果整体丢弃。
     if let Some(focused) = focused_element {
-        let search_service = app
-            .try_state::<Arc<SearchService>>()
-            .map(|s| s.inner().clone());
+        let search_service = search_service.clone();
+        let generation = snapshot_generation;
         let app_clone = app.clone();
         std::thread::spawn(move || {
             let t_extract = std::time::Instant::now();
@@ -139,8 +170,8 @@ pub fn invoke_with_placement(app: &AppHandle, placement: window::MainWindowPlace
             if let Some(ref text) = grabbed {
                 tracing::debug!(len = text.chars().count(), "invoke: UIA 异步抓取选区成功");
             }
-            if let Some(ss) = search_service {
-                ss.update_selected_text(grabbed, None);
+            if let (Some(ss), Some(snapshot_gen)) = (&search_service, generation) {
+                ss.update_selected_text_if_fresh(snapshot_gen, grabbed, None);
                 // 通知前端重跑搜索——选区可能刚到，翻译 Ghost 等建议需要更新
                 // 仅在窗口仍可见时 emit（用户可能已 ESC 关闭）
                 if window::is_visible() {
@@ -154,6 +185,70 @@ pub fn invoke_with_placement(app: &AppHandle, placement: window::MainWindowPlace
                 "[perf] invoke: async UIA extraction (after show)"
             );
         });
+    }
+
+    // 5. show 之后：异步采集 Explorer 文件选中（0.27.3，STA COM worker）
+    //
+    // 有界并发（同一时刻至多一个采集线程，占位失败本轮放弃——下轮唤起重试）；
+    // 回写前四重复核：代次（SearchService 侧）、开关（重读 config）、来源仍属
+    // explorer、敏感门控（explorer 本身被列敏感时放弃）。日志不打印完整路径。
+    if let (Some(hwnd), Some(ss), Some(snapshot_gen)) = (file_selection_hwnd, &search_service, snapshot_generation) {
+        if FILE_SELECTION_ACTIVE
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            tracing::trace!("invoke: 文件选中采集 worker 占用中，本轮跳过");
+        } else {
+            let ss = ss.clone();
+            let cfg_cell = app
+                .try_state::<Arc<std::sync::RwLock<ContextConfig>>>()
+                .map(|c| c.inner().clone());
+            let sensitive = context_cfg.sensitive_apps.clone();
+            let app_clone = app.clone();
+            std::thread::spawn(move || {
+                let t_collect = std::time::Instant::now();
+                let pid = crate::infra::platform::selection::files::window_pid(hwnd);
+                let state = crate::infra::platform::selection::files::collect_selection(
+                    hwnd, pid, snapshot_gen,
+                );
+                // 回写前复核：开关未翻转、来源窗口仍属 explorer、explorer 未被列敏感
+                let cfg_now = cfg_cell
+                    .as_ref()
+                    .map(|c| c.read().unwrap().clone())
+                    .unwrap_or_default();
+                let gate_ok = cfg_now.enabled
+                    && cfg_now.file_selection_enabled
+                    && !sensitive
+                        .iter()
+                        .any(|name| name.trim().eq_ignore_ascii_case("explorer.exe"))
+                    && crate::infra::platform::selection::files::window_belongs_to_explorer(hwnd);
+                let hit = state.is_some();
+                match state {
+                    Some(state) if gate_ok => {
+                        tracing::debug!(
+                            count = state.items.len(),
+                            truncated = state.truncated,
+                            source_pid = state.source_pid,
+                            "invoke: 文件选中采集成功"
+                        );
+                        ss.update_file_selection_if_fresh(snapshot_gen, Some(state));
+                        if window::is_visible() {
+                            let _ = app_clone.emit(EventNames::AWARENESS_UPDATED, ());
+                        }
+                    }
+                    Some(_) => {
+                        tracing::debug!("invoke: 文件选中采集完成但门控复核未过，丢弃");
+                    }
+                    None => {}
+                }
+                tracing::debug!(
+                    target: "perf",
+                    elapsed_ms = t_collect.elapsed().as_millis(),
+                    hit,
+                    "[perf] invoke: async file selection (after show)"
+                );
+                FILE_SELECTION_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
+            });
+        }
     }
 }
 

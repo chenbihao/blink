@@ -542,15 +542,17 @@ export function listSystemFonts() {
     return invoke("list_system_fonts");
 }
 
-/** 0.11.7-c：OCR 识别图片中的文字，返回 `{text, lines, words, text_angle?}`（0.11.9-b word 级）。
+/** 0.11.7-c：OCR 识别图片中的文字，返回按 detail 投影的结果（0.27.2）。
  *  0.19.14 raw IPC：PNG 直接传 Uint8Array。
  *  0.22.4：可选 screenshotSession/screenshotRevision 参数，携带截图来源信息。
  *  0.22.4 Task 6：同步产生 requestId（UUID），立即暴露 cancel()。
+ *  0.27.2：overlay 交互需行/词/字符级数据（word 拖选、翻译嵌图、pin 文本层），
+ *  统一显式传 X-Ocr-Detail: full；AI/MCP 工具侧不经此封装，走 Capability 缺省 text。
  *  Task 11：cancel 幂等——多次调用安全，只发一次后端取消请求。
  *
  *  @returns {{ requestId: string, promise: Promise<{result: *, requestId: string}>, cancel: () => Promise<boolean> }} */
 export function ocrImage(pngData, screenshotSession, screenshotRevision) {
-    const headers = {};
+    const headers = {'X-Ocr-Detail': 'full'};
     if (screenshotSession != null && screenshotRevision != null) {
         headers['X-Screenshot-Session'] = String(screenshotSession);
         headers['X-Screenshot-Revision'] = String(screenshotRevision);

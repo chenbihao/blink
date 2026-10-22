@@ -143,6 +143,10 @@ pub struct SearchService {
     /// 唤起时的上下文快照（前台应用、剪贴板等）。
     /// invoke 时更新，search 时读取。RwLock 读可并行，写极少（仅唤起时）。
     snapshot: Arc<RwLock<ContextSnapshot>>,
+    /// 快照代次（0.27.3）——`update_snapshot` 时递增。show 后的异步回写
+    /// （UIA 选区 / Shell 文件选中）携带冻结时的代次，回写前核对，
+    /// 唤起 A→关闭→B 场景旧结果不覆盖新快照。
+    snapshot_generation: Arc<AtomicU64>,
     /// 融合后返回前端的最大结果数（AppConfig.max_results 热更新，搜索热路径零 IO）。
     max_results: Arc<AtomicUsize>,
     /// 是否允许从主搜索框通过 `clip/剪贴板` 召回历史。Alt+C 专用模式不受此开关影响。
@@ -220,6 +224,7 @@ impl SearchService {
             router,
             latest_seq: Arc::new(AtomicU64::new(0)),
             snapshot: Arc::new(RwLock::new(ContextSnapshot::default())),
+            snapshot_generation: Arc::new(AtomicU64::new(0)),
             max_results: Arc::new(AtomicUsize::new(50)),
             clipboard_search_enabled: Arc::new(AtomicBool::new(true)),
             disabled_builtin_actions,
@@ -247,9 +252,21 @@ impl SearchService {
     }
 
     /// 更新上下文快照（window::invoke 时调用）。
+    ///
+    /// 0.27.3：写入即递增快照代次（**在写锁内 bump**，与快照写入原子化）——
+    /// show 后异步回写（UIA 选区 / Shell 文件选中）持有冻结代次，回写前在
+    /// 持锁后经 `*_if_fresh` 复核，旧代次结果整体丢弃，且「检查后拿锁前」
+    /// 窗口内插入的新 invoke 不会漏判（bump 与写入同锁序）。
     pub fn update_snapshot(&self, snapshot: ContextSnapshot) {
         let mut guard = self.snapshot.write().unwrap();
         *guard = snapshot;
+        self.snapshot_generation.fetch_add(1, Ordering::SeqCst);
+        drop(guard);
+    }
+
+    /// 当前快照代次（invoke 编排冻结异步回写凭证用，0.27.3）。
+    pub fn current_snapshot_generation(&self) -> u64 {
+        self.snapshot_generation.load(Ordering::SeqCst)
     }
 
     /// 读取当前 awareness 快照中的选区文本（0.16.9）。
@@ -271,10 +288,50 @@ impl SearchService {
     ///
     /// 0.8.3 收尾：走 `AwarenessSnapshot::upsert_text` —— 找到 Selection 项就替换,
     /// 否则 append；None 时删除同 source 项。
-    pub fn update_selected_text(&self, text: Option<String>, captured_at: Option<Instant>) {
+    ///
+    /// 0.27.3：带代次核验版本——`generation` 为冻结时 `current_snapshot_generation()`，
+    /// 不匹配（期间发生过新 invoke / 快照重写）则丢弃并返回 false。复核在持写锁后
+    /// 进行（bump 与写入同锁序，无「检查后拿锁前」竞态窗口）。
+    pub fn update_selected_text_if_fresh(
+        &self,
+        generation: u64,
+        text: Option<String>,
+        captured_at: Option<Instant>,
+    ) -> bool {
         use blink_infra::platform::context::AwarenessSource;
         let mut guard = self.snapshot.write().unwrap();
+        if self.current_snapshot_generation() != generation {
+            tracing::debug!(
+                generation,
+                current = self.current_snapshot_generation(),
+                "选区回写被代次保护丢弃"
+            );
+            return false;
+        }
         guard.upsert_text_with_time(AwarenessSource::Selection, text, captured_at);
+        true
+    }
+
+    /// 写回文件选中状态（0.27.3 Shell COM worker 回填，带代次核验）。
+    ///
+    /// `None` 显式清空本代文件选中（开关翻转/来源失效）；代次不匹配返回 false
+    /// 且不写。调用方（window_orchestrator）已完成来源 PID/开关/敏感门控复核。
+    pub fn update_file_selection_if_fresh(
+        &self,
+        generation: u64,
+        state: Option<blink_infra::platform::selection::files::FileSelectionState>,
+    ) -> bool {
+        let mut guard = self.snapshot.write().unwrap();
+        if self.current_snapshot_generation() != generation {
+            tracing::debug!(
+                generation,
+                current = self.current_snapshot_generation(),
+                "文件选中回写被代次保护丢弃"
+            );
+            return false;
+        }
+        guard.file_selection = state;
+        true
     }
 
     /// 写回剪贴板文本（clipboard listener 检测到剪贴板变化时调用）。
@@ -1752,3 +1809,103 @@ mod tests {
     }
 }
 
+
+#[cfg(test)]
+mod generation_tests {
+    //! 0.27.3 快照代次保护：show 后异步回写（UIA 选区 / Shell 文件选中）
+    //! 带冻结代次，`update_snapshot`（新一次 invoke）后旧结果必须被丢弃。
+
+    use super::*;
+    use crate::search::engine::SearchAction;
+
+    async fn minimal_service() -> SearchService {
+        struct Events;
+        impl EventPort for Events {
+            fn emit(&self, _: &str, _: serde_json::Value) -> Result<(), String> { Ok(()) }
+            fn emit_to(&self, _: &str, _: &str, _: serde_json::Value) -> Result<(), String> { Ok(()) }
+        }
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE history (lnk_path TEXT, hit_count INTEGER, last_used_at INTEGER)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let router = Arc::new(crate::intent::RuleRouter::new(true));
+        let runtime = Arc::new(RwLock::new(SuggestionRuntimeConfig::default()));
+        SearchService::new(
+            Arc::new(Events),
+            pool,
+            vec![],
+            Arc::new(PluginEngine::new(vec![], sqlx::sqlite::SqlitePool::connect_lazy("sqlite::memory:").unwrap(), None)),
+            router,
+            runtime,
+            SuggestionCoordinator::new(),
+            Arc::new(RwLock::new(None)),
+            Arc::new(RwLock::new(vec![])),
+            Arc::new(RwLock::new(vec![])),
+        )
+    }
+
+    fn file_state(generation: u64) -> blink_infra::platform::selection::files::FileSelectionState {
+        use blink_infra::platform::selection::files::{FileSelectionItem, FileSelectionState};
+        FileSelectionState {
+            items: vec![FileSelectionItem {
+                path: "C:/tmp/a.md".into(),
+                is_dir: false,
+                display_name: "a.md".into(),
+            }],
+            source_pid: 42,
+            source_generation: generation,
+            collected_at: std::time::Instant::now(),
+            truncated: false,
+        }
+    }
+
+    /// 新代次回写成功；随后旧代次回写被拒（invoke A→B 场景）。
+    #[tokio::test]
+    async fn stale_generation_write_is_rejected() {
+        let service = minimal_service().await;
+
+        // invoke A：写快照 → 冻结代次
+        service.update_snapshot(ContextSnapshot::default());
+        let gen_a = service.current_snapshot_generation();
+
+        // invoke B（A 的异步采集仍在途）：update_snapshot 递增代次
+        service.update_snapshot(ContextSnapshot::default());
+        let gen_b = service.current_snapshot_generation();
+        assert!(gen_b > gen_a, "update_snapshot 必须递增代次");
+
+        // A 的迟到回写 → 拒绝
+        assert!(
+            !service.update_file_selection_if_fresh(gen_a, Some(file_state(gen_a))),
+            "旧代次文件选中回写必须被拒绝"
+        );
+        assert!(
+            !service.update_selected_text_if_fresh(gen_a, Some("stale".into()), None),
+            "旧代次选区回写必须被拒绝"
+        );
+
+        // B 的回写 → 成功落快照
+        assert!(service.update_file_selection_if_fresh(gen_b, Some(file_state(gen_b))));
+        assert!(service.update_selected_text_if_fresh(gen_b, Some("fresh".into()), None));
+        {
+            let guard = service.snapshot.read().unwrap();
+            assert!(guard.file_selection.is_some(), "新代次回写应落快照");
+            assert_eq!(guard.find_text(blink_infra::platform::context::AwarenessSource::Selection).map(|v| v.text), Some("fresh"));
+        }
+    }
+
+    /// 空结果清理：新代次的 None 回写清空本代文件选中。
+    #[tokio::test]
+    async fn fresh_none_clears_file_selection() {
+        let service = minimal_service().await;
+        service.update_snapshot(ContextSnapshot::default());
+        let generation = service.current_snapshot_generation();
+        assert!(service.update_file_selection_if_fresh(generation, Some(file_state(generation))));
+        assert!(service.update_file_selection_if_fresh(generation, None));
+        assert!(service.snapshot.read().unwrap().file_selection.is_none());
+    }
+}

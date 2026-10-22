@@ -1021,6 +1021,9 @@ pub async fn ocr_image(
     let screenshot_revision = header_opt_u64(request.headers(), "X-Screenshot-Revision");
     // 0.22.4：从 headers 提取 request_id（前端生成，用于 cancel tracker）
     let request_id_header = header_opt_string(request.headers(), "X-Request-Id");
+    // 0.27.2：从 headers 提取输出详略档位（截图 overlay 显式 full 保交互；
+    // 值校验在 OcrImage Capability 内做——未知 detail 返 InvalidArgs）
+    let ocr_detail_header = header_opt_string(request.headers(), "X-Ocr-Detail");
 
     // 构造 InvokeContext（确定性调用，无超时）
     let env_arc = app
@@ -1075,6 +1078,9 @@ pub async fn ocr_image(
     }
     if let Some(ref rid) = request_id_header {
         arguments["request_id"] = serde_json::Value::from(rid.clone());
+    }
+    if let Some(detail) = ocr_detail_header {
+        arguments["detail"] = serde_json::Value::from(detail);
     }
 
     let ctx = crate::domain::capability::InvokeContext {

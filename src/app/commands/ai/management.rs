@@ -256,8 +256,8 @@ pub async fn fetch_ai_models(
 /// 获取当前 AI system prompt 信息（0.11.3 §3.8 token 监控）。
 ///
 /// 0.21.18: 展示口径改为「聊天 preamble（含 Skill 阶段 1 摘要）+ AI 授权的
-/// Capability 工具（不含 MCP，下同）」。此前渲染的是 `routing_system_prompt`
-/// （意图路由器，运行时调用方已随 0.17.6 AI lane 移除，现为幽灵指标）。
+/// Capability 工具（不含 MCP，下同）」。此前渲染的是旧意图路由器的工具清单
+/// （运行时调用方已随 0.17.6 AI lane 移除，0.27.2 死代码已删）。
 ///
 /// 0.21.22.1: tools 侧优先取缓存 Agent 的真实 tool 池快照（含 MCP 工具，
 /// 与预算侧同源）；无缓存时退回 0.21.18 的估算口径。

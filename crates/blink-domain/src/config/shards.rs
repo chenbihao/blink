@@ -604,6 +604,10 @@ pub struct ContextConfig {
     pub clipboard_enabled: bool,
     #[serde(default = "default_true")]
     pub selection_enabled: bool,
+    /// 文件选中感知（0.27.3）：Explorer/桌面选中项经 Shell COM 采集，
+    /// 供复制路径/定位建议。默认开。
+    #[serde(default = "default_true")]
+    pub file_selection_enabled: bool,
     #[serde(default)]
     pub sensitive_apps: Vec<String>,
 }
@@ -614,6 +618,7 @@ impl Default for ContextConfig {
             enabled: true,
             clipboard_enabled: true,
             selection_enabled: true,
+            file_selection_enabled: true,
             sensitive_apps: Vec::new(),
         }
     }

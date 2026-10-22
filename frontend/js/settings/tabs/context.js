@@ -78,11 +78,13 @@ async function loadContextConfig() {
         const enabled = captureContainer.querySelector(".context-enabled").checked;
         const clipboardEnabled = captureContainer.querySelector('.plugin-field[data-key="clipboard_enabled"]')?.checked ?? true;
         const selectionEnabled = captureContainer.querySelector('.plugin-field[data-key="selection_enabled"]')?.checked ?? true;
+        const fileSelectionEnabled = captureContainer.querySelector('.plugin-field[data-key="file_selection_enabled"]')?.checked ?? true;
         try {
             await saveConfig("context_config", {
                 enabled,
                 clipboardEnabled,
                 selectionEnabled,
+                fileSelectionEnabled,
                 sensitiveApps: [...sensitiveApps]
             });
         } catch (e) {
@@ -139,6 +141,16 @@ function renderCaptureCard(cfg, clipboardHistEnabled) {
           </label>
           <label class="switch switch-sm">
             <input type="checkbox" class="plugin-field" data-key="selection_enabled" ${cfg.selectionEnabled ? "checked" : ""} />
+            <span class="slider"></span>
+          </label>
+        </div>
+        <div class="setting-row">
+          <label class="setting-label">
+            ${t("context.fileSelection")}
+            <span class="field-hint-icon" title="${t("context.fileSelection.hint")}">ⓘ</span>
+          </label>
+          <label class="switch switch-sm">
+            <input type="checkbox" class="plugin-field" data-key="file_selection_enabled" ${cfg.fileSelectionEnabled ? "checked" : ""} />
             <span class="slider"></span>
           </label>
         </div>

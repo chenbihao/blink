@@ -37,6 +37,8 @@ use super::{
 const RANK_OPEN_URL: f64 = 0.95;
 const RANK_OPEN_PATH: f64 = 0.93;
 const RANK_REVEAL: f64 = 0.88;
+/// 文件选中「复制路径」rank（0.27.3 §5.3.5：高于 reveal，低于 OpenUrl）。
+const RANK_COPY_PATHS: f64 = 0.90;
 
 /// Translate 域 + 打开类的环境感知 Suggestion 生产者。
 pub struct ContextProducer {
@@ -110,6 +112,67 @@ impl ContextProducer {
 
         out
     }
+
+    /// 文件选中候选（0.27.3 §5.3.4/§5.3.5）：Explorer/桌面选中 N 项文件系统对象时
+    /// 产出「复制路径」（write_clipboard 一次写入全部路径）与「定位」
+    /// （reveal_in_explorer 多路径分组）两条本地动作建议。
+    ///
+    /// 只实现本地动作——「发送到聊天」待 0.27.9 附件协议，不提前提供会触发
+    /// 敏感读文件的假闭环。动作粒度禁用（disabled_builtin_actions）拦对应能力；
+    /// 复制路径是显式用户动作，不受环境 binding 约束。display 为首项显示名，
+    /// 前端按 kind + args 数量组数量文案。
+    pub(crate) fn produce_file_selection(&self, snapshot: &AwarenessSnapshot) -> Vec<Suggestion> {
+        let Some(selection) = snapshot.file_selection.as_ref() else {
+            return Vec::new();
+        };
+        if selection.items.is_empty() {
+            return Vec::new();
+        }
+        let paths: Vec<&str> = selection.items.iter().map(|item| item.path.as_str()).collect();
+        let first_display = selection
+            .items
+            .first()
+            .map(|item| item.display_name.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let fingerprint = text_fingerprint(&first_display) ^ (paths.len() as u64);
+        let mut out = Vec::new();
+        if !self.action_disabled("write_clipboard") {
+            out.push(Suggestion {
+                id: "copy-paths-selection".into(),
+                kind: SuggestionKind::CopyPaths,
+                action: SuggestionAction::InvokeCapability {
+                    capability_id: "write_clipboard".into(),
+                    args: serde_json::json!({ "text": paths.join("\r\n") }),
+                },
+                rank_score: RANK_COPY_PATHS,
+                display: first_display.clone(),
+                prefix_len: 0,
+                origin: Some(SuggestionOrigin::FileSelection),
+                fingerprint,
+                source: SuggestionSource::Context,
+                ranking_hint: None,
+            });
+        }
+        if !self.action_disabled("reveal_in_explorer") {
+            out.push(Suggestion {
+                id: "reveal-selection".into(),
+                kind: SuggestionKind::RevealInExplorer,
+                action: SuggestionAction::InvokeCapability {
+                    capability_id: "reveal_in_explorer".into(),
+                    args: serde_json::json!({ "paths": paths }),
+                },
+                rank_score: RANK_REVEAL,
+                display: first_display,
+                prefix_len: 0,
+                origin: Some(SuggestionOrigin::FileSelection),
+                fingerprint,
+                source: SuggestionSource::Context,
+                ranking_hint: None,
+            });
+        }
+        out
+    }
 }
 
 impl SuggestionProducer for ContextProducer {
@@ -117,7 +180,7 @@ impl SuggestionProducer for ContextProducer {
         SuggestionSource::Context
     }
 
-    /// 产出 Translate + 打开类 Suggestion（query 派生 + awareness 派生）。
+    /// 产出 Translate + 打开类 + 文件选中 Suggestion（query 派生 + awareness 派生）。
     ///
     /// 采纳后自抑制护栏（0.8.8 bugfix）内聚在 router 侧两个构造方法：
     /// query 已命中目标 plugin keyword（如 `翻译 xxx`）→ 不产同义建议，
@@ -131,6 +194,7 @@ impl SuggestionProducer for ContextProducer {
             out.push(sug);
         }
         out.extend(self.produce_open_targets(query, snapshot));
+        out.extend(self.produce_file_selection(snapshot));
         out
     }
 }
@@ -400,5 +464,84 @@ mod tests {
         let snap = snap_with_clipboard("https://example.com");
         let out = p.produce("", &snap);
         assert!(out.iter().any(|s| s.kind == SuggestionKind::OpenUrl));
+    }
+
+    // ── 0.27.3 文件选中候选 ────────────────────────────────────────────
+
+    fn snap_with_files(paths: &[&str]) -> ContextSnapshot {
+        use blink_infra::platform::selection::files::{
+            FileSelectionItem, FileSelectionState,
+        };
+        let mut snap = ContextSnapshot::default();
+        snap.file_selection = Some(FileSelectionState {
+            items: paths
+                .iter()
+                .map(|p| FileSelectionItem {
+                    path: (*p).to_string(),
+                    is_dir: false,
+                    display_name: p.rsplit('\\').next().unwrap_or(p).to_string(),
+                })
+                .collect(),
+            source_pid: 4242,
+            source_generation: 1,
+            collected_at: std::time::Instant::now(),
+            truncated: false,
+        });
+        snap
+    }
+
+    /// 选中两项 → CopyPaths（0.90）+ Reveal（0.88）双候选，origin=FileSelection。
+    #[test]
+    fn file_selection_yields_copy_and_reveal() {
+        let p = producer(vec![], vec![]);
+        let snap = snap_with_files(&["C:\\tmp\\a.md", "C:\\tmp\\b.md"]);
+        let out = p.produce_file_selection(&snap);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].kind, SuggestionKind::CopyPaths);
+        assert_eq!(out[0].rank_score, 0.90);
+        assert_eq!(out[0].origin, Some(SuggestionOrigin::FileSelection));
+        assert_eq!(out[1].kind, SuggestionKind::RevealInExplorer);
+        match &out[0].action {
+            SuggestionAction::InvokeCapability { capability_id, args } => {
+                assert_eq!(capability_id, "write_clipboard");
+                // 复制路径一次写入：\r\n 连接全部路径
+                assert_eq!(args["text"], "C:\\tmp\\a.md\r\nC:\\tmp\\b.md");
+            }
+            other => panic!("CopyPaths 动作应为 InvokeCapability，实际 {other:?}"),
+        }
+        match &out[1].action {
+            SuggestionAction::InvokeCapability { capability_id, args } => {
+                assert_eq!(capability_id, "reveal_in_explorer");
+                assert_eq!(args["paths"][0], "C:\\tmp\\a.md");
+                assert_eq!(args["paths"][1], "C:\\tmp\\b.md");
+            }
+            other => panic!("Reveal 动作应为 InvokeCapability，实际 {other:?}"),
+        }
+    }
+
+    /// 无文件选中 → 零候选。
+    #[test]
+    fn no_file_selection_yields_nothing() {
+        let p = producer(vec![], vec![]);
+        assert!(p.produce_file_selection(&ContextSnapshot::default()).is_empty());
+    }
+
+    /// 动作粒度禁用 write_clipboard → 只剩 reveal。
+    #[test]
+    fn disabled_write_clipboard_blocks_copy_only() {
+        let p = producer(vec!["write_clipboard".to_string()], vec![]);
+        let snap = snap_with_files(&["C:\\tmp\\a.md"]);
+        let out = p.produce_file_selection(&snap);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].kind, SuggestionKind::RevealInExplorer);
+    }
+
+    /// display 为首项显示名（前端按 args 数量组文案）。
+    #[test]
+    fn file_selection_display_is_first_item_name() {
+        let p = producer(vec![], vec![]);
+        let snap = snap_with_files(&["C:\\tmp\\报告.md", "C:\\tmp\\b.md"]);
+        let out = p.produce_file_selection(&snap);
+        assert_eq!(out[0].display, "报告.md");
     }
 }

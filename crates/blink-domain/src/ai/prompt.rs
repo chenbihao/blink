@@ -1,19 +1,18 @@
-//! AI 提示词统一管理（0.11.3 改进 4）。
+//! AI 提示词统一管理（0.11.3 改进 4；0.27.2 删除意图路由死代码、标题 prompt 迁入）。
 //!
-//! 从 `service.rs::build_routing_prompt` 迁出，新增 `tool_result_feedback_prompt`
-//! （Turn 2 用，0.11.4 改进 2 消费），工具列表增强（含参数摘要 + 插件 hint）。
+//! **在册函数**：
+//! - `chat_system_prompt*` / `pure_chat_system_prompt*` —— 对话窗口 Agent preamble 族
+//! - `conversation_title_system_prompt()` —— 对话标题生成（0.27.2 从 app 层迁入，纯函数）
+//! - `build_prompt_infos` / `ToolPromptInfo` —— 工具定义 → prompt 元数据投影
 //!
-//! **三函数设计**（文档 §2.4）：
-//! - `routing_system_prompt(tools, lang)` —— 主窗口路由 system prompt
-//! - `tool_result_feedback_prompt(tools, lang)` —— Turn 2 结果回流 system prompt
-//! - `tool_list_section(tools)` —— 工具列表文字段（含 name + description + 参数名 + hint）
+//! **0.27.2 清理**：意图路由与 Turn 2 结果回流两个死 prompt（运行时调用方已随
+//! 0.17.6 AI lane 移除，长期 `#[allow(dead_code)]` 仅测试消费）连同其专属工具链
+//! （工具列表文字段 / 参数摘要）一并删除。
 //!
-//! **token 成本控制**（§3.8）：每次构建 system prompt 估算 token 数，超 5000 token
-//! `tracing::warn!` 告警。工具描述走"分层详略"——system prompt 文字段只含 name +
-//! 一句话 description + 参数名（不含 schema），完整 JSON Schema 走 `tools` 协议字段。
+//! **token 成本控制**（§3.8）：构建 system prompt 时估算 token 数，超 5000 token
+//! `tracing::warn!` 告警。工具描述走"分层详略"——完整 JSON Schema 走 `tools` 协议字段。
 //!
-//! **插件贡献 prompt hint**：manifest 的 `tools[].hint` 字段自动拼入 system prompt
-//! 工具描述段——插件作者一句话告诉 AI 这个工具的用法窍门。
+//! **插件贡献 prompt hint**：manifest 的 `tools[].hint` 字段自动拼入工具元数据。
 
 use crate::ai::skill::{SkillEntry, SkillSummary};
 use crate::schema::ToolSchema;
@@ -107,109 +106,12 @@ pub use crate::ai::token_budget::estimate_text_tokens as estimate_tokens;
 
 // ── system prompt 构建 ──────────────────────────────────────────────────────────
 
-/// 主窗口路由 system prompt（从 `service.rs::build_routing_prompt` 迁出 + 增强）。
+/// 对话标题生成的 system prompt（0.12.5 §5.3；0.27.2 从 app/commands/ai/conversations.rs
+/// 迁入，保持纯函数与原输出语义——生成 6-10 字语义化标题，只输出标题文本）。
 ///
-/// **增强点**（D4 修复 + 改进 4）：
-/// 1. 工具列表从 `"- {name}: {desc}"` 升级为含参数摘要 + hint
-/// 2. 拼入插件 manifest `tools[].hint` 字段
-/// 3. 构建 token 估算 + 超阈值 warn
-///
-/// `_lang` 参数预留 i18n（0.x 阶段 prompt 用中文，AI 按用户输入语言回答）。
-///
-/// 0.21.18: 运行时调用方已随 0.17.6 AI lane 移除，保留供测试与未来路由复用。
-#[allow(dead_code)]
-pub fn routing_system_prompt(tools: &[ToolPromptInfo], _lang: &str) -> String {
-    let mut prompt =
-        String::from("你是 Blink 的意图路由器。用户输入未命中确定性规则,由你判断意图。\n\n");
-
-    if !tools.is_empty() {
-        prompt.push_str("【可用工具】\n");
-        prompt.push_str(&tool_list_section(tools));
-        prompt.push('\n');
-    }
-
-    prompt.push_str(
-        "【判断规则】\n\
-         1. 如果用户意图明确匹配某个工具 → 返回该工具的 tool_call（参数从用户输入提取）\n\
-         2. 如果是问题/对话/翻译请求/不确定 → 直接文本回答\n\
-         3. 不确定时宁可文本回答,不要猜测工具参数\n\n\
-         【语言】跟随用户输入语言回答。",
-    );
-
-    // token 监控（§3.8）
-    let tokens = estimate_tokens(&prompt);
-    if tokens > TOKEN_WARN_THRESHOLD {
-        tracing::warn!(
-            tokens = tokens,
-            threshold = TOKEN_WARN_THRESHOLD,
-            tools_count = tools.len(),
-            "system prompt 超过 {} token，可能影响 AI 响应质量与延迟",
-            TOKEN_WARN_THRESHOLD,
-        );
-    } else {
-        tracing::debug!(
-            target: blink_infra::utils::perf::ai_slo::TARGET,
-            tokens = tokens,
-            tools_count = tools.len(),
-            "system prompt 构建",
-        );
-    }
-
-    prompt
-}
-
-/// Turn 2 结果回流 system prompt（0.11.4 改进 2 消费）。
-///
-/// AI 拿到工具返回结果后，用此 prompt 做第二轮 completion——总结结果 /
-/// 链式调 safe tool 完成闭环 / 解释错误。
-///
-/// **tool chain 闭环**：用户说"打开微信" → Turn 1 `search_apps` 返回路径 →
-/// Turn 2 AI 调 `file_action(action=open_path, path=...)` 直接打开。
-/// `file_action` 是分组 tool，`open_path` 是 Safe action，
-/// `handle_turn2_tool_call` 会自动执行（不需用户确认）。
-///
-/// `_lang` 参数预留 i18n。
-#[allow(dead_code)] // 0.11.4 Turn 2 回流用，测试消费
-pub fn tool_result_feedback_prompt(tools: &[ToolPromptInfo], _lang: &str) -> String {
-    let mut prompt = String::from(
-        "你刚才调用了工具并拿到了结果。现在请基于结果回应用户。\n\n\
-         【行为准则】\n\
-         1. 如果用户意图是执行操作（如打开应用/文件/网址），且结果中包含目标路径 → \
-         调用 file_action 工具（action=open_path, path=结果中的路径）直接打开，不要只返回路径文字\n\
-         2. 如果结果是数据/列表 → 用自然语言总结最可能关心的，提示\"按 ↓ 查看完整列表\"\n\
-         3. 如果工具返回错误 → 用自然语言解释原因 + 给出可操作的修复建议\n\
-         （如\"API key 未配置，请到设置页 AI tab 配置\"），不要只说\"失败了\"\n\
-         4. 不要复述原始 JSON 数据，不要说\"我没有权限\"或\"没有可用的工具\"——\
-         下方列出的安全工具你都可以调用\n\n",
-    );
-
-    if !tools.is_empty() {
-        prompt.push_str("【可调用的安全工具】\n");
-        prompt.push_str(&tool_list_section(tools));
-        prompt.push('\n');
-    }
-
-    prompt.push_str("【语言】跟随用户输入语言回答。");
-
-    // token 监控（§3.8）
-    let tokens = estimate_tokens(&prompt);
-    if tokens > TOKEN_WARN_THRESHOLD {
-        tracing::warn!(
-            tokens = tokens,
-            threshold = TOKEN_WARN_THRESHOLD,
-            tools_count = tools.len(),
-            "Turn 2 feedback prompt 超过 {} token",
-            TOKEN_WARN_THRESHOLD,
-        );
-    } else {
-        tracing::debug!(
-            tokens = tokens,
-            tools_count = tools.len(),
-            "Turn 2 feedback prompt 构建",
-        );
-    }
-
-    prompt
+/// 消费方：`generate_conversation_title`。输入截断（500 字）与输出清理由调用方负责。
+pub fn conversation_title_system_prompt() -> &'static str {
+    "请用 6-10 个字概括以下用户消息，作为对话标题。只输出标题文本，不要加引号或标点符号。"
 }
 
 /// 独立 chat 窗口的 Agent system prompt（0.12.1 Phase 3B）。
@@ -348,85 +250,6 @@ pub fn chat_system_prompt_with_skills(
     prompt
 }
 
-/// 工具列表文字段（含 name + description + 参数摘要 + hint）。
-///
-/// **分层详略**（§3.8）：system prompt 文字段只含 name + 一句话 description + 参数名
-/// （不含完整 schema，~30 token/工具）；完整 JSON Schema 走 `tools` 协议字段。
-///
-/// 格式示例：
-/// ```text
-/// - get_weather: 查询指定城市天气。参数: city(城市名称), unit(温度单位)。提示: 返回结构化数据
-/// - get_ip: 获取本机 IP 地址信息。参数: include_ipv6(是否包含 IPv6 地址)。提示: 返回多个 IP,公网 IP 通常最有价值
-/// - system_action: 系统操作。参数: action(要执行的操作)
-/// ```
-fn tool_list_section(tools: &[ToolPromptInfo]) -> String {
-    let mut buf = String::with_capacity(tools.len() * 80);
-    for t in tools {
-        buf.push_str(&format!("- {}: {}", t.name, t.description));
-
-        // 参数摘要：从 JSON Schema 提取参数名 + description 截断
-        if let Some(params_summary) = parameters_summary(&t.parameters) {
-            buf.push_str(&format!("。参数: {params_summary}"));
-        }
-
-        // 插件 hint（manifest `tools[].hint`）
-        if let Some(hint) = &t.hint
-            && !hint.is_empty()
-        {
-            buf.push_str(&format!("。提示: {hint}"));
-        }
-
-        buf.push('\n');
-    }
-    buf
-}
-
-/// 从 JSON Schema 提取参数摘要（`name(desc), name2(desc2)` 格式）。
-///
-/// - 跳过 `action` 字段（分组 tool 的内部字段，不给 AI 看）
-/// - description 截断到 20 字（省 token）
-/// - 无参数返回 None
-fn parameters_summary(parameters: &serde_json::Value) -> Option<String> {
-    let props = parameters.get("properties")?.as_object()?;
-    if props.is_empty() {
-        return None;
-    }
-
-    let summaries: Vec<String> = props
-        .iter()
-        .filter(|(name, _)| name.as_str() != "action") // 跳过分组 tool 的 action 字段
-        .map(|(name, schema)| {
-            let desc = schema
-                .get("description")
-                .and_then(|d| d.as_str())
-                .unwrap_or("");
-            // 截断 description 到 20 字（省 token），空 description 只显示参数名
-            if desc.is_empty() {
-                name.clone()
-            } else {
-                let truncated = truncate_chars(desc, 20);
-                format!("{name}({truncated})")
-            }
-        })
-        .collect();
-
-    if summaries.is_empty() {
-        None
-    } else {
-        Some(summaries.join(", "))
-    }
-}
-
-/// 按字符数截断字符串（不按字节，避免中文 panic），超长追加 `…`。
-fn truncate_chars(s: &str, max: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max {
-        return s.to_string();
-    }
-    let truncated: String = chars.iter().take(max).collect();
-    format!("{truncated}…")
-}
-
 // ── 单测 ───────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -434,15 +257,6 @@ mod tests {
     use super::*;
     use crate::ai::skill::SkillSource;
     use serde_json::json;
-
-    fn make_tool(name: &str, desc: &str, params: serde_json::Value) -> ToolPromptInfo {
-        ToolPromptInfo {
-            name: name.to_string(),
-            description: desc.to_string(),
-            parameters: params,
-            hint: None,
-        }
-    }
 
     // ── estimate_tokens ──
 
@@ -469,178 +283,15 @@ mod tests {
         assert_eq!(estimate_tokens(""), 0);
     }
 
-    // ── routing_system_prompt ──
+    // ── conversation_title_system_prompt（0.27.2 迁入） ──
 
     #[test]
-    fn routing_prompt_contains_judgment_rules() {
-        let prompt = routing_system_prompt(&[], "zh");
-        assert!(prompt.contains("判断规则"));
-        assert!(prompt.contains("跟随用户输入语言"));
-    }
-
-    #[test]
-    fn routing_prompt_includes_tool_list_when_nonempty() {
-        let tools = vec![make_tool(
-            "get_weather",
-            "查询天气",
-            json!({"type":"object","properties":{"city":{"type":"string","description":"城市名"}}}),
-        )];
-        let prompt = routing_system_prompt(&tools, "zh");
-        assert!(prompt.contains("get_weather"));
-        assert!(prompt.contains("查询天气"));
-        assert!(prompt.contains("city"));
-    }
-
-    #[test]
-    fn routing_prompt_omits_tool_list_when_empty() {
-        let prompt = routing_system_prompt(&[], "zh");
-        assert!(!prompt.contains("可用工具"));
-    }
-
-    // ── tool_result_feedback_prompt ──
-
-    #[test]
-    fn feedback_prompt_contains_error_guidance() {
-        let p = tool_result_feedback_prompt(&[], "zh");
-        assert!(p.contains("错误"));
-        assert!(p.contains("修复建议"));
-        assert!(p.contains("API key"));
-    }
-
-    #[test]
-    fn feedback_prompt_includes_tool_list_when_nonempty() {
-        let tools = vec![make_tool(
-            "open_path",
-            "Open a file or directory",
-            json!({"type":"object","properties":{"path":{"type":"string","description":"file path"}}}),
-        )];
-        let p = tool_result_feedback_prompt(&tools, "zh");
-        assert!(p.contains("open_path"));
-        assert!(p.contains("安全工具"));
-    }
-
-    #[test]
-    fn feedback_prompt_guides_tool_chain_execution() {
-        // Turn 2 回流引导 AI 在用户意图是执行操作时调 file_action(action=open_path)
-        let p = tool_result_feedback_prompt(&[], "zh");
-        assert!(p.contains("file_action"));
-        assert!(p.contains("open_path"));
-        assert!(p.contains("不要说\"我没有权限\""));
-    }
-
-    // ── tool_list_section ──
-
-    #[test]
-    fn tool_list_includes_parameter_names() {
-        let tools = vec![make_tool(
-            "get_weather",
-            "查询天气",
-            json!({
-                "type": "object",
-                "properties": {
-                    "city": {"type":"string","description":"城市名"},
-                    "unit": {"type":"string","description":"温度单位"}
-                }
-            }),
-        )];
-        let section = tool_list_section(&tools);
-        assert!(section.contains("city(城市名)"));
-        assert!(section.contains("unit(温度单位)"));
-    }
-
-    #[test]
-    fn tool_list_skips_action_field() {
-        // 分组 tool 的 action 字段不展示给 AI
-        let tools = vec![make_tool(
-            "system_action",
-            "系统操作",
-            json!({
-                "type": "object",
-                "properties": {
-                    "action": {"type":"string","enum":["lock","shutdown"],"description":"要执行的操作"},
-                    "url": {"type":"string","description":"URL"}
-                }
-            }),
-        )];
-        let section = tool_list_section(&tools);
-        assert!(!section.contains("action("));
-        assert!(section.contains("url(URL)"));
-    }
-
-    #[test]
-    fn tool_list_includes_hint_when_present() {
-        let mut tool = make_tool(
-            "get_ip",
-            "获取 IP",
-            json!({"type":"object","properties":{}}),
+    fn title_prompt_keeps_original_semantics() {
+        // 迁移钉住：与 0.12.5 app 层内联原文逐字节一致，输出语义不变
+        assert_eq!(
+            conversation_title_system_prompt(),
+            "请用 6-10 个字概括以下用户消息，作为对话标题。只输出标题文本，不要加引号或标点符号。"
         );
-        tool.hint = Some("返回多个 IP,公网 IP 通常最有价值".to_string());
-        let section = tool_list_section(&tools_vec(&[tool]));
-        assert!(section.contains("提示: 返回多个 IP"));
-    }
-
-    #[test]
-    fn tool_list_omits_hint_when_empty() {
-        let mut tool = make_tool(
-            "get_ip",
-            "获取 IP",
-            json!({"type":"object","properties":{}}),
-        );
-        tool.hint = Some(String::new());
-        let section = tool_list_section(&tools_vec(&[tool]));
-        assert!(!section.contains("提示:"));
-    }
-
-    #[test]
-    fn tool_list_truncates_long_description() {
-        let long_desc = "这是一个非常非常非常非常非常非常非常非常非常非常非常长的参数描述";
-        let tools = vec![make_tool(
-            "test",
-            "测试",
-            json!({"type":"object","properties":{"param":{"type":"string","description":long_desc}}}),
-        )];
-        let section = tool_list_section(&tools);
-        // 截断后 20 字 + …
-        assert!(section.contains("…"));
-        // 原文不应完整出现（超过 20 字被截断）
-        assert!(!section.contains(long_desc));
-    }
-
-    #[test]
-    fn tool_list_param_without_description_shows_name_only() {
-        let tools = vec![make_tool(
-            "test",
-            "测试",
-            json!({"type":"object","properties":{"flag":{"type":"boolean"}}}),
-        )];
-        let section = tool_list_section(&tools);
-        assert!(section.contains("flag"));
-        assert!(!section.contains("flag()")); // 无 description 不加括号
-    }
-
-    #[test]
-    fn tool_list_no_params_omits_param_section() {
-        let tools = vec![make_tool(
-            "lock",
-            "锁屏",
-            json!({"type":"object","properties":{}}),
-        )];
-        let section = tool_list_section(&tools);
-        assert!(!section.contains("参数:"));
-    }
-
-    // ── parameters_summary ──
-
-    #[test]
-    fn parameters_summary_returns_none_for_empty_properties() {
-        let params = json!({"type":"object","properties":{}});
-        assert!(parameters_summary(&params).is_none());
-    }
-
-    #[test]
-    fn parameters_summary_returns_none_for_no_properties_key() {
-        let params = json!({"type":"object"});
-        assert!(parameters_summary(&params).is_none());
     }
 
     // ── build_prompt_infos ──
@@ -668,23 +319,8 @@ mod tests {
         assert_eq!(infos[1].hint.as_deref(), Some("公网 IP 最有价值"));
     }
 
-    // ── truncate_chars ──
-
-    #[test]
-    fn truncate_short_string_unchanged() {
-        assert_eq!(truncate_chars("短文本", 10), "短文本");
-    }
-
-    #[test]
-    fn truncate_long_string_gets_ellipsis() {
-        let result = truncate_chars("一二三四五六七八九十", 5);
-        assert_eq!(result, "一二三四五…");
-    }
-
-    #[test]
-    fn truncate_exact_length_no_ellipsis() {
-        assert_eq!(truncate_chars("一二三", 3), "一二三");
-    }
+    // ── 字符级截断 helper 已随死 prompt 链删除（0.27.2）；token 预算截断真源在
+    //    ai/token_budget.rs::utf8_safe_token_prefix ──
 
     #[test]
     fn chat_prompt_contains_tool_and_safety_contracts() {
@@ -826,11 +462,6 @@ mod tests {
         );
         assert!(prompt.contains("分组指令"), "分组指令应保留");
         assert!(prompt.contains("可用技能"), "技能摘要应追加");
-    }
-
-    /// 辅助：构造单元素 Vec
-    fn tools_vec(tool: &[ToolPromptInfo]) -> Vec<ToolPromptInfo> {
-        tool.to_vec()
     }
 
     // ── T2: tool_source preamble 格式测试（0.21.22）──
