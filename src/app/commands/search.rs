@@ -381,7 +381,7 @@ pub async fn confirm_chat_action(
 
 /// 打开设置页并定位到指定 Tab（0.12.4 §6.5）。
 ///
-/// 复用 `open_about` 的 eval 模式：打开设置窗口后延迟 300ms 点击对应 Tab。
+/// eval 模式：打开设置窗口后延迟 300ms 点击对应 Tab（HTML 异步加载，等 DOM 就绪）。
 /// chat 窗口设置按钮调用此 command 并传 `tab: "ai"`。
 #[tauri::command]
 pub async fn open_settings_tab(app: tauri::AppHandle, tab: String) -> Result<(), String> {

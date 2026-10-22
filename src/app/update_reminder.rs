@@ -268,7 +268,7 @@ pub async fn set_auto_check_enabled(app: &tauri::AppHandle, enabled: bool) {
 pub fn open_settings_about(app: &tauri::AppHandle) {
     crate::infra::platform::window::open_settings(app);
     if let Some(w) = app.get_webview_window("settings") {
-        // HTML 异步加载，需延迟等 DOM 就绪后再切 Tab（与 open_about 的 eval 模式一致）
+        // HTML 异步加载，需延迟等 DOM 就绪后再切 Tab（与 open_settings_tab 的 eval 模式一致）
         let _ = w.eval(
             "setTimeout(() => document.querySelector('.tab[data-tab=\"about\"]')?.click(), 300)",
         );

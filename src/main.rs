@@ -437,12 +437,6 @@ fn open_settings(app: &tauri::AppHandle) {
     infra::platform::window::open_settings(app);
 }
 
-/// 打开设置窗口并定位到「关于」Tab。
-/// 0.26.20：实现收敛到 update_reminder（托盘「检查更新」/建议采纳共用）。
-fn open_about(app: &tauri::AppHandle) {
-    app::update_reminder::open_settings_about(app);
-}
-
 /// 最小 percent-decode：还原前端 `encodeURIComponent` 编码的图标路径。
 /// 仅处理 `%XX`，非法序列原样保留。
 /// 0.26.9：blink-clipimg `/file-preview/<id>` 用的全局 history pool
@@ -598,14 +592,9 @@ fn setup_app(app: &mut tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error:
             "chat_window" => {
                 let _ = crate::infra::platform::window::show_chat_window(app, None);
             }
-            "about" => open_about(app),
-            // 0.26.20：检查更新——打开设置关于 tab（打开即静默自动检查并渲染）
+            // 0.26.20：检查更新——打开设置关于 tab（打开即静默自动检查并渲染）；
+            // 0.26.23：菜单收敛后它是托盘直达关于页的唯一入口（版本/许可/更新检查）
             "check_update" => app::update_reminder::open_settings_about(app),
-            // 0.19.17：输入钩子逃生舱——Alt+Space 失效时从此手动恢复
-            "recover_hook" => {
-                tracing::info!("托盘菜单：用户请求恢复输入钩子");
-                crate::infra::platform::hotkey::InputController::request_manual_recovery();
-            }
             // 0.23.2：主动退出统一入口——有活动编辑会话时先请求一次汇总确认（§3.5）
             "quit" => crate::app::editor::request_user_exit(app),
             _ => {}

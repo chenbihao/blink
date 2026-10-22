@@ -1,7 +1,7 @@
 //! 系统托盘菜单构建 + 文案 i18n。
 //!
 //! 托盘菜单文字构建在 Rust 侧（`main.rs` setup），不走前端 i18n 字典——前端字典是 JS
-//! 对象 Rust 无法 import，且托盘文字仅 3 条，本地 match 比维护一份共享字典更直接。
+//! 对象 Rust 无法 import，且托盘条目少，本地 match 比维护一份共享字典更直接。
 //!
 //! **运行时热切换**：`set_config` 的 `"language"` 分支调用 [`rebuild_menu`] 重建菜单。
 //! `on_menu_event` 挂在 `TrayIcon` 上而非 `Menu` 上，`set_menu` 替换菜单不影响 id 路由。
@@ -19,7 +19,6 @@ pub enum TrayText {
     ChatWindow,
     StickyManager,
     Settings,
-    About,
     CheckUpdate,
     Quit,
 }
@@ -34,14 +33,12 @@ pub fn text(lang: &str, key: TrayText) -> &'static str {
         (true, TrayText::ChatWindow) => "AI 对话窗口",
         (true, TrayText::StickyManager) => "便签管理",
         (true, TrayText::Settings) => "设置",
-        (true, TrayText::About) => "关于 Blink",
         (true, TrayText::CheckUpdate) => "检查更新",
         (true, TrayText::Quit) => "退出 Blink",
         (false, TrayText::ShowMain) => "Show Main Window",
-        (false, TrayText::StickyManager) => "Sticky Manager",
         (false, TrayText::ChatWindow) => "AI Chat Window",
+        (false, TrayText::StickyManager) => "Sticky Manager",
         (false, TrayText::Settings) => "Settings",
-        (false, TrayText::About) => "About Blink",
         (false, TrayText::CheckUpdate) => "Check for Updates",
         (false, TrayText::Quit) => "Quit Blink",
     }
@@ -49,21 +46,23 @@ pub fn text(lang: &str, key: TrayText) -> &'static str {
 
 /// 构建托盘菜单（不挂事件——事件由 `TrayIconBuilder::on_menu_event` 统一挂）。
 ///
-/// 菜单 item id（`"settings"` / `"about"` / `"quit"`）是稳定的，重建菜单后 id 不变，
-/// `on_menu_event` 路由依然有效。
+/// 菜单 item id（`"settings"` / `"check_update"` / `"quit"` 等）是稳定的，
+/// 重建菜单后 id 不变，`on_menu_event` 路由依然有效。
 ///
 /// `update_hint`（0.26.20）：检测到新版本时「检查更新」项文案携带版本号
 ///（如「检查更新（0.26.21 可用）」）；None = 基础文案。托盘不受 dismiss 影响
 ///——主动点开菜单才可见，始终显示最新已知版本。
+///
+/// 0.26.23 重组为三组：打开窗口（主窗/对话窗/便签管理）→ 应用自身（设置/检查
+/// 更新）→ 退出；同时删掉独立的「关于」项——「检查更新」与设置内 tab 都直达
+/// 同一关于页（打开即自动检查）。旧「chord 能力组」分组（0.18.4）按用户心智
+/// 取消。结构：show_main → chat_window → sticky_manager → sep → settings →
+/// check_update → sep → quit
 pub fn build_menu(
     app: &impl Manager<tauri::Wry>,
     lang: &str,
     update_hint: Option<&str>,
 ) -> tauri::Result<Menu<tauri::Wry>> {
-    // 0.18.4：菜单重组——便签管理 + AI 对话窗口归为 chord 能力组，设置上提
-    // 0.19.17：新增「恢复输入钩子」逃生舱——Alt+Space 失效时用户可从此恢复
-    // 0.26.20：新增「检查更新」——点击打开设置关于 tab（打开即静默自动检查）
-    // 结构：show_main → sep → sticky_manager → chat_window → sep → settings → about → check_update → sep → quit
     let show_main = MenuItem::with_id(
         app,
         "show_main",
@@ -92,13 +91,6 @@ pub fn build_menu(
         true,
         None::<&str>,
     )?;
-    let about = MenuItem::with_id(
-        app,
-        "about",
-        text(lang, TrayText::About),
-        true,
-        None::<&str>,
-    )?;
     let check_update_label = match update_hint {
         Some(v) if lang.starts_with("zh") => format!("检查更新（{v} 可用）"),
         Some(v) => format!("Check for Updates ({v} available)"),
@@ -112,13 +104,10 @@ pub fn build_menu(
         app,
         &[
             &show_main,
-            &sep,
             &chat_window,
             &sticky_manager,
             &sep,
             &settings,
-            // &recover_hook,
-            &about,
             &check_update,
             &sep,
             &quit,
