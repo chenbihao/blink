@@ -27,11 +27,21 @@ const {
     relocalizeFromKeyframes,
     relocalizeFromPositionedContent,
     selectRelocalizationCandidate,
+    scrollCommitFits,
     validatePositionedOverlap,
 } = await import(
 'data:text/javascript;base64,'
 + Buffer.from(await readFile(new URL('./stitch.js', import.meta.url))).toString('base64')
     );
+
+{
+    const frames = [{top: -80, image: new ImageData(2, 100)}, {top: 20, image: new ImageData(2, 80)}];
+    assert.equal(scrollCommitFits(frames, 80, 100, 200, 10, 80), false,
+        '向上再向下扩展：总高度260，不能误按 abs(top)+height=180 接受');
+    assert.equal(scrollCommitFits(frames, 0, 100, 200, 2, 0), true,
+        '片段达到上限后仍允许定位到已有范围');
+    assert.equal(scrollCommitFits(frames, 80, 100, 300, 2, 80), false);
+}
 
 function withFixedBlocks(frame) {
     const result = new ImageData(new Uint8ClampedArray(frame.data), frame.width, frame.height);

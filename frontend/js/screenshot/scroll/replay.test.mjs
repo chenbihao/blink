@@ -28,6 +28,9 @@ const {
     rememberScrollKeyframe, trackScrollFrame, transitionScrollTracking,
 } = await import(trackerUrl);
 const replaySource = (await readFile(new URL('./replay.js', import.meta.url), 'utf8'))
+    .replace("'./tracking-engine.js'", JSON.stringify(dataUrl((await readFile(new URL('./tracking-engine.js', import.meta.url), 'utf8'))
+        .replace("'./stitch.js'", JSON.stringify(stitchUrl))
+        .replace("'./tracker.js'", JSON.stringify(trackerUrl)))))
     .replace("'./stitch.js'", JSON.stringify(stitchUrl))
     .replace("'./tracker.js'", JSON.stringify(trackerUrl));
 const {replayScrollSequence} = await import(dataUrl(replaySource));
@@ -84,6 +87,17 @@ const fixtureNames = [
     'no-overlap',
     'scroll-bottom',
 ];
+// 与生产共用范围/片段预算；拒绝后仍能回访已确认区域，不推进错误坐标。
+const boundedSequence = [0, 18, 36, 18].map(top => ({frame: documentFrame(top)}));
+for (const limits of [{maxHeight: 108, maxFrames: 200}, {maxHeight: 32768, maxFrames: 2}]) {
+    const bounded = replayScrollSequence(boundedSequence, limits);
+    assert.equal(bounded.decisions[2].reason, 'frame-limit');
+    assert.equal(bounded.decisions[2].accepted, false);
+    assert.equal(bounded.decisions[2].appendRange, null);
+    assert.equal(bounded.confirmedTop, 18);
+    assert.equal(bounded.confirmedFrames.length, 2);
+    assert.equal(bounded.decisions[3].reason, 'unchanged');
+}
 for (const fixtureName of fixtureNames) {
     const fixture = JSON.parse(await readFile(
         new URL(`./fixtures/scroll-replay/${fixtureName}.json`, import.meta.url),

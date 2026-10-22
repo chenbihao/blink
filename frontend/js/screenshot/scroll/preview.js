@@ -2,37 +2,35 @@
 
 import {ss} from '../ss-state.js';
 import {positionedFrameBounds} from './stitch.js';
-import {computePredictedLocatorTop, computePreviewPosition} from './preview-layout.js';
+import {computePreviewPosition} from './preview-layout.js';
 import {uiScaleAtCss} from '../ss-selection-geometry.js';
 import {findDisplayCssAt, getMonitorForScroll} from '../ss-display.js';
 import {computeFloatingPlacement} from '../ss-utils.js';
+import {createScrollThumbnail, SCROLL_THUMBNAIL_WIDTH} from './thumbnail.js';
 
-const PREVIEW_W = 120;
+const PREVIEW_W = SCROLL_THUMBNAIL_WIDTH;
 export const SCROLL_PREVIEW_GAP = 8;
 let segmentCanvasCache = new WeakMap();
-let predictedTop = null;
-let predictedDirection = 0;
-let predictionFrame = 0;
 let cachedAccent = null;
+let lastRendering = null;
 
-function canvasForImage(image) {
-    let cached = segmentCanvasCache.get(image);
+function canvasForSegment(segment) {
+    let cached = segmentCanvasCache.get(segment.image);
     if (cached) return cached;
+    const image = segment.preview || createScrollThumbnail(segment.image);
     cached = document.createElement('canvas');
     cached.width = image.width;
     cached.height = image.height;
     cached.getContext('2d').putImageData(image, 0, 0);
-    segmentCanvasCache.set(image, cached);
+    segmentCanvasCache.set(segment.image, cached);
     return cached;
 }
 
 export function resetPreviewRendering() {
-    if (predictionFrame) cancelAnimationFrame(predictionFrame);
-    predictionFrame = 0;
-    predictedTop = null;
-    predictedDirection = 0;
+    ss.scrollPreviewCanvas?.classList.remove('is-pending');
     cachedAccent = null;
     segmentCanvasCache = new WeakMap();
+    lastRendering = null;
 }
 
 /**
@@ -73,9 +71,10 @@ export function positionPreview(rect) {
     const uiScale = uiScaleAtCss(anchorX, anchorY, meta);
     preview.style.transformOrigin = 'top left';
     preview.style.transform = `scale(${uiScale})`;
-    const visualW = (preview.width || PREVIEW_W) * uiScale;
-    const visualH = (preview.height || 200) * uiScale;
+    const visualW = (preview.offsetWidth || preview.width || PREVIEW_W) * uiScale;
     const mon = getMonitorForScroll(ss.scrollSession) || findDisplayCssAt(anchorX, anchorY);
+    // 按最终可用高度预留位置，避免每追加几行就把整个预览向上挪一次。
+    const visualH = previewHeightLimit(mon, uiScale) * uiScale;
     const position = computePreviewPosition({
         rect,
         direction: ss.scrollDirection,
@@ -90,48 +89,19 @@ export function positionPreview(rect) {
     preview.style.bottom = '';
 }
 
-/** 滚轮后立即显示预测框；不修改任何真实定位或拼接状态。 */
-export function showPredictedPreview(direction) {
-    const normalizedDirection = Math.sign(direction || 0);
-    const canExtrapolate = ss.scrollTrackingState === 'tracking';
-    const pendingTop = canExtrapolate && predictedDirection === normalizedDirection
-        ? predictedTop
-        : null;
-    predictedTop = canExtrapolate
-        ? computePredictedLocatorTop({
-            currentTop: ss.scrollCurrentTop,
-            pendingTop,
-            direction: normalizedDirection,
-            lastAcceptedShift: ss.scrollLastAcceptedShift,
-            viewportHeight: ss.scrollBandH,
-        })
-        : ss.scrollCurrentTop;
-    predictedDirection = normalizedDirection;
-    if (predictionFrame) return;
-    predictionFrame = requestAnimationFrame(() => {
-        predictionFrame = 0;
-        renderPreview(predictedTop, {predicted: true});
-    });
+function previewHeightLimit(monitor, uiScale) {
+    return Math.max(1, Math.min(600, Math.floor((monitor.h - SCROLL_PREVIEW_GAP * 2) / uiScale)));
 }
 
-/** 按已确认坐标更新缩略图；新一轮滚轮已发生时保留其预测定位框。 */
+/** 输入仅改变边框状态，不能移动定位框、扩充画布或重绘尚未确认的内容。 */
+export function showScrollInputFeedback() {
+    ss.scrollPreviewCanvas?.classList.add('is-pending');
+}
+
+/** 内容与视口只跟随已确认坐标；候选框是额外标记，不参与布局。 */
 export function updatePreview(options = {}) {
-    if (predictionFrame) cancelAnimationFrame(predictionFrame);
-    predictionFrame = 0;
-    if (Number.isFinite(options.candidateTop)) {
-        predictedTop = null;
-        predictedDirection = 0;
-        return renderPreview(options.candidateTop, {
-            predicted: true,
-            recoveryCandidate: true,
-        });
-    }
-    if (options.preservePrediction && Number.isFinite(predictedTop)) {
-        return renderPreview(predictedTop, {predicted: true});
-    }
-    predictedTop = null;
-    predictedDirection = 0;
-    return renderPreview(ss.scrollCurrentTop);
+    ss.scrollPreviewCanvas?.classList.toggle('is-pending', options.pendingInput === true);
+    return renderPreview(options);
 }
 
 /**
@@ -155,6 +125,31 @@ export function positionScrollToolbar(rect) {
     scrollTb.style.left = '-9999px';
     scrollTb.style.top = '-9999px';
     placeScrollToolbar(scrollTb, rect, anchorX, anchorY, uiScale);
+    positionScrollDiagnostics();
+}
+
+/** 诊断条与工具栏共用来源屏和 DPI；不能固定在虚拟桌面的左下角。 */
+export function positionScrollDiagnostics() {
+    const panel = document.getElementById('scroll-diagnostics');
+    const rect = ss.scrollSession?.scrollSourceRect;
+    if (!panel || panel.classList.contains('hidden') || !rect) return;
+    const meta = window.__blinkScreenMeta || {vx: 0, vy: 0};
+    const anchorX = rect.x + rect.w / 2, anchorY = rect.y + Math.max(0, rect.h - 1);
+    const mon = getMonitorForScroll(ss.scrollSession) || findDisplayCssAt(anchorX, anchorY);
+    const uiScale = uiScaleAtCss(anchorX, anchorY, meta);
+    panel.style.transformOrigin = 'top left';
+    panel.style.transform = `scale(${uiScale})`;
+    panel.style.width = Math.min(420, Math.max(1, (mon.w - SCROLL_PREVIEW_GAP * 2) / uiScale)) + 'px';
+    const toolbar = document.getElementById('scroll-toolbar');
+    const box = toolbar && !toolbar.classList.contains('hidden') ? toolbar.getBoundingClientRect() : null;
+    const anchorRect = box?.width > 0
+        ? {x: box.left, y: box.top, w: box.width, h: box.height} : rect;
+    const placement = computeFloatingPlacement({anchorRect,
+        visualWidth: panel.offsetWidth * uiScale, visualHeight: panel.offsetHeight * uiScale,
+        monitorRect: mon, margin: SCROLL_PREVIEW_GAP});
+    panel.style.left = placement.left + 'px';
+    panel.style.top = placement.top + 'px';
+    panel.style.bottom = '';
 }
 
 /**
@@ -243,8 +238,7 @@ export function logScrollUiDiagnostics(rect) {
     }));
 }
 
-function renderPreview(locatorDocumentTop, options = {}) {
-    const predicted = options.predicted === true;
+function renderPreview(options = {}) {
     const startedAt = performance.now();
     const ctx = ss.scrollPreviewCtx;
     const canvas = ss.scrollPreviewCanvas;
@@ -254,16 +248,20 @@ function renderPreview(locatorDocumentTop, options = {}) {
     const firstFrame = ss.scrollFrames.find((frame) => frame?.image);
     if (!bounds || !firstFrame) return 0;
     const scale = PREVIEW_W / firstFrame.image.width;
-    const displayTop = Math.min(bounds.top, locatorDocumentTop);
-    const displayBottom = Math.max(bounds.bottom, locatorDocumentTop + ss.scrollBandH);
+    const locatorDocumentTop = ss.scrollCurrentTop;
+    const displayTop = bounds.top;
+    const displayBottom = bounds.bottom;
     const previewH = Math.round((displayBottom - displayTop) * scale);
 
-    const nextHeight = Math.min(previewH, 600);
+    const rect = ss.scrollSourceRect || {x: 0, y: 0, w: 0, h: 0};
+    const mon = getMonitorForScroll(ss.scrollSession) || findDisplayCssAt(rect.x + rect.w / 2, rect.y + rect.h / 2);
+    const uiScale = uiScaleAtCss(rect.x + rect.w / 2, rect.y + rect.h / 2, window.__blinkScreenMeta || {});
+    const nextHeight = Math.max(1, Math.min(previewH, previewHeightLimit(mon, uiScale)));
     const sizeChanged = canvas.width !== PREVIEW_W || canvas.height !== nextHeight;
     if (canvas.width !== PREVIEW_W) canvas.width = PREVIEW_W;
     if (canvas.height !== nextHeight) canvas.height = nextHeight;
     if (canvas.style.height !== `${canvas.height}px`) canvas.style.height = `${canvas.height}px`;
-    // canvas 会随长图增长；每次按新高度重新避让屏幕边缘，不能沿用首帧 200px 的位置。
+    // 使用固定的预留高度摆位，画布增长不会反复移动外壳。
     if (sizeChanged && ss.scrollSourceRect) positionPreview(ss.scrollSourceRect);
 
     const locatorTop = (locatorDocumentTop - displayTop) * scale;
@@ -272,13 +270,27 @@ function renderPreview(locatorDocumentTop, options = {}) {
         0,
         Math.min(previewH - canvas.height, locatorTop + locatorH / 2 - canvas.height / 2),
     );
+    const hasCandidate = Number.isFinite(options.candidateTop);
+    const candidateTop = hasCandidate ? options.candidateTop : null;
+    const previous = lastRendering;
+    if (!sizeChanged && previous?.canvas === canvas && previous.ctx === ctx
+        && previous.offset === sourceOffset && previous.top === displayTop
+        && previous.locatorTop === locatorTop && previous.locatorH === locatorH
+        && previous.trackingState === ss.scrollTrackingState && previous.candidateTop === candidateTop
+        && previous.frames.length === ss.scrollFrames.length
+        && previous.frames.every((frame, i) => frame.image === ss.scrollFrames[i].image && frame.top === ss.scrollFrames[i].top)) {
+        return performance.now() - startedAt;
+    }
+    lastRendering = {canvas, ctx, offset: sourceOffset, top: displayTop, locatorTop, locatorH,
+        trackingState: ss.scrollTrackingState, candidateTop,
+        frames: ss.scrollFrames.map(({image, top}) => ({image, top}))};
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     const orderedFrames = [...ss.scrollFrames].sort((a, b) => a.top - b.top);
     for (const captured of orderedFrames) {
         const scaledTop = (captured.top - displayTop) * scale - sourceOffset;
         const scaledH = captured.image.height * scale;
         if (scaledTop + scaledH <= 0 || scaledTop >= canvas.height) continue;
-        const tmp = canvasForImage(captured.image);
+        const tmp = canvasForSegment(captured);
         ctx.drawImage(tmp, 0, scaledTop, PREVIEW_W, scaledH);
     }
 
@@ -291,16 +303,27 @@ function renderPreview(locatorDocumentTop, options = {}) {
         || 'Highlight';
     // 已通过历史像素复核、只等连续帧确认的候选不是“识别失败”。候选框使用
     // 主题强调色虚线；只有没有可靠候选的真正 lost 状态才显示橙色。
-    const trackingLost = ss.scrollTrackingState === 'lost' && !options.recoveryCandidate;
+    const trackingLost = ss.scrollTrackingState === 'lost' && !hasCandidate;
     ctx.save();
     ctx.fillStyle = trackingLost ? 'rgba(245, 158, 11, 0.18)' : cachedAccent;
     ctx.strokeStyle = trackingLost ? '#f59e0b' : cachedAccent;
     ctx.lineWidth = 2;
-    if (trackingLost || predicted) ctx.setLineDash(predicted ? [4, 3] : [5, 4]);
-    ctx.globalAlpha = trackingLost ? 1 : (predicted ? 0.09 : 0.14);
+    if (trackingLost) ctx.setLineDash([5, 4]);
+    ctx.globalAlpha = trackingLost ? 1 : 0.14;
     ctx.fillRect(1, visibleTop, canvas.width - 2, visibleBottom - visibleTop);
     ctx.globalAlpha = 1;
     ctx.strokeRect(1, visibleTop, canvas.width - 2, visibleBottom - visibleTop);
     ctx.restore();
+    if (hasCandidate) {
+        const candidateY = (options.candidateTop - displayTop) * scale - sourceOffset;
+        const top = Math.max(1, candidateY), bottom = Math.min(canvas.height - 1, candidateY + locatorH);
+        if (bottom > top) {
+            ctx.save();
+            ctx.strokeStyle = cachedAccent;
+            ctx.setLineDash([4, 3]);
+            ctx.strokeRect(1, top, canvas.width - 2, bottom - top);
+            ctx.restore();
+        }
+    }
     return performance.now() - startedAt;
 }

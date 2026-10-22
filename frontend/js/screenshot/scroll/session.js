@@ -24,6 +24,7 @@ const SESSION_DEFAULTS = Object.freeze({
     scrollCurrentTop: 0,
     scrollLastAcceptedShift: 0,
     scrollWheelStartedAtMs: null,
+    scrollLastWheelAtMs: null,
     scrollPendingDirection: 0,
     scrollUnchangedCount: 0,
     scrollLastDecision: null,
@@ -39,6 +40,7 @@ export const SCROLL_SESSION_KEYS = Object.freeze(Object.keys(SESSION_DEFAULTS));
 
 export class ScrollCaptureSession {
     constructor() {
+        this.lifecycleId = 0;
         this.captureGeneration = 0;
         this.manualWheelVersion = 0;
         this.autoWheelDelta = -120;
@@ -70,6 +72,11 @@ export class ScrollCaptureSession {
     }
 
     reset() {
+        this.continuousCapture?.dispose();
+        this.trackingClient?.dispose();
+        this.continuousCapture = null;
+        this.trackingClient = null;
+        this.lifecycleId++;
         this.invalidate();
         if (this._scrollCaptureTimer) clearTimeout(this._scrollCaptureTimer);
         for (const [key, value] of Object.entries(SESSION_DEFAULTS)) {
@@ -84,6 +91,18 @@ export class ScrollCaptureSession {
         this.autoLowConfidenceCount = 0;
         this.queuedManualWheel = null;
         this.captureFinalizing = false;
+        this.finalizeInFlight = null;
+        this.outputBusy = false;
+        this.autoScrollTask = null;
+        this.wheelForwardInFlight = null;
+        this.wheelForwardPending = false;
+        this.captureInFlight = null;
+        this.scrollInputToken = null;
+        this.scrollTimingSamples = [];
+        this.scrollTimeline = [];
+        this.scrollDroppedTimingSamples = 0;
+        this.scrollDroppedTimelineEvents = 0;
+        this.lastMovementResult = null;
     }
 }
 

@@ -111,4 +111,30 @@ assert.deepEqual(
     'recovering / lost 状态必须先恢复定位再注入滚轮',
 );
 
+// 二次确认的迟到帧不能调整新会话的自动滚轮步长或清理其采集标记。
+active = true;
+let lateCaptures = 0;
+const lateSession = {
+    captureGeneration: 3, scrollTrackingState: 'tracking', scrollBandH: 300,
+    autoWheelDelta: -120, autoLowConfidenceCount: 0,
+};
+await runAutoScrollController({
+    generation: 3, session: lateSession, isActive: () => active,
+    waitForSettle: async () => ({stable: true}),
+    forwardWheel: async () => {}, delay: async () => {},
+    captureFrame: async () => {
+        if (++lateCaptures === 1) return {reason: 'pending-confirmation'};
+        active = false;
+        lateSession.captureGeneration = 4;
+        lateSession.autoWheelDelta = -480;
+        lateSession.autoLowConfidenceCount = 8;
+        lateSession._scrollCapturing = true;
+        return {moved: true, positionShift: 30, decision: {confidence: 1}};
+    },
+    stop: () => assert.fail('旧任务不得停止新会话'),
+});
+assert.equal(lateSession.autoWheelDelta, -480);
+assert.equal(lateSession.autoLowConfidenceCount, 8);
+assert.equal(lateSession._scrollCapturing, true);
+
 console.log('scroll auto tests passed');

@@ -28,12 +28,14 @@ const apiUrl = dataUrl(`
     return 'C:/AppData/blink/logs/scroll-replays/' + directoryName;
   }
 `);
-const stateUrl = dataUrl(`export const ss = { screenshotConfig: { scrollDebug: true } };`);
+const stateUrl = dataUrl(`export const ss = globalThis.scrollDiagnosticState = { screenshotConfig: { scrollDebug: true } };`);
 const source = (await readFile(new URL('./diagnostics.js', import.meta.url), 'utf8'))
     .replace("'./tracker.js'", JSON.stringify(trackerUrl))
     .replace("'../../shared/api.js'", JSON.stringify(apiUrl))
-    .replace("'../ss-state.js'", JSON.stringify(stateUrl));
-const {exportScrollReplay} = await import(dataUrl(source));
+    .replace("'../ss-state.js'", JSON.stringify(stateUrl))
+    .replace("'./preview.js'", JSON.stringify(dataUrl('export function positionScrollDiagnostics() {}')));
+const {exportScrollReplay, resetScrollDiagnostics, recordScrollDiagnostic,
+    recordScrollEvent, buildCalibrationSummary} = await import(dataUrl(source));
 
 const frame = {width: 1, height: 1, data: new Uint8ClampedArray([0, 0, 0, 255])};
 const decision = {
@@ -77,5 +79,45 @@ assert.equal(manifest.calibrationSummary.tracking.becameLostCount, 1);
 assert.equal(manifest.calibrationSummary.confidence.average, 0.8);
 assert.equal(manifest.calibrationSummary.timing.previewMs.average, 2.4);
 assert.equal(manifest.calibrationSummary.timing.totalLatencyMs.max, 151.5);
+
+// 分位数包含输入到抓帧前的等待，且不把缺失/非法值混入统计。
+const summary = buildCalibrationSummary(Array.from({length: 20}, (_, i) => ({
+    timing: {preCaptureMs: i + 1, totalLatencyMs: (i + 1) * 10, captureMs: -1},
+})));
+assert.equal(summary.timing.preCaptureMs.p50, 10);
+assert.equal(summary.timing.totalLatencyMs.p95, 190);
+assert.equal(summary.timing.captureMs.count, 0);
+
+// 帧像素预算用尽后继续有界保留纯计时/时间线，显式报告截断数量。
+const session = {};
+resetScrollDiagnostics(session);
+for (let i = 0; i < 1100; i++) recordScrollDiagnostic(session, frame, decision, {
+    timing: {totalLatencyMs: i},
+});
+assert.equal(session.scrollReplayFrames.length, 256);
+assert.equal(session.scrollReplayBytes, 256 * 4);
+assert.equal(session.scrollTimingSamples.length, 1024);
+assert.equal(session.scrollDroppedTimingSamples, 76);
+for (let i = 0; i < 1100; i++) recordScrollEvent(session, 'wheel');
+assert.equal(session.scrollTimeline.length, 2048);
+assert.equal(session.scrollDroppedTimelineEvents, 152);
+savedReplayFiles.length = 0;
+await exportScrollReplay(session);
+const bounded = JSON.parse(new TextDecoder().decode(savedReplayFiles.at(-1).data));
+assert.equal(bounded.timingSampleCount, 1024);
+assert.equal(bounded.droppedTimingSamples, 76);
+assert.equal(bounded.timeline.length, 2048);
+assert.equal(bounded.droppedTimelineEvents, 152);
+assert.equal(bounded.timingSummary.totalLatencyMs.min, 76);
+assert.equal(bounded.timingSummary.totalLatencyMs.p95, 1048);
+
+// 默认不开启诊断时，不保留像素、输入时间线或计时样本。
+scrollDiagnosticState.screenshotConfig.scrollDebug = false;
+resetScrollDiagnostics(session);
+recordScrollDiagnostic(session, frame, decision, {timing: {totalLatencyMs: 20}});
+recordScrollEvent(session, 'wheel');
+assert.equal(session.scrollReplayFrames.length, 0);
+assert.equal(session.scrollTimingSamples.length, 0);
+assert.equal(session.scrollTimeline.length, 0);
 
 console.log('scroll diagnostics tests passed');

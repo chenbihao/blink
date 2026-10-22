@@ -782,8 +782,7 @@ function renderScreenshotDetail(cfg) {
 <span class="slider"></span>
 </label>
 </div>
-<!-- 调试项已调优，用户无需自行调整，注释隐藏（保留默认值）
-<div class="chord-field">
+<div class="chord-field" data-developer-only>
 <label class="setting-label chord-field-label">${t("chord.screenshot.ocr_debug.label")}
 <span class="field-hint-icon" title="${escapeAttr(t("chord.screenshot.ocr_debug.hint"))}">ⓘ</span>
 </label>
@@ -792,7 +791,7 @@ function renderScreenshotDetail(cfg) {
 <span class="slider"></span>
 </label>
 </div>
-<div class="chord-field">
+<div class="chord-field" data-developer-only>
 <label class="setting-label chord-field-label">${t("chord.screenshot.scroll_debug.label")}
 <span class="field-hint-icon" title="${escapeAttr(t("chord.screenshot.scroll_debug.hint"))}">ⓘ</span>
 </label>
@@ -801,7 +800,6 @@ function renderScreenshotDetail(cfg) {
 <span class="slider"></span>
 </label>
 </div>
--->
 <div class="chord-field">
 <label class="setting-label chord-field-label">${t("chord.screenshot.control_snap.label")}
 <span class="field-hint-icon" title="${escapeAttr(t("chord.screenshot.control_snap.hint"))}">ⓘ</span>

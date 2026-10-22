@@ -2823,6 +2823,7 @@ pub fn show_screenshot_overlay(
     app: &AppHandle,
     meta: crate::platform::screenshot::ScreenCaptureMeta,
 ) -> Result<(), String> {
+    super::scroll_capture::reset_capture_input(app);
     use tauri::{WebviewUrl, WebviewWindowBuilder};
     const LABEL: &str = "chord-screenshot";
 
@@ -3034,6 +3035,7 @@ pub fn show_image_editor_window(
     source_kind: &str,
     source_label: Option<&str>,
 ) -> Result<(), String> {
+    super::scroll_capture::reset_capture_input(app);
     use tauri::{WebviewUrl, WebviewWindowBuilder};
     const LABEL: &str = "chord-screenshot";
     let t0 = std::time::Instant::now();
@@ -3418,6 +3420,7 @@ fn unpin_screenshot_overlay_geometry() {
 
 /// 隐藏截图覆盖窗 + 清空 SESSION（释放位图内存）。
 pub fn hide_screenshot_overlay(app: &AppHandle) {
+    super::scroll_capture::reset_capture_input(app);
     cancel_pending_window_activation("chord-screenshot");
     // 会话结束：解除 WM_DPICHANGED 钉扎（窗口 hide 后几何交还 tao 默认处理）
     unpin_screenshot_overlay_geometry();
@@ -3438,6 +3441,7 @@ pub fn hide_screenshot_overlay(app: &AppHandle) {
 
 /// 隐藏通用图片编辑窗口并释放用户图片载荷；不触碰截图 SESSION。
 pub fn hide_image_editor_window(app: &AppHandle) {
+    super::scroll_capture::reset_capture_input(app);
     cancel_pending_window_activation("chord-screenshot");
     if let Some(win) = app.get_webview_window("chord-screenshot") {
         let _ = win.hide();

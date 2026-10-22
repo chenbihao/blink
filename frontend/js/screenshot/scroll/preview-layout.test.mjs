@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {computePredictedLocatorTop, computePreviewPosition} from './preview-layout.js';
+import {computePreviewPosition} from './preview-layout.js';
 
 // ── 基本定位（单屏，origin 0,0 与旧 viewportWidth/Height 等价） ──────────
 
@@ -64,28 +64,5 @@ assert.ok(
     }).top <= 800 - 300 - 8,
     '预览不超出矮副屏底部',
 );
-
-// ── computePredictedLocatorTop（0.24.10 校准：步长忠实真实位移、墙 0.45）──
-
-assert.equal(computePredictedLocatorTop({
-    currentTop: 300, pendingTop: null, direction: 1,
-    lastAcceptedShift: 120, viewportHeight: 300,
-}), 420, '优先沿用最近一次已确认位移');
-assert.equal(computePredictedLocatorTop({
-    currentTop: 300, pendingTop: 360, direction: 1,
-    lastAcceptedShift: 60, viewportHeight: 300,
-}), 420, '连续滚轮应累积预测但不修改真实坐标');
-assert.equal(computePredictedLocatorTop({
-    currentTop: 300, pendingTop: 540, direction: 1,
-    lastAcceptedShift: 300, viewportHeight: 300,
-}), 435, '预测范围必须限制在当前视口的 45% 内');
-assert.equal(computePredictedLocatorTop({
-    currentTop: 300, pendingTop: null, direction: 1,
-    lastAcceptedShift: 20, viewportHeight: 300,
-}), 320, '小滚轮刻度按真实位移预测（不再被 15% 下限夸大）');
-assert.equal(computePredictedLocatorTop({
-    currentTop: 300, pendingTop: null, direction: 1,
-    lastAcceptedShift: 0, viewportHeight: 300,
-}), 354, '无历史时默认约 18% 视口高（≈1.5 个滚轮刻度）');
 
 console.log('scroll preview layout tests passed');

@@ -15,11 +15,13 @@ import {initMarkdown, renderMarkdown} from "../../shared/markdown.js";
 import {t} from "../../i18n/index.js";
 import {navigateSettings} from "../navigation.js";
 import {saveConfig} from "../../shared/config-keys.js";
+import {initDeveloperMode} from '../developer-mode.js';
 
 /**
  * 初始化关于 Tab
  */
 export function initAboutTab() {
+    initDeveloperMode();
     // 初始化 Markdown 渲染器（vendor 脚本在 settings.html 底部加载）
     initMarkdown();
     loadAboutInfo();

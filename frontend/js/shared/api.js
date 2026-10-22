@@ -502,8 +502,8 @@ export function screenshotControlHints(hwnd, generation) {
 }
 
 /** 0.15.7：设置/清除 overlay 捕获排除（WDA_EXCLUDEFROMCAPTURE）。 */
-export function screenshotSetCaptureExclusion(exclude) {
-    return invoke("screenshot_set_capture_exclusion", {exclude});
+export function screenshotSetCaptureExclusion(exclude, sessionToken = null) {
+    return invoke("screenshot_set_capture_exclusion", {exclude, sessionToken});
 }
 
 /** 0.15.7：截取屏幕区域为 RGBA bytes（ArrayBuffer）。 */
@@ -530,9 +530,10 @@ export function screenshotForwardWheel(
     passthroughMs = null,
     positionCursor = false,
     forceMessage = false,
+    sessionToken = null,
 ) {
     return invoke("screenshot_forward_wheel", {
-        hwnd, delta, screenX, screenY, passthroughMs, positionCursor, forceMessage,
+        hwnd, delta, screenX, screenY, passthroughMs, positionCursor, forceMessage, sessionToken,
     });
 }
 

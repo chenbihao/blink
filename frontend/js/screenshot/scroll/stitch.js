@@ -975,6 +975,27 @@ export function positionedFrameBounds(frames) {
     return Number.isFinite(top) && bottom > top ? {top, bottom, height: bottom - top} : null;
 }
 
+/** 校验提交后的真实范围/片段数；回访已有范围不占新增片段预算。 */
+export const SCROLL_CAPTURE_LIMITS = Object.freeze({maxFrames: 200, maxHeight: 32768});
+
+export function scrollCommitFits(frames, top, height, maxHeight, maxFrames, appendedRows = 0) {
+    const bounds = positionedFrameBounds(frames);
+    const nextTop = Math.min(bounds?.top ?? top, top);
+    const nextBottom = Math.max(bounds?.bottom ?? top + height, top + height);
+    return Number.isFinite(nextTop) && Number.isFinite(nextBottom)
+        && height > 0 && nextBottom - nextTop <= maxHeight
+        && frames.length + (appendedRows > 0 ? 1 : 0) <= maxFrames;
+}
+
+/** 生产与回放共用的事务式提交准备；预算拒绝不修改输入状态。 */
+export function prepareScrollCommit(frames, previousFrame, frame, tracked, limits = SCROLL_CAPTURE_LIMITS) {
+    // 先限制高度，避免为已知超限的范围分配像素；固定层刷新后的真实片段数再核验。
+    if (!scrollCommitFits(frames, tracked.nextTop, frame.height, limits.maxHeight, Infinity)) return null;
+    const committed = commitTrackedFrame(frames, previousFrame, frame, tracked);
+    return scrollCommitFits(committed.frames, tracked.nextTop, frame.height,
+        limits.maxHeight, limits.maxFrames) ? committed : null;
+}
+
 /**
  * 规划一个已定位视口对当前已提交范围的唯一增量。定位落在已有范围内时明确
  * 返回 inside，调用方只能移动定位框，不能把“识别成功”误当成“内容已追加”。

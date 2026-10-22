@@ -12,11 +12,11 @@
 //!
 //! **手动滚动**：
 //! - overlay 接收首个 wheel 事件 → 短时穿透，后续真实输入直达目标窗口
-//! - 等待滚动停稳 → 调 `screenshot_capture_band` 采集一帧
+//! - 持续调用 `screenshot_capture_band`，保留有界 FIFO 中间帧，与输入解耦
 //!
 //! **自动滚动**：
-//! - 前端每轮只注入一次滚轮，低分辨率探针确认画面稳定后才采集全帧
-//! - 当前帧完成配准前不开始下一轮；无法配准立即暂停并保留已确认内容
+//! - 每轮只注入一次滚轮，经过同一队列处理后才开始下一轮
+//! - Worker 串行匹配/提交；稳定探针只用于最终收尾
 //!
 //! **帧拼接算法**（双向 SAD 模板匹配）：
 //! 1. 同时估算上/下位移，滚轮方向只用于重复纹理的优先级
@@ -26,22 +26,18 @@
 import {ss} from '../ss-state.js';
 import {screenshotCancel, screenshotSetCaptureExclusion,} from '../../shared/api.js';
 import {findWindowForRect} from '../ss-hover.js';
-import {commitTrackedFrame, compositePositionedFrames,} from './stitch.js';
-import {
-    rememberScrollKeyframe as retainScrollKeyframe,
-    trackScrollFrame,
-    transitionScrollTracking,
-} from './tracker.js';
+import {ContinuousScrollCapture} from './continuous.js';
+import {ScrollTrackingClient} from './tracking-client.js';
 import {runAutoScrollController} from './auto.js';
+import {finalizeScrollCapture} from './finalize.js';
 import {
     captureBandFrame,
     delay,
     forwardAutoWheel,
-    MANUAL_WHEEL_DEBOUNCE_MS,
     queueManualWheel,
     waitForVisualSettle,
 } from './capture-driver.js';
-import {bindScrollDiagnostics, recordScrollDiagnostic, resetScrollDiagnostics,} from './diagnostics.js';
+import {bindScrollDiagnostics, recordScrollDiagnostic, recordScrollEvent, resetScrollDiagnostics, scrollDiagnosticsEnabled,} from './diagnostics.js';
 import {isLongScreenshotPan} from '../ss-editor-policy.js';
 import {encodeImageDataPng, outputScreenshotPng} from '../ss-output.js';
 import {cssPointToScreen, cssRectToBitmap} from '../ss-selection-geometry.js';
@@ -54,16 +50,11 @@ import {
     positionScrollToolbar,
     resetPreviewRendering,
     showCaptureFrame,
-    showPredictedPreview,
+    showScrollInputFeedback,
     updatePreview,
 } from './preview.js';
 
 const session = ss.scrollSession;
-const DELAYED_MOTION_RECHECK_MS = 90;
-
-// M12 优化：长截图帧数 / 总高度上限，防止无界增长导致 OOM
-const MAX_SCROLL_FRAMES = 200;       // 200 帧（每帧是一个增量行段）
-const MAX_SCROLL_TOTAL_HEIGHT = 32768; // 32K 像素高度上限（≈ 30 个 1080p 屏高）
 
 function roundedMs(value) {
     return Number.isFinite(value) ? Math.round(value * 10) / 10 : null;
@@ -83,7 +74,8 @@ function captureStillActive(generation, requireAuto = false) {
  * @param {object} rect - 框选矩形 CSS 坐标 {x, y, w, h}
  */
 export async function enterScrollCapture(rect) {
-    const generation = session.invalidate();
+    session.reset();
+    const generation = session.captureGeneration;
     session.manualWheelVersion = 0;
     session.autoWheelDelta = -120;
     session.autoLowConfidenceCount = 0;
@@ -175,7 +167,12 @@ export async function enterScrollCapture(rect) {
 
     // 设置 WDA_EXCLUDEFROMCAPTURE：overlay 在整段采集会话中不进入 BitBlt。
     try {
-        await screenshotSetCaptureExclusion(true);
+        const inputToken = await screenshotSetCaptureExclusion(true);
+        if (!captureStillActive(generation)) {
+            await screenshotSetCaptureExclusion(false, inputToken);
+            return false;
+        }
+        session.scrollInputToken = inputToken;
     } catch (e) {
         if (!captureStillActive(generation)) {
             console.warn('[scroll] 设置捕获排除期间会话已被并发失效，长截图静默中止', {
@@ -188,7 +185,7 @@ export async function enterScrollCapture(rect) {
         console.warn('[scroll] 设置捕获排除失败，已中止长截图', e);
         resetScrollCaptureState();
         ss._showTransientHint?.('当前系统无法排除截图工具界面，长截图已取消');
-        screenshotSetCaptureExclusion(false)
+        screenshotSetCaptureExclusion(false, session.scrollInputToken)
             .catch((cleanupError) => console.warn('[scroll] 捕获排除失败后的清理失败', cleanupError));
         return false;
     }
@@ -207,7 +204,16 @@ export async function enterScrollCapture(rect) {
     logScrollUiDiagnostics(rect);
 
     // 截取第一帧
-    await captureFrame(0, generation);
+    try {
+        createContinuousPipeline();
+        await captureFrame(0, generation);
+    } catch (error) {
+        if (!captureStillActive(generation)) return false;
+        console.warn('[scroll] 连续采集初始化失败', error);
+        await exitScrollCapture(true);
+        ss._showTransientHint?.('连续采集启动失败，请重新框选后重试');
+        return false;
+    }
     if (!captureStillActive(generation)) {
         console.warn('[scroll] 首帧采集后会话已被并发失效，长截图静默中止', {
             generation,
@@ -219,6 +225,7 @@ export async function enterScrollCapture(rect) {
     if (!session.scrollHwnd) {
         ss._showTransientHint?.('未找到可滚动窗口，请重新框选目标窗口内的区域');
     }
+    session.continuousCapture.start();
     console.info('[scroll] enter capturing', {
         sourceRect: {x: rect.x, y: rect.y, w: rect.w, h: rect.h},
         sourceMonitor: session.scrollSourceMonitor,
@@ -238,207 +245,130 @@ export async function enterScrollCapture(rect) {
  * 截取当前帧并拼接到 scrollFrames。
  * 每次滚动后调用（手动 wheel 或自动滚动回调）。
  */
-async function captureFrame(expectedDirection = 0, generation = session.captureGeneration, metadata = {}) {
-    const task = captureFrameOnce(expectedDirection, generation, metadata);
-    session.captureInFlight = task;
-    try {
-        return await task;
-    } finally {
-        if (session.captureInFlight === task) session.captureInFlight = null;
-    }
-}
-
-async function captureFrameOnce(expectedDirection = 0, generation = session.captureGeneration, metadata = {}) {
-    if (!captureStillActive(generation)) return {appended: false, reason: 'inactive'};
-
-    const w = session.scrollBandW;
-    const h = session.scrollBandH;
-    if (w <= 0 || h <= 0) return {appended: false, reason: 'invalid-band'};
-
-    try {
-        const captureStartedAt = performance.now();
-        // 调用 Rust 端 fresh BitBlt 采集（WDA_EXCLUDEFROMCAPTURE 已设，overlay 不可见）
-        const captured = await captureBandFrame(session);
-        const captureFinishedAt = performance.now();
-        if (!captureStillActive(generation)) return {appended: false, reason: 'aborted'};
-        // BitBlt 等待期间可能又收到滚轮。旧帧不得推进定位、pendingJump 或 lost 状态；
-        // 新版本会由手动采集调度器重新等待稳定后统一处理。
-        if (Number.isInteger(metadata.wheelVersion)
-            && metadata.wheelVersion !== session.manualWheelVersion) {
-            return {appended: false, reason: 'superseded'};
-        }
-        if (!captured.frame) {
-            console.warn('[scroll] captureBand 返回数据不足', {
-                expected: captured.expected,
-                got: captured.got,
+function createContinuousPipeline() {
+    const lifecycleId = session.lifecycleId;
+    let firstObservation = session.scrollFrames.length > 0;
+    const client = new ScrollTrackingClient({frames: session.scrollFrames,
+        currentTop: session.scrollCurrentTop, height: session.scrollBandH,
+        trackingState: session.scrollTrackingState});
+    let pipeline;
+    const current = () => lifecycleId === session.lifecycleId && session.continuousCapture === pipeline;
+    pipeline = new ContinuousScrollCapture({
+        frameBytes: session.scrollBandW * session.scrollBandH * 4,
+        metadata: () => ({wheelVersion: session.manualWheelVersion,
+            wheelStartedAtMs: session.scrollWheelStartedAtMs}),
+        capture: () => {
+            recordScrollEvent(session, 'capture-start');
+            return captureBandFrame(session);
+        },
+        process: async (frame, metadata) => {
+            if (!current()) throw new Error('长截图采集会话已失效');
+            metadata.trackingReset = firstObservation;
+            firstObservation = false;
+            const diagnosticFrame = scrollDiagnosticsEnabled()
+                ? new ImageData(frame.data.slice(), frame.width, frame.height) : null;
+            const startedAt = performance.now();
+            const result = await client.process(frame, {
+                expectedDirection: metadata.expectedDirection || 0,
+                motionTimedOut: metadata.settle?.timedOut === true,
+                discontinuity: metadata.discontinuity,
             });
-            return {appended: false, reason: captured.reason};
-        }
-        const frame = captured.frame;
-        const trackStartedAt = performance.now();
-        const trackingStateBefore = session.scrollTrackingState;
-        const tracked = trackScrollFrame({
-            frames: session.scrollFrames,
-            keyframes: session.scrollKeyframes,
-            lastFrame: session.scrollLastFrame,
-            currentTop: session.scrollCurrentTop,
-            trackingState: session.scrollTrackingState,
-            pendingJump: session.scrollPendingJump,
-            lostFrameCount: session.scrollLostFrameCount,
-        }, frame, {
-            expectedDirection,
-            motionTimedOut: metadata.settle?.timedOut === true,
-        });
-        const trackFinishedAt = performance.now();
-        const {decision, match, relocalized, placement} = tracked;
-        session.scrollPendingJump = tracked.pendingJump;
-        const tracking = transitionScrollTracking(session, tracked);
-        session.scrollTrackingState = tracking.trackingState;
-        session.scrollLostFrameCount = tracking.lostFrameCount;
-        const trackingDiagnostic = {
-            before: trackingStateBefore,
-            after: tracking.trackingState,
-            failureCount: tracking.lostFrameCount,
-            becameLost: tracking.becameLost,
-        };
-        if (!decision.accepted) {
-            session.scrollUnchangedCount++;
-            const preservePrediction = Number.isInteger(metadata.wheelVersion)
-                && metadata.wheelVersion !== session.manualWheelVersion;
-            const candidateTop = decision.reason === 'pending-confirmation'
-            && Number.isFinite(decision.candidateTop)
-                ? decision.candidateTop
-                : null;
-            const previewMs = updatePreview({preservePrediction, candidateTop});
+            return {...result, diagnosticFrame, queueMs: startedAt - metadata.capturedAt,
+                workerRoundTripMs: performance.now() - startedAt};
+        },
+        onResult: (result, metadata) => {
+            if (!current()) return;
+            const {decision} = result;
+            if (decision.accepted) {
+                const previous = new Map(session.scrollFrames.map(item => [item.id, item]));
+                session.scrollFrames = result.segments.map(item => ({id: item.id, top: item.top,
+                    image: item.buffer
+                        ? new ImageData(new Uint8ClampedArray(item.buffer), item.width, item.height)
+                        : previous.get(item.id).image,
+                    preview: item.preview
+                        ? new ImageData(new Uint8ClampedArray(item.preview.buffer), item.preview.width, item.preview.height)
+                        : previous.get(item.id)?.preview}));
+                session.scrollCurrentTop = result.currentTop;
+                session.scrollUnchangedCount = 0;
+                session.lastMovementResult = {moved: true, appended: result.appended,
+                    decision, positionShift: result.positionShift, trackingState: result.trackingState};
+                if (result.positionShift) session.scrollLastAcceptedShift = result.positionShift;
+            } else session.scrollUnchangedCount++;
+            session.scrollPendingJump = result.pendingJump;
+            session.scrollTrackingState = result.trackingState;
+            session.scrollLostFrameCount = result.lostFrameCount;
+            const candidateTop = decision.reason === 'pending-confirmation' ? decision.candidateTop : null;
+            const previewMs = updatePreview({candidateTop,
+                pendingInput: metadata.wheelVersion !== session.manualWheelVersion});
             const completedAt = performance.now();
-            recordScrollDiagnostic(session, frame, decision, {
-                ...metadata,
-                tracking: trackingDiagnostic,
+            recordScrollDiagnostic(session, result.diagnosticFrame, decision, {
+                ...metadata, tracking: result.tracking,
                 timing: {
-                    settleMs: metadata.settle?.elapsedMs ?? null,
-                    captureMs: roundedMs(captureFinishedAt - captureStartedAt),
-                    trackMs: roundedMs(trackFinishedAt - trackStartedAt),
-                    commitMs: 0,
+                    preCaptureMs: roundedMs(metadata.wheelStartedAtMs == null ? null
+                        : metadata.captureStartedAt - metadata.wheelStartedAtMs),
+                    captureMs: roundedMs(metadata.capturedAt - metadata.captureStartedAt),
+                    queueMs: roundedMs(result.queueMs),
+                    trackMs: roundedMs(result.timing.trackMs),
+                    commitMs: roundedMs(result.timing.commitMs),
+                    workerRoundTripMs: roundedMs(result.workerRoundTripMs),
                     previewMs: roundedMs(previewMs),
-                    totalLatencyMs: roundedMs(completedAt
-                        - (metadata.wheelStartedAtMs ?? captureStartedAt)),
+                    totalLatencyMs: roundedMs(completedAt - (metadata.wheelStartedAtMs ?? metadata.captureStartedAt)),
+                    lastWheelToPreviewMs: roundedMs(session.scrollLastWheelAtMs == null ? null
+                        : completedAt - session.scrollLastWheelAtMs),
                 },
             });
-            console.debug('[scroll] frame ignored', {
-                reason: decision.reason,
-                source: decision.source,
-                score: decision.bestScore,
-                unchangedCount: session.scrollUnchangedCount,
-            });
-            return {
-                appended: false,
-                reason: decision.reason,
-                match,
-                decision,
-                trackingState: tracking.trackingState,
-                becameLost: tracking.becameLost,
-            };
-        }
+            if (result.becameLost) ss._showTransientHint?.('暂未找到可靠重叠；请缓慢滚回最近已捕获区域后继续');
+            if (decision.reason === 'frame-limit') {
+                pipeline.pause();
+                ss._showTransientHint?.('长截图已达上限，请点击完成按钮结束');
+            }
+            if (metadata.wheelVersion === session.manualWheelVersion && result.moved) {
+                session.scrollPendingDirection = 0;
+                session.scrollWheelStartedAtMs = null;
+            }
+        },
+        onPressure: stats => {
+            if (!current()) return;
+            recordScrollEvent(session, 'buffer-pressure', stats);
+            ss._showTransientHint?.('采集处理积压，已保留中间帧；请减慢滚动，必要时滚回已捕获区域');
+        },
+        onError: error => {
+            if (!current()) return;
+            console.warn('[scroll] 连续采集失败，保留已确认长图', error);
+            pipeline.dispose();
+            client.dispose();
+            ss._showTransientHint?.('连续采集已暂停，已保留长图；请点击完成重试收尾');
+        },
+    });
+    session.trackingClient = client;
+    session.continuousCapture = pipeline;
+    return pipeline;
+}
 
-        const previousTop = session.scrollCurrentTop;
-        session.scrollCurrentTop = tracked.nextTop;
-
-        // M12 优化：帧数 / 总高度上限检查，超限则停止追加并提示用户
-        const estimatedTotalHeight = Math.abs(tracked.nextTop) + session.scrollBandH;
-        if (session.scrollFrames.length >= MAX_SCROLL_FRAMES
-            || estimatedTotalHeight > MAX_SCROLL_TOTAL_HEIGHT) {
-            console.warn('[scroll] frame limit reached, stopping accumulation', {
-                frameCount: session.scrollFrames.length,
-                maxFrames: MAX_SCROLL_FRAMES,
-                estimatedTotalHeight,
-                maxHeight: MAX_SCROLL_TOTAL_HEIGHT,
-            });
-            ss._showTransientHint?.('长截图已达上限，请点击完成按钮结束');
-            return {
-                appended: false,
-                reason: 'frame-limit',
-                moved: true,
-                match,
-                decision,
-                trackingState: tracking.trackingState,
-                becameLost: tracking.becameLost,
-            };
-        }
-
-        const commitStartedAt = performance.now();
-        const committed = commitTrackedFrame(
-            session.scrollFrames,
-            session.scrollLastFrame,
-            frame,
-            tracked,
-        );
-        const commitFinishedAt = performance.now();
-        session.scrollFrames = committed.frames;
-        const addedRows = committed.addedRows;
-        const extendsRange = addedRows > 0;
-        session.scrollLastFrame = frame;
-        rememberScrollKeyframe(committed.committedFrame, session.scrollCurrentTop);
-        session.scrollUnchangedCount = 0;
-        const positionShift = session.scrollCurrentTop - previousTop;
-        if (positionShift) session.scrollLastAcceptedShift = positionShift;
-        const preservePrediction = Number.isInteger(metadata.wheelVersion)
-            && metadata.wheelVersion !== session.manualWheelVersion;
-        const previewMs = updatePreview({preservePrediction});
-        const completedAt = performance.now();
-        recordScrollDiagnostic(session, frame, decision, {
-            ...metadata,
-            tracking: trackingDiagnostic,
-            timing: {
-                settleMs: metadata.settle?.elapsedMs ?? null,
-                captureMs: roundedMs(captureFinishedAt - captureStartedAt),
-                trackMs: roundedMs(trackFinishedAt - trackStartedAt),
-                commitMs: roundedMs(commitFinishedAt - commitStartedAt),
-                previewMs: roundedMs(previewMs),
-                totalLatencyMs: roundedMs(completedAt
-                    - (metadata.wheelStartedAtMs ?? captureStartedAt)),
-            },
-        });
-        console.debug('[scroll] movement captured', {
-            frameCount: session.scrollFrames.length,
-            shift: positionShift,
-            matchShift: match?.shift ?? 0,
-            currentTop: session.scrollCurrentTop,
-            extendsRange,
-            score: decision.bestScore,
-            relocalized: relocalized?.scope || false,
-            placement: placement.edge,
-            fixedTiles: committed.fixedTileCount,
-        });
-        return {
-            appended: extendsRange,
-            moved: true,
-            first: decision.reason === 'first-frame',
-            addedRows,
-            match,
-            decision,
-            positionShift,
-            relocalized: relocalized?.scope,
-            trackingState: tracking.trackingState,
-            becameLost: false,
-        };
-    } catch (e) {
-        console.warn('[scroll] captureFrame 失败', e);
-        return {appended: false, reason: 'capture-error', error: e};
+function resumeContinuousCapture() {
+    if (!session.continuousCapture || session.continuousCapture.closed || session.trackingClient?.closed) {
+        session.continuousCapture?.dispose();
+        session.trackingClient?.dispose();
+        createContinuousPipeline();
     }
+    session.continuousCapture.start();
 }
 
-function rememberScrollKeyframe(frame, top) {
-    session.scrollKeyframes = retainScrollKeyframe(session.scrollKeyframes, frame, top);
+async function captureFrame(expectedDirection = 0, generation = session.captureGeneration, metadata = {}) {
+    if (!captureStillActive(generation)) return {reason: 'aborted'};
+    const task = session.continuousCapture.sample({...metadata, expectedDirection});
+    session.captureInFlight = task;
+    try { return await task; }
+    finally { if (session.captureInFlight === task) session.captureInFlight = null; }
 }
-
 /**
  * 合成所有帧为一张长图 ImageData。
  * 使用 SAD 模板匹配去重叠。
  *
  * @returns {ImageData|null} 合成后的长图
  */
-function compositeLongImage() {
-    return compositePositionedFrames(session.scrollFrames)?.image || null;
+async function compositeLongImage() {
+    return session.trackingClient?.compose() || null;
 }
 
 /**
@@ -448,42 +378,90 @@ function compositeLongImage() {
  * 需要调用来源无关的 `enterCanvasImageEditor`（index.js 提供）。
  */
 export async function enterScrollEdit() {
+    return runScrollOutput(enterScrollEditOnce);
+}
+
+async function finishCapture() {
+    const lifecycleId = session.lifecycleId;
+    const startedAt = performance.now();
+    recordScrollEvent(session, 'finalize-start');
+    if (session.continuousCapture?.closed || session.trackingClient?.closed) {
+        session.continuousCapture?.dispose();
+        session.trackingClient?.dispose();
+        createContinuousPipeline();
+    }
+    const result = await finalizeScrollCapture(session, {
+        stopCapture: () => session.continuousCapture.pauseAndDrain(),
+        waitForSettle: (generation) => waitForVisualSettle(session, generation),
+        captureFrame,
+        delay,
+    });
+    if (session.lifecycleId !== lifecycleId) return false;
+    recordScrollEvent(session, 'finalize-end', {
+        ok: result.ok, reason: result.reason || null, durationMs: roundedMs(performance.now() - startedAt),
+    });
+    const btn = document.getElementById('scroll-auto');
+    if (result.reason !== 'aborted' && btn) {
+        btn.classList.remove('active');
+        btn.title = '自动滚动';
+    }
+    if (result.truncated) ss._showTransientHint?.('已达长截图上限，本次输出仅包含已确认内容');
+    if (!result.ok && result.reason !== 'aborted') {
+        console.warn('[scroll] 尾段未确认，保留采集会话', {reason: result.reason});
+        ss._showTransientHint?.('末段尚未确认，已保留长图；请停稳或滚回已捕获区域后重试完成');
+        // 超时可能仍有在途 Worker。终止旧实例，从已确认像素恢复，防止迟到提交。
+        session.continuousCapture.dispose();
+        session.trackingClient.dispose();
+        resumeContinuousCapture();
+    }
+    return result.ok;
+}
+
+async function runScrollOutput(action) {
+    if (session.outputBusy) return;
+    if (session.scrollCapturePhase === 'capturing'
+        && (!session.continuousCapture || session.scrollFrames.length === 0)) return;
+    const lifecycleId = session.lifecycleId;
+    session.outputBusy = true;
+    try {
+        return await action();
+    } catch (error) {
+        if (session.lifecycleId === lifecycleId && session.scrollCapturePhase === 'finalizing') {
+            session.scrollCapturePhase = 'capturing';
+            session.captureFinalizing = false;
+            resumeContinuousCapture();
+        }
+        throw error;
+    } finally {
+        if (session.lifecycleId === lifecycleId) session.outputBusy = false;
+    }
+}
+
+async function enterScrollEditOnce() {
     if (session.scrollCapturePhase !== 'capturing') return;
     if (session.scrollFrames.length === 0) return;
 
-    // 先停止自动滚动（如果在运行）
-    if (session.autoScroll) {
-        await stopAutoScroll();
-    }
-    // 先阻止新 wheel。若已经进入最终 BitBlt，则让该帧完整提交；尚在防抖/稳定
-    // 等待的任务随后通过代际失效，避免编辑快照与预览确认交叉。
-    session.captureFinalizing = true;
-    if (session._scrollCaptureTimer) {
-        clearTimeout(session._scrollCaptureTimer);
-        session._scrollCaptureTimer = 0;
-    }
-    session.queuedManualWheel = null;
-    const inFlight = session.captureInFlight;
-    if (inFlight) await inFlight.catch(() => {
-    });
-    session.invalidate();
-    session.scrollCapturePhase = 'finalizing';
-
-    session.scrollCapturePhase = 'editing';
-    session.captureFinalizing = false;
-    hideCaptureFrame();
-    const longImage = compositeLongImage();
+    if (!await finishCapture()) return;
+    const lifecycleId = session.lifecycleId;
+    const longImage = await compositeLongImage();
+    if (session.lifecycleId !== lifecycleId) return;
     if (!longImage) {
         console.warn('[scroll] compositeLongImage returned null');
+        session.scrollCapturePhase = 'capturing';
+        session.captureFinalizing = false;
+        resumeContinuousCapture();
         return;
     }
 
     // 清除捕获排除
     try {
-        await screenshotSetCaptureExclusion(false);
+        await screenshotSetCaptureExclusion(false, session.scrollInputToken);
     } catch (e) {
         console.warn('[scroll] 清除捕获排除失败', e);
     }
+    if (session.lifecycleId !== lifecycleId) return;
+    session.scrollCapturePhase = 'editing';
+    session.captureFinalizing = false;
 
     // 切回默认工具栏
     const scrollTb = document.getElementById('scroll-toolbar');
@@ -516,12 +494,13 @@ export async function exitScrollCapture(restoreSelection = true) {
         frameCount: session.scrollFrames?.length || 0,
     });
     const sourceRect = session.scrollSourceRect ? {...session.scrollSourceRect} : null;
+    const inputToken = session.scrollInputToken;
     resetScrollCaptureState();
     const cleanupGeneration = session.captureGeneration;
 
     // 清除捕获排除
     try {
-        await screenshotSetCaptureExclusion(false);
+        await screenshotSetCaptureExclusion(false, inputToken);
     } catch (e) {
         console.warn('[scroll] 清除捕获排除失败', e);
     }
@@ -548,6 +527,7 @@ function resetScrollCaptureState() {
     ss.canvas?.classList.remove('long-image-editing');
 
     document.getElementById('scroll-toolbar')?.classList.add('hidden');
+    document.getElementById('scroll-diagnostics')?.classList.add('hidden');
     const autoButton = document.getElementById('scroll-auto');
     autoButton?.classList.remove('active');
     if (autoButton) autoButton.title = '自动滚动';
@@ -559,8 +539,10 @@ function resetScrollCaptureState() {
 
 /** overlay 重载使用的同步失效入口；平台排除状态异步尽力清除。 */
 export function resetScrollCaptureSession() {
+    const inputToken = session.scrollInputToken;
     resetScrollCaptureState();
-    screenshotSetCaptureExclusion(false)
+    if (inputToken == null) return;
+    screenshotSetCaptureExclusion(false, inputToken)
         .catch((error) => console.warn('[scroll] 重置时清除捕获排除失败', error));
 }
 
@@ -593,6 +575,7 @@ export function isScrollCapturing() {
  */
 export function onScrollWheel(e) {
     if (session.scrollCapturePhase !== 'capturing' || session.captureFinalizing) return;
+    if (!session.scrollFrames.length) return;
     // 自动滚动模式下忽略手动 wheel
     if (session.autoScroll) return;
     if (!session.scrollHwnd) {
@@ -607,8 +590,12 @@ export function onScrollWheel(e) {
     const forwardedMagnitude = Math.max(1, Math.min(480, Math.round(Math.abs(rawDelta))));
     const delta = rawDelta > 0 ? -forwardedMagnitude : forwardedMagnitude;
     session.scrollPendingDirection = rawDelta > 0 ? 1 : -1;
-    session.scrollWheelStartedAtMs = performance.now();
+    session.scrollWheelStartedAtMs ??= performance.now();
+    session.scrollLastWheelAtMs = performance.now();
     session.manualWheelVersion++;
+    recordScrollEvent(session, 'wheel', {
+        wheelVersion: session.manualWheelVersion, direction: session.scrollPendingDirection,
+    });
     // 统一使用 renderScale 换算
     const meta = window.__blinkScreenMeta || {vx: 0, vy: 0};
     const cursorPos = cssPointToScreen(e.clientX, e.clientY, meta);
@@ -616,109 +603,11 @@ export function onScrollWheel(e) {
     const cursorScreenY = cursorPos.y;
 
     queueManualWheel(session, delta, cursorScreenX, cursorScreenY);
-    showPredictedPreview(session.scrollPendingDirection);
+    showScrollInputFeedback(session.scrollPendingDirection);
 
-    scheduleManualCapture();
+    session.continuousCapture?.wake();
 }
 
-function scheduleManualCapture() {
-    if (session._scrollCaptureTimer) clearTimeout(session._scrollCaptureTimer);
-    session._scrollCaptureTimer = setTimeout(runSettledManualCapture, MANUAL_WHEEL_DEBOUNCE_MS);
-}
-
-async function runSettledManualCapture() {
-    session._scrollCaptureTimer = 0;
-    if (session.scrollCapturePhase !== 'capturing' || session.autoScroll) return;
-    if (session._scrollCapturing) {
-        scheduleManualCapture();
-        return;
-    }
-    const generation = session.captureGeneration;
-    session._scrollCapturing = true;
-    let capturedWheelVersion = session.manualWheelVersion;
-    let settled = null;
-    try {
-        do {
-            capturedWheelVersion = session.manualWheelVersion;
-            settled = await waitForVisualSettle(session, generation);
-            if (settled.aborted) return;
-        } while (capturedWheelVersion !== session.manualWheelVersion);
-        if (!captureStillActive(generation) || session.autoScroll) return;
-        const direction = session.scrollPendingDirection;
-        const wheelStartedAtMs = session.scrollWheelStartedAtMs;
-        let result = await captureFrame(direction, generation, {
-            settle: settled,
-            wheelStartedAtMs,
-            wheelVersion: capturedWheelVersion,
-        });
-        if (capturedWheelVersion !== session.manualWheelVersion) return;
-        // 快路径可能发生在目标窗口尚未消费滚轮消息时。只有首帧仍完全不变时才做
-        // 一次延迟复核，不增加正常滚动的确认延迟。
-        if (result.reason === 'unchanged'
-            && capturedWheelVersion === session.manualWheelVersion
-            && captureStillActive(generation)) {
-            await delay(DELAYED_MOTION_RECHECK_MS);
-            if (capturedWheelVersion !== session.manualWheelVersion) return;
-            const delayedSettle = await waitForVisualSettle(session, generation);
-            if (delayedSettle.aborted) return;
-            if (capturedWheelVersion !== session.manualWheelVersion) return;
-            result = await captureFrame(direction, generation, {
-                settle: delayedSettle,
-                wheelStartedAtMs,
-                wheelVersion: capturedWheelVersion,
-            });
-            if (capturedWheelVersion !== session.manualWheelVersion) return;
-        }
-        if (result.reason === 'pending-confirmation'
-            && capturedWheelVersion === session.manualWheelVersion
-            && captureStillActive(generation)) {
-            const confirmationSettle = await waitForVisualSettle(session, generation);
-            if (confirmationSettle.aborted) return;
-            if (capturedWheelVersion !== session.manualWheelVersion) return;
-            result = await captureFrame(0, generation, {
-                settle: confirmationSettle,
-                wheelStartedAtMs,
-                wheelVersion: capturedWheelVersion,
-            });
-            if (capturedWheelVersion !== session.manualWheelVersion) return;
-        }
-        if (capturedWheelVersion === session.manualWheelVersion) {
-            session.scrollPendingDirection = 0;
-            session.scrollWheelStartedAtMs = null;
-        }
-        const unreliableReasons = ['ambiguous', 'low-confidence', 'no-overlap', 'motion-timeout',
-            'position-conflict', 'insufficient-detail', 'insufficient-overlap'];
-        if (unreliableReasons.includes(result.reason)) {
-            // 第一次失配只是 recovering；连续失败真正转入 lost 时提示一次。lost 后的
-            // 后续拒绝保持安静，不能再落入“画面没有变化”的错误提示。
-            if (result.becameLost) {
-                let hint = '暂未找到可靠重叠；请缓慢滚回最近已捕获区域后继续';
-                if (result.reason === 'ambiguous') {
-                    hint = '页面存在重复内容，暂时无法唯一定位；请缓慢滚回最近已捕获区域';
-                } else if (result.reason === 'insufficient-overlap') {
-                    hint = '本次滚动跨度过大，保留的重叠不足；请减小滚动幅度后继续';
-                }
-                ss._showTransientHint?.(hint);
-            }
-        } else if (result.reason === 'pending-confirmation') {
-            ss._showTransientHint?.('远距离定位尚未通过连续确认，请保持画面稳定后重试');
-        } else if (result.relocalized && !result.appended) {
-            ss._showTransientHint?.('已恢复到已捕获区域；越过长图边界后才会新增内容');
-        } else if (!result.moved && session.scrollUnchangedCount >= 2) {
-            ss._showTransientHint?.('画面没有发生变化，请确认框选中心位于可滚动内容区域');
-        }
-    } finally {
-        session._scrollCapturing = false;
-        if (captureStillActive(generation) && !session.autoScroll
-            && capturedWheelVersion !== session.manualWheelVersion) {
-            scheduleManualCapture();
-        }
-    }
-}
-
-/**
- * 切换滚动方向（纵向/横向）。
- */
 export function toggleScrollDirection() {
     session.scrollDirection = 'vertical';
     ss._showTransientHint?.('当前版本先保障纵向长截图，横向滚动暂未开放');
@@ -726,9 +615,11 @@ export function toggleScrollDirection() {
 
 /**
  * 切换自动滚动模式。
- * 开启时调 Rust 端 PostMessage 驱动滚动 + 监听 tick 事件。
+ * 单生产者依次注入滚轮、等待画面并采集；无变化时再使用窗口消息兜底。
  */
 export async function toggleAutoScroll() {
+    if (session.captureFinalizing || session.scrollCapturePhase !== 'capturing') return;
+    if (!session.scrollFrames.length) return;
     if (session.autoScroll) {
         await stopAutoScroll();
         return;
@@ -747,24 +638,50 @@ export async function toggleAutoScroll() {
         btn.title = session.autoScroll ? '自动滚动中（点击停止）' : '自动滚动';
     }
 
-    void runAutoScrollController({
+    let wheelTop = session.scrollCurrentTop;
+    const task = runAutoScrollController({
         generation,
         session,
         isActive: captureStillActive,
-        waitForSettle: (gen, requireAuto) => waitForVisualSettle(session, gen, requireAuto),
-        captureFrame,
-        forwardWheel: (positionCursor, forceMessage) => (
-            forwardAutoWheel(session, positionCursor, forceMessage)
-        ),
-        previewWheel: showPredictedPreview,
-        stop: stopAutoScroll,
+        waitForSettle: async (gen, requireAuto) => {
+            await delay(33);
+            return {stable: true, mode: 'continuous', aborted: !captureStillActive(gen, requireAuto)};
+        },
+        captureFrame: async (...args) => {
+            const result = await captureFrame(...args);
+            // 持续采样可能已提交本次 wheel 的运动；强制复核的 unchanged 不等于没有滚动。
+            if (captureStillActive(generation, true) && result.reason === 'unchanged'
+                && session.scrollCurrentTop !== wheelTop) {
+                return {...session.lastMovementResult, positionShift: session.scrollCurrentTop - wheelTop};
+            }
+            return result;
+        },
+        forwardWheel: async (positionCursor, forceMessage) => {
+            // 注入前先排空积压，降低自动输入速率，同时保留所有中间帧。
+            const pipeline = session.continuousCapture;
+            await pipeline.pauseAndDrain();
+            if (!captureStillActive(generation, true)) return;
+            wheelTop = session.scrollCurrentTop;
+            await forwardAutoWheel(session, positionCursor, forceMessage);
+            if (captureStillActive(generation, true)) pipeline.start();
+        },
+        previewWheel: showScrollInputFeedback,
+        stop: (reason) => {
+            if (captureStillActive(generation)) return stopAutoScroll(reason);
+        },
         delay,
+    }).finally(() => {
+        if (session.autoScrollTask === task) session.autoScrollTask = null;
     });
+    session.autoScrollTask = task;
 }
 
 async function stopAutoScroll(reason = null) {
     session.autoScroll = false;
     session.invalidate();
+    // 旧任务的 finally 不能跨代清理。暂停方释放调度标记，实际抓帧仍由队列串行化。
+    session._scrollCapturing = false;
+    if (!session.captureFinalizing) session.continuousCapture?.start();
     const btn = document.getElementById('scroll-auto');
     if (btn) {
         btn.classList.remove('active');
@@ -780,20 +697,17 @@ async function stopAutoScroll(reason = null) {
  * @param {string} action - 'pin' | 'save' | 'copy'
  */
 export async function outputLongImage(action) {
+    return runScrollOutput(() => outputLongImageOnce(action));
+}
+
+async function outputLongImageOnce(action) {
     if (session.scrollCapturePhase === 'capturing') {
-        if (session.autoScroll) await stopAutoScroll();
-        session.captureFinalizing = true;
-        if (session._scrollCaptureTimer) {
-            clearTimeout(session._scrollCaptureTimer);
-            session._scrollCaptureTimer = 0;
-        }
-        session.queuedManualWheel = null;
-        const inFlight = session.captureInFlight;
-        if (inFlight) await inFlight.catch(() => {
-        });
-        session.invalidate();
-        session.scrollCapturePhase = 'finalizing';
+        if (!await finishCapture()) return;
     }
+    if (!['finalizing', 'editing'].includes(session.scrollCapturePhase)) return;
+    const lifecycleId = session.lifecycleId;
+    const screenX = session.scrollBandX;
+    const screenY = session.scrollBandY;
     // 从标注引擎获取编辑后的图（如果在 editing 阶段）
     // 否则直接合成 scrollFrames
     let pngData = null;
@@ -801,31 +715,35 @@ export async function outputLongImage(action) {
     if (session.scrollCapturePhase === 'editing' && ss._compositeSelection) {
         pngData = await ss._compositeSelection();
     } else {
-        const longImage = compositeLongImage();
+        const longImage = await compositeLongImage();
+        if (session.lifecycleId !== lifecycleId) return;
         if (!longImage) {
             if (session.scrollCapturePhase === 'finalizing') session.scrollCapturePhase = 'capturing';
             session.captureFinalizing = false;
+            resumeContinuousCapture();
             return;
         }
         pngData = await encodeImageDataPng(longImage);
     }
 
+    if (session.lifecycleId !== lifecycleId) return;
     if (!pngData) {
         if (session.scrollCapturePhase === 'finalizing') session.scrollCapturePhase = 'capturing';
         session.captureFinalizing = false;
+        if (session.scrollCapturePhase === 'capturing') resumeContinuousCapture();
         return;
     }
-
-    const screenX = session.scrollBandX;
-    const screenY = session.scrollBandY;
 
     try {
         await outputScreenshotPng(action, pngData, screenX, screenY);
     } catch (error) {
+        if (session.lifecycleId !== lifecycleId) return;
         if (session.scrollCapturePhase === 'finalizing') session.scrollCapturePhase = 'capturing';
         session.captureFinalizing = false;
+        if (session.scrollCapturePhase === 'capturing') resumeContinuousCapture();
         throw error;
     }
+    if (session.lifecycleId !== lifecycleId) return;
     await exitScrollCapture(false);
 }
 

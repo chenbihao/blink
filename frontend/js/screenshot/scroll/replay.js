@@ -1,45 +1,18 @@
-//! 长截图离线回放执行器。输入已解码的完整帧，复用生产追踪决策并返回确定性摘要。
+//! 离线回放与 Worker 共用同一状态机，逐帧决策保持可对拍。
+import {ScrollTrackingEngine} from './tracking-engine.js';
 
-import {commitTrackedFrame} from './stitch.js';
-import {rememberScrollKeyframe, trackScrollFrame, transitionScrollTracking,} from './tracker.js';
-
-export function replayScrollSequence(sequence) {
-    const state = {
-        frames: [],
-        keyframes: [],
-        lastFrame: null,
-        currentTop: 0,
-        trackingState: 'tracking',
-        pendingJump: null,
-        lostFrameCount: 0,
-    };
-    const decisions = [];
-    for (const captured of sequence) {
-        const tracked = trackScrollFrame(state, captured.frame, {
-            expectedDirection: captured.expectedDirection,
-            motionTimedOut: captured.settle?.timedOut === true,
-        });
-        decisions.push(tracked.decision);
-        state.pendingJump = tracked.pendingJump;
-        const tracking = transitionScrollTracking(state, tracked);
-        state.trackingState = tracking.trackingState;
-        state.lostFrameCount = tracking.lostFrameCount;
-        if (!tracked.decision.accepted) {
-            continue;
-        }
-        const committed = commitTrackedFrame(state.frames, state.lastFrame, captured.frame, tracked);
-        state.frames = committed.frames;
-        state.currentTop = tracked.nextTop;
-        state.lastFrame = captured.frame;
-        state.keyframes = rememberScrollKeyframe(
-            state.keyframes,
-            committed.committedFrame,
-            state.currentTop,
-        );
-    }
-    return {
-        decisions,
-        confirmedTop: state.currentTop,
-        confirmedFrames: state.frames,
-    };
+export function replayScrollSequence(sequence, limits) {
+    let engine = new ScrollTrackingEngine({}, limits);
+    const decisions = sequence.map(captured => {
+        if (captured.trackingReset) engine = new ScrollTrackingEngine({
+            frames: engine.state.frames, currentTop: engine.state.currentTop,
+            height: captured.frame.height, trackingState: engine.state.trackingState,
+        }, limits);
+        return engine.process(captured.frame, {
+        expectedDirection: captured.expectedDirection,
+        motionTimedOut: captured.settle?.timedOut === true,
+        discontinuity: captured.discontinuity === true,
+        }).decision;
+    });
+    return {decisions, confirmedTop: engine.state.currentTop, confirmedFrames: engine.state.frames};
 }

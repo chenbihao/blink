@@ -495,6 +495,10 @@ export const zh = {
 
     // ── 关于 Tab ──
     "about.version.label": "版本",
+    "about.developer.remaining": "再点击 {remaining} 次显示调试项",
+    "about.developer.enabled": "调试项已显示",
+    "about.developer.hidden": "调试项已隐藏",
+    "about.developer.hide": "隐藏调试项",
     "about.stack.label": "技术栈",
     "about.license.label": "许可",
     "about.license.third_party.label": "开源与许可",

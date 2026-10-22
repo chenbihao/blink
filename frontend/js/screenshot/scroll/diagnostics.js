@@ -3,12 +3,16 @@
 import {SCROLL_DECISION_SCHEMA_VERSION} from './tracker.js';
 import {screenshotSaveReplayFile} from '../../shared/api.js';
 import {ss} from '../ss-state.js';
+import {positionScrollDiagnostics} from './preview.js';
 
 const MAX_REPLAY_FRAMES = 256;
 const MAX_REPLAY_BYTES = 256 * 1024 * 1024;
-const CALIBRATION_SCHEMA_VERSION = 3;
+const MAX_TIMING_SAMPLES = 1024;
+const MAX_TIMELINE_EVENTS = 2048;
+const CALIBRATION_SCHEMA_VERSION = 4;
 const TIMING_KEYS = [
-    'settleMs', 'captureMs', 'trackMs', 'commitMs', 'previewMs', 'totalLatencyMs',
+    'preCaptureMs', 'settleMs', 'captureMs', 'queueMs', 'trackMs', 'commitMs', 'previewMs', 'workerRoundTripMs',
+    'totalLatencyMs', 'lastWheelToPreviewMs',
 ];
 
 export function scrollDiagnosticsEnabled() {
@@ -24,7 +28,9 @@ export function refreshDiagnosticsVisibility() {
 }
 
 function setPanelVisible(visible) {
+    visible = visible && ss.scrollSession?.scrollCapturePhase === 'capturing';
     document.getElementById('scroll-diagnostics')?.classList.toggle('hidden', !visible);
+    if (visible) positionScrollDiagnostics();
 }
 
 export function resetScrollDiagnostics(session) {
@@ -32,14 +38,45 @@ export function resetScrollDiagnostics(session) {
     session.scrollDecisions = [];
     session.scrollReplayFrames = [];
     session.scrollReplayBytes = 0;
+    session.scrollTimingSamples = [];
+    session.scrollTimeline = [];
+    session.scrollDroppedTimingSamples = 0;
+    session.scrollDroppedTimelineEvents = 0;
+    session.scrollDiagnosticStartedAt = performance.now();
     setPanelVisible(scrollDiagnosticsEnabled());
     const text = document.getElementById('scroll-diagnostics-text');
     if (text) text.textContent = '等待首帧';
 }
 
+/** 只记录调度元数据；不包含窗口标题、输入文本或截图像素。 */
+export function recordScrollEvent(session, kind, details = {}) {
+    if (!scrollDiagnosticsEnabled()) return;
+    session.scrollTimeline ??= [];
+    session.scrollTimeline.push({
+        atMs: Math.round(performance.now() - (session.scrollDiagnosticStartedAt ?? 0)),
+        kind, generation: session.captureGeneration, ...details,
+    });
+    if (session.scrollTimeline.length > MAX_TIMELINE_EVENTS) {
+        session.scrollTimeline.shift();
+        session.scrollDroppedTimelineEvents = (session.scrollDroppedTimelineEvents || 0) + 1;
+    }
+}
+
 export function recordScrollDiagnostic(session, frame, decision, metadata = {}) {
     session.scrollLastDecision = decision;
     if (!scrollDiagnosticsEnabled()) return;
+    session.scrollTimingSamples ??= [];
+    session.scrollTimingSamples.push({decision, timing: metadata.timing || null,
+        tracking: metadata.tracking || null, calibration: decision.calibration || null});
+    if (session.scrollTimingSamples.length > MAX_TIMING_SAMPLES) {
+        session.scrollTimingSamples.shift();
+        session.scrollDroppedTimingSamples = (session.scrollDroppedTimingSamples || 0) + 1;
+    }
+    recordScrollEvent(session, 'frame-decision', {
+        accepted: decision.accepted, reason: decision.reason,
+        wheelVersion: metadata.wheelVersion ?? null, finalizing: metadata.finalizing === true,
+        timing: metadata.timing || null,
+    });
     session.scrollDecisions.push(decision);
     if (session.scrollDecisions.length > MAX_REPLAY_FRAMES) session.scrollDecisions.shift();
     const frameBytes = frame?.data?.byteLength || 0;
@@ -47,7 +84,9 @@ export function recordScrollDiagnostic(session, frame, decision, metadata = {}) 
         && session.scrollReplayBytes + frameBytes <= MAX_REPLAY_BYTES) {
         session.scrollReplayFrames.push({
             frame,
-            capturedAtMs: Math.round(performance.now()),
+            discontinuity: metadata.discontinuity === true,
+            trackingReset: metadata.trackingReset === true,
+            capturedAtMs: Math.round(metadata.capturedAt ?? performance.now()),
             expectedDirection: decision.expectedDirection,
             settle: metadata.settle || null,
             timing: metadata.timing || null,
@@ -64,6 +103,7 @@ export function recordScrollDiagnostic(session, frame, decision, metadata = {}) 
         const latency = metadata.timing?.totalLatencyMs;
         const timingText = Number.isFinite(latency) ? ` · ${Math.round(latency)}ms` : '';
         text.textContent = `top ${decision.candidateTop ?? '—'} · ${decision.source} · ${decision.reason} · ${confidence}% · score ${score}${timingText}`;
+        text.title = text.textContent;
     }
 }
 
@@ -91,11 +131,12 @@ export function buildCalibrationSummary(frames) {
         },
         confidence: {count: 0, min: null, max: null, average: null},
         timing: Object.fromEntries(TIMING_KEYS.map((key) => [key, {
-            count: 0, min: null, max: null, average: null,
+            count: 0, min: null, max: null, average: null, p50: null, p95: null,
         }])),
     };
     let confidenceTotal = 0;
     const timingTotals = Object.fromEntries(TIMING_KEYS.map((key) => [key, 0]));
+    const timingValues = Object.fromEntries(TIMING_KEYS.map((key) => [key, []]));
     for (const captured of frames) {
         const decision = captured.decision || {};
         if (decision.accepted) summary.acceptedCount++;
@@ -125,12 +166,13 @@ export function buildCalibrationSummary(frames) {
         }
         for (const key of TIMING_KEYS) {
             const value = captured.timing?.[key];
-            if (!Number.isFinite(value)) continue;
+            if (!Number.isFinite(value) || value < 0) continue;
             const stats = summary.timing[key];
             stats.count++;
             stats.min = stats.min == null ? value : Math.min(stats.min, value);
             stats.max = stats.max == null ? value : Math.max(stats.max, value);
             timingTotals[key] += value;
+            timingValues[key].push(value);
         }
     }
     if (summary.confidence.count) {
@@ -140,7 +182,12 @@ export function buildCalibrationSummary(frames) {
     }
     for (const key of TIMING_KEYS) {
         const stats = summary.timing[key];
-        if (stats.count) stats.average = Math.round(timingTotals[key] / stats.count * 10) / 10;
+        if (stats.count) {
+            stats.average = Math.round(timingTotals[key] / stats.count * 10) / 10;
+            const values = timingValues[key].sort((a, b) => a - b);
+            stats.p50 = values[Math.ceil(values.length * 0.5) - 1];
+            stats.p95 = values[Math.ceil(values.length * 0.95) - 1];
+        }
     }
     return summary;
 }
@@ -160,10 +207,24 @@ async function imageDataToPngBlob(image) {
 export async function exportScrollReplay(session) {
     if (!scrollDiagnosticsEnabled()) throw new Error('长截图诊断未开启');
     if (!session.scrollReplayFrames.length) throw new Error('当前没有可导出的采集帧');
+    // 导出过程可跨窗口关闭/复用；只消费启动时的自有快照，不再追读 session。
+    const capturedFrames = [...session.scrollReplayFrames];
+    const timingSamples = [...(session.scrollTimingSamples || session.scrollReplayFrames)];
+    const timeline = [...(session.scrollTimeline || [])];
+    const environment = {
+        userAgent: globalThis.navigator?.userAgent || null,
+        devicePixelRatio: window.devicePixelRatio || null,
+        bandWidth: session.scrollBandW, bandHeight: session.scrollBandH,
+        renderScale: ss.canvas?.getBoundingClientRect?.().width > 0
+            ? ss.canvas.width / ss.canvas.getBoundingClientRect().width : null,
+        capture: session.continuousCapture?.diagnostics() || null,
+    };
+    const droppedTimingSamples = session.scrollDroppedTimingSamples || 0;
+    const droppedTimelineEvents = session.scrollDroppedTimelineEvents || 0;
     const directoryName = `blink-scroll-${new Date().toISOString().replaceAll(':', '-').replaceAll('.', '-')}`;
     const frames = [];
-    for (let index = 0; index < session.scrollReplayFrames.length; index++) {
-        const captured = session.scrollReplayFrames[index];
+    for (let index = 0; index < capturedFrames.length; index++) {
+        const captured = capturedFrames[index];
         const file = `frame-${String(index).padStart(4, '0')}.png`;
         const png = new Uint8Array(await (await imageDataToPngBlob(captured.frame)).arrayBuffer());
         await screenshotSaveReplayFile(directoryName, file, png);
@@ -171,6 +232,8 @@ export async function exportScrollReplay(session) {
             file,
             capturedAtMs: captured.capturedAtMs,
             expectedDirection: captured.expectedDirection,
+            discontinuity: captured.discontinuity === true,
+            trackingReset: captured.trackingReset === true,
             settle: captured.settle,
             timing: captured.timing || null,
             tracking: captured.tracking || null,
@@ -184,7 +247,12 @@ export async function exportScrollReplay(session) {
         decisionSchemaVersion: SCROLL_DECISION_SCHEMA_VERSION,
         createdAt: new Date().toISOString(),
         frameCount: frames.length,
-        calibrationSummary: buildCalibrationSummary(session.scrollReplayFrames),
+        environment,
+        calibrationSummary: buildCalibrationSummary(capturedFrames),
+        timingSummary: buildCalibrationSummary(timingSamples).timing,
+        timingSampleCount: timingSamples.length,
+        droppedTimingSamples,
+        timeline, droppedTimelineEvents,
         frames,
     };
     const manifestBytes = new TextEncoder().encode(JSON.stringify(manifest, null, 2));

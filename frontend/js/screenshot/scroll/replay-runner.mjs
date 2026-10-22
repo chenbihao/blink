@@ -30,7 +30,11 @@ async function loadReplayModule() {
     const trackerSource = (await readFile(new URL('tracker.js', base), 'utf8'))
         .replace("'./stitch.js'", JSON.stringify(stitchUrl));
     const trackerUrl = dataUrl(trackerSource);
+    const engineUrl = dataUrl((await readFile(new URL('tracking-engine.js', base), 'utf8'))
+        .replace("'./stitch.js'", JSON.stringify(stitchUrl))
+        .replace("'./tracker.js'", JSON.stringify(trackerUrl)));
     const replaySource = (await readFile(new URL('replay.js', base), 'utf8'))
+        .replace("'./tracking-engine.js'", JSON.stringify(engineUrl))
         .replace("'./stitch.js'", JSON.stringify(stitchUrl))
         .replace("'./tracker.js'", JSON.stringify(trackerUrl));
     return import(dataUrl(replaySource));
@@ -48,6 +52,8 @@ export async function replayExportedDirectory(directory, options = {}) {
             frame: new ImageData(decoded.data, decoded.width, decoded.height),
             expectedDirection: captured.expectedDirection,
             settle: captured.settle,
+            discontinuity: captured.discontinuity === true,
+            trackingReset: captured.trackingReset === true,
         });
     }
     const {replayScrollSequence} = await loadReplayModule();

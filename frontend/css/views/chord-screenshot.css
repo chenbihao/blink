@@ -2292,16 +2292,18 @@ body.image-editor-mode #canvas.long-image-editing {
     display: none;
 }
 
-/* 仅 ?scrollDebug=1 显示的长截图开发诊断。 */
+.scroll-preview.is-pending {
+    border-color: var(--accent);
+}
+
+/* 诊断开启时显示；JS 按来源屏 DPI 定位到长截图工具栏旁。 */
 .scroll-diagnostics {
     position: fixed;
-    left: var(--space-md);
-    bottom: var(--space-md);
     z-index: 120;
     display: flex;
     align-items: center;
     gap: var(--space-sm);
-    max-width: calc(100vw - var(--space-lg) * 2);
+    box-sizing: border-box;
     padding: var(--space-sm) var(--space-md);
     border: 1px solid var(--surface-2);
     border-radius: var(--radius-md);
@@ -2309,6 +2311,14 @@ body.image-editor-mode #canvas.long-image-editing {
     color: var(--text);
     font-family: var(--font-mono, ui-monospace, monospace);
     font-size: 12px;
+}
+
+.scroll-diagnostics span {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
 }
 
 .scroll-diagnostics.hidden {

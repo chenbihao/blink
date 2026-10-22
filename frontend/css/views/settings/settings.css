@@ -240,6 +240,32 @@ body {
 
 /* ── 关于面板：更新提示（紧跟版本号） ── */
 
+/* 默认即隐藏，包含 Chord 动态渲染的行；无须等待 JS 扫描 DOM。 */
+:root:not([data-developer-mode="true"]) [data-developer-only] {
+    display: none !important;
+}
+
+.about-version {
+    border: 0;
+    background: transparent;
+    padding: 0;
+    cursor: default;
+    user-select: none;
+}
+
+.about-version:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 4px;
+    border-radius: var(--radius-sm);
+}
+
+.about-developer-controls {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-md);
+}
+
 .about-check-btn {
     margin-left: 8px;
     padding: 2px 8px;

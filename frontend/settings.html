@@ -2779,7 +2779,7 @@
                 <button class="btn-small" data-i18n="log.open_dir" id="open-log-dir">打开文件夹</button>
             </div>
 
-            <div class="setting-row">
+            <div class="setting-row" data-developer-only>
                 <label class="setting-label" data-i18n="log.http_body.label">AI HTTP 请求/响应体日志<span
                         class="field-hint-icon" data-i18n-title="log.http_body.hint">ⓘ</span></label>
                 <label class="checkbox">
@@ -2789,8 +2789,8 @@
             </div>
 
             <!-- 主题调试台（0.25.11）：单页验收全部主题的对比度与组件渲染 -->
-            <div class="section-label" data-i18n="debug.section.theme">主题 · 调试台</div>
-            <div class="setting-row">
+            <div class="section-label" data-i18n="debug.section.theme" data-developer-only>主题 · 调试台</div>
+            <div class="setting-row" data-developer-only>
                 <label class="setting-label" data-i18n="debug.theme.label">主题调试台<span class="field-hint-icon"
                                                                                          data-i18n-title="debug.theme.hint">ⓘ</span></label>
                 <button class="btn-small" data-i18n="debug.theme.open" id="open-theme-debug" type="button">打开主题调试页
@@ -2840,20 +2840,7 @@
         <div class="panel" id="about">
             <h2 data-i18n="panel.about">关于</h2>
             <p class="panel-lede" data-i18n="about.lede">版本、技术栈与源码仓库。</p>
-            <div class="setting-row">
-                <label class="setting-label" data-i18n="about.version.label">版本</label>
-                <span class="value" id="about-version">—</span>
-                <button class="about-check-btn" data-i18n="about.update.check" id="about-check-update">检查更新</button>
-                <button class="about-check-btn about-install-btn" data-i18n="about.update.install" id="about-install-update" hidden>一键更新</button>
-                <span class="about-update" hidden id="about-update"></span>
-            </div>
-            <!-- 0.25.10：一键更新下载进度条（检查到新版本并点击安装后显示） -->
-            <div class="about-update-progress" hidden id="about-update-progress">
-                <div class="about-update-progress-bar" id="about-update-progress-bar"></div>
-            </div>
-            <div class="release-notes" hidden id="about-release-notes"></div>
-            <!-- 0.26.20：自动检查更新总开关——关闭后后台静默检查与建议槽/托盘版本提示停止；
-                 手动「检查更新」按钮与主窗口内置动作不受影响 -->
+            <!-- 自动检查更新优先展示；关闭不拦截手动检查。 -->
             <div class="setting-row">
                 <label class="setting-label" data-i18n="about.update.auto_check">自动检查更新<span
                         class="field-hint-icon" data-i18n-title="about.update.auto_check.hint">ⓘ</span></label>
@@ -2862,6 +2849,23 @@
                     <span class="checkmark"></span>
                 </label>
             </div>
+            <div class="setting-row">
+                <label class="setting-label" data-i18n="about.version.label">版本</label>
+                <button class="value about-version" id="about-version" type="button">—</button>
+                <button class="about-check-btn" data-i18n="about.update.check" id="about-check-update">检查更新</button>
+                <button class="about-check-btn about-install-btn" data-i18n="about.update.install" id="about-install-update" hidden>一键更新</button>
+                <span class="about-update" hidden id="about-update"></span>
+            </div>
+            <div class="about-developer-controls" id="developer-mode-controls" hidden>
+                <span class="hint" id="developer-mode-status" role="status" aria-live="polite"></span>
+                <button class="btn-small" id="developer-mode-hide" type="button" data-developer-only
+                        data-i18n="about.developer.hide">隐藏调试项</button>
+            </div>
+            <!-- 0.25.10：一键更新下载进度条（检查到新版本并点击安装后显示） -->
+            <div class="about-update-progress" hidden id="about-update-progress">
+                <div class="about-update-progress-bar" id="about-update-progress-bar"></div>
+            </div>
+            <div class="release-notes" hidden id="about-release-notes"></div>
             <div class="setting-row">
                 <label class="setting-label" data-i18n="about.stack.label">技术栈</label>
                 <span class="value">Rust 2024 + Tauri 2 + WebView2</span>

@@ -2,7 +2,6 @@
 
 use super::*;
 
-static WHEEL_INJECT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 const WHEEL_PASSTHROUGH_MS: u64 = 260;
 const MAX_WHEEL_PASSTHROUGH_MS: u64 = 500;
 const SCROLL_PROBE_MAX_W: u32 = 96;
@@ -1998,32 +1997,17 @@ pub async fn screenshot_control_hints(
 /// 设为 true 时，overlay 窗口在 BitBlt 屏幕采集中不可见（但用户仍能看到）。
 /// 进入长截图采集阶段时设 true，退出时设 false。
 #[tauri::command]
-pub fn screenshot_set_capture_exclusion(
+pub async fn screenshot_set_capture_exclusion(
     app: tauri::AppHandle,
     exclude: bool,
-) -> Result<(), String> {
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE,
-    };
-
-    let win = app
-        .get_webview_window("chord-screenshot")
-        .ok_or_else(|| "截图 overlay 窗口未找到".to_string())?;
-    let hwnd = win.hwnd().map_err(|e| format!("获取 HWND 失败: {e}"))?;
-    let target = HWND(hwnd.0 as _);
-
-    let affinity = if exclude {
-        WDA_EXCLUDEFROMCAPTURE
-    } else {
-        WDA_NONE
-    };
-    let ok = unsafe { SetWindowDisplayAffinity(target, affinity) };
-    if ok.is_err() {
-        return Err("SetWindowDisplayAffinity 失败".to_string());
-    }
-    tracing::debug!(exclude, "overlay 捕获排除已设置");
-    Ok(())
+    session_token: Option<u64>,
+) -> Result<Option<u64>, String> {
+    crate::infra::platform::window::scroll_capture::set_capture_exclusion(
+        &app,
+        exclude,
+        session_token,
+    )
+    .await
 }
 
 /// 0.15.7：长截图——截取屏幕区域为 RGBA bytes。
@@ -2114,7 +2098,7 @@ pub fn screenshot_cursor_position() -> Result<serde_json::Value, String> {
 /// `delta` 为 wheel delta（正值向上滚，负值向下滚），标准 120 为一格。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
-pub fn screenshot_forward_wheel(
+pub async fn screenshot_forward_wheel(
     app: tauri::AppHandle,
     hwnd: Option<isize>,
     delta: i32,
@@ -2123,136 +2107,25 @@ pub fn screenshot_forward_wheel(
     passthrough_ms: Option<u64>,
     position_cursor: Option<bool>,
     force_message: Option<bool>,
+    session_token: Option<u64>,
 ) -> Result<(), String> {
-    let hwnd_val = hwnd
+    let hwnd = hwnd
         .filter(|value| *value != 0)
         .ok_or("未提供有效窗口 HWND")?;
-    let passthrough_ms = passthrough_ms
-        .unwrap_or(WHEEL_PASSTHROUGH_MS)
-        .min(MAX_WHEEL_PASSTHROUGH_MS);
-    if position_cursor.unwrap_or(false) {
-        unsafe { windows::Win32::UI::WindowsAndMessaging::SetCursorPos(screen_x, screen_y) }
-            .map_err(|e| format!("定位自动滚动光标失败: {e}"))?;
-    }
-    if force_message.unwrap_or(false) {
-        tracing::debug!(hwnd = hwnd_val, delta, "自动滚动切换到窗口消息兜底");
-        return post_wheel_to_target(hwnd_val, delta, screen_x, screen_y);
-    }
-    if let Err(inject_error) = inject_wheel_through_overlay(&app, delta, passthrough_ms) {
-        tracing::warn!(error = %inject_error, "真实滚轮注入失败，回退到窗口消息转发");
-        return post_wheel_to_target(hwnd_val, delta, screen_x, screen_y);
-    }
-    Ok(())
-}
-
-/// overlay 会截获首个滚轮事件。开启一个短时连续穿透窗口并用
-/// SendInput 补发首个事件，后续真实滚轮可直达底层应用。这避免每一格
-/// 都切换 overlay hit-test 并阻塞线程，同时兼容忽略 WM_MOUSEWHEEL 的自绘窗口。
-fn inject_wheel_through_overlay(
-    app: &tauri::AppHandle,
-    delta: i32,
-    passthrough_ms: u64,
-) -> Result<(), String> {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{
-        INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput,
-    };
-
-    let _guard = WHEEL_INJECT_LOCK
-        .lock()
-        .map_err(|_| "滚轮注入状态锁中毒".to_string())?;
-    let overlay = app
-        .get_webview_window("chord-screenshot")
-        .ok_or_else(|| "截图 overlay 窗口未找到".to_string())?;
-    overlay
-        .set_ignore_cursor_events(true)
-        .map_err(|e| format!("开启 overlay 鼠标穿透失败: {e}"))?;
-
-    let wheel_delta = delta.clamp(i16::MIN as i32, i16::MAX as i32);
-    let input = INPUT {
-        r#type: INPUT_MOUSE,
-        Anonymous: INPUT_0 {
-            mi: MOUSEINPUT {
-                dx: 0,
-                dy: 0,
-                mouseData: wheel_delta as u32,
-                dwFlags: MOUSEEVENTF_WHEEL,
-                time: 0,
-                dwExtraInfo: 0,
-            },
-        },
-    };
-    let sent = unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) };
-
-    if sent != 1 {
-        let _ = overlay.set_ignore_cursor_events(false);
-        return Err("SendInput 未能注入滚轮事件".to_string());
-    }
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(passthrough_ms));
-        if let Err(error) = overlay.set_ignore_cursor_events(false) {
-            tracing::warn!(%error, "恢复截图 overlay 鼠标交互失败");
-        }
-    });
-    // tracing::debug!(delta, passthrough_ms, "已开启连续滚轮穿透");
-    Ok(())
-}
-
-fn post_wheel_to_target(
-    hwnd_val: isize,
-    delta: i32,
-    screen_x: i32,
-    screen_y: i32,
-) -> Result<(), String> {
-    use windows::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
-    use windows::Win32::Graphics::Gdi::ScreenToClient;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        CWP_SKIPDISABLED, CWP_SKIPINVISIBLE, CWP_SKIPTRANSPARENT, ChildWindowFromPointEx, IsWindow,
-        PostMessageW, WM_MOUSEWHEEL,
-    };
-
-    let root = HWND(hwnd_val as _);
-    if !unsafe { IsWindow(Some(root)) }.as_bool() {
-        return Err(format!("滚动目标窗口已失效: hwnd={hwnd_val}"));
-    }
-
-    // WM_MOUSEWHEEL 正常会发给光标所在控件。overlay 截获输入后需显式沿选区中心
-    // 找到最深子 HWND；只投顶层窗口对 Chromium/Electron/自绘控件通常无效。
-    let mut target = root;
-    for _ in 0..8 {
-        let mut client_point = POINT {
-            x: screen_x,
-            y: screen_y,
-        };
-        if !unsafe { ScreenToClient(target, &mut client_point) }.as_bool() {
-            break;
-        }
-        let child = unsafe {
-            ChildWindowFromPointEx(
-                target,
-                client_point,
-                CWP_SKIPINVISIBLE | CWP_SKIPDISABLED | CWP_SKIPTRANSPARENT,
-            )
-        };
-        if child.is_invalid() || child == target {
-            break;
-        }
-        target = child;
-    }
-
-    let wheel_delta = delta.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-    let wparam = WPARAM(((wheel_delta as u16 as usize) & 0xFFFF) << 16);
-    let packed_point = ((screen_x as u16 as u32) | ((screen_y as u16 as u32) << 16)) as isize;
-    unsafe { PostMessageW(Some(target), WM_MOUSEWHEEL, wparam, LPARAM(packed_point)) }
-        .map_err(|e| format!("投递 WM_MOUSEWHEEL 失败: {e}"))?;
-    tracing::debug!(
-        hwnd = hwnd_val,
-        child_hwnd = target.0 as isize,
+    crate::infra::platform::window::scroll_capture::forward_wheel(
+        &app,
+        session_token,
+        hwnd,
         delta,
         screen_x,
         screen_y,
-        "已转发滚轮事件"
-    );
-    Ok(())
+        passthrough_ms
+            .unwrap_or(WHEEL_PASSTHROUGH_MS)
+            .min(MAX_WHEEL_PASSTHROUGH_MS),
+        position_cursor.unwrap_or(false),
+        force_message.unwrap_or(false),
+    )
+    .await
 }
 
 fn finish_screenshot_session(app: &tauri::AppHandle) {

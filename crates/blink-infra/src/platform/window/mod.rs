@@ -7,6 +7,9 @@
 mod windows;
 
 #[cfg(target_os = "windows")]
+pub mod scroll_capture;
+
+#[cfg(target_os = "windows")]
 mod main_placement;
 
 #[cfg(target_os = "windows")]

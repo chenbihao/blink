@@ -11,7 +11,6 @@ const SETTLE_STABLE_SAMPLE_COUNT = 2;
 const SETTLE_INITIAL_DELAY_MS = 35;
 const MANUAL_WHEEL_PASSTHROUGH_MS = 72;
 
-export const MANUAL_WHEEL_DEBOUNCE_MS = 45;
 export const AUTO_WHEEL_PASSTHROUGH_MS = 24;
 
 export function delay(ms) {
@@ -50,6 +49,7 @@ export async function waitForVisualSettle(session, generation, requireAuto = fal
     } catch (error) {
         console.warn('[scroll] 稳定探针首次采集失败，使用短延时兜底', error);
         await delay(180);
+        if (!active(session, generation, requireAuto)) return {aborted: true};
         return {
             stable: false,
             fallback: true,
@@ -57,6 +57,8 @@ export async function waitForVisualSettle(session, generation, requireAuto = fal
             elapsedMs: Math.round(performance.now() - overallStartedAt),
         };
     }
+
+    if (!active(session, generation, requireAuto)) return {aborted: true};
 
     const startedAt = performance.now();
     let stableSamples = 0;
@@ -69,10 +71,12 @@ export async function waitForVisualSettle(session, generation, requireAuto = fal
         try {
             current = await captureProbe(session);
         } catch (error) {
+            if (!active(session, generation, requireAuto)) return {aborted: true};
             console.warn('[scroll] 稳定探针采集失败，继续等待', error);
             stableSamples = 0;
             continue;
         }
+        if (!active(session, generation, requireAuto)) return {aborted: true};
         const motion = isProbeStable(previous, current);
         lastScore = motion.score;
         if (!motion.stable) sawMotion = true;
@@ -113,6 +117,7 @@ export async function captureBandFrame(state) {
 }
 
 export function queueManualWheel(session, delta, screenX, screenY) {
+    if (session.captureFinalizing) return;
     if (session.queuedManualWheel) {
         session.queuedManualWheel.delta = Math.max(
             -480,
@@ -123,14 +128,23 @@ export function queueManualWheel(session, delta, screenX, screenY) {
     } else {
         session.queuedManualWheel = {delta, screenX, screenY};
     }
-    if (!session.wheelForwardPending) void pumpManualWheel(session);
+    if (!session.wheelForwardInFlight) startManualWheelPump(session);
+}
+
+function startManualWheelPump(session) {
+    const task = pumpManualWheel(session).finally(() => {
+        if (session.wheelForwardInFlight === task) session.wheelForwardInFlight = null;
+    });
+    session.wheelForwardInFlight = task;
 }
 
 async function pumpManualWheel(session) {
     if (session.wheelForwardPending) return;
+    const lifecycleId = session.lifecycleId;
     session.wheelForwardPending = true;
     try {
         while (session.queuedManualWheel
+        && lifecycleId === session.lifecycleId
         && session.scrollCapturePhase === 'capturing' && !session.autoScroll) {
             const wheel = session.queuedManualWheel;
             session.queuedManualWheel = null;
@@ -140,15 +154,16 @@ async function pumpManualWheel(session) {
                 wheel.screenX,
                 wheel.screenY,
                 MANUAL_WHEEL_PASSTHROUGH_MS,
+                false,
+                false,
+                session.scrollInputToken,
             );
         }
     } catch (error) {
         console.warn('[scroll] wheel 转发失败', error);
     } finally {
-        session.wheelForwardPending = false;
-        if (session.queuedManualWheel
-            && session.scrollCapturePhase === 'capturing' && !session.autoScroll) {
-            void pumpManualWheel(session);
+        if (lifecycleId === session.lifecycleId) {
+            session.wheelForwardPending = false;
         }
     }
 }
@@ -162,5 +177,6 @@ export function forwardAutoWheel(session, positionCursor, forceMessage = false) 
         AUTO_WHEEL_PASSTHROUGH_MS,
         positionCursor,
         forceMessage,
+        session.scrollInputToken,
     );
 }

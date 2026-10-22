@@ -47,10 +47,12 @@ export async function runAutoScrollController(options) {
         const settled = await waitForSettle(generation, true);
         if (settled.aborted || !isActive(generation, true)) return null;
         let result = await captureFrame(0, generation, {settle: settled});
+        if (!isActive(generation, true)) return null;
         if (result.reason === 'pending-confirmation') {
             const confirmationSettle = await waitForSettle(generation, true);
             if (confirmationSettle.aborted || !isActive(generation, true)) return null;
             result = await captureFrame(0, generation, {settle: confirmationSettle});
+            if (!isActive(generation, true)) return null;
         }
         return result;
     };
@@ -59,6 +61,7 @@ export async function runAutoScrollController(options) {
     let unchangedCount = 0;
     if (session.scrollTrackingState !== 'tracking') {
         const recovered = await recoverTracking();
+        if (!isActive(generation, true)) return;
         if (!recovered?.moved) {
             await stop('当前位置仍无法恢复定位；请手动滚回已捕获区域');
             return;
@@ -73,12 +76,15 @@ export async function runAutoScrollController(options) {
             positionCursor = positionCursor || unchangedCount >= 1;
             const forceMessage = unchangedCount >= 2;
             const wheelStartedAtMs = performance.now();
+            session.scrollLastWheelAtMs = wheelStartedAtMs;
             previewWheel?.(1);
             await forwardWheel(positionCursor, forceMessage);
+            if (!isActive(generation, true)) return;
             positionCursor = false;
             let settled = await waitForSettle(generation, true);
             if (settled.aborted || !isActive(generation, true)) return;
             let result = await captureFrame(1, generation, {settle: settled, wheelStartedAtMs});
+            if (!isActive(generation, true)) return;
             // 目标窗口繁忙时，快路径可能在滚轮真正生效前得到 unchanged。复用同一次
             // wheel 做一次延迟采集，避免继续注入滚轮并造成后续大跨度跳转。
             if (result.reason === 'unchanged') {
@@ -87,6 +93,7 @@ export async function runAutoScrollController(options) {
                 settled = await waitForSettle(generation, true);
                 if (settled.aborted || !isActive(generation, true)) return;
                 result = await captureFrame(1, generation, {settle: settled, wheelStartedAtMs});
+                if (!isActive(generation, true)) return;
             }
             if (result.reason === 'pending-confirmation') {
                 result = await recoverTracking();
@@ -119,7 +126,9 @@ export async function runAutoScrollController(options) {
             await stop('自动滚动失败，已保留当前长图');
             return;
         } finally {
-            session._scrollCapturing = false;
+            if (session.captureGeneration == null || session.captureGeneration === generation) {
+                session._scrollCapturing = false;
+            }
         }
         await delay(16);
     }

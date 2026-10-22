@@ -495,6 +495,10 @@ export const en = {
 
     // ── About tab ──
     "about.version.label": "Version",
+    "about.developer.remaining": "Tap {remaining} more times to show debugging options",
+    "about.developer.enabled": "Debugging options are visible",
+    "about.developer.hidden": "Debugging options are hidden",
+    "about.developer.hide": "Hide debugging options",
     "about.stack.label": "Tech stack",
     "about.license.label": "License",
     "about.license.third_party.label": "Open source & licenses",
