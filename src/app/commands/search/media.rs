@@ -2001,11 +2001,13 @@ pub async fn screenshot_set_capture_exclusion(
     app: tauri::AppHandle,
     exclude: bool,
     session_token: Option<u64>,
+    input_regions: Option<crate::infra::platform::window::scroll_capture::CaptureInputRegions>,
 ) -> Result<Option<u64>, String> {
     crate::infra::platform::window::scroll_capture::set_capture_exclusion(
         &app,
         exclude,
         session_token,
+        input_regions,
     )
     .await
 }
@@ -2025,7 +2027,7 @@ pub async fn screenshot_capture_band(
     h: u32,
 ) -> Result<tauri::ipc::Response, String> {
     let bytes = tokio::task::spawn_blocking(move || {
-        let bgra = crate::infra::platform::screenshot::capture_region(x, y, w, h)?;
+        let bgra = crate::infra::platform::screenshot::capture_region_continuous(x, y, w, h)?;
         let mut rgba = bgra;
         // 共用对齐 u32 快路径，避免 dev 下逐像素构造/复制四字节数组的高开销。
         crate::infra::platform::screenshot::swap_rgba_bgra_in_place(&mut rgba);

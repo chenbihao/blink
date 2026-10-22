@@ -71,4 +71,9 @@ pub trait ScreenshotBackend: Send + Sync {
     /// 与 `capture_virtual_screen` 的区别：只截取指定区域而非全屏，
     /// 适用于长截图逐帧采集——每次 BitBlt 一个采集带而非整屏。
     fn capture_region(&self, x: i32, y: i32, w: u32, h: u32) -> Result<Vec<u8>, String>;
+
+    /// 连续观察读取当前已呈现画面，不额外等待下一次显示提交；默认复用区域捕获。
+    fn capture_region_continuous(&self, x: i32, y: i32, w: u32, h: u32) -> Result<Vec<u8>, String> {
+        self.capture_region(x, y, w, h)
+    }
 }

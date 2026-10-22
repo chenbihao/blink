@@ -119,10 +119,7 @@ export async function captureBandFrame(state) {
 export function queueManualWheel(session, delta, screenX, screenY) {
     if (session.captureFinalizing) return;
     if (session.queuedManualWheel) {
-        session.queuedManualWheel.delta = Math.max(
-            -480,
-            Math.min(480, session.queuedManualWheel.delta + delta),
-        );
+        session.queuedManualWheel.delta += delta;
         session.queuedManualWheel.screenX = screenX;
         session.queuedManualWheel.screenY = screenY;
     } else {
@@ -147,10 +144,13 @@ async function pumpManualWheel(session) {
         && lifecycleId === session.lifecycleId
         && session.scrollCapturePhase === 'capturing' && !session.autoScroll) {
             const wheel = session.queuedManualWheel;
-            session.queuedManualWheel = null;
+            const delta = Math.max(-480, Math.min(480, wheel.delta));
+            const remaining = wheel.delta - delta;
+            // 限制单次注入步长，剩余输入继续发送；不能在 IPC 在途时静默截掉滚动量。
+            session.queuedManualWheel = remaining ? {...wheel, delta: remaining} : null;
             await screenshotForwardWheel(
                 session.scrollHwnd,
-                wheel.delta,
+                delta,
                 wheel.screenX,
                 wheel.screenY,
                 MANUAL_WHEEL_PASSTHROUGH_MS,

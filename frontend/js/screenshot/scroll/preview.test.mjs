@@ -41,7 +41,7 @@ globalThis.previewMonitor = {x: 0, y: 0, w: 1000, h: 700};
 globalThis.ImageData = class {
     constructor(width, height) { this.width = width; this.height = height; this.data = new Uint8ClampedArray(width * height * 4); }
 };
-globalThis.document = {documentElement: {}, getElementById: id => nodes.get(id) || null,
+globalThis.document = {documentElement: {classList: classes()}, getElementById: id => nodes.get(id) || null,
     createElement: () => { createdCanvases++; const canvas = {width: 0, height: 0, getContext: () => context};
         cachedCanvases.push(canvas); return canvas; }};
 globalThis.window = {innerWidth: 5000, innerHeight: 2000, __blinkScreenMeta: {}};
@@ -54,14 +54,22 @@ const urls = {
         top: Math.min(...frames.map(f => f.top)), bottom: Math.max(...frames.map(f => f.top + f.image.height))});`),
     './thumbnail.js': dataUrl(await sourceOf('./thumbnail.js')),
     './preview-layout.js': dataUrl(await sourceOf('./preview-layout.js')),
-    '../ss-selection-geometry.js': dataUrl('export const uiScaleAtCss = () => globalThis.previewScale;'),
+    '../ss-selection-geometry.js': dataUrl(`export const uiScaleAtCss = () => globalThis.previewScale;
+        export const cssRectToScreen = (r, m) => ({x: Math.round((m.vx || 0) + r.x * (m.renderScaleX || 1)),
+            y: Math.round((m.vy || 0) + r.y * (m.renderScaleY || 1)),
+            w: Math.round(r.w * (m.renderScaleX || 1)), h: Math.round(r.h * (m.renderScaleY || 1))});`),
     '../ss-display.js': dataUrl('export const findDisplayCssAt = () => globalThis.previewMonitor; export const getMonitorForScroll = () => globalThis.previewMonitor;'),
     '../ss-utils.js': dataUrl(await sourceOf('../ss-utils.js')),
 };
 let source = await sourceOf('./preview.js');
 for (const [name, url] of Object.entries(urls)) source = source.replace(`'${name}'`, JSON.stringify(url));
-const {showScrollInputFeedback, updatePreview, resetPreviewRendering,
-    positionScrollToolbar, positionScrollDiagnostics} = await import(dataUrl(source));
+const {showScrollInputFeedback, updatePreview, resetPreviewRendering, setScrollCapturePresentation,
+    positionScrollToolbar, positionScrollDiagnostics, scrollCaptureInputRegions} = await import(dataUrl(source));
+
+setScrollCapturePresentation(true);
+assert.equal(document.documentElement.classList.contains('scroll-capturing'), true);
+setScrollCapturePresentation(false);
+assert.equal(document.documentElement.classList.contains('scroll-capturing'), false);
 
 updatePreview(); updatePreview();
 assert.equal(createdCanvases, 1, '同一片段的 Canvas 缓存应复用');
@@ -138,6 +146,15 @@ positionScrollToolbar(state.scrollSourceRect); positionScrollDiagnostics();
 const negative = diagnostics.getBoundingClientRect();
 assert.ok(negative.left >= -1912 && negative.left + negative.width <= -8);
 assert.ok(negative.top >= -1072 && negative.top + negative.height <= -8);
+// 穿透区域使用虚拟桌面物理像素；控件阴影和预览未来增长区域始终保留。
+canvas.getBoundingClientRect = () => ({left: -500, top: -900, width: 180, height: 24});
+window.__blinkScreenMeta = {vx: -2560, vy: -1440, renderScaleX: 2, renderScaleY: 1.5};
+const regions = scrollCaptureInputRegions({x: 100, y: 200, w: 500, h: 300});
+assert.deepEqual(regions.capture, {x: -2348, y: -1131, w: 976, h: 432});
+assert.equal(regions.controls.length, 3);
+assert.equal(regions.controls[1].h, 1386, '预留最大预览高度而非初始24px');
+assert.equal(scrollCaptureInputRegions({x: 0, y: 0, w: 8, h: 100}), null);
+window.__blinkScreenMeta = {};
 const cachedBeforeReset = createdCanvases;
 resetPreviewRendering(); assert.equal(canvas.classList.contains('is-pending'), false);
 updatePreview();

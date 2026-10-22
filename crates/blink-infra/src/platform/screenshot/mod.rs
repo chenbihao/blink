@@ -180,6 +180,11 @@ pub fn capture_region(x: i32, y: i32, w: u32, h: u32) -> Result<Vec<u8>, String>
     backend().capture_region(x, y, w, h)
 }
 
+/// 长截图连续观察的区域读取；结束稳定性探针仍使用带提交等待的 capture_region。
+pub fn capture_region_continuous(x: i32, y: i32, w: u32, h: u32) -> Result<Vec<u8>, String> {
+    backend().capture_region_continuous(x, y, w, h)
+}
+
 /// 启动截图会话：截取整个虚拟屏幕，**立即编码 PNG**，存进 SESSION，返回元数据。
 ///
 /// **调用时机**：主窗已隐藏、overlay 尚未显示。这样 BitBlt 拍到的是"没有 blink"的桌面。

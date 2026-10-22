@@ -61,7 +61,7 @@
 | **0.23** | [0.23-editor-voice-ai-workflow.md](./phases/0.23-editor-voice-ai-workflow.md) | 单会话文本工作台、Preview/Draft 双层识别、AI 确认与主链路稳定性收口；0.23.12 统一资源 ref 层、0.23.14 VAD/Preview-Draft 收尾、0.23.15 截图实线选区拖动流畅度、0.23.16 双层识别体验收口（组合预览反回退、Draft 在途不停摆、目标窗口默认开启、渐进上屏保留窗口配置化、设置页体验收口）；0.23.17~0.23.19 实机反馈打磨（AI 整理替换语义、截图/pin 视觉与交互收口、下载源降级 + 自定义 tooltip + 编辑器一次 ESC 退出等修复合集）均已完成 | ✅ |
 | **0.24** | [0.24-smart-tab-suggestion-system.md](./phases/0.24-smart-tab-suggestion-system.md) | Smart Tab 与统一建议系统（双槽位仲裁、Query/Awareness 评分、主窗口提示 UI 收敛、Needle 路由 Spike、0.24.10 长截图拼接算法加固与体验打磨） | ✅ |
 | **0.25** | [0.25-domain-crate-split.md](./phases/0.25-domain-crate-split.md) | domain 拆 crate、快捷键设置、跨窗口配置同步、应用内一键更新、密钥命名重构与插件密钥接入、AI 代码块适配、编辑器 MD 根治、版本更新提示优化、脚本解释器托管分发；0.25.21–0.25.25 剪贴板管理器治理（上屏注入策略/类型筛选/批量上屏/唤起定位）；0.25.26 长图 pin 双击消失与拖动 DPI 修复；实机验收待验项见 phase 文档 §6.3 | 🚧 0.25.1–0.25.26 已实现 · 实机待验 |
-| **0.26** | [0.26-plugin-system-upgrade.md](./phases/0.26-plugin-system-upgrade.md) | 插件系统升级：天气/IP 与公共交互、剪贴板文件与预览、超链/书签与浏览器导入、托管 Everything、更新提醒；0.26.22 长截图连续采集重构与技术债清理 | 🚧 0.26.0–0.26.21 代码与自动化验证完成，部分实机待验；0.26.22 🚧 R1 代码与自动化验证落地，真实基线/实机待验 |
+| **0.26** | [0.26-plugin-system-upgrade.md](./phases/0.26-plugin-system-upgrade.md) | 插件系统升级：天气/IP 与公共交互、剪贴板文件与预览、超链/书签与浏览器导入、托管 Everything、更新提醒；0.26.22 长截图连续采集重构与技术债清理 | ✅ 0.26.0–0.26.23 本版范围收尾；长截图用户实测流畅，未覆盖的实机验证边界见 phase §六 |
 | **0.27** | [0.27-ai-interaction-enhancement.md](./phases/0.27-ai-interaction-enhancement.md) | AI 交互增强（提示词库、编辑器整理预设、斜杠命令框架与 /compact、@ 附件面板与文本附件、图片输入 vision、文件选中感知、代理接线与更新检查降级、OpenAICompatible 路由核验） | 📋 规划中 |
 
 > **非版本档案**：[roadmap.md](./roadmap.md)（近期优先、条件候选与远期观察；不预占版本号）；ADR-001（Agent 后端策略）已并入 [spec-architecture §A10](./specs/spec-architecture.md)。
@@ -94,7 +94,7 @@
 | 0.23.x | 单会话编辑底座、连续听写、Preview/Draft 双层识别、显式 AI 整理与主链路稳定性收口；0.23.15 截图实线选区拖动流畅度专项；0.23.16 VAD 双层识别体验收口；0.23.17~0.23.19 实机反馈打磨（AI 整理替换语义 / 截图与 pin 视觉交互收口 / 下载源降级与截图修复合集） | ✅ 0.23.0~0.23.19 完成 |
 | 0.24.x | Smart Tab、SuggestionSet/Coordinator、Query/Awareness 简单评分、主窗口提示 UI 收敛、Needle Spike、长截图拼接算法加固与体验打磨（0.24.10） | ✅ 0.24.0~0.24.10 完成 |
 | 0.25.x | domain 拆 crate、快捷键设置与欢迎页优化、跨窗口配置同步、应用内一键更新、密钥命名重构与插件密钥接入、AI 代码块适配、编辑器 MD 根治、版本更新提示优化、脚本解释器托管分发；0.25.21 起剪贴板管理器治理（门控常量修复/一律 Ctrl+V 上屏/Tab 类型筛选/批量上屏/定位钳制） | 🚧 0.25.1–0.25.26 已实现（真实粘贴/类型筛选/批量上屏/鼠标兜底定位/全量验证优化/长图 pin 修复）（决策见 [phase 文档 §3.13](phases/0.25-domain-crate-split.md)），实机验收待验项见 [phase 文档 §6.3](phases/0.25-domain-crate-split.md) |
-| 0.26.x | 插件系统与公共交互升级；0.26.22 长截图连续采集重构与技术债清理 | 🚧 0.26.0–0.26.21 代码与自动化验证完成，部分实机待验；0.26.22 🚧 R1 代码与自动化验证落地，真实基线/实机待验（见 [phase 文档](phases/0.26-plugin-system-upgrade.md)） |
+| 0.26.x | 插件系统与公共交互升级；0.26.22 长截图连续采集重构与技术债清理 | ✅ 0.26.0–0.26.23 本版范围收尾；长截图用户实测流畅，未覆盖的实机验证边界见 phase §六（见 [phase 文档](phases/0.26-plugin-system-upgrade.md)） |
 | 0.27.x | AI 交互增强（斜杠命令、提示词库、编辑器预设、/compact、@ 附件与文本文件、图片输入、文件选中感知、代理接线与更新检查降级） | 📋 规划中（见 [phase 文档](phases/0.27-ai-interaction-enhancement.md)） |
 | 未立项 | 见 roadmap：subagent / proactivity / 同步 / 多类型 API（生图/TTS）/ 国产 provider 方言 / 远期向量与 RAG 观察 | 🔮 候选池 |
 

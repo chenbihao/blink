@@ -502,8 +502,8 @@ export function screenshotControlHints(hwnd, generation) {
 }
 
 /** 0.15.7：设置/清除 overlay 捕获排除（WDA_EXCLUDEFROMCAPTURE）。 */
-export function screenshotSetCaptureExclusion(exclude, sessionToken = null) {
-    return invoke("screenshot_set_capture_exclusion", {exclude, sessionToken});
+export function screenshotSetCaptureExclusion(exclude, sessionToken = null, inputRegions = null) {
+    return invoke("screenshot_set_capture_exclusion", {exclude, sessionToken, inputRegions});
 }
 
 /** 0.15.7：截取屏幕区域为 RGBA bytes（ArrayBuffer）。 */

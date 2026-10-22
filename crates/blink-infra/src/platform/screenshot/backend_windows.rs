@@ -57,6 +57,10 @@ impl ScreenshotBackend for WindowsScreenshotBackend {
     fn capture_region(&self, x: i32, y: i32, w: u32, h: u32) -> Result<Vec<u8>, String> {
         capture_region_bgra(x, y, w, h)
     }
+
+    fn capture_region_continuous(&self, x: i32, y: i32, w: u32, h: u32) -> Result<Vec<u8>, String> {
+        capture_region_bgra_impl(x, y, w, h, false)
+    }
 }
 
 // ── 显示器枚举 ────────────────────────────────────────────────────────────────
@@ -198,9 +202,22 @@ fn capture_virtual_screen_impl() -> Result<(Vec<u8>, ScreenCaptureMeta), String>
 /// H4 优化：使用 thread_local GDI 缓存——DC 全程复用，bitmap 仅在尺寸变化时重建。
 /// 避免每次调用都 CreateDC + CreateCompatibleDC + CreateCompatibleBitmap + Delete* 6 次 syscall。
 fn capture_region_bgra(src_x: i32, src_y: i32, w: u32, h: u32) -> Result<Vec<u8>, String> {
+    capture_region_bgra_impl(src_x, src_y, w, h, true)
+}
+
+fn capture_region_bgra_impl(
+    src_x: i32,
+    src_y: i32,
+    w: u32,
+    h: u32,
+    wait_for_present: bool,
+) -> Result<Vec<u8>, String> {
     unsafe {
-        // BitBlt 前再 DwmFlush 一次——确保 GDI 拿到的屏幕是 DWM 最新合成的一帧
-        let _ = DwmFlush();
+        // 单次截图保留原有提交等待；连续观察无需每帧等下一次 Present。
+        // DwmFlush 只等待调用进程排队的更新，不能保证外部浏览器已经响应滚轮。
+        if wait_for_present {
+            let _ = DwmFlush();
+        }
 
         GDI_CACHE.with(|cache| {
             let mut gdi_opt = cache.borrow_mut();

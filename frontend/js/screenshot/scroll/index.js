@@ -11,7 +11,7 @@
 //! - 进入 capturing 前设 `WDA_EXCLUDEFROMCAPTURE` 排除 overlay 自身
 //!
 //! **手动滚动**：
-//! - overlay 接收首个 wheel 事件 → 短时穿透，后续真实输入直达目标窗口
+//! - 选区内部原生穿透，真实输入直达目标窗口；控件及失败降级保留滚轮转发
 //! - 持续调用 `screenshot_capture_band`，保留有界 FIFO 中间帧，与输入解耦
 //!
 //! **自动滚动**：
@@ -29,7 +29,7 @@ import {findWindowForRect} from '../ss-hover.js';
 import {ContinuousScrollCapture} from './continuous.js';
 import {ScrollTrackingClient} from './tracking-client.js';
 import {runAutoScrollController} from './auto.js';
-import {finalizeScrollCapture} from './finalize.js';
+import {finalizeScrollCapture, recordTailStability} from './finalize.js';
 import {
     captureBandFrame,
     delay,
@@ -49,6 +49,8 @@ import {
     positionPreview,
     positionScrollToolbar,
     resetPreviewRendering,
+    scrollCaptureInputRegions,
+    setScrollCapturePresentation,
     showCaptureFrame,
     showScrollInputFeedback,
     updatePreview,
@@ -143,13 +145,13 @@ export async function enterScrollCapture(rect) {
     // 现改为：可见 UI 同步就位（单帧呈现）→ 设排除 → 首帧采集。即便呈现从此停摆，
     // 用户也已看到完整采集 UI，工具栏按钮的 DOM 命中不受呈现影响，采集/取消可用。
 
-    // 清除暗色蒙版，让用户看到真实背景。DOM pointer-events 不等于 Win32 窗口穿透；
-    // wheel 仍由 overlay window listener 接收，再显式投递给目标 HWND。
+    // 清除暗色蒙版，让用户看到真实背景；原生输入区域在控制层就位后一起设置。
     if (ss.ctx && ss.canvas) {
         ss.ctx.clearRect(0, 0, ss.canvas.width, ss.canvas.height);
         ss.canvas.style.pointerEvents = 'none';
     }
     if (ss.annotCanvas) ss.annotCanvas.classList.add('hidden');
+    setScrollCapturePresentation(true);
     // 隐藏 OCR hit canvas 和像素放大镜
     if (ss.hitCanvas) ss.hitCanvas.style.pointerEvents = 'none';
     showCaptureFrame(rect);
@@ -167,7 +169,7 @@ export async function enterScrollCapture(rect) {
 
     // 设置 WDA_EXCLUDEFROMCAPTURE：overlay 在整段采集会话中不进入 BitBlt。
     try {
-        const inputToken = await screenshotSetCaptureExclusion(true);
+        const inputToken = await screenshotSetCaptureExclusion(true, null, scrollCaptureInputRegions(rect));
         if (!captureStillActive(generation)) {
             await screenshotSetCaptureExclusion(false, inputToken);
             return false;
@@ -247,6 +249,7 @@ export async function enterScrollCapture(rect) {
  */
 function createContinuousPipeline() {
     const lifecycleId = session.lifecycleId;
+    session.tailStability = null;
     let firstObservation = session.scrollFrames.length > 0;
     const client = new ScrollTrackingClient({frames: session.scrollFrames,
         currentTop: session.scrollCurrentTop, height: session.scrollBandH,
@@ -279,6 +282,7 @@ function createContinuousPipeline() {
         onResult: (result, metadata) => {
             if (!current()) return;
             const {decision} = result;
+            recordTailStability(session, result, metadata);
             if (decision.accepted) {
                 const previous = new Map(session.scrollFrames.map(item => [item.id, item]));
                 session.scrollFrames = result.segments.map(item => ({id: item.id, top: item.top,
@@ -399,6 +403,7 @@ async function finishCapture() {
     if (session.lifecycleId !== lifecycleId) return false;
     recordScrollEvent(session, 'finalize-end', {
         ok: result.ok, reason: result.reason || null, durationMs: roundedMs(performance.now() - startedAt),
+        reusedStability: result.reusedStability === true,
     });
     const btn = document.getElementById('scroll-auto');
     if (result.reason !== 'aborted' && btn) {
@@ -462,6 +467,7 @@ async function enterScrollEditOnce() {
     const releasedFrameCount = session.scrollFrames.length;
     const releasedReplayBytes = session.scrollReplayBytes;
     session.releaseCaptureResources();
+    setScrollCapturePresentation(false);
     resetPreviewRendering();
 
     // 切回默认工具栏
@@ -526,6 +532,7 @@ export async function exitScrollCapture(restoreSelection = true) {
 
 function resetScrollCaptureState() {
     session.reset();
+    setScrollCapturePresentation(false);
     resetPreviewRendering();
     ss.editorSession.reset();
     ss._imagePan = null;
@@ -573,8 +580,8 @@ export function isScrollCapturing() {
 }
 
 /**
- * 手动滚动检测：wheel 事件 → 转发给目标窗口 → 等待 → 采集。
- * 由 index.js 在 capturing 阶段绑定时调用。
+ * 控件及原生穿透失败时的手动滚轮兜底；选区内部真实输入直接到达底层窗口。
+ * 图像仍由独立连续采集队列观察，不等待此转发路径。
  *
  * @param {WheelEvent} e
  */
@@ -591,7 +598,7 @@ export function onScrollWheel(e) {
     const modeScale = e.deltaMode === 1 ? 40 : (e.deltaMode === 2 ? session.scrollBandH : 1);
     const rawDelta = e.deltaY * modeScale;
     if (rawDelta === 0) return;
-    // 首个滚轮由 SendInput 补发，随后的真实输入在短时窗口穿透期内直达底层应用。
+    // 仅处理仍被 overlay 截获的滚轮；选区内部不经过 JS 或补发。
     const forwardedMagnitude = Math.max(1, Math.min(480, Math.round(Math.abs(rawDelta))));
     const delta = rawDelta > 0 ? -forwardedMagnitude : forwardedMagnitude;
     session.scrollPendingDirection = rawDelta > 0 ? 1 : -1;

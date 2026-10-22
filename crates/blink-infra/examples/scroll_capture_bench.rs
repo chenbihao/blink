@@ -23,6 +23,7 @@ fn main() -> Result<(), String> {
     let mut captures = Vec::new();
     let mut conversions = Vec::new();
     let mut reused_conversions = Vec::new();
+    let mut continuous_captures = Vec::new();
     for _ in 0..count {
         let started = Instant::now();
         let mut rgba = blink_infra::platform::screenshot::capture_region(0, 0, width, height)?;
@@ -45,6 +46,14 @@ fn main() -> Result<(), String> {
         if rgba != original {
             return Err("快速转换与原路径像素结果不一致".into());
         }
+        let started = Instant::now();
+        let current =
+            blink_infra::platform::screenshot::capture_region_continuous(0, 0, width, height)?;
+        continuous_captures.push(started.elapsed().as_secs_f64() * 1000.0);
+        if current.len() != original.len() {
+            return Err("连续捕获像素尺寸不一致".into());
+        }
+        std::hint::black_box(current);
         std::thread::sleep(Duration::from_millis(50));
     }
     let capture_mean = captures.iter().sum::<f64>() / count as f64;
@@ -56,6 +65,8 @@ fn main() -> Result<(), String> {
         count,
         capture_mean_ms = capture_mean,
         capture_p95_ms = p95(&mut captures),
+        continuous_capture_mean_ms = continuous_captures.iter().sum::<f64>() / count as f64,
+        continuous_capture_p95_ms = p95(&mut continuous_captures),
         convert_mean_ms = convert_mean,
         convert_p95_ms = p95(&mut conversions),
         reused_convert_mean_ms = reused_mean,

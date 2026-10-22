@@ -89,6 +89,7 @@ export class ScrollCaptureSession {
         this.scrollReplayFrames = [];
         this.scrollReplayBytes = 0;
         this.scrollPendingJump = null;
+        this.tailStability = null;
         this.lastMovementResult = null;
     }
 

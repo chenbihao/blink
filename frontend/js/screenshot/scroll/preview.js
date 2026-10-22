@@ -3,7 +3,7 @@
 import {ss} from '../ss-state.js';
 import {positionedFrameBounds} from './stitch.js';
 import {computePreviewPosition} from './preview-layout.js';
-import {uiScaleAtCss} from '../ss-selection-geometry.js';
+import {cssRectToScreen, uiScaleAtCss} from '../ss-selection-geometry.js';
 import {findDisplayCssAt, getMonitorForScroll} from '../ss-display.js';
 import {computeFloatingPlacement} from '../ss-utils.js';
 import {createScrollThumbnail, SCROLL_THUMBNAIL_WIDTH} from './thumbnail.js';
@@ -13,6 +13,14 @@ export const SCROLL_PREVIEW_GAP = 8;
 let segmentCanvasCache = new WeakMap();
 let cachedAccent = null;
 let lastRendering = null;
+
+/** 采集时只保留小型控制层，透明区域直接透出实时桌面，退出时恢复普通截图层。 */
+export function setScrollCapturePresentation(active) {
+    document.documentElement.classList.toggle('scroll-capturing', active);
+    if (active && ss.interactionCtx && ss.interactionCanvas) {
+        ss.interactionCtx.clearRect(0, 0, ss.interactionCanvas.width, ss.interactionCanvas.height);
+    }
+}
 
 function canvasForSegment(segment) {
     let cached = segmentCanvasCache.get(segment.image);
@@ -91,6 +99,29 @@ export function positionPreview(rect) {
 
 function previewHeightLimit(monitor, uiScale) {
     return Math.max(1, Math.min(600, Math.floor((monitor.h - SCROLL_PREVIEW_GAP * 2) / uiScale)));
+}
+
+/** 一次建立原生输入洞；预览按最大高度保留，后续增长无需每帧发 IPC。 */
+export function scrollCaptureInputRegions(rect) {
+    const meta = window.__blinkScreenMeta || {};
+    const uiScale = uiScaleAtCss(rect.x + rect.w / 2, rect.y + rect.h / 2, meta);
+    const mon = getMonitorForScroll(ss.scrollSession) || findDisplayCssAt(rect.x + rect.w / 2, rect.y + rect.h / 2);
+    const inset = 4 * uiScale;
+    if (rect.w <= inset * 2 || rect.h <= inset * 2) return null;
+    const controls = [];
+    for (const el of [document.getElementById('scroll-toolbar'), ss.scrollPreviewCanvas,
+        document.getElementById('scroll-diagnostics')]) {
+        if (!el || el.classList.contains('hidden')) continue;
+        const box = el.getBoundingClientRect();
+        if (box.width <= 0 || box.height <= 0) continue;
+        const h = el === ss.scrollPreviewCanvas ? previewHeightLimit(mon, uiScale) * uiScale : box.height;
+        // 阴影和边框也留在窗口区域内，控件上的 wheel 仍由原有路径处理。
+        const padding = 8 * uiScale;
+        controls.push(cssRectToScreen({x: box.left - padding, y: box.top - padding,
+            w: box.width + padding * 2, h: h + padding * 2}, meta));
+    }
+    return {capture: cssRectToScreen({x: rect.x + inset, y: rect.y + inset,
+        w: rect.w - inset * 2, h: rect.h - inset * 2}, meta), controls};
 }
 
 /** 输入仅改变边框状态，不能移动定位框、扩充画布或重绘尚未确认的内容。 */

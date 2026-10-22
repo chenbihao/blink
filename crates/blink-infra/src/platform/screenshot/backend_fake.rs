@@ -210,6 +210,19 @@ mod tests {
     }
 
     #[test]
+    fn continuous_region_fallback_preserves_top_down_bgra_pixels() {
+        let backend = FakeScreenshotBackend::builder()
+            .display(0, -100, 0, 100, 100, true)
+            .fill_color(0x11, 0x22, 0x33, 0x80)
+            .build();
+        let regular = backend.capture_region(-90, 4, 3, 2).unwrap();
+        let continuous = backend.capture_region_continuous(-90, 4, 3, 2).unwrap();
+        assert_eq!(continuous, regular);
+        assert_eq!(continuous.len(), 24);
+        assert_eq!(&continuous[..4], &[0x11, 0x22, 0x33, 0x80]);
+    }
+
+    #[test]
     fn empty_displays_capture_virtual_screen_errors() {
         let b = FakeScreenshotBackend::builder().build();
         assert!(b.capture_virtual_screen().is_err());

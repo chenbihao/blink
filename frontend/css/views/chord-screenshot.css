@@ -38,6 +38,16 @@ body.image-editor-mode {
     background: transparent;
 }
 
+/* 长截图采集只显示边框/工具栏/小预览。整屏半透明底色和旧截图层会增加合成负担。 */
+html.scroll-capturing,
+html.scroll-capturing body {
+    background: transparent;
+}
+
+html.scroll-capturing :is(#canvas, #interaction-canvas, #annot-canvas, #ocr-hit-canvas, #preselection-mask, #live-selection) {
+    visibility: hidden;
+}
+
 /* 独立图片需要明确的画布边界。棋盘底让透明 PNG 可辨识，描边和阴影把图片从
  * 真实桌面内容中托起；这些都是 canvas 的 CSS 背景，不会进入复制/保存输出。 */
 body.image-editor-mode #canvas.long-image-editing {

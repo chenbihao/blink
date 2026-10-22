@@ -69,12 +69,15 @@ const stubs = {
     '../ss-hover.js': `export const findWindowForRect = () => ({hwnd: 1, targetX: 1, targetY: 1});`,
     './diagnostics.js': `export const bindScrollDiagnostics = () => {}; export const recordScrollDiagnostic = () => {}; export const recordScrollEvent = () => {}; export const resetScrollDiagnostics = () => {}; export const canRetainScrollReplayFrame = () => false;`,
     '../ss-editor-policy.js': `export const isLongScreenshotPan = () => false;`,
-    '../ss-output.js': `export const encodeImageDataPng = async image => image; export const outputScreenshotPng = async (action, image) => globalThis.scrollLifecycleHarness.output(image);`,
+    '../ss-output.js': `export const encodeImageDataPng = async image => image;
+        export const outputScreenshotPng = async (action, image) => {
+            const h = globalThis.scrollLifecycleHarness; h.lastOutputAt = performance.now(); return h.output(image);
+        };`,
     '../ss-selection-geometry.js': `export const cssPointToScreen = (x, y) => ({x,y}); export const cssRectToBitmap = r => r;`,
     '../ss-display.js': `export const findDisplayCssAt = () => null;`,
     '../image-editor-session.js': `export const IMAGE_SOURCE = {LONG_SCREENSHOT: 'long'};`,
     './preview.js': ['hideCaptureFrame','logScrollUiDiagnostics','positionPreview','positionScrollToolbar',
-        'resetPreviewRendering','showCaptureFrame','showScrollInputFeedback','updatePreview']
+        'resetPreviewRendering','scrollCaptureInputRegions','setScrollCapturePresentation','showCaptureFrame','showScrollInputFeedback','updatePreview']
         .map(name => `export const ${name} = () => 0;`).join('\n'),
 };
 h.output = image => outputs.push(image);
@@ -126,6 +129,18 @@ try {
     resetScrollCaptureSession();
 
     // 无需等防抖：滚轮生效后立即完成，输出必须含真实新增的18行。
+    await begin();
+    let releaseSlowCapture;
+    h.captureGate = new Promise(resolve => { releaseSlowCapture = resolve; });
+    const slowCapture = session.continuousCapture.sample({expectedDirection: 0});
+    await tick();
+    onScrollWheel({deltaY: 120, deltaMode: 0, clientX: 10, clientY: 10,
+        preventDefault() { assert.fail('采集不能同步阻止滚轮默认行为'); }});
+    await tick();
+    assert.equal(h.top, 18, '抓屏仍在途时也应立即转发滚轮，不等候图像处理');
+    h.captureGate = null; releaseSlowCapture(); await slowCapture;
+    resetScrollCaptureSession();
+
     await begin(); wheel();
     const finishing = outputLongImage('copy');
     await advance(1500); await finishing;
@@ -133,6 +148,39 @@ try {
     assert.deepEqual(outputs.at(-1).data, new Uint8ClampedArray([
         ...frame(0).data, ...frame(18).data.slice(72 * 36 * 4),
     ]), '输出必须保留末段像素而非只满足高度');
+
+    // 原生穿透滚动不经过overlay wheel；点击后迟到的真实滚动也必须进入最终像素。
+    await begin();
+    setTimeout(() => { h.top = 18; }, 180);
+    const coldStartedAt = clock;
+    const nativeTailOutput = outputLongImage('pin');
+    await advance(1500); await nativeTailOutput;
+    assert.equal(outputs.at(-1).height, 108);
+    assert.deepEqual(outputs.at(-1).data, new Uint8ClampedArray([
+        ...frame(0).data, ...frame(18).data.slice(72 * 36 * 4),
+    ]), '优化等待后不能漏掉首个unchanged之后才生效的原生滚动');
+
+    const coldFinalizeMs = h.lastOutputAt - coldStartedAt;
+    // 真正后台采集积累静止记录；停稳后点击只省掉重复探针，仍有两次新采集。
+    await begin(); await advance(1000);
+    const beforeStablePin = h.captures;
+    const stableStartedAt = clock;
+    const stablePin = outputLongImage('pin');
+    await advance(1500); await stablePin;
+    assert.equal(outputs.at(-1).height, 90);
+    assert.equal(h.captures - beforeStablePin, 2);
+    assert.ok(h.lastOutputAt - stableStartedAt < coldFinalizeMs, '停稳后的收尾应省去重复稳定检测');
+
+    // 已走快路径时，点击180ms后才到来的原生滚动也不能漏尾。
+    await begin(); await advance(1000);
+    setTimeout(() => { h.top = 18; }, 180);
+    const beforeNativeTail = h.captures;
+    const stableNativeTail = outputLongImage('pin');
+    await advance(1500); await stableNativeTail;
+    assert.ok(h.captures - beforeNativeTail >= 3, '发现迟到运动后应重新确认');
+    assert.deepEqual(outputs.at(-1).data, new Uint8ClampedArray([
+        ...frame(0).data, ...frame(18).data.slice(72 * 36 * 4),
+    ]));
 
     // 连续输入仍处于旧稳定等待时完成，必须采到最后位置。
     await begin(); wheel(); await advance(70); wheel();

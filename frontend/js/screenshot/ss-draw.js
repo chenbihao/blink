@@ -32,15 +32,17 @@ function getScreenshotSource() {
 }
 
 /**
- * 0.20.5：同步 interaction canvas 的 backing store 尺寸与主 canvas 一致。
+ * 普通截图同步遮罩尺寸；canvas-backed 编辑不使用选区遮罩，释放其 backing store。
  * 在主 canvas 尺寸变化后调用（loadScreenshot / resetState / enterCanvasImageEditor）。
  */
 export function syncInteractionCanvasSize() {
     const {canvas, interactionCanvas} = ss;
     if (!canvas || !interactionCanvas) return;
-    if (interactionCanvas.width !== canvas.width || interactionCanvas.height !== canvas.height) {
-        interactionCanvas.width = canvas.width;
-        interactionCanvas.height = canvas.height;
+    const width = ss.editorSession.canvasBacked ? 0 : canvas.width;
+    const height = ss.editorSession.canvasBacked ? 0 : canvas.height;
+    if (interactionCanvas.width !== width || interactionCanvas.height !== height) {
+        interactionCanvas.width = width;
+        interactionCanvas.height = height;
     }
 }
 

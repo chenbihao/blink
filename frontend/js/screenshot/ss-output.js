@@ -82,9 +82,6 @@ export function doCopySelection() {
     if (!ss.selCss || ss.sent || !ensureOutputReady()) return;
     ss.sent = true;
     const hasAnnot = annot.hasAnnotations();
-    // ⚠️ 临时打桩日志（0.19.14 性能排查用），收尾时清理
-    const _t0 = performance.now();
-    console.info('[screenshot] copy selection start', {hasAnnot, selW: ss.selCss.w, selH: ss.selCss.h});
 
     // 快路径：无标注 → 后端直接从 SESSION 裁剪 BGRA 写剪贴板
     if (!hasAnnot && ss.editorSession.canUseCaptureCropFastPath) {
@@ -93,7 +90,6 @@ export function doCopySelection() {
         const bmp = cssRectToBitmap(ss.selCss, meta);
         cleanupCanvasVisuals();
         screenshotCopyRegion(bmp.x, bmp.y, bmp.w, bmp.h)
-            .then(() => console.info('[screenshot] copy 成功（快路径）', {ms: Math.round(performance.now() - _t0)}))
             .catch((err) => {
                 console.error('[screenshot] copy 失败（快路径）', err);
                 ss.errorHint.textContent = '截图保存失败：' + err;
@@ -109,7 +105,6 @@ export function doCopySelection() {
             cleanupCanvasVisuals();
             screenshotCopyRgba(rgba, w, h)
                 .then(() => {
-                    console.info('[screenshot] copy 成功（RGBA 直传）', {ms: Math.round(performance.now() - _t0)});
                     cleanupLongCapture();
                 })
                 .catch((err) => {
@@ -141,7 +136,6 @@ export function doCopySelection() {
         cleanupCanvasVisuals();
         outputEditorPng('copy', pngBytes)
             .then(() => {
-                console.info('[screenshot] copy 成功（PNG 路径）', {ms: Math.round(performance.now() - _t0)});
                 cleanupLongCapture();
             })
             .catch((err) => {
@@ -156,12 +150,9 @@ export function doCopySelection() {
 export function doCopyFullScreen() {
     if (ss.sent) return;
     ss.sent = true;
-    // ⚠️ 临时打桩日志（0.19.14 性能排查用），收尾时清理
-    const _t0 = performance.now();
-    console.info('[screenshot] copy fullscreen start', {canvasW: ss.canvas.width, canvasH: ss.canvas.height});
+
     cleanupCanvasVisuals();
     screenshotCopyRegion(0, 0, ss.canvas.width, ss.canvas.height)
-        .then(() => console.info('[screenshot] fullscreen copy 成功（快路径）', {ms: Math.round(performance.now() - _t0)}))
         .catch((err) => {
             console.error('[screenshot] fullscreen copy 失败', err);
             ss.errorHint.textContent = '截图保存失败：' + err;
@@ -181,25 +172,13 @@ export function doPinSelection() {
         : cssPointToScreen(ss.selCss.x, ss.selCss.y, meta);
     const screenX = screenPos.x;
     const screenY = screenPos.y;
-    // ⚠️ 临时打桩日志（0.19.14 性能排查用），收尾时清理
-    const _t0 = performance.now();
-    console.info('[screenshot] pin start', {hasAnnot, selW: ss.selCss.w, selH: ss.selCss.h});
 
     // 0.19.14 快路径：无标注 → 后端直接 crop BGRA + encode PNG + show_pin，
     // 跳过前端 toBlob + IPC PNG 往返（省 ~1200ms 全屏）
     if (!hasAnnot && ss.editorSession.canUseCaptureCropFastPath) {
         const bmp = cssRectToBitmap(ss.selCss, meta);
-        // ⚠️ 临时诊断日志（跨 DPR 排查用），收尾时清理
-        console.info('[screenshot] pin fast path', {
-            selCss: ss.selCss,
-            bmpRect: bmp,
-            screenX, screenY,
-            renderScale: meta.renderScaleX,
-            dpr: window.devicePixelRatio,
-        });
         cleanupCanvasVisuals();
         screenshotPinRegion(bmp.x, bmp.y, bmp.w, bmp.h, screenX, screenY)
-            .then(() => console.info('[screenshot] pin 成功（快路径）', {ms: Math.round(performance.now() - _t0)}))
             .catch((err) => {
                 console.error('[screenshot] pin 失败（快路径）', err);
                 showTransientHint(`钉图失败：${normalizeError(err).message}`, {isError: true, duration: 3000});
@@ -208,14 +187,17 @@ export function doPinSelection() {
         return;
     }
 
-    compositeSelection((pngBytes) => {
+    const pinEpoch = ss.editorSession.epoch;
+    return compositeSelection((pngBytes) => {
+        if (ss.editorSession.epoch !== pinEpoch) return;
         cleanupCanvasVisuals();
         outputEditorPng('pin', pngBytes, screenX, screenY)
             .then(() => {
-                console.info('[screenshot] pin 成功（PNG 路径）', {ms: Math.round(performance.now() - _t0)});
+                if (ss.editorSession.epoch !== pinEpoch) return;
                 cleanupLongCapture();
             })
             .catch((err) => {
+                if (ss.editorSession.epoch !== pinEpoch) return;
                 console.error('[screenshot] pin 失败', err);
                 showTransientHint(`钉图失败：${normalizeError(err).message}`, {isError: true, duration: 3000});
                 ss.sent = false;
@@ -276,6 +258,7 @@ function getCompositeCanvas(w, h) {
 /** 将 ImageData 编码为后端输出接口统一接收的 PNG 字节。 */
 export async function encodeImageDataPng(imageData) {
     if (!imageData) return null;
+
     const canvas = document.createElement('canvas');
     let blob;
     try {
@@ -288,7 +271,9 @@ export async function encodeImageDataPng(imageData) {
         canvas.width = 0;
         canvas.height = 0;
     }
-    return blob ? new Uint8Array(await blob.arrayBuffer()) : null;
+    if (!blob) return null;
+
+    return new Uint8Array(await blob.arrayBuffer());
 }
 
 /** 统一分发已经编码好的截图输出，供普通截图和长截图复用。
@@ -339,7 +324,10 @@ async function compositeSelectionBytes() {
         ss.sent = false;
         return null;
     }
-    const _t0 = performance.now();
+
+    // 长图合成使用任务自有画布；编码结束即释放，避免缓存整张超长合成图。
+    const transient = ss.editorSession.source === IMAGE_SOURCE.LONG_SCREENSHOT;
+    let off;
     try {
         const sessionBase = ss.editorSession.baseCanvas;
         const meta = window.__blinkScreenMeta || {vx: 0, vy: 0};
@@ -360,7 +348,8 @@ async function compositeSelectionBytes() {
             throw new Error(`compositeSelectionBytes: invalid output dimensions { pw: ${pw}, ph: ${ph} }`);
         }
 
-        const off = getCompositeCanvas(pw, ph);
+        off = transient ? document.createElement('canvas') : getCompositeCanvas(pw, ph);
+        if (transient) { off.width = pw; off.height = ph; }
         const offCtx = off.getContext('2d');
         if (sessionBase) {
             if (sessionBase.width <= 0 || sessionBase.height <= 0) {
@@ -379,24 +368,21 @@ async function compositeSelectionBytes() {
             }
             offCtx.drawImage(ss.annotCanvas, 0, 0);
         }
-        console.info('[screenshot] compositeSelectionBytes: sync draw done', {
-            pw,
-            ph,
-            ms: Math.round(performance.now() - _t0)
-        });
+
         const blob = await new Promise((resolve) => off.toBlob(resolve, 'image/png'));
-        console.info('[screenshot] compositeSelectionBytes: toBlob done', {ms: Math.round(performance.now() - _t0)});
+
         if (!blob) {
             console.error('[screenshot] PNG 合成失败（blob=null）');
             ss.sent = false;
             return null;
         }
-        const bytes = new Uint8Array(await blob.arrayBuffer());
-        return bytes;
+        return new Uint8Array(await blob.arrayBuffer());
     } catch (e) {
         console.error('[screenshot] compositeSelection threw', e);
         ss.sent = false;
         return null;
+    } finally {
+        if (transient && off) { off.width = 0; off.height = 0; }
     }
 }
 

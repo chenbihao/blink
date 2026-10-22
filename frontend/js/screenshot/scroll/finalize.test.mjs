@@ -4,7 +4,7 @@ import {readFile} from 'node:fs/promises';
 const load = async (name) => import('data:text/javascript;base64,'
     + Buffer.from(await readFile(new URL(name, import.meta.url))).toString('base64'));
 const {ScrollCaptureSession} = await load('./session.js');
-const {finalizeScrollCapture} = await load('./finalize.js');
+const {finalizeScrollCapture, recordTailStability} = await load('./finalize.js');
 const deferred = () => {
     let resolve;
     const promise = new Promise((done) => { resolve = done; });
@@ -112,5 +112,138 @@ function setup(results = [{moved: true}, {reason: 'unchanged'}]) {
     assert.deepEqual(order, []);
     assert.equal(session.scrollCapturePhase, 'capturing');
     assert.equal(session.captureFinalizing, true);
+}
+// 稳定探针已经观察足够久时，不再额外睡90ms；仍须两次独立尾帧确认。
+{
+    const {session, options, order} = setup([{reason: 'unchanged'}, {reason: 'unchanged'}]);
+    let clock = 0;
+    const delays = [];
+    options.now = () => clock;
+    options.waitForSettle = async () => { order.push('settle'); clock += 205; return {stable: true}; };
+    const capture = options.captureFrame;
+    options.captureFrame = (...args) => { clock += 70; return capture(...args); };
+    options.delay = async ms => { delays.push(ms); clock += ms; };
+    assert.equal((await finalizeScrollCapture(session, options)).ok, true);
+    assert.equal(clock, 550, '两轮205ms稳定观察和70ms尾帧确认不应再叠加90ms');
+    assert.deepEqual(delays, []);
+    assert.equal(order.filter(x => x === 'capture').length, 2);
+}
+// 探针提前返回时只补足90ms间隔，迟到滚动仍要重新确认，不能把首个unchanged当结束。
+{
+    const {session, options} = setup();
+    let clock = 0, top = 0;
+    const captures = [], delays = [];
+    options.now = () => clock;
+    options.waitForSettle = async () => { clock += 10; return {stable: true}; };
+    options.captureFrame = async () => {
+        captures.push(top); clock += 5;
+        return captures.length === 2 ? {moved: true} : {reason: 'unchanged'};
+    };
+    options.delay = async ms => { delays.push(ms); clock += ms; top = 18; };
+    assert.equal((await finalizeScrollCapture(session, options)).ok, true);
+    assert.deepEqual(captures, [0, 18, 18]);
+    assert.deepEqual(delays, [80, 80], '只补足观察间隔，不能省掉短探针后的等待');
+}
+// 补足间隔期间退出，旧收尾不得再发尾帧请求。
+{
+    const {session, options, order} = setup([{reason: 'unchanged'}]);
+    options.now = () => 0;
+    options.delay = async () => { session.reset(); session.scrollCapturePhase = 'capturing'; };
+    assert.equal((await finalizeScrollCapture(session, options)).reason, 'aborted');
+    assert.equal(order.filter(x => x === 'capture').length, 1);
+}
+function stableHistory(session) {
+    for (const at of [0, 100, 200]) recordTailStability(session,
+        {decision: {reason: 'unchanged'}, trackingState: 'tracking'},
+        {captureStartedAt: at, wheelVersion: session.manualWheelVersion});
+}
+// 最近持续静止时复用一轮观察；仍抓两张新尾帧，另一轮探针照常验证。
+{
+    const {session, options, order} = setup([{reason: 'unchanged'}, {reason: 'unchanged'}]);
+    stableHistory(session);
+    let clock = 250;
+    options.now = () => clock;
+    options.waitForSettle = async () => { order.push('settle'); clock += 205; return {stable: true}; };
+    const capture = options.captureFrame;
+    options.captureFrame = (...args) => { clock += 70; return capture(...args); };
+    options.delay = async ms => { clock += ms; };
+    assert.equal((await finalizeScrollCapture(session, options)).ok, true);
+    assert.deepEqual(order, ['capture', 'settle', 'capture']);
+    assert.equal(clock - 250, 345, '复用近期稳定观察后省去一轮205ms探针');
+}
+// 快路径仍须有点击后的观察窗口，迟到滚动会推进尾段并再确认一次。
+{
+    const {session, options, order} = setup([
+        {reason: 'unchanged'}, {moved: true}, {reason: 'unchanged'},
+    ]);
+    stableHistory(session);
+    let clock = 250;
+    const capturedAt = [];
+    options.now = () => clock;
+    options.waitForSettle = async () => { order.push('settle'); clock += 125; return {stable: true}; };
+    const capture = options.captureFrame;
+    options.captureFrame = (...args) => { capturedAt.push(clock); return capture(...args); };
+    options.delay = async ms => { clock += ms; };
+    assert.equal((await finalizeScrollCapture(session, options)).ok, true);
+    assert.deepEqual(capturedAt, [250, 430, 555]);
+    assert.deepEqual(order, ['capture', 'settle', 'capture', 'settle', 'capture']);
+}
+// 证据过期、刚滚动、失去定位、待确认跳跃、自动滚动和短观察都必须完整检测。
+for (const invalidate of [
+    (session, options) => { options.now = () => 551; },
+    session => { session.manualWheelVersion++; },
+    session => { session.scrollTrackingState = 'lost'; },
+    session => { session.scrollPendingJump = {}; },
+    session => { session.autoScroll = true; },
+    session => { session.tailStability.since = 100; },
+]) {
+    const {session, options, order} = setup([{reason: 'unchanged'}, {reason: 'unchanged'}]);
+    stableHistory(session);
+    options.now = () => 250;
+    invalidate(session, options);
+    options.captureFrame = async () => {
+        order.push('capture'); session.scrollTrackingState = 'tracking'; session.scrollPendingJump = null;
+        return {reason: 'unchanged'};
+    };
+    assert.equal((await finalizeScrollCapture(session, options)).ok, true);
+    assert.deepEqual(order, ['settle', 'capture', 'settle', 'capture']);
+}
+// 稳定历史不能越过新尾帧的定位失败；快路径补时期间退出也必须中止。
+{
+    const {session, options, order} = setup([{reason: 'no-overlap'}]);
+    stableHistory(session);
+    options.now = () => 250;
+    assert.equal((await finalizeScrollCapture(session, options)).ok, false);
+    assert.deepEqual(order, ['capture']);
+}
+{
+    const {session, options, order} = setup([{reason: 'unchanged'}]);
+    stableHistory(session);
+    options.now = () => 250;
+    options.delay = async () => { session.reset(); session.scrollCapturePhase = 'capturing'; };
+    assert.equal((await finalizeScrollCapture(session, options)).reason, 'aborted');
+    assert.deepEqual(order, ['capture', 'settle']);
+}
+// 运动/拒绝/断档/旧输入结果不能累计稳定时间；新会话不继承历史。
+{
+    const session = new ScrollCaptureSession();
+    const result = {decision: {reason: 'unchanged'}, trackingState: 'tracking'};
+    for (const [changedResult, metadata] of [
+        [{decision: {reason: 'moved'}, trackingState: 'tracking'}, {}],
+        [{...result, pendingJump: {}}, {}],
+        [{...result, trackingState: 'lost'}, {}],
+        [result, {discontinuity: true}],
+        [result, {wheelVersion: -1}],
+        [result, {finalizing: true}],
+    ]) {
+        stableHistory(session);
+        recordTailStability(session, changedResult, {captureStartedAt: 250, wheelVersion: 0, ...metadata});
+        assert.equal(session.tailStability, null);
+    }
+    stableHistory(session);
+    recordTailStability(session, result, {captureStartedAt: 551, wheelVersion: 0});
+    assert.equal(session.tailStability.since, 551, '采集断档不能累计旧静止时长');
+    session.reset();
+    assert.equal(session.tailStability, null);
 }
 console.log('scroll finalization tests passed');

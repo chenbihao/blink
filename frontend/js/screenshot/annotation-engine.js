@@ -80,6 +80,7 @@ let canvas = null;
 let cropImageData = null;
 /** 原始裁剪区缓存 canvas（高斯模糊嵌图背景复用） */
 let cropSourceCanvas = null;
+let ownsCropSourceCanvas = false;
 /** 水印配置（0.11.9-a 起独立于 commands 栈；null = 无水印）
  *  形状: { text, layout, color, opacity } | null */
 let watermarkConfig = null;
@@ -166,14 +167,23 @@ export function init(annotCanvas) {
 }
 
 /** 重置标注状态（新选区时调） */
-export function reset(cropW, cropH, cropImageDataRef) {
+export function reset(cropW, cropH, cropImageDataRef, sourceCanvas = null) {
     commands = [];
     undoIndex = -1;
     currentPoints = [];
     cropImageData = cropImageDataRef;
+    if (ownsCropSourceCanvas && cropSourceCanvas) {
+        cropSourceCanvas.width = 0;
+        cropSourceCanvas.height = 0;
+    }
     cropSourceCanvas = null;
-    if (cropImageDataRef) {
+    ownsCropSourceCanvas = false;
+    if (sourceCanvas && sourceCanvas !== canvas && sourceCanvas.width === cropW && sourceCanvas.height === cropH) {
+        // 编辑会话底图只读共享，不再为马赛克/模糊/橡皮擦复制一整张长图。
+        cropSourceCanvas = sourceCanvas;
+    } else if (cropImageDataRef) {
         cropSourceCanvas = document.createElement('canvas');
+        ownsCropSourceCanvas = true;
         cropSourceCanvas.width = cropW;
         cropSourceCanvas.height = cropH;
         cropSourceCanvas.getContext('2d').putImageData(cropImageDataRef, 0, 0);
@@ -195,8 +205,9 @@ export function reset(cropW, cropH, cropImageDataRef) {
 export function updateCropData(cropImageDataRef, cropW, cropH) {
     cropImageData = cropImageDataRef;
     if (cropImageDataRef) {
-        if (!cropSourceCanvas) {
+        if (!cropSourceCanvas || !ownsCropSourceCanvas) {
             cropSourceCanvas = document.createElement('canvas');
+            ownsCropSourceCanvas = true;
         }
         cropSourceCanvas.width = cropW;
         cropSourceCanvas.height = cropH;

@@ -2,6 +2,21 @@
 
 use tauri::Manager;
 
+/// 虚拟桌面物理像素坐标；不使用窗口所在屏的 DPR 二次换算。
+#[derive(Clone, Copy, serde::Deserialize)]
+pub struct CaptureRect {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
+
+#[derive(serde::Deserialize)]
+pub struct CaptureInputRegions {
+    pub capture: CaptureRect,
+    pub controls: Vec<CaptureRect>,
+}
+
 static INPUT_STATE: std::sync::Mutex<CaptureInputState> =
     std::sync::Mutex::new(CaptureInputState::new());
 
@@ -55,9 +70,10 @@ pub async fn set_capture_exclusion(
     app: &tauri::AppHandle,
     exclude: bool,
     token: Option<u64>,
+    input_regions: Option<CaptureInputRegions>,
 ) -> Result<Option<u64>, String> {
     on_main(app, move |app| {
-        set_capture_exclusion_on_main(app, exclude, token)
+        set_capture_exclusion_on_main(app, exclude, token, input_regions)
     })
     .await
 }
@@ -120,6 +136,7 @@ fn set_capture_exclusion_on_main(
     app: &tauri::AppHandle,
     exclude: bool,
     token: Option<u64>,
+    input_regions: Option<CaptureInputRegions>,
 ) -> Result<Option<u64>, String> {
     let mut state = INPUT_STATE.lock().map_err(|_| "长截图输入锁中毒")?;
     if !exclude && !state.accepts(token) {
@@ -132,10 +149,24 @@ fn set_capture_exclusion_on_main(
     state.reset(false);
     win.set_ignore_cursor_events(false)
         .map_err(|e| format!("恢复截图鼠标交互失败: {e}"))?;
+    set_input_region(&win, None)?;
     set_affinity(&win, exclude)?;
+    let native_passthrough = if exclude && let Some(regions) = input_regions {
+        match set_input_region(&win, Some(&regions)) {
+            Ok(()) => true,
+            Err(error) => {
+                // 区域构造失败前不会修改窗口；保留原有 wheel 补发作为降级路径。
+                tracing::warn!(%error, "设置长截图原生穿透失败，保留滚轮转发");
+                false
+            }
+        }
+    } else {
+        false
+    };
     state.active = exclude;
-    tracing::debug!(
+    tracing::info!(
         exclude,
+        native_passthrough,
         generation = state.generation,
         "长截图捕获会话已切换"
     );
@@ -152,10 +183,107 @@ fn reset_capture_input_on_main(app: &tauri::AppHandle) {
         if let Err(error) = win.set_ignore_cursor_events(false) {
             tracing::warn!(%error, "重置截图鼠标交互失败");
         }
+        if let Err(error) = set_input_region(&win, None) {
+            tracing::warn!(%error, "重置截图窗口区域失败");
+        }
         if let Err(error) = set_affinity(&win, false) {
             tracing::warn!(%error, "重置截图捕获排除失败");
         }
     }
+}
+
+/// 将采集区域从原生窗口中挖空：真实滚轮无需经过 WebView / IPC / SendInput。
+/// 工具栏和预览仍属于窗口；退出、编辑及所有原生 show/hide 路径恢复完整区域。
+fn set_input_region(
+    win: &tauri::WebviewWindow,
+    regions: Option<&CaptureInputRegions>,
+) -> Result<(), String> {
+    let hwnd = windows::Win32::Foundation::HWND(
+        win.hwnd()
+            .map_err(|e| format!("获取截图 HWND 失败: {e}"))?
+            .0 as _,
+    );
+    apply_input_region(hwnd, regions)
+}
+
+fn apply_input_region(
+    hwnd: windows::Win32::Foundation::HWND,
+    regions: Option<&CaptureInputRegions>,
+) -> Result<(), String> {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::Graphics::Gdi::{
+        CombineRgn, CreateRectRgn, DeleteObject, HRGN, RGN_DIFF, RGN_ERROR, RGN_OR, SetWindowRgn,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+
+    struct OwnedRegion(HRGN);
+    impl Drop for OwnedRegion {
+        fn drop(&mut self) {
+            let _ = unsafe { DeleteObject(self.0.into()) };
+        }
+    }
+    fn region(rect: [i32; 4]) -> Result<OwnedRegion, String> {
+        let handle = unsafe { CreateRectRgn(rect[0], rect[1], rect[2], rect[3]) };
+        if handle.is_invalid() {
+            return Err("创建长截图窗口区域失败".into());
+        }
+        Ok(OwnedRegion(handle))
+    }
+    let Some(regions) = regions else {
+        return if unsafe { SetWindowRgn(hwnd, None, true) } != 0 {
+            Ok(())
+        } else {
+            Err("恢复截图完整窗口区域失败".into())
+        };
+    };
+    if regions.controls.len() > 16 {
+        return Err("长截图控件区域数量超限".into());
+    }
+    let mut window = RECT::default();
+    unsafe { GetWindowRect(hwnd, &mut window) }
+        .map_err(|e| format!("读取截图窗口区域失败: {e}"))?;
+    let bounds = CaptureRect {
+        x: window.left,
+        y: window.top,
+        w: window.right - window.left,
+        h: window.bottom - window.top,
+    };
+    let hole = relative_rect(regions.capture, bounds).ok_or("长截图穿透区域无效")?;
+    let output = region([0, 0, bounds.w, bounds.h])?;
+    let cut = region(hole)?;
+    if unsafe { CombineRgn(Some(output.0), Some(output.0), Some(cut.0), RGN_DIFF) } == RGN_ERROR {
+        return Err("裁切长截图窗口区域失败".into());
+    }
+    for control in &regions.controls {
+        let Some(rect) = relative_rect(*control, bounds) else {
+            continue;
+        };
+        let control = region(rect)?;
+        if unsafe { CombineRgn(Some(output.0), Some(output.0), Some(control.0), RGN_OR) }
+            == RGN_ERROR
+        {
+            return Err("保留长截图控件区域失败".into());
+        }
+    }
+    if unsafe { SetWindowRgn(hwnd, Some(output.0), true) } == 0 {
+        return Err("应用长截图窗口区域失败".into());
+    }
+    // 成功后 HRGN 归系统所有；临时区域仍由 Drop 释放。
+    std::mem::forget(output);
+    Ok(())
+}
+
+fn relative_rect(rect: CaptureRect, window: CaptureRect) -> Option<[i32; 4]> {
+    if rect.w <= 0 || rect.h <= 0 || window.w <= 0 || window.h <= 0 {
+        return None;
+    }
+    let left = (i64::from(rect.x) - i64::from(window.x)).clamp(0, i64::from(window.w));
+    let top = (i64::from(rect.y) - i64::from(window.y)).clamp(0, i64::from(window.h));
+    let right =
+        (i64::from(rect.x) + i64::from(rect.w) - i64::from(window.x)).clamp(0, i64::from(window.w));
+    let bottom =
+        (i64::from(rect.y) + i64::from(rect.h) - i64::from(window.y)).clamp(0, i64::from(window.h));
+    (right > left && bottom > top).then_some([left as i32, top as i32, right as i32, bottom as i32])
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -188,9 +316,8 @@ fn forward_wheel_on_main(
     Ok(())
 }
 
-/// overlay 会截获首个滚轮事件。开启一个短时连续穿透窗口并用
-/// SendInput 补发首个事件，后续真实滚轮可直达底层应用。这避免每一格
-/// 都切换 overlay hit-test 并阻塞线程，同时兼容忽略 WM_MOUSEWHEEL 的自绘窗口。
+/// 控件及原生区域穿透失败时，overlay 仍可能截获滚轮。短时整体穿透并用
+/// SendInput 补发，兼容忽略 WM_MOUSEWHEEL 的自绘窗口；正常选区输入不走这里。
 fn inject_wheel_through_overlay(
     app: &tauri::AppHandle,
     delta: i32,
@@ -310,6 +437,128 @@ fn post_wheel_to_target(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_region_keeps_controls_and_restores_full_window() {
+        use windows::Win32::Foundation::{HWND, RECT};
+        use windows::Win32::Graphics::Gdi::{
+            CreateRectRgn, DeleteObject, GetWindowRgn, PtInRegion, RGN_ERROR,
+        };
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, GetWindowRect, WINDOW_EX_STYLE, WS_POPUP,
+        };
+        use windows::core::w;
+        struct TestWindow(HWND);
+        impl Drop for TestWindow {
+            fn drop(&mut self) {
+                let _ = unsafe { DestroyWindow(self.0) };
+            }
+        }
+        // 隐藏的原生窗口；不显示、不抢焦点、不注入用户输入。
+        let win = TestWindow(
+            unsafe {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE::default(),
+                    w!("STATIC"),
+                    w!("scroll-region-test"),
+                    WS_POPUP,
+                    -2000,
+                    -1000,
+                    400,
+                    400,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            }
+            .unwrap(),
+        );
+        let mut bounds = RECT::default();
+        unsafe { GetWindowRect(win.0, &mut bounds) }.unwrap();
+        let regions = CaptureInputRegions {
+            capture: CaptureRect {
+                x: bounds.left + 100,
+                y: bounds.top + 100,
+                w: 200,
+                h: 200,
+            },
+            controls: vec![CaptureRect {
+                x: bounds.left + 150,
+                y: bounds.top + 150,
+                w: 20,
+                h: 20,
+            }],
+        };
+        apply_input_region(win.0, Some(&regions)).unwrap();
+        let actual = unsafe { CreateRectRgn(0, 0, 0, 0) };
+        assert_ne!(unsafe { GetWindowRgn(win.0, actual) }, RGN_ERROR);
+        assert!(!unsafe { PtInRegion(actual, 110, 110) }.as_bool());
+        assert!(unsafe { PtInRegion(actual, 155, 155) }.as_bool());
+        assert!(unsafe { PtInRegion(actual, 10, 10) }.as_bool());
+        apply_input_region(win.0, None).unwrap();
+        let restored = unsafe { GetWindowRgn(win.0, actual) };
+        let _ = unsafe { DeleteObject(actual.into()) };
+        assert_eq!(restored, RGN_ERROR, "退出后移除自定义窗口区域");
+    }
+
+    #[test]
+    fn input_hole_coordinates_are_relative_to_negative_origin_window() {
+        let window = CaptureRect {
+            x: -2560,
+            y: -1440,
+            w: 4480,
+            h: 2520,
+        };
+        assert_eq!(
+            relative_rect(
+                CaptureRect {
+                    x: -2300,
+                    y: -1100,
+                    w: 930,
+                    h: 636
+                },
+                window
+            ),
+            Some([260, 340, 1190, 976])
+        );
+        assert_eq!(
+            relative_rect(
+                CaptureRect {
+                    x: -3000,
+                    y: -1600,
+                    w: 800,
+                    h: 600
+                },
+                window
+            ),
+            Some([0, 0, 360, 440])
+        );
+        assert_eq!(
+            relative_rect(
+                CaptureRect {
+                    x: i32::MAX,
+                    y: 0,
+                    w: i32::MAX,
+                    h: 10
+                },
+                window
+            ),
+            None
+        );
+        assert_eq!(
+            relative_rect(
+                CaptureRect {
+                    x: 0,
+                    y: 0,
+                    w: 0,
+                    h: 100
+                },
+                window
+            ),
+            None
+        );
+    }
 
     #[test]
     fn old_restore_cannot_end_new_lease() {

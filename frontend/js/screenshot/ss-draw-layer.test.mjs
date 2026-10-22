@@ -11,8 +11,20 @@ window.__blinkScreenMeta = {
 
 const {ss} = await import('./ss-state.js');
 const drawMod = await import('./ss-draw.js');
-const {drawDimmed, drawFinalSelection} = drawMod;
+const {drawDimmed, drawFinalSelection, syncInteractionCanvasSize} = drawMod;
 const annot = await import('./annotation-engine.js');
+
+test('长图编辑释放未使用的交互遮罩，回到普通截图时恢复尺寸', () => {
+    ss.canvas = {width: 930, height: 17935};
+    ss.interactionCanvas = {width: 1920, height: 1080};
+    ss.editorSession.beginCanvasSource('long-screenshot', ss.canvas);
+    syncInteractionCanvasSize();
+    assert.deepEqual([ss.interactionCanvas.width, ss.interactionCanvas.height], [0, 0]);
+    ss.editorSession.beginScreenshotSelection();
+    ss.canvas = {width: 1920, height: 1080};
+    syncInteractionCanvasSize();
+    assert.deepEqual([ss.interactionCanvas.width, ss.interactionCanvas.height], [1920, 1080]);
+});
 
 /** 最小元素替身（只需要 style + classList） */
 function fakeEl() {

@@ -1218,7 +1218,7 @@ function enterCanvasImageEditor(cropData, pw, ph, source = IMAGE_SOURCE.LONG_SCR
     annotCanvas.width = pw;
     annotCanvas.height = ph;
 
-    annot.reset(pw, ph, cropData);
+    annot.reset(pw, ph, cropData, baseCanvas);
     updateUndoRedoButtons();
     if (ss.editorSession.ownsScreenshotSession) {
         screenshotSetAnnotationMode(true).catch((e) => console.error('setAnnotationMode(true) 失败', e));
