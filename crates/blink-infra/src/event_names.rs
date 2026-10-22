@@ -90,6 +90,10 @@ impl EventNames {
     // ── 配置 ──
     pub const CONFIG_CHANGED: &str = "blink://config-changed";
 
+    // ── 提示词库（0.27.5）──
+    /// payload 含 scope，设置页/Chat/Editor 按需刷新缓存。
+    pub const PROMPT_LIBRARY_CHANGED: &str = "blink://prompt-library-changed";
+
     // ── 上下文感知 ──
     pub const AWARENESS_UPDATED: &str = "blink://awareness-updated";
     pub const CONTEXT_MENU_ACTION: &str = "blink://context-menu-action";

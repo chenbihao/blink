@@ -21,6 +21,7 @@ import {initWeblinksTab} from "./tabs/weblinks.js";
 import {initPluginsTab} from "./tabs/plugins.js";
 import {initCapabilitiesTab} from "./tabs/capabilities.js";
 import {initNetworkTab} from "./tabs/network.js";
+import {initPromptsTab} from "./tabs/prompts.js";
 import {initContextTab} from "./tabs/context.js";
 import {initGuideTab} from "./tabs/guide.js";
 import {initStorageTab} from "./tabs/storage.js";
@@ -672,6 +673,7 @@ async function initializeSettings() {
         initPluginsTab(cfg);
         initCapabilitiesTab();
         initNetworkTab(cfg);
+        initPromptsTab(cfg);
         initContextTab(cfg);
         initGuideTab();
         initStorageTab(cfg);

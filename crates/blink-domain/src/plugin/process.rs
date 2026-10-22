@@ -638,7 +638,7 @@ impl PluginHandle {
             .unwrap_or(Err(PluginError::Timeout))
     }
 }
-/// 执行 HTTP 请求（插件代理请求用）。使用 reqwest 并遵循全局代理配置。
+/// 执行 HTTP 请求（插件代理请求用）。经 net 工厂注入代理策略。
 /// 返回 (status_code, body, error)。
 async fn execute_http_request(
     method: &str,
@@ -647,7 +647,6 @@ async fn execute_http_request(
     timeout_ms: u64,
     headers: &[(String, String)],
 ) -> (u16, Option<String>, Option<String>) {
-    use reqwest::Client;
 
     // 0.26.2:带鉴权头的请求禁止跨目的地重定向——reqwest 跟随重定向时只剥离
     // Authorization/Cookie 等内建敏感头，自定义头（如 X-QW-Api-Key）会原样重发，
@@ -656,11 +655,15 @@ async fn execute_http_request(
     // 0.26.3:彩云签名请求（x-cy-signature）更严——App Key 就在 URL 路径中，
     // 且签名覆盖精确 method/path/query，任何重定向（含同 Host 改路径/query）
     // 都意味着凭据外发或签名失效；宿主拒绝跟随且不自动重签。
+    // 0.27.4：统一经 net 工厂的 proxied_builder——用户代理配置（scheme 匹配 +
+    // loopback bypass）真实生效，替代此前「注释声称走全局代理但实际未接线」的状态；
+    // 重定向策略保持 0.26.2/0.26.3 的凭据保护分档不变。
+    let base = blink_infra::net::proxied_builder;
     let builder = match redirect_rule(headers) {
-        RedirectRule::Never => Client::builder().redirect(reqwest::redirect::Policy::none()),
+        RedirectRule::Never => base().redirect(reqwest::redirect::Policy::none()),
         RedirectRule::SameHostHttps => match url_host(url) {
             Some(host) => {
-                Client::builder().redirect(reqwest::redirect::Policy::custom(move |attempt| {
+                base().redirect(reqwest::redirect::Policy::custom(move |attempt| {
                     if attempt.url().scheme() == "https"
                         && attempt.url().host_str() == Some(host.as_str())
                     {
@@ -670,9 +673,9 @@ async fn execute_http_request(
                     }
                 }))
             }
-            None => Client::builder().redirect(reqwest::redirect::Policy::none()),
+            None => base().redirect(reqwest::redirect::Policy::none()),
         },
-        RedirectRule::Follow => Client::builder(),
+        RedirectRule::Follow => base(),
     };
     let client = match builder
         .timeout(std::time::Duration::from_millis(

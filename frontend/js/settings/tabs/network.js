@@ -1,9 +1,9 @@
 /**
  * 网络设置 Tab 模块
- * 包含：HTTP/HTTPS 代理配置
+ * 包含：HTTP/HTTPS 代理配置（0.27.4：迁移到 network 配置分片，保存即热更新）
  */
 
-import {invoke} from "../../shared/tauri.js";
+import {invoke, normalizeError} from "../../shared/tauri.js";
 import {onLangChange, t} from "../../i18n/index.js";
 import {iconHTML} from "../../shared/icon.js";
 import {saveConfig} from "../../shared/config-keys.js";
@@ -25,7 +25,7 @@ async function loadNetworkConfig() {
 
     let proxyConfig = {http: "", https: ""};
     try {
-        const cfg = await invoke("get_engine_config", {engineId: "_global_proxy"});
+        const cfg = await invoke("get_config_section", {key: "network"});
         if (cfg) {
             proxyConfig = {http: cfg.http || "", https: cfg.https || ""};
         }
@@ -81,6 +81,9 @@ function renderNetworkCard(proxyConfig) {
             value="${escapeAttr(proxyConfig.https)}"
           />
         </div>
+        <p class="network-status hidden" id="network-save-status"></p>
+        <p class="extension-desc">${t("network.note.direct")}</p>
+        <p class="extension-desc">${t("network.note.boundary")}</p>
       </div>
     </div>
   `;
@@ -88,39 +91,51 @@ function renderNetworkCard(proxyConfig) {
 
 /**
  * 绑定网络事件（自动保存：输入变更 → debounce 保存）
+ *
+ * 0.27.4：保存走 `network` 分片——后端校验通过后落库并热更新 net 工厂
+ * （AI/更新/下载/MCP 立即生效，无需重启）；无效地址保留旧配置并回显错误。
  * @param {HTMLElement} container - 容器元素
  */
 function bindNetworkEvents(container) {
     let debounceTimer = null;
 
+    const showStatus = (message, isError) => {
+        const el = container.querySelector("#network-save-status");
+        if (!el) return;
+        if (!message) {
+            el.classList.add("hidden");
+            el.textContent = "";
+            return;
+        }
+        el.classList.remove("hidden");
+        el.textContent = message;
+        el.classList.toggle("network-status-error", isError === true);
+    };
+
     const doSave = async () => {
         const http = container.querySelector('.plugin-field[data-key="http_proxy"]')?.value || "";
         const https = container.querySelector('.plugin-field[data-key="https_proxy"]')?.value || "";
         try {
-            await saveConfig("global_proxy", {http, https});
+            await saveConfig("network", {http, https});
+            showStatus(t("network.saved"), false);
         } catch (e) {
             console.error("save proxy failed:", e);
+            const err = normalizeError(e);
+            showStatus(
+                err.code === "network_invalid" ? t("network.err.invalid") : err.message,
+                true,
+            );
         }
     };
 
     // 文本输入 debounce 800ms（避免每 keystroke 都写盘）
-    container.querySelectorAll('.plugin-field').forEach((el) => {
+    container.querySelectorAll(".plugin-field").forEach((el) => {
         el.addEventListener("input", () => {
+            showStatus("", false);
             clearTimeout(debounceTimer);
             debounceTimer = setTimeout(doSave, 800);
         });
     });
-}
-
-/**
- * HTML 转义
- * @param {string} str - 原始字符串
- * @returns {string} 转义后的字符串
- */
-function escapeHtml(str) {
-    const div = document.createElement("div");
-    div.textContent = str;
-    return div.innerHTML;
 }
 
 /**

@@ -499,6 +499,19 @@ fn setup_app(app: &mut tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error:
     // AI HTTP 请求/响应体日志开关 reload（0.21.16，默认关）
     infra::utils::http_log::set_body_log_enabled(app_config.ai_http_body_log);
 
+    // 0.27.5：提示词库内置种子（幂等：未覆盖内置项随版本默认内容升级，
+    // 不动用户覆盖/名称/排序/隐藏）。Editor 预设与 Chat 插入共用此资产。
+    tauri::async_runtime::block_on(app::commands::seed_builtin_prompts(&pools.ai));
+
+    // 0.27.4：网络策略快照注入（legacy engine:_global_proxy 一次性迁移到
+    // network 分片）。必须在首个出网请求（更新检查/插件加载/AI）之前完成；
+    // 注入失败保持空策略显式直连，不静默读环境变量。
+    let network_config =
+        tauri::async_runtime::block_on(app::config::init_network_config(&pools.config));
+    if let Err(e) = infra::net::global().set_policy(network_config.to_policy()) {
+        tracing::warn!(%e, "网络策略快照注入失败，运行时按显式直连");
+    }
+
     // pools 交给 Tauri 管理(command 层用 app.state::<DbPools>() 取)
     app.manage(pools.clone());
 
@@ -613,26 +626,14 @@ fn setup_app(app: &mut tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error:
         .build(app)?;
 
     // 加载 builtin 插件
-    // 全局代理配置(engine:_global_proxy → {http,https})，进程启动时 env 注入，ureq/reqwest 原生读取
-    let global_proxy = tauri::async_runtime::block_on(app::config::get_engine_config(
-        &pools.config,
-        "_global_proxy",
-    ));
-    let proxy = global_proxy.and_then(|v| {
-        let http = v
-            .get("http")
-            .and_then(|s| s.as_str())
-            .map(|s| s.to_string());
-        let https = v
-            .get("https")
-            .and_then(|s| s.as_str())
-            .map(|s| s.to_string());
-        if http.is_some() || https.is_some() {
-            Some((http.unwrap_or_default(), https.unwrap_or_default()))
-        } else {
-            None
-        }
-    });
+    // 0.27.4：插件子进程 env 代理来自 network 分片（net 工厂同源快照）；
+    // 只影响插件子进程自行联网（ureq/reqwest 原生读 env），core HTTP 代发
+    // 走 net 工厂。未配置 = 不注入，插件自行联网不受本产品代理承诺约束。
+    let proxy = if network_config.has_proxy() {
+        Some(network_config.to_policy().plugin_env_tuple())
+    } else {
+        None
+    };
     let plugins_dir = if cfg!(debug_assertions) {
         domain::plugin::builtin_plugins_dir()
     } else {
@@ -1830,6 +1831,11 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
         app::commands::refresh_bookmarks,
         app::commands::get_engine_config,
         app::commands::get_plugins,
+        app::commands::prompt_library_list,
+        app::commands::prompt_library_upsert,
+        app::commands::prompt_library_delete,
+        app::commands::prompt_library_reset,
+        app::commands::prompt_library_reorder,
         app::commands::get_plugin_secret_hint,
         app::commands::clear_plugin_secret,
         app::commands::search_weather_locations,

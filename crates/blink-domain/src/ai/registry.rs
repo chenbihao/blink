@@ -76,7 +76,11 @@ fn compute_provider_fingerprint(p: &ProviderEntry, secret_epoch: u64) -> String 
         ProviderKind::OllamaHttp => "ollama",
     };
     let bu = p.base_url.as_deref().unwrap_or("");
-    format!("{kind}|{bu}|e{secret_epoch}")
+    // 0.27.4：network generation 纳入 fingerprint——代理配置变化（net 工厂
+    // 换快照）后所有 provider 强制重建，新请求取新代理 client；在途请求持有
+    // 旧实例继续跑完（§3.5 当前流不打断）。net 工厂未注入策略时恒为 0，测试稳定。
+    let net_gen = blink_infra::net::generation();
+    format!("{kind}|{bu}|e{secret_epoch}|n{net_gen}")
 }
 
 /// ChatService 构造 AgentProvider 所需的配置快照。
@@ -667,7 +671,11 @@ mod tests {
         assert_eq!(resolved.model.id, "m1");
         assert_eq!(resolved.cache_key.0, "p1");
         assert_eq!(resolved.cache_key.1, "m1");
-        assert!(resolved.cache_key.2.ends_with("|e0"));
+        assert!(
+            resolved.cache_key.2.ends_with("|e0|n0"),
+            "fingerprint 应含 secret epoch 与 network generation，实际 {}",
+            resolved.cache_key.2
+        );
 
         reg.bump_secret_epoch();
         let after_secret_change = reg.resolve_entries(Tier::UltraLight).unwrap();

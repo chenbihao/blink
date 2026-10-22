@@ -149,6 +149,8 @@ test("transform: selection start 冻结身份与范围三元组", async () => {
         scope: "selection",
         text: "第一段。",
         revision: 9,
+        preset: null,
+        translateTarget: null,
         rangeHandle: JSON.stringify({kind: "source", start: 0, end: 4, text: "第一段。", blockSafe: true}),
     });
     assert.equal(controller.phase, "running");

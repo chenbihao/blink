@@ -1082,6 +1082,89 @@ input[type="number"]::-webkit-outer-spin-button {
     margin: 0;
 }
 
+/* 0.27.4：网络设置保存状态行（成功提示 / 无效配置回显） */
+.network-status {
+    font-size: var(--text-base);
+    color: var(--text-dim);
+    margin: 0;
+}
+
+.network-status-error {
+    color: var(--red);
+}
+
+/* ── 提示词库（0.27.5）────────────────────────────────────────── */
+.prompt-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-sm, 8px);
+    flex-wrap: wrap;
+}
+
+.prompt-scope-filters {
+    display: flex;
+    gap: var(--space-xs, 4px);
+}
+
+.prompt-scope-filter.active {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.prompt-badges {
+    display: flex;
+    gap: var(--space-xs, 4px);
+    flex-wrap: wrap;
+    margin-top: var(--space-xs, 4px);
+}
+
+.prompt-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: var(--text-sm, 12px);
+    color: var(--text-dim);
+    border: 1px solid var(--border, var(--text-dim));
+    border-radius: var(--radius-sm);
+    padding: 1px 6px;
+}
+
+.prompt-badge .icon {
+    width: 12px;
+    height: 12px;
+}
+
+.prompt-badge-muted {
+    opacity: 0.7;
+}
+
+.prompt-entry-hidden .extension-header h3 {
+    opacity: 0.55;
+}
+
+.prompt-preview {
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 3em;
+    overflow: hidden;
+}
+
+.prompt-actions {
+    display: flex;
+    gap: var(--space-xs, 4px);
+    flex-wrap: wrap;
+    margin-top: var(--space-sm, 8px);
+}
+
+.prompt-danger {
+    color: var(--red);
+}
+
+.prompt-content-readonly {
+    opacity: 0.7;
+}
+
 .version-badge {
     font-size: var(--text-sm);
     font-weight: var(--weight-normal);

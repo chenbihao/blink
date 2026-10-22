@@ -247,7 +247,8 @@ pub async fn transcribe_async(
     model_id: &str,
     wav_bytes: &[u8],
 ) -> Result<String, super::SttError> {
-    let client = reqwest::Client::builder()
+    // 0.27.4：经 net 工厂（代理策略生效），30s 总超时
+    let client = blink_infra::net::proxied_builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| super::SttError::Engine(format!("HTTP client 创建失败: {e}")))?;
@@ -295,7 +296,8 @@ pub async fn transcribe_via_chat_async(
         }
     });
 
-    let client = reqwest::Client::builder()
+    // 0.27.4：经 net 工厂（代理策略生效），30s 总超时
+    let client = blink_infra::net::proxied_builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| super::SttError::Engine(format!("HTTP client 创建失败: {e}")))?;

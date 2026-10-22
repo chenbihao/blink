@@ -13,6 +13,7 @@ pub mod icon_cache;
 pub mod perf;
 pub mod permission_memory;
 pub mod pools;
+pub mod prompt_library;
 pub mod sticky;
 
 pub use pools::{CleanupParams, DbPools};

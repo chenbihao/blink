@@ -151,7 +151,7 @@ pub(crate) fn build_openai_client(
     Ok(openai::OpenAIConfig::new(key)
         .with_base_url(url)
         .with_route(openai::Route::Chat)
-        .connect(blink_infra::utils::http_log::LoggingHttpClient::default()))
+        .connect(blink_infra::utils::http_log::LoggingHttpClient::from_net()))
 }
 
 /// 构造 Anthropic Messages 协议的 rig client（0.12.1 抽出）。
@@ -165,7 +165,7 @@ pub(crate) fn build_anthropic_client(
         config = config.with_base_url(url);
     }
     // 0.21.16/0.43: 注入 LoggingHttpClient——与其他协议一致的请求/响应体日志开关。
-    Ok(config.connect(blink_infra::utils::http_log::LoggingHttpClient::default()))
+    Ok(config.connect(blink_infra::utils::http_log::LoggingHttpClient::from_net()))
 }
 
 /// 构造 Google Gemini 协议的 rig client（0.12.1 抽出）。
@@ -177,7 +177,7 @@ pub(crate) fn build_gemini_client(
     use rig_core::providers::gemini;
     // 0.21.16/0.43: 注入 LoggingHttpClient——与其他协议一致的请求/响应体日志开关。
     Ok(gemini::GeminiConfig::new(key)
-        .connect(blink_infra::utils::http_log::LoggingHttpClient::default()))
+        .connect(blink_infra::utils::http_log::LoggingHttpClient::from_net()))
 }
 
 /// 构造 ollama 本地推理的 rig client（0.12.1 抽出）。
@@ -191,7 +191,7 @@ pub(crate) fn build_ollama_client(
         config = config.with_base_url(url);
     }
     // 0.21.16/0.43: 注入 LoggingHttpClient——与其他协议一致的请求/响应体日志开关。
-    Ok(config.connect(blink_infra::utils::http_log::LoggingHttpClient::default()))
+    Ok(config.connect(blink_infra::utils::http_log::LoggingHttpClient::from_net()))
 }
 
 /// OpenAI Chat Completions 协议——**通用兼容层**(0.9.2 第二步)。

@@ -12,7 +12,8 @@
 #[allow(unused_imports)] // 门面 re-export：保持 crate::domain::* 全量旧路径（部分模块当前无 bin 引用）
 pub use blink_domain::{
     ai, capability, chord, clipboard, color, config, context, editor, event, event_names,
-    feature_catalog, intent, mcp, ocr, palette, plugin, resource, schema, search, sticky,
+    feature_catalog, intent, mcp, ocr, palette, plugin, prompt_library, resource, schema,
+    search, sticky,
 };
 pub use blink_domain_local_engine as local_engine;
 pub use blink_domain_stt as stt;

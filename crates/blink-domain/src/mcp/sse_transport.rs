@@ -96,9 +96,9 @@ impl SseClientTransport {
     ///
     /// 返回 `Err` 表示 SSE 连接/握手失败。
     pub async fn new(sse_url: &str, headers: &HashMap<String, String>) -> Result<Self, String> {
-        let client = reqwest::Client::builder()
-            .build()
-            .map_err(|e| format!("HTTP client 创建失败: {e}"))?;
+        // 0.27.4：client 经 net 工厂取（MCP 类别：代理策略 + loopback bypass；
+        // 长连接无总超时，代理配置变化经 apply_network_change 重建连接）。
+        let client = blink_infra::net::client(blink_infra::net::RequestCategory::Mcp);
 
         // 构建 GET 请求
         let mut req = client.get(sse_url).header("Accept", "text/event-stream");

@@ -592,6 +592,53 @@ impl ConfigKey for UpdateConfig {
     const KEY: &'static str = "app.update";
 }
 
+// ── NetworkConfig（0.27.4，第 9 配置分片）────────────────────────────────────
+
+/// 网络代理配置分片（phase 0.27 §8.4）。
+///
+/// KV key `network`，值形如 `{ "http": null|"http://host:port", "https": ... }`。
+/// **空配置语义（完全显式直连）**：未配置 = 忽略 `HTTP_PROXY`/`HTTPS_PROXY`
+/// 等环境变量、不读 Windows 系统代理、不做升级检测提示。loopback 恒直连。
+/// 存量用户的 `engine:_global_proxy` 值在 app 启动时一次性迁移到本分片。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NetworkConfig {
+    /// HTTP 协议出网代理（`http://host:port`）；None = 该协议直连。
+    #[serde(default)]
+    pub http: Option<String>,
+    /// HTTPS 协议出网代理；None = 该协议直连。
+    #[serde(default)]
+    pub https: Option<String>,
+}
+
+impl ConfigKey for NetworkConfig {
+    const KEY: &'static str = "network";
+}
+
+impl NetworkConfig {
+    /// 从前端原始输入构造（空串/空白归一 None），并交给 net 工厂校验。
+    pub fn from_raw(http: &str, https: &str) -> Result<Self, blink_infra::net::NetPolicyError> {
+        let policy = blink_infra::net::NetPolicy::from_raw(http, https)?;
+        Ok(Self {
+            http: policy.http,
+            https: policy.https,
+        })
+    }
+
+    /// 转换为 infra net 工厂的策略快照。
+    pub fn to_policy(&self) -> blink_infra::net::NetPolicy {
+        blink_infra::net::NetPolicy {
+            http: self.http.clone(),
+            https: self.https.clone(),
+        }
+    }
+
+    /// 是否配置了任一代理（false = 完全显式直连）。
+    pub fn has_proxy(&self) -> bool {
+        self.http.as_deref().is_some_and(|s| !s.trim().is_empty())
+            || self.https.as_deref().is_some_and(|s| !s.trim().is_empty())
+    }
+}
+
 // ── ContextConfig ─────────────────────────────────────────────────────────────
 
 /// Context 层配置：控制唤起时的环境采集行为。

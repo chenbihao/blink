@@ -43,6 +43,7 @@ import {EditorSession} from "./editor-session.js";
 import {EditorActions, fileConflictAction, stickyConflictAction} from "./actions.js";
 import {EditorVoiceController} from "./voice.js";
 import {EditorTransformController} from "./transform.js";
+import {openPresetMenu} from "./preset-menu.js";
 import {
     RecoveryDraft,
     draftKeyForSource,
@@ -614,15 +615,28 @@ function bindVoiceControls() {
         }
     });
 
-    // 整理本次听写（0.23.4 §3.7 显式入口；0.23.6 使用冻结的听写范围 handle）
+    // AI 处理本次听写（0.23.4 显式入口；0.23.6 冻结听写范围 handle；
+    // 0.27.6 起打开预设菜单：整理/精简/互译 + 库自定义 scope=editor 条目）
     chipTidyEl?.addEventListener("click", () => {
         if (!voice.runHandle) return;
-        void transform.start("dictation", {handle: voice.runHandle});
+        void openPresetMenu(chipTidyEl, (item) => {
+            if (!voice.runHandle) return;
+            void transform.start("dictation", {
+                handle: voice.runHandle,
+                preset: item.preset,
+                translateTarget: item.translateTarget,
+            });
+        });
     });
 
-    // 整理选中内容（选区非空时出现，§3.8 按上下文出现的整理动作）
+    // AI 处理选中内容（选区非空时出现；0.27.6 同样走预设菜单）
     chipTidySelectionEl?.addEventListener("click", () => {
-        void transform.start("selection");
+        void openPresetMenu(chipTidySelectionEl, (item) => {
+            void transform.start("selection", {
+                preset: item.preset,
+                translateTarget: item.translateTarget,
+            });
+        });
     });
 
     chipDismissEl?.addEventListener("click", hideVoiceChips);
@@ -688,14 +702,18 @@ function updateActionChips() {
     if (chipLocateEl) chipLocateEl.classList.toggle("hidden", !dictationReady);
     if (chipTidyEl) {
         chipTidyEl.classList.toggle("hidden", !dictationReady || !transform.aiAvailable);
-        if (dictationReady) chipTidyEl.textContent = t("editor.voice.tidy");
+        if (dictationReady) {
+            chipTidyEl.textContent = t("editor.preset.chipDictation");
+            chipTidyEl.title = t("editor.preset.chipHint");
+        }
     }
     if (chipTidySelectionEl) {
         chipTidySelectionEl.classList.toggle("hidden", !selectionReady);
         if (selectionReady) {
-            chipTidySelectionEl.textContent = t("editor.transform.tidySelection", {
+            chipTidySelectionEl.textContent = t("editor.preset.chipSelection", {
                 count: selectionText.length,
             });
+            chipTidySelectionEl.title = t("editor.preset.chipHint");
         }
     }
     if (chipDismissEl) chipDismissEl.classList.toggle("hidden", !dictationReady);

@@ -964,3 +964,36 @@
     flex-wrap: wrap;
     justify-content: flex-end;
 }
+
+/* ── 0.27.6 预设菜单（chip 下拉：整理/精简/互译/自定义预设）────────── */
+.editor-preset-menu {
+    position: fixed;
+    z-index: 60;
+    min-width: 180px;
+    max-height: 50vh;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    padding: 4px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-lg, 0 8px 24px rgba(0, 0, 0, 0.35));
+}
+
+.editor-preset-menu-item {
+    display: block;
+    width: 100%;
+    padding: 6px 10px;
+    border: none;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--text);
+    text-align: left;
+    cursor: pointer;
+    transition: background var(--transition-fast);
+}
+
+.editor-preset-menu-item:hover {
+    background: var(--accent-dim, rgba(128, 128, 128, 0.15));
+}

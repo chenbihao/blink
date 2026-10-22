@@ -432,13 +432,11 @@ async fn download_once(
         return Err(ManagedRuntimeError::Cancelled);
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(600))
-        .build()
-        .map_err(|e| ManagedRuntimeError::Download(format!("HTTP client 构造失败: {e}")))?;
+    // 0.27.4：经 net 工厂（Download 类别，代理策略生效）；总超时按请求注入
+    let client = crate::net::client(crate::net::RequestCategory::Download);
 
     let response = tokio::select! {
-        r = client.get(url).send() => {
+        r = client.get(url).timeout(std::time::Duration::from_secs(600)).send() => {
             r.map_err(|e| ManagedRuntimeError::Download(format!("下载失败: {e}")))?
         }
         _ = wait_cancel(cancel_token) => {

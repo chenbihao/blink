@@ -143,7 +143,9 @@ impl EngineManager {
 
         // 单次 HTTP 请求超时——使用 start_timeout（Phase 1 连通+鉴权），
         // 不硬编码 5s。reqwest 对每次 .send() 应用此超时。
+        // 0.27.4：127.0.0.1 探测显式直连（排除环境变量/用户代理配置）
         let client = reqwest::Client::builder()
+            .no_proxy()
             .timeout(start_timeout)
             .build()
             .map_err(|e| {

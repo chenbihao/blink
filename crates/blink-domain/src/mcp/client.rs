@@ -653,7 +653,8 @@ impl McpClientManager {
         );
 
         // rmcp Streamable HTTP client transport
-        // 统一用 from_config：支持 custom_headers（含 Authorization 等任意 header）
+        // 0.27.4：client 经 net 工厂注入（代理策略/loopback bypass 生效）；
+        // custom_headers 支持保持不变（含 Authorization 等任意 header）。
         use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
         let mut cfg = StreamableHttpClientTransportConfig::with_uri(url);
 
@@ -683,7 +684,11 @@ impl McpClientManager {
             }
         }
 
-        let transport = rmcp::transport::StreamableHttpClientTransport::from_config(cfg);
+        let transport =
+            rmcp::transport::StreamableHttpClientTransport::with_client(
+                blink_infra::net::client(blink_infra::net::RequestCategory::Mcp),
+                cfg,
+            );
 
         let client_info = ClientInfo::default();
         client_info
@@ -797,6 +802,65 @@ impl McpClientManager {
             .ok_or_else(|| format!("未找到 server 配置: {name}"))?;
 
         self.start_server(&config).await
+    }
+
+    /// 网络策略变化后重建网络传输连接（0.27.4 §3.5）。
+    ///
+    /// 只处理当前已连接的 HTTP/SSE server（stdio 子进程不经代理，跳过；
+    /// 未启用的不主动拉起）。语义：
+    /// - 旧连接立即从 tool 池移除（bump epoch，Agent 不再用旧连接冒充新配置），
+    ///   但其 service 由重连任务持有到新连接提交/失败后才 drop——**在途调用
+    ///   优雅完成，不粗暴杀掉**；
+    /// - generation 推进 + 清缓存结果，重连走 `start_server` 完整单飞/重试链。
+    pub async fn apply_network_change(self: &Arc<Self>, config_pool: &sqlx::SqlitePool) {
+        use crate::mcp::config::McpTransport;
+
+        let configs = match McpServerConfigStore::load_all(config_pool).await {
+            Ok(configs) => configs,
+            Err(e) => {
+                tracing::warn!(%e, "MCP: 网络切换后读取 server 配置失败，跳过重连");
+                return;
+            }
+        };
+
+        for config in configs {
+            if !matches!(
+                config.transport,
+                McpTransport::Http { .. } | McpTransport::Sse { .. }
+            ) {
+                continue;
+            }
+            // 移出旧连接（tool 池立即如实反映），service 转交重连任务持有。
+            let old_server = { self.connected.write().await.remove(&config.name) };
+            if old_server.is_none() {
+                continue; // 未连接的网络 server：不主动拉起
+            }
+            {
+                let mut lifecycles = self.lifecycles.lock().await;
+                if let Some(lifecycle) = lifecycles.get_mut(&config.name) {
+                    lifecycle.generation = lifecycle.generation.saturating_add(1);
+                    lifecycle.last_result = None;
+                    lifecycle.cooldown_until = None;
+                    lifecycle.notify.notify_waiters();
+                }
+            }
+            self.bump_epoch();
+            self.statuses
+                .write()
+                .await
+                .insert(config.name.clone(), McpServerStatus::Connecting);
+            tracing::info!(server = %config.name, "MCP: 网络配置变化，重建连接");
+
+            let manager = Arc::clone(self);
+            tokio::spawn(async move {
+                // old_server 在新连接提交/失败前保持存活：在途调用持有同源
+                // ServerSink，transport 不被取消；任务结束时统一释放。
+                if let Err(e) = manager.start_server(&config).await {
+                    tracing::warn!(server = %config.name, %e, "MCP: 网络切换后重连失败");
+                }
+                drop(old_server);
+            });
+        }
     }
 
     /// 收集所有已连接 server 的 tool，返回原始 (Tool, ServerSink) 对。

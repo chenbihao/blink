@@ -63,7 +63,9 @@ pub async fn probe_health_evidence(endpoint: &str) -> Option<HealthEvidence> {
         format!("http://{endpoint}/health")
     };
 
+    // 0.27.4：localhost 探测显式直连（排除环境变量/用户代理配置）
     let client = reqwest::Client::builder()
+        .no_proxy()
         .timeout(std::time::Duration::from_secs(3))
         .build()
         .ok()?;

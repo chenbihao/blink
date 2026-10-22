@@ -104,7 +104,7 @@ async fn download_file(
         (cb.on_log)(&format!("下载 {file_name}（{url}）"));
 
         let mut response = tokio::select! {
-            r = client.get(url).send() => r,
+            r = client.get(url).timeout(DOWNLOAD_TIMEOUT).send() => r,
             _ = cancel_token.cancelled() => return Err(ModelDownloadError::Cancelled),
         }
         .map_err(|e| ModelDownloadError::Network {
@@ -303,12 +303,8 @@ impl ModelInstallWorker for FunasrGgufModelInstallWorker {
                 message: format!("创建 staging 目录失败: {e}"),
             })?;
 
-        let client = reqwest::Client::builder()
-            .timeout(DOWNLOAD_TIMEOUT)
-            .build()
-            .map_err(|e| ModelDownloadError::Internal {
-                message: format!("HTTP client 创建失败: {e}"),
-            })?;
+        // 0.27.4：经 net 工厂（Download 类别，代理策略生效）；总超时按请求注入
+        let client = crate::infra::net::client(crate::infra::net::RequestCategory::Download);
 
         let _ = engine_id; // 引擎绑定由模型事务保证；worker 只按 spec 下载
         for file in &spec.files {

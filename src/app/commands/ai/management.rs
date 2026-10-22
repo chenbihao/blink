@@ -196,7 +196,8 @@ pub async fn fetch_ai_models(
     let kind: ProviderKind =
         serde_json::from_str(&format!("\"{}\"", kind)).map_err(|_| format!("未知协议: {kind}"))?;
 
-    let client = reqwest::Client::builder()
+    // 0.27.4：经 net 工厂（代理策略生效），模型列表拉取 15s 总超时
+    let client = crate::infra::net::proxied_builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|e| format!("HTTP 客户端创建失败: {e}"))?;
@@ -413,7 +414,8 @@ pub async fn test_ai_provider(
     let kind: ProviderKind =
         serde_json::from_str(&format!("\"{}\"", kind)).map_err(|_| format!("未知协议: {kind}"))?;
 
-    let client = reqwest::Client::builder()
+    // 0.27.4：经 net 工厂（代理策略生效），连接测试 10s 总超时
+    let client = crate::infra::net::proxied_builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| format!("HTTP 客户端创建失败: {e}"))?;

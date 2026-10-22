@@ -320,10 +320,12 @@ pub(crate) fn check_result_items(
         } else {
             format!("发现新版本 {}", outcome.latest_version)
         };
-        let desc = if en {
-            "Press Enter to view update details"
-        } else {
-            "回车查看更新内容"
+        // 0.27.4：镜像降级（主站不可达、镜像判出版本）时说明不可用，如实标注
+        let desc = match (en, outcome.degraded) {
+            (true, true) => "Press Enter to view update details (release notes unavailable; checked via mirror)",
+            (true, false) => "Press Enter to view update details",
+            (false, true) => "回车查看更新内容（更新说明暂不可用，经镜像检查）",
+            (false, false) => "回车查看更新内容",
         };
         // settings kind = 纯 UI 导航（Interaction 层协议，不伪装 Capability），
         // payload = 目标 tab（后端命令带白名单校验）
@@ -340,10 +342,11 @@ pub(crate) fn check_result_items(
     } else {
         format!("已是最新版本（{}）", outcome.current_version)
     };
-    let desc = if en {
-        "Latest release on GitHub"
-    } else {
-        "GitHub 最新发布版本"
+    let desc = match (en, outcome.degraded) {
+        (true, true) => "Checked via mirror; release notes unavailable",
+        (true, false) => "Latest release on GitHub",
+        (false, true) => "经镜像检查（主站不可达），更新说明暂不可用",
+        (false, false) => "GitHub 最新发布版本",
     };
     vec![item(
         name,
@@ -508,6 +511,7 @@ mod tests {
             release_notes: String::new(),
             updates: Vec::new(),
             error: None,
+            degraded: false,
         };
         let zh = check_result_items(&ok_latest, "zh");
         assert_eq!(zh.len(), 1);

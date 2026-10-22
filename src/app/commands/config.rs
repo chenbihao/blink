@@ -39,7 +39,9 @@ pub async fn get_config(app: tauri::AppHandle) -> Result<serde_json::Value, Stri
 /// `chord_toggles` / `clipboard_enabled` / `disabled_builtin_actions` /
 /// `disabled_context_bindings` / `disabled_chord_actions` / `window_opacity`
 ///
-/// **引擎配置**：`file_search` / `start_menu_config` / `calc_config` / `global_proxy`
+/// **引擎配置**：`file_search` / `start_menu_config` / `calc_config`
+///
+/// **网络代理**（0.27.4）：`network` —— NetworkConfig 第 9 分片（`global_proxy` 为兼容别名）
 ///
 /// **快捷超链（0.26.12）**：`weblinks` —— WebLinksConfig 分片（保存时 keyword 冲突校验）
 ///
@@ -68,6 +70,7 @@ pub async fn set_config(
             "secret_write_failed",
             "secret_restore_failed",
             "keyword_conflict",
+            "network_invalid",
         ]
             .into_iter()
             .find(|code| message == *code || message.starts_with(&format!("{code}:")))
@@ -435,21 +438,73 @@ async fn set_config_value(
             }
             tracing::info!(enabled = cc.enabled, "计算器配置已更新");
         }
-        "global_proxy" => {
+        // ── 网络代理（0.27.4：NetworkConfig 第 9 分片，KV key `network`）─────
+        //
+        // 旧 `global_proxy` key（engine:_global_proxy）保留为别名：前端随本版
+        // 迁移到 `network`，别名让旧入口继续可用。语义变化见 §8.4：空配置 =
+        // 完全显式直连（忽略环境变量/系统代理）；保存前校验，无效配置不落库
+        // 也不切运行时快照。
+        "network" | "global_proxy" => {
             let v: crate::app::config::GlobalProxyUpdate =
                 serde_json::from_value(value).map_err(|e| e.to_string())?;
-            let config = serde_json::json!({ "http": v.http, "https": v.https });
-            crate::app::config::set_engine_config(pool, "_global_proxy", &config).await?;
-            let engine = app.state::<std::sync::Arc<crate::domain::plugin::PluginEngine>>();
-            let has_http = !v.http.is_empty();
-            let has_https = !v.https.is_empty();
-            let proxy = if !has_http && !has_https {
-                None
+            let cfg = crate::app::config::NetworkConfig::from_raw(&v.http, &v.https)
+                .map_err(|e| format!("network_invalid: {e}"))?;
+            crate::app::config::ConfigStore::set(pool, &cfg).await?;
+
+            // 1. net 工厂换快照：generation +1、分类 client 作废（新请求生效，
+            //    在途请求持有旧 client 继续跑完）。
+            let policy = cfg.to_policy();
+            if let Err(e) = crate::infra::net::global().set_policy(policy.clone()) {
+                tracing::error!(%e, "网络快照切换失败（配置已落库，运行时保持旧快照）");
+                return Err(format!("network_invalid: {e}"));
+            }
+
+            // 2. AI 两层缓存失效：provider fingerprint 含 network generation，
+            //    reload 强制重建 provider；Agent 缓存随 config-changed 失效。
+            if let Some(reg) =
+                app.try_state::<std::sync::Arc<crate::domain::ai::AIProviderRegistry>>()
+            {
+                reg.reload(&reg.config_snapshot());
+            }
+            if let Some(chat) =
+                app.try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
+            {
+                chat.notify_config_changed();
+            }
+
+            // 3. 插件子进程 env 代理热更新（下次 query 自动用新 env 重启进程）。
+            let proxy = if cfg.has_proxy() {
+                Some(policy.plugin_env_tuple())
             } else {
-                Some((v.http, v.https))
+                None
             };
-            engine.update_global_proxy(proxy).await;
-            tracing::info!(has_http, has_https, "全局代理配置已更新");
+            if let Some(engine) =
+                app.try_state::<std::sync::Arc<crate::domain::plugin::PluginEngine>>()
+            {
+                engine.update_global_proxy(proxy).await;
+            }
+
+            // 4. MCP 网络传输（HTTP/SSE）按新 client 重连；stdio 子进程不受
+            //    代理影响跳过。在途调用持有旧 service 引用继续完成，新连接
+            //    建立并提交后才替换旧连接（§3.5 不粗暴杀活跃调用）。
+            if let Some(mcp) = app.try_state::<std::sync::Arc<crate::domain::mcp::McpClientManager>>()
+            {
+                let mcp = mcp.inner().clone();
+                let config_pool = pool.clone();
+                tokio::spawn(async move {
+                    mcp.apply_network_change(&config_pool).await;
+                });
+            }
+
+            let _ = app.emit(
+                EventNames::CONFIG_CHANGED,
+                serde_json::json!({ "key": "network" }),
+            );
+            tracing::info!(
+                has_http = cfg.http.is_some(),
+                has_https = cfg.https.is_some(),
+                "网络代理配置已更新"
+            );
         }
         // ── 快捷超链（0.26.12 WebEngine）─────────────────────────────────
         "weblinks" => {

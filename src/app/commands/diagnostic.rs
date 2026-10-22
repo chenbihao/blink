@@ -266,29 +266,17 @@ pub fn get_app_info() -> serde_json::Value {
     })
 }
 
-/// 读取全局代理配置（`engine:_global_proxy` → `{http, https}`），返回代理 URL。
+/// 读取网络策略的代理 URL（tauri updater 注入用，https 优先）。
 ///
-/// 0.25.10 从 check_update 内联块提取：`install_update`（下载安装）与
-/// 检查更新共用——国内直连 GitHub 极易超时，用户代理配置要覆盖全更新链路。
-async fn global_proxy_url(app: &tauri::AppHandle) -> Option<String> {
-    let pool = &app.state::<crate::infra::data::DbPools>().config;
-    let cfg = crate::app::config::get_engine_config(pool, "_global_proxy").await;
-    cfg.and_then(|v| {
-        let https = v
-            .get("https")
-            .and_then(|s| s.as_str())
-            .filter(|s| !s.is_empty());
-        let http = v
-            .get("http")
-            .and_then(|s| s.as_str())
-            .filter(|s| !s.is_empty());
-        https.or(http).map(|s| s.to_string())
-    })
+/// 0.27.4：网络配置迁移到 `network` 分片/net 工厂后，代理统一从快照取。
+fn updater_proxy_url() -> Option<String> {
+    let policy = crate::infra::net::global().policy();
+    policy.https.clone().or(policy.http)
 }
 
 /// 一次检查的结果（0.26.20 从 check_update command 提取，供设置页手动检查 /
 /// 后台静默任务 / 主窗口内置动作三路共用）。Clone 供结果条目构造测试复用基准。
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct UpdateCheckOutcome {
     pub has_update: bool,
     pub current_version: String,
@@ -299,19 +287,25 @@ pub(crate) struct UpdateCheckOutcome {
     pub updates: Vec<(String, String, String)>,
     /// Some(错误描述) = 网络失败 / API 异常；此时 has_update 恒 false。
     pub error: Option<String>,
+    /// 0.27.4 §3.6：主链（GitHub API）不可达、镜像 latest.json 判出版本。
+    /// true = 版本可检查、多版本更新说明不可用。
+    pub degraded: bool,
 }
 
-/// 检查 GitHub Release 是否有新版本（0.26.20 提取为共享函数）。
+/// 检查 GitHub Release 是否有新版本（0.26.20 提取为共享函数；0.27.4 降级改造）。
 ///
-/// 流程：请求 GitHub API `/repos/{owner/repo}/releases?per_page=10`（时间倒序）→
-/// 取第一条非 prerelease 为「最新发布版」（在客户端复现 `/latest` 端点的
-/// prerelease 排除语义）→ `version_gt` 与当前版本比较；所有大于当前版本的
-/// 已发布条目经 `extract_changelog` 过滤模板后作为 `updates` 数组返回，
-/// 供前端按版本分组展示更新日志（跳版升级可看到中间各版内容）。
+/// 主链（§3.6）：GitHub API `/repos/{owner/repo}/releases?per_page=10`（时间倒序）
+/// → 取第一条非 prerelease 为「最新发布版」→ `version_gt` 比较；全部大于当前
+/// 版本的已发布条目作为 `updates` 数组（跳版升级可见中间各版内容）。
 ///
-/// **走全局代理**：如果用户配置了 `engine:_global_proxy`，检查更新请求也走代理。
-/// 国内直连 `api.github.com` 极易超时，这是此前「检查更新无效」的根由。
-pub(crate) async fn perform_update_check(app: &tauri::AppHandle) -> UpdateCheckOutcome {
+/// **镜像降级**：主链失败（网络/非 2xx/解析失败）后，经既有
+/// `github_proxy_candidates` 拉镜像 `latest.json` **只判版本**，返回
+/// `degraded = true`（版本可检查、说明不可用）；镜像也全失败才是「检查失败」，
+/// 不能报「已是最新」。主链与全部镜像共用 [`UPDATE_CHECK_BUDGET`] 总时限。
+///
+/// **网络策略**：client 经 net 工厂 Update 类别——按所选 scheme 走代理，
+/// 空配置显式直连（§3.5）；镜像同样遵守网络策略，不静默旁路直连。
+pub(crate) async fn perform_update_check(_app: &tauri::AppHandle) -> UpdateCheckOutcome {
     let current = env!("CARGO_PKG_VERSION");
     let repo = env!("CARGO_PKG_REPOSITORY");
     // 从 "https://github.com/owner/repo" 提取 "owner/repo"
@@ -321,42 +315,60 @@ pub(crate) async fn perform_update_check(app: &tauri::AppHandle) -> UpdateCheckO
         .trim_end_matches('/');
 
     let api_url = format!("https://api.github.com/repos/{repo_path}/releases?per_page=10");
+    let client = crate::infra::net::client(crate::infra::net::RequestCategory::Update);
 
-    // 读取全局代理配置，与插件 HTTP 请求共用
-    let proxy_url = global_proxy_url(app).await;
-
-    let mut builder = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .user_agent("blink-updater");
-
-    if let Some(ref url) = proxy_url {
-        match reqwest::Proxy::all(url) {
-            Ok(proxy) => builder = builder.proxy(proxy),
-            Err(e) => tracing::warn!(%e, proxy = %url, "check_update: 代理配置无效，回退直连"),
+    tokio::time::timeout(UPDATE_CHECK_BUDGET, async {
+        match check_via_github_api(&client, &api_url, repo_path, current).await {
+            Ok(outcome) => outcome,
+            Err(main_error) => {
+                tracing::warn!(%main_error, "check_update: GitHub API 主链失败，尝试镜像降级");
+                let endpoint = format!(
+                    "https://github.com/{repo_path}/releases/latest/download/latest.json"
+                );
+                let candidates = crate::infra::utils::mirrors::github_proxy_candidates(&endpoint);
+                match check_via_mirror_latest(&client, &candidates, repo_path, current).await {
+                    Ok(mut outcome) => {
+                        outcome.degraded = true;
+                        tracing::info!(
+                            latest = %outcome.latest_version,
+                            has_update = outcome.has_update,
+                            "check_update: 镜像降级成功（版本可检查、说明不可用）"
+                        );
+                        outcome
+                    }
+                    Err(mirror_error) => {
+                        tracing::warn!(%mirror_error, "check_update: 镜像 latest.json 亦不可达");
+                        error_outcome(
+                            current,
+                            format!("检查失败：{main_error}；镜像亦不可达（{mirror_error}）"),
+                        )
+                    }
+                }
+            }
         }
-    }
+    })
+    .await
+    .unwrap_or_else(|_| error_outcome(current, "更新检查超时".to_string()))
+}
 
-    let client = builder.build().unwrap_or_default();
-
-    let resp_result = client.get(&api_url).send().await;
-    let resp = match resp_result {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!(%e, "check_update: 请求 GitHub API 失败");
-            return error_outcome(current, format!("网络请求失败: {e}"));
-        }
-    };
+/// 主链：GitHub API releases 列表 → 完整 outcome（notes + 多版本 updates）。
+///
+/// 返回 `Err` 表示主链不可用（网络错误 / 非 2xx / 解析失败），由调用方决定
+/// 是否走镜像降级。
+async fn check_via_github_api(
+    client: &reqwest::Client,
+    api_url: &str,
+    repo_path: &str,
+    current: &str,
+) -> Result<UpdateCheckOutcome, String> {
+    let resp = client.get(api_url).send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
-        tracing::warn!(status = %resp.status(), "check_update: GitHub API 返回非 2xx");
-        return error_outcome(current, format!("GitHub API 返回 {}", resp.status()));
+        return Err(format!("GitHub API 返回 {}", resp.status()));
     }
-    let releases = match resp.json::<Vec<serde_json::Value>>().await {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!(%e, "check_update: 解析 JSON 失败");
-            return error_outcome(current, "响应解析失败".to_string());
-        }
-    };
+    let releases = resp
+        .json::<Vec<serde_json::Value>>()
+        .await
+        .map_err(|e| format!("响应解析失败: {e}"))?;
 
     // 「最新发布版」= 列表第一条非 prerelease（GitHub /releases 按创建时间倒序）
     let latest_release = releases
@@ -385,7 +397,7 @@ pub(crate) async fn perform_update_check(app: &tauri::AppHandle) -> UpdateCheckO
         tracing::debug!(current, latest, "已是最新版本");
     }
 
-    UpdateCheckOutcome {
+    Ok(UpdateCheckOutcome {
         has_update,
         current_version: current.to_string(),
         latest_version: latest,
@@ -393,7 +405,61 @@ pub(crate) async fn perform_update_check(app: &tauri::AppHandle) -> UpdateCheckO
         release_notes,
         updates: pending,
         error: None,
+        degraded: false,
+    })
+}
+
+/// 镜像降级（§3.6）：镜像 latest.json **只判版本**。
+///
+/// latest.json（tauri updater 产物）只含最新一版的 `version`/`notes`，无
+/// 多版本 releases 列表——降级语义固定为「版本可检查、说明不可用」，
+/// 不用单版 notes 冒充完整更新日志。全部镜像失败返回 Err（调用方报检查失败）。
+async fn check_via_mirror_latest(
+    client: &reqwest::Client,
+    candidates: &[String],
+    repo_path: &str,
+    current: &str,
+) -> Result<UpdateCheckOutcome, String> {
+    let mut last_error = String::new();
+    for url in candidates {
+        let resp = match client.get(url).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                last_error = e.to_string();
+                continue;
+            }
+        };
+        if !resp.status().is_success() {
+            last_error = format!("HTTP {}", resp.status());
+            continue;
+        }
+        let json: serde_json::Value = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                last_error = format!("latest.json 解析失败: {e}");
+                continue;
+            }
+        };
+        // 版本校验：非空字符串才可信（§3.6 校验版本与响应格式）
+        let Some(version) = json["version"].as_str().map(str::trim).filter(|v| !v.is_empty())
+        else {
+            last_error = "latest.json 缺少 version 字段".to_string();
+            continue;
+        };
+        let version = version.trim_start_matches('v').to_string();
+        let has_update = crate::app::update_reminder::version_gt(&version, current);
+        return Ok(UpdateCheckOutcome {
+            has_update,
+            current_version: current.to_string(),
+            latest_version: version,
+            release_url: format!("https://github.com/{repo_path}/releases/latest"),
+            release_notes: String::new(),
+            updates: Vec::new(),
+            error: None,
+            degraded: false, // 由调用方统一置位
+        });
     }
+    Err(last_error)
 }
 
 /// 构造失败结果（`has_update` 恒 false，`latest_version` 留空）。
@@ -406,8 +472,12 @@ fn error_outcome(current: &str, error: String) -> UpdateCheckOutcome {
         release_notes: String::new(),
         updates: Vec::new(),
         error: Some(error),
+        degraded: false,
     }
 }
+
+/// 更新检查主链 + 镜像降级共用的总时限（§3.6：共享总时限与取消信号）。
+const UPDATE_CHECK_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// 设置页-关于：检查 GitHub Release 是否有新版本（0.25.19 起一次拉取最近多条）。
 ///
@@ -453,6 +523,7 @@ fn outcome_to_json(outcome: &UpdateCheckOutcome) -> serde_json::Value {
         "latest_version": outcome.latest_version,
         "release_url": outcome.release_url,
         "release_notes": outcome.release_notes,
+        "degraded": outcome.degraded,
         "updates": outcome.updates
             .iter()
             .map(|(version, notes, url)| serde_json::json!({
@@ -533,7 +604,7 @@ async fn check_updater_update(
 ) -> Result<Option<tauri_plugin_updater::Update>, String> {
     use tauri_plugin_updater::UpdaterExt;
 
-    let proxy_url = global_proxy_url(app).await;
+    let proxy_url = updater_proxy_url();
     let endpoint = format!(
         "{}/releases/latest/download/latest.json",
         env!("CARGO_PKG_REPOSITORY").trim_end_matches('/')
@@ -1159,5 +1230,156 @@ mod tests {
         ];
         assert!(collect_pending_updates(&releases, "0.25.18").is_empty());
         assert!(collect_pending_updates(&[], "0.25.18").is_empty());
+    }
+
+    // ── 0.27.4 主链/镜像降级（本地 TcpListener 桩，沿用 wire_tests 手法）──────
+
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{SocketAddr, TcpListener};
+    use std::sync::{Arc, Mutex};
+
+    /// 单用途 HTTP 桩：按序服务 n 个请求，回写固定 body；记录请求 path。
+    fn spawn_http_stub(responses: Vec<(u16, String)>) -> (SocketAddr, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let paths: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = paths.clone();
+        std::thread::spawn(move || {
+            for (status, body) in responses {
+                let Ok((stream, _)) = listener.accept() else { break };
+                let mut reader = BufReader::new(stream);
+                let mut request_line = String::new();
+                if reader.read_line(&mut request_line).is_err() {
+                    break;
+                }
+                let path = request_line.split_whitespace().nth(1).unwrap_or("").to_string();
+                sink.lock().unwrap().push(path);
+                let mut content_length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).is_err() {
+                        break;
+                    }
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':')
+                        && name.trim().eq_ignore_ascii_case("content-length")
+                    {
+                        content_length = value.trim().parse().unwrap_or(0);
+                    }
+                }
+                if content_length > 0 {
+                    let mut body = vec![0u8; content_length];
+                    let _ = reader.read_exact(&mut body);
+                }
+                let reason = match status {
+                    200 => "OK",
+                    404 => "Not Found",
+                    _ => "Error",
+                };
+                let response = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len(),
+                );
+                let _ = reader.get_mut().write_all(response.as_bytes());
+                let _ = reader.get_mut().flush();
+            }
+        });
+        (addr, paths)
+    }
+
+    fn stub_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(5))
+            .connect_timeout(std::time::Duration::from_secs(3))
+            .build()
+            .expect("client")
+    }
+
+    /// 主链成功：releases 列表解析出完整 outcome（notes + 多版本 pending）。
+    #[tokio::test]
+    async fn main_chain_github_api_parses_full_outcome() {
+        let releases = serde_json::json!([
+            release_item("v0.27.4", false, "主链更新日志"),
+            release_item("v0.27.5-beta", true, "预发布"),
+            release_item("v0.27.3", false, "上一版"),
+        ])
+        .to_string();
+        let (addr, _) = spawn_http_stub(vec![(200, releases)]);
+        let url = format!("http://{addr}/repos/o/r/releases?per_page=10");
+
+        let out = super::check_via_github_api(&stub_client(), &url, "o/r", "0.27.3")
+            .await
+            .expect("主链应成功");
+        assert!(out.has_update);
+        assert_eq!(out.latest_version, "0.27.4");
+        assert!(out.release_notes.contains("主链更新日志"));
+        assert_eq!(out.updates.len(), 1, "只有 0.27.4 > 0.27.3");
+        assert!(!out.degraded);
+        assert!(out.error.is_none());
+    }
+
+    /// 主链非 2xx / 坏 JSON → Err（由调用方决定降级）。
+    #[tokio::test]
+    async fn main_chain_non_2xx_and_bad_json_return_err() {
+        let (addr, _) = spawn_http_stub(vec![(404, "{}".to_string())]);
+        let url = format!("http://{addr}/releases");
+        assert!(super::check_via_github_api(&stub_client(), &url, "o/r", "0.27.3").await.is_err());
+
+        let (addr2, _) = spawn_http_stub(vec![(200, "not json".to_string())]);
+        let url2 = format!("http://{addr2}/releases");
+        assert!(super::check_via_github_api(&stub_client(), &url2, "o/r", "0.27.3").await.is_err());
+    }
+
+    /// 镜像降级：latest.json 只判版本，notes 空、updates 空、degraded 未置位
+    /// （由 perform_update_check 统一置位）。
+    #[tokio::test]
+    async fn mirror_latest_json_reports_version_without_notes() {
+        let latest = serde_json::json!({
+            "version": "0.27.4",
+            "notes": "镜像也有 notes，但降级语义固定不采用",
+            "platforms": {},
+        })
+        .to_string();
+        let (addr, _) = spawn_http_stub(vec![(200, latest)]);
+        let candidates = vec![format!("http://{addr}/releases/latest/download/latest.json")];
+
+        let out = super::check_via_mirror_latest(&stub_client(), &candidates, "o/r", "0.27.3")
+            .await
+            .expect("镜像应成功");
+        assert!(out.has_update);
+        assert_eq!(out.latest_version, "0.27.4");
+        assert!(out.release_notes.is_empty(), "镜像降级不提供更新说明");
+        assert!(out.updates.is_empty(), "latest.json 无多版本列表");
+        assert!(!out.degraded, "degraded 由调用方置位");
+        assert!(out.error.is_none());
+    }
+
+    /// 镜像版本不高于当前 → 降级 + 无更新（不是失败）。
+    #[tokio::test]
+    async fn mirror_latest_json_no_update_is_valid_outcome() {
+        let latest = serde_json::json!({"version": "0.27.3", "platforms": {}}).to_string();
+        let (addr, _) = spawn_http_stub(vec![(200, latest)]);
+        let candidates = vec![format!("http://{addr}/latest.json")];
+
+        let out = super::check_via_mirror_latest(&stub_client(), &candidates, "o/r", "0.27.3")
+            .await
+            .expect("版本可检查就是成功降级");
+        assert!(!out.has_update);
+        assert_eq!(out.latest_version, "0.27.3");
+    }
+
+    /// 镜像坏响应（缺 version）/ 全部不可达 → Err（检查失败，不报「已是最新」）。
+    #[tokio::test]
+    async fn mirror_all_fail_returns_err_not_latest() {
+        // 缺 version 字段 + 桩关闭后连接失败：全部候选失败 → Err（不报「已是最新」）
+        let (addr, _) = spawn_http_stub(vec![(200, r#"{"notes":"no version"}"#.to_string())]);
+        let base = format!("http://{addr}");
+        let candidates = (0..2).map(|i| format!("{base}/mirror{i}/latest.json")).collect::<Vec<_>>();
+        let _ = super::check_via_mirror_latest(&stub_client(), &candidates, "o/r", "0.27.3")
+            .await
+            .expect_err("坏响应 + 连接失败必须整体失败，不得报「已是最新」");
     }
 }

@@ -156,3 +156,50 @@ pub async fn migrate_0_4_to_0_5(
     }
     tracing::info!("0.4→0.5 配置迁移完成");
 }
+
+// ── 0.27.4：网络策略启动初始化 ──────────────────────────────────────────────
+
+/// 网络配置启动初始化：legacy `engine:_global_proxy` 一次性迁移 + 返回当前快照。
+///
+/// 迁移条件（同时满足，保证幂等且不覆盖用户显式保存的空配置）：
+/// - `network` 分片 KV 不存在（首次进入 0.27.4）；
+/// - legacy 值含非空代理地址且能通过校验。
+///
+/// legacy 值本身不删除（不再读取，避免误清用户数据）。
+pub async fn init_network_config(pool: &sqlx::SqlitePool) -> NetworkConfig {
+    match ConfigStore::get_checked::<NetworkConfig>(pool).await {
+        Ok(cfg) => cfg,
+        Err(reason) => {
+            tracing::debug!(%reason, "network 分片缺失，尝试 legacy 迁移");
+            let legacy = get_engine_config(pool, "_global_proxy").await;
+            let Some(legacy) = legacy else {
+                return NetworkConfig::default();
+            };
+            let http = legacy
+                .get("http")
+                .and_then(|s| s.as_str())
+                .unwrap_or_default();
+            let https = legacy
+                .get("https")
+                .and_then(|s| s.as_str())
+                .unwrap_or_default();
+            if http.trim().is_empty() && https.trim().is_empty() {
+                return NetworkConfig::default();
+            }
+            match NetworkConfig::from_raw(http, https) {
+                Ok(migrated) => {
+                    if let Err(e) = ConfigStore::set(pool, &migrated).await {
+                        tracing::warn!(%e, "网络配置迁移写入失败，本次按空配置直连");
+                        return NetworkConfig::default();
+                    }
+                    tracing::info!("网络配置：已从 legacy engine:_global_proxy 迁移到 network 分片");
+                    migrated
+                }
+                Err(e) => {
+                    tracing::warn!(%e, "legacy 代理配置无效，按空配置直连（请在网络设置重新填写）");
+                    NetworkConfig::default()
+                }
+            }
+        }
+    }
+}

@@ -34,10 +34,8 @@ pub async fn test_cloud_stt() -> Result<serde_json::Value, String> {
     let _is_chat_asr = endpoint.uses_chat_completion_asr;
 
     let audio_url = "https://isv-data.oss-cn-hangzhou.aliyuncs.com/ics/MaaS/ASR/test_audio/BAC009S0764W0121.wav";
-    let dl_client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| format!("HTTP client 创建失败: {e}"))?;
+    // 0.27.4：经 net 工厂（CloudStt 类别，代理策略生效）
+    let dl_client = crate::infra::net::client(crate::infra::net::RequestCategory::CloudStt);
 
     let resp = dl_client
         .get(audio_url)

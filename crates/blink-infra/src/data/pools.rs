@@ -268,6 +268,10 @@ async fn init_ai_schema(pool: &SqlitePool) -> Result<(), String> {
     crate::data::conversations::init_db(pool)
         .await
         .map_err(|e| e.to_string())?;
+    // 0.27.5：提示词库（chat 插入 / editor 预设共用资产）
+    crate::data::prompt_library::init_db(pool)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 

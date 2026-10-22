@@ -16,8 +16,8 @@
 mod transform;
 
 pub use transform::{
-    EditorTransformError, TRANSFORM_SYSTEM_INSTRUCTION, TransformOutput, TransformScope,
-    evaluate_transform_output, plan_transform,
+    EditorTransformError, TranslateTarget, TransformOutput, TransformScope,
+    evaluate_transform_output, plan_transform, resolve_translate_target,
 };
 
 use serde::{Deserialize, Serialize};

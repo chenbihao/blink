@@ -308,6 +308,8 @@ function renderCheckResult(r) {
     const progressEl = document.getElementById("about-update-progress");
     if (!updateEl) return;
     updateEl.hidden = false;
+    // 0.27.4：镜像降级（主站不可达、镜像判出版本）时追加说明，如实标注
+    const degradedHint = r.degraded ? t("about.update.degraded") : "";
     if (r.error) {
         updateEl.textContent = friendlyUpdateError(r.error);
     } else if (r.has_update) {
@@ -316,11 +318,11 @@ function renderCheckResult(r) {
         const link = r.release_url
             ? ` · <a href="#" class="external-link about-update-link" data-url="${r.release_url}">查看</a>`
             : "";
-        updateEl.innerHTML = `新版本 ${r.latest_version} 可用${link}`;
+        updateEl.innerHTML = `新版本 ${r.latest_version} 可用${degradedHint}${link}`;
         if (installBtn) installBtn.hidden = false;
         renderUpdateNotes(notesEl, r);
     } else {
-        updateEl.textContent = `已是最新版本（${r.current_version}）`;
+        updateEl.textContent = `已是最新版本（${r.current_version}）${degradedHint}`;
     }
     if (!r.has_update) {
         if (notesEl) notesEl.hidden = true;

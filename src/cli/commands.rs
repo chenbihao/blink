@@ -67,6 +67,14 @@ pub fn dispatch(cli: Cli) -> i32 {
 
     // 0.14.6 §2.2：创建 DomainEnv 桥接器（CLI 模式最小化，仅注入 Capability）。
     let pools = app.state::<crate::infra::data::DbPools>().inner().clone();
+    // 0.27.4：CLI 出网与桌面共享网络策略——读 network 分片注入 net 工厂
+    // （含 legacy _global_proxy 一次性迁移，同 app 启动逻辑）。
+    let network_config = tauri::async_runtime::block_on(async {
+        crate::app::config::init_network_config(&pools.config).await
+    });
+    if let Err(e) = crate::infra::net::global().set_policy(network_config.to_policy()) {
+        tracing::warn!(%e, "CLI 网络策略注入失败，按显式直连");
+    }
     let domain_env = Arc::new(crate::app::domain_env::TauriDomainEnv::new(
         app.handle().clone(),
         pools.clone(),

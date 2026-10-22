@@ -21,6 +21,7 @@ pub mod mcp; // 0.13.0：MCP client（消费外部 tool，包装进 Tool 适配�
 pub mod ocr; // 0.22.4：OCR 领域协议（config/error/layout/types 已下沉 blink-infra）
 pub mod palette; // 0.20.7：配色核心（OKLab/OKLCH/聚类/角色/搭配/对比度，Rust 单一真源）
 pub mod plugin;
+pub mod prompt_library; // 0.27.5：提示词库 domain 层（内置目录 + 有效内容解析 + 校验）
 pub mod resource; // 0.23.12：统一资源 ref 层（ResourceStore 协议 + DefaultResourceStore）
 pub mod schema; // 0.14.6：ToolSchema 公共基（CapabilitySchema 共享）
 pub mod search;

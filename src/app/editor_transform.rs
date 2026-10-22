@@ -28,9 +28,10 @@ use crate::domain::ai::chat_service::{ChatService, ConversationKind};
 use crate::domain::ai::message::{ChatMessage, CompletionRequest, Role};
 use crate::domain::ai::registry::AIProviderRegistry;
 use crate::domain::editor::{
-    EditorError, EditorTransformError, TRANSFORM_SYSTEM_INSTRUCTION, TransformOutput,
-    TransformScope, evaluate_transform_output, plan_transform,
+    EditorError, EditorTransformError, TranslateTarget, TransformOutput, TransformScope,
+    evaluate_transform_output, plan_transform, resolve_translate_target,
 };
+use crate::domain::prompt_library;
 use crate::infra::event_names::EventNames;
 
 /// 整理请求硬超时（毫秒）。整理是用户显式发起的成段任务，输入门 24K token，
@@ -69,10 +70,10 @@ impl EditorTransformService {
     /// → 后台调用 provider → 完成事件（只产候选，不改正文）。
     ///
     /// 结构化错误经 command 层投影：`ai_already_active`（携带 activeWindow）、
-    /// `unsupported`（AI 未配置/输入超限/上下文过小）、`stale_session`、
+    /// `unsupported`（AI 未配置/输入超限/上下文过小/预设不可用）、`stale_session`、
     /// `cancelled`。
-    /// 8 参对一次整理调用的完整上下文（会话身份 + 范围 + 文本 + 版本 + 资源引用）
-    /// 是刻意设计——打包成 struct 会掩盖"每次调用都必须全量携带"的契约。
+    /// 参数对一次整理调用的完整上下文（会话身份 + 范围 + 文本 + 版本 + 资源引用 +
+    /// 0.27.6 预设）是刻意设计——打包成 struct 会掩盖"每次调用都必须全量携带"的契约。
     #[allow(clippy::too_many_arguments)]
     pub async fn start(
         &self,
@@ -83,6 +84,8 @@ impl EditorTransformService {
         text: String,
         revision: u64,
         range_handle: String,
+        preset: Option<&str>,
+        translate_target: Option<TranslateTarget>,
     ) -> Result<u64, EditorError> {
         if !editor.verify_active_session(&session_ref, generation) {
             return Err(EditorError::StaleSession);
@@ -92,6 +95,35 @@ impl EditorTransformService {
                 detail: "整理范围为空".into(),
             });
         }
+
+        // 0.27.6 §3.9：预设解析并**冻结正文/名称**——请求发出后库内容变化
+        // 不影响在途请求（§5.6.2）。None = 默认整理（旧调用语义不变）。
+        let pool = self
+            .app
+            .try_state::<crate::infra::data::DbPools>()
+            .map(|pools| pools.ai.clone())
+            .ok_or_else(|| EditorError::Unsupported {
+                detail: "AI 未配置，请先在设置中配置模型".into(),
+            })?;
+        let preset_id = preset.unwrap_or(prompt_library::BUILTIN_EDITOR_TIDY);
+        let frozen_preset =
+            resolve_frozen_preset(&pool, preset_id).await?;
+        // 互译预设：显式目标优先，未指定按输入主语言判定（§3.9）
+        let translate_target = if frozen_preset.is_translate {
+            Some(resolve_translate_target(translate_target, &text))
+        } else {
+            None
+        };
+        let instruction = match translate_target {
+            Some(target) => format!(
+                "{}
+
+{}",
+                frozen_preset.instruction,
+                target.instruction_line()
+            ),
+            None => frozen_preset.instruction.clone(),
+        };
 
         // 主窗口当前选中的模型（policy light/main/显式自选 + 失效回落链）。
         let entries = self
@@ -113,8 +145,9 @@ impl EditorTransformService {
                 detail: "AI 未配置，请先在设置中配置模型".into(),
             })?;
 
-        // 输入门 + max_tokens 推导（§3.10 冻结公式；超限不截断发送）。
-        let plan = plan_transform(text, entries.model.context_window).map_err(map_plan_error)?;
+        // 输入门 + max_tokens 推导（§3.10 公式；0.27.6 起指令 token 一并计入）。
+        let plan = plan_transform(&instruction, text, entries.model.context_window)
+            .map_err(map_plan_error)?;
 
         // 活跃槽互斥（同服务不并发整理）；guard 不跨 await——预检 → 全局注册
         // → 复查落槽（竞争时回滚全局槽位）。
@@ -153,6 +186,8 @@ impl EditorTransformService {
             generation,
             request_id,
             scope = scope.as_str(),
+            preset = %preset_id,
+            translate = ?translate_target.map(|t| t.label()),
             revision,
             input_chars = plan.input_text.chars().count(),
             input_tokens = plan.input_tokens,
@@ -162,12 +197,13 @@ impl EditorTransformService {
         );
 
         let app = self.app.clone();
+        let preset_name = frozen_preset.name.clone();
         tokio::spawn(async move {
             let req = CompletionRequest {
                 messages: vec![
                     ChatMessage {
                         role: Role::System,
-                        content: TRANSFORM_SYSTEM_INSTRUCTION.to_string(),
+                        content: instruction,
                         tool_call_id: None,
                         tool_name: None,
                     },
@@ -217,6 +253,10 @@ impl EditorTransformService {
                                 "revisedText": text,
                                 "revision": revision,
                                 "rangeHandle": range_handle,
+                                // 0.27.6 §3.9：候选标注当前动作（预设名 + 互译方向）
+                                "presetName": preset_name,
+                                "translateTarget": translate_target
+                                    .map(|t| t.label()),
                             }),
                         )
                     }
@@ -383,6 +423,57 @@ impl EditorTransformService {
                 detail: format!("整理状态锁失败: {e}"),
             }
         })
+    }
+}
+
+// ── 0.27.6 预设解析（§3.9 / §5.6.1）────────────────────────────────────────
+
+/// 已冻结的预设执行材料（请求发出后不再随库变化）。
+struct FrozenPreset {
+    /// 有效指令正文（内置未覆盖=默认内容 / 已覆盖=用户值 / 自建=用户正文）。
+    instruction: String,
+    /// 展示名（完成事件 presetName，前端候选标注）。
+    name: String,
+    /// 是否互译内置预设（决定是否消费 translate_target / 追加目标语言行）。
+    is_translate: bool,
+}
+
+/// 解析预设：库行（scope=editor）→ 冻结正文；内置条目读库失败时回落
+/// 随版本目录默认内容（§3.7：默认整理始终可解析为兼容兜底）；自建条目
+/// 不存在/非 editor 作用域 → Unsupported（不静默换默认预设）。
+async fn resolve_frozen_preset(
+    pool: &sqlx::SqlitePool,
+    preset_id: &str,
+) -> Result<FrozenPreset, EditorError> {
+    match blink_infra::data::prompt_library::get(pool, preset_id).await {
+        Ok(row) => {
+            if row.scope != blink_infra::data::prompt_library::PromptScope::Editor {
+                return Err(EditorError::Unsupported {
+                    detail: "该提示词不属于编辑器预设".into(),
+                });
+            }
+            Ok(FrozenPreset {
+                instruction: prompt_library::effective_content_of_row(&row).to_string(),
+                name: row.name,
+                is_translate: row.builtin && row.id == prompt_library::BUILTIN_EDITOR_TRANSLATE,
+            })
+        }
+        Err(_) => {
+            // 库行缺失：内置条目回落目录默认内容；自建条目无兜底
+            let catalog = prompt_library::BUILTIN_CATALOG
+                .iter()
+                .find(|entry| entry.id == preset_id);
+            match catalog {
+                Some(entry) => Ok(FrozenPreset {
+                    instruction: entry.content.to_string(),
+                    name: entry.default_name.to_string(),
+                    is_translate: entry.id == prompt_library::BUILTIN_EDITOR_TRANSLATE,
+                }),
+                None => Err(EditorError::Unsupported {
+                    detail: "预设不存在或已删除，请重新选择".into(),
+                }),
+            }
+        }
     }
 }
 

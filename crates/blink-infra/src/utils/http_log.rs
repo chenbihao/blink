@@ -51,8 +51,19 @@ fn body_log_enabled() -> bool {
 /// 内部持有 `rig_reqwest::ReqwestClient`（rig 0.43 起默认 transport 拆到 rig-reqwest；
 /// `Default` 即 rig 的进程共享 client，包装共享 reqwest 连接池，clone 廉价），
 /// 满足 rig `Client<H>` 对 `H: Clone + Debug + Default` 的约束。
+///
+/// 0.27.4：AI factory 改用 [`LoggingHttpClient::from_net`]——client 来自 net 工厂
+/// 的 AI 类别（代理/直连策略统一接线）；`Default`（rig 共享 client）保留给测试。
 #[derive(Debug, Clone, Default)]
 pub struct LoggingHttpClient(pub ReqwestClient);
+
+impl LoggingHttpClient {
+    /// 从 net 工厂构造（生产路径）：代理策略与 network generation 生效，
+    /// provider 重建（fingerprint 变化）后自动换新 client。
+    pub fn from_net() -> Self {
+        Self(crate::net::rig_http_client())
+    }
+}
 
 /// 共享 reqwest client 未构建成功（reqwest builder 失败，极罕见）时 send 报的占位错误。
 #[derive(Debug)]

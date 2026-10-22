@@ -576,6 +576,12 @@ pub struct StartEditorTransformRequest {
     pub text: String,
     pub revision: u64,
     pub range_handle: String,
+    /// 0.27.6：提示词库预设 id（scope=editor）；None = 默认整理
+    /// （`builtin.editor.tidy`，保持旧调用行为，§5.6.1）。
+    pub preset: Option<String>,
+    /// 0.27.6：互译显式目标（`"zh" | "en"`），仅互译预设消费；
+    /// None = 按输入主语言自动判定。
+    pub translate_target: Option<String>,
 }
 
 /// start_editor_transform 结果：全局单活跃协调器分配的请求 id。
@@ -610,6 +616,7 @@ pub async fn start_editor_transform(
         session_ref = %request.session_ref,
         generation = request.generation,
         scope = request.scope.as_str(),
+        preset = request.preset.as_deref().unwrap_or("default"),
         revision = request.revision,
         text_chars = request.text.chars().count(),
         "start_editor_transform"
@@ -617,6 +624,12 @@ pub async fn start_editor_transform(
 
     let editor = service(&app)?;
     let transform = editor_transform_service(&app)?;
+    let translate_target = match request.translate_target.as_deref() {
+        None => None,
+        Some(raw) => Some(crate::domain::editor::TranslateTarget::parse(raw).ok_or_else(
+            || CommandError::new("unsupported", format!("未知互译目标: {raw}"), false),
+        )?),
+    };
     let request_id = transform
         .start(
             &editor,
@@ -626,6 +639,8 @@ pub async fn start_editor_transform(
             request.text,
             request.revision,
             request.range_handle,
+            request.preset.as_deref(),
+            translate_target,
         )
         .await?;
     Ok(EditorTransformStartResult { request_id })

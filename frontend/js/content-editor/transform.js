@@ -21,6 +21,7 @@ import {normalizeError} from "../shared/tauri.js";
 import {EVENTS} from "../shared/event-names.js";
 import {t} from "../i18n/index.js";
 import {computeDiff, diffToHtml, hasChanges} from "./diff.js";
+import {composeActionLabel} from "./preset-menu.js";
 
 /**
  * "仍在处理中"档位阈值（秒，0.23.7）。
@@ -179,11 +180,13 @@ export class EditorTransformController {
      * 发起整理。scope="selection" 冻结当前选区；scope="dictation" 定位拼接文本。
      * 已有运行请求时先取消（§3.7 新请求取消旧请求）；已有候选直接丢弃。
      * @param {"selection"|"dictation"} scope
-     * @param {{text?: string, handle?: {handle: object, text: string, blockSafe: boolean}|null}} [opts]
+     * @param {{text?: string, handle?: {handle: object, text: string, blockSafe: boolean}|null,
+     *          preset?: string|null, translateTarget?: "zh"|"en"|null}} [opts]
      *   dictation 的范围文本（本次听写拼接）；handle = Adapter 已冻结的
-     *   本轮听写范围（0.23.6 §5.7，提供时跳过 Engine 内 indexOf 定位）
+     *   本轮听写范围（0.23.6 §5.7，提供时跳过 Engine 内 indexOf 定位）；
+     *   preset/translateTarget = 0.27.6 预设（null = 默认整理）。
      */
-    async start(scope, {text = "", handle = null} = {}) {
+    async start(scope, {text = "", handle = null, preset = null, translateTarget = null} = {}) {
         const session = this._getSession();
         if (!session || !session.isActive) {
             this._callbacks.onError?.(t("editor.transform.err.stale_session"));
@@ -222,6 +225,8 @@ export class EditorTransformController {
                 text: frozen.text,
                 revision: this._adapter.revision,
                 rangeHandle: JSON.stringify(frozen.handle),
+                preset,
+                translateTarget,
             });
             if (op !== this._opSeq) {
                 // 已被更新一代请求取代：追认取消，不写回任何状态。
@@ -310,6 +315,11 @@ export class EditorTransformController {
             revisedText: typeof p.revisedText === "string" ? p.revisedText : "",
             frozenRevision: p.revision,
             stale,
+            // 0.27.6 §3.9：候选注明本次动作（预设名 + 互译方向）
+            actionLabel: composeActionLabel(
+                typeof p.presetName === "string" ? p.presetName : null,
+                p.translateTarget === "zh" || p.translateTarget === "en" ? p.translateTarget : null,
+            ),
         };
         this.pendingRun = null;
         this._setPhase("candidate");
@@ -536,7 +546,7 @@ export class EditorTransformController {
 
         const cand = this.candidate;
         if (title) {
-            title.textContent = t(cand.scope === "dictation"
+            title.textContent = cand.actionLabel || t(cand.scope === "dictation"
                 ? "editor.transform.cardTitleDictation"
                 : "editor.transform.cardTitleSelection");
         }

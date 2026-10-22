@@ -12,7 +12,9 @@
  * `clipboard_config`（0.10.7）/ `disabled_builtin_actions` /
  * `disabled_context_bindings` / `disabled_chord_actions`
  *
- * **引擎配置**：`file_search` / `start_menu_config` / `calc_config` / `global_proxy`
+ * **引擎配置**：`file_search` / `start_menu_config` / `calc_config`
+ *
+ * **网络代理**（0.27.4）：`network` —— NetworkConfig 分片（`global_proxy` 为兼容别名）
  *
  * **插件配置**：`plugin_config`
  *
