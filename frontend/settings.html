@@ -355,6 +355,17 @@
                         <span class="status-badge status-unknown" id="file-search-active-source">…</span>
                     </div>
 
+                    <!-- 0.26.23：内置引擎入口上移紧跟「当前来源」——状态徽章与其解决办法相邻，
+                         来源块（当前来源/内置引擎/端口）与参数块（最大结果数）分块清晰 -->
+                    <div class="setting-row" hidden id="file-search-managed-row">
+                        <label class="setting-label" data-i18n="engine.file_search.managed_row">内置搜索引擎</label>
+                        <button class="btn-small" id="file-search-managed-action" type="button"></button>
+                    </div>
+                    <div class="download-progress" hidden id="file-search-managed-progress">
+                        <div class="download-progress__bar"><div class="download-progress__fill"></div></div>
+                        <span class="download-progress__text"></span>
+                    </div>
+
                     <div class="setting-row">
                         <label class="setting-label" data-i18n="engine.everything.port.label" for="everything-port"
                                id="everything-port-label">Everything 端口<span class="field-hint-icon"
@@ -370,15 +381,6 @@
                         </div>
                         <span class="status-badge status-unknown" id="everything-status">…</span>
                         <button class="btn-small" data-i18n="engine.probe" id="probe-everything" type="button">重新探测</button>
-                    </div>
-
-                    <div class="setting-row" hidden id="file-search-managed-row">
-                        <label class="setting-label" data-i18n="engine.file_search.managed_row">内置搜索引擎</label>
-                        <button class="btn-small" id="file-search-managed-action" type="button"></button>
-                    </div>
-                    <div class="download-progress" hidden id="file-search-managed-progress">
-                        <div class="download-progress__bar"><div class="download-progress__fill"></div></div>
-                        <span class="download-progress__text"></span>
                     </div>
 
                     <div class="setting-row">
