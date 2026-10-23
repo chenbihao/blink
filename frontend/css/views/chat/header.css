@@ -1,4 +1,4 @@
-/* chat header — 语音指示器 / skill 提示 / 面包屑 / 模型选择器（从 chat.css 拆分，0.14.6 §4.3） */
+/* chat header — 语音指示器 / 面包屑 / 模型选择器（从 chat.css 拆分，0.14.6 §4.3；0.27.7 skill 提示迁出至 popup.css 命令面板） */
 
 /* ── 语音指示器（0.12.3 对齐主窗口 G1） ──────────── */
 
@@ -22,74 +22,6 @@
     font-size: var(--text-xs, 12px);
     color: var(--text-faint);
     white-space: nowrap;
-}
-
-/* ── 0.13.3 /skill 命令提示 ──────────────────────────────────────────── */
-
-.skill-hint {
-    position: absolute;
-    bottom: 100%;
-    left: 0;
-    right: 0;
-    max-height: 280px;
-    overflow-y: auto;
-    background: var(--surface);
-    border: 1px solid var(--border-glow);
-    border-radius: 8px 8px 0 0;
-    box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.08);
-    z-index: 20;
-    padding: 4px 0;
-}
-
-.skill-hint[hidden] {
-    display: none;
-}
-
-.skill-hint-empty {
-    padding: 10px 14px;
-    font-size: var(--text-sm, 13px);
-    color: var(--text-sub);
-    font-style: normal;
-}
-
-.skill-hint-item {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 6px 14px;
-    cursor: pointer;
-    transition: background var(--transition-fast);
-}
-
-.skill-hint-item:hover {
-    background: var(--accent-bg);
-}
-
-.skill-hint-name {
-    font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
-    font-size: var(--text-sm, 13px);
-    font-weight: var(--weight-medium, 500);
-    color: var(--text);
-    flex-shrink: 0;
-}
-
-.skill-hint-source {
-    font-size: 10px;
-    padding: 1px 6px;
-    border-radius: 3px;
-    background: var(--surface-2);
-    color: var(--text-sub);
-    font-weight: var(--weight-semibold, 600);
-    flex-shrink: 0;
-}
-
-.skill-hint-desc {
-    font-size: var(--text-xs, 12px);
-    color: var(--text-sub);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    flex: 1;
 }
 
 /* 0.12.7 §1：面包屑标题（文件夹路径 + 对话标题） */

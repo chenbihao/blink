@@ -453,12 +453,23 @@ export function getContextWindowStatus(conversationId) {
 }
 
 /**
- * 强制压缩当前对话的上下文窗口。
+ * 0.27.8: 手动压缩当前对话（/compact 与 80% 告警按钮共用）。
+ * command 只做预检即返回；任务状态经 CHAT_COMPACT_JOB 事件按
+ * job_id/conversation_id 推送（running/succeeded/no_op/failed/cancelled）。
  * @param {string} conversationId
- * @returns {Promise<{estimated_tokens: number, context_limit: number, usage_percent: number, last_compressed: boolean, last_compressed_count: number, last_recall_count: number, preamble_tokens: number, pending_message_tokens: number, history_tokens: number, tools_tokens: number, protocol_overhead_tokens: number, multimodal_tokens: number, reserved_output_tokens: number, safety_margin_tokens: number, effective_input_limit: number, remaining_tokens: number, context_limit_source: string, confidence: string, conversation_id: string, provider_id: string, model_id: string, raw_estimated_tokens: number, summary_tokens: number, summarized_count: number, summary_enabled: boolean}>}
+ * @returns {Promise<{status: string, job_id?: number}>}
  */
-export function compressContextNow(conversationId) {
-    return invoke("compress_context_now", {conversationId});
+export function compactConversation(conversationId) {
+    return invoke("compact_conversation", {conversationId});
+}
+
+/**
+ * 0.27.8: 列出提示词库条目（/prompt 面板数据源，scope=chat）。
+ * @param {string} scope "chat" | "editor"
+ * @returns {Promise<Array<{id: string, name: string, content: string, effectiveContent: string, scope: string, builtin: boolean, hidden: boolean, sortOrder: number, revision: number}>>}
+ */
+export function listPromptLibrary(scope) {
+    return invoke("prompt_library_list", {scope});
 }
 
 /**
@@ -489,6 +500,17 @@ export function getMcpToolSources() {
  */
 export function getComposerBarSnapshot(conversationId) {
     return invoke("get_composer_bar_snapshot", {conversationId});
+}
+
+// ── 0.27.7 斜杠命令动态快照 ──────────────────────────────
+
+/**
+ * 获取斜杠命令动态内容快照（/tools 工具池 /mcp 连接状态 /skill 可用性）。
+ * 只读无副作用——不因查看主动连接 MCP。
+ * @returns {Promise<{mode: string, tools: Array<{name: string, description: string, source: string}>, tools_empty_reason?: string, tools_source: string, mcp_servers: Array<{name: string, transport: string, status: string, tool_count: number, tool_names: string[]}>, skills_enabled: boolean, skill_count: number}>}
+ */
+export function getSlashCommandSnapshot() {
+    return invoke("get_slash_command_snapshot");
 }
 
 // ── Events ───────────────────────────────────────
@@ -522,11 +544,22 @@ export function listenChatTitleUpdated(handler) {
 
 /**
  * 监听上下文窗口状态更新事件（0.13.6）。
- * @param {(event: {payload: {estimated_tokens: number, context_limit: number, usage_percent: number, last_compressed: boolean, last_compressed_count: number, last_recall_count: number, preamble_tokens: number, pending_message_tokens: number, history_tokens: number, tools_tokens: number, protocol_overhead_tokens: number, multimodal_tokens: number, reserved_output_tokens: number, safety_margin_tokens: number, effective_input_limit: number, remaining_tokens: number, context_limit_source: string, confidence: string, conversation_id: string, provider_id: string, model_id: string, raw_estimated_tokens: number, summary_tokens: number, summarized_count: number, summary_enabled: boolean}}) => void} handler
+ * @param {(event: {payload: object}) => void} handler
  * @returns {Promise<() => void>} unsubscribe
  */
 export function listenContextStatus(handler) {
     return listen(EVENTS.CHAT_CONTEXT_STATUS, handler);
+}
+
+/**
+ * 0.27.8: 监听手动压缩任务状态事件（/compact 与告警按钮共用）。
+ * payload: { job_id, conversation_id, status: running|succeeded|no_op|failed|cancelled,
+ *            error?, covered_count?, kept_turns? }
+ * @param {(event: {payload: object}) => void} handler
+ * @returns {Promise<() => void>} unsubscribe
+ */
+export function listenChatCompactJob(handler) {
+    return listen(EVENTS.CHAT_COMPACT_JOB, handler);
 }
 
 /**

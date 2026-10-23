@@ -12,11 +12,12 @@
 //! 摘要是优化项，不是正确性依赖。
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use tokio::sync::mpsc;
 
 use crate::ai::agent_provider::{AgentProvider, ChatStreamChunk};
+use crate::event_names::EventNames;
 use blink_infra::data::conversations::{MERGE_CONV_PREFIX, SUMMARY_CONV_PREFIX};
 
 use super::ChatService;
@@ -31,6 +32,49 @@ impl Drop for SummaryInFlightGuard<'_> {
     fn drop(&mut self) {
         self.0.store(false, Ordering::SeqCst);
     }
+}
+
+/// 0.27.8 手动压缩任务 id 发号器（进程内单调递增；重复触发可识别，phase §3.8）。
+static MANUAL_COMPACT_JOB_SEQ: AtomicU64 = AtomicU64::new(1);
+
+/// 手动压缩任务内部分类哨兵串：任务结果为 no-op（未满边界，不动 DB）。
+const MANUAL_COMPACT_NOOP: &str = "__noop__";
+/// 手动压缩任务内部分类哨兵串：陈旧结果（水位已变，放弃提交）。
+const MANUAL_COMPACT_STALE: &str = "__stale__";
+/// 手动压缩加载水位以上消息的上限（防御性；正常会话远达不到）。
+const MANUAL_COMPACT_LOAD_LIMIT: i64 = 100_000;
+
+/// 0.27.8 手动压缩预检结果（`compact_conversation` command 投影 + 任务状态词）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ManualCompactPrecheck {
+    /// 任务已启动，完成后经 `CHAT_COMPACT_JOB` 事件推送。
+    Started { job_id: u64 },
+    /// AI 请求进行中（流式生成中不允许压缩——与旧 compress_context_now 同门禁）。
+    Busy,
+    /// 已有摘要任务在途（重复触发可识别）。
+    InFlight,
+    /// 水位以上无消息（空会话/新会话）。
+    NoContent,
+    /// 未满手动边界（完整 user turn 不足），no-op 不动 DB。
+    NoOp,
+}
+
+/// 0.27.8 手动压缩任务事件载荷（`CHAT_COMPACT_JOB`）。
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct CompactJobEvent {
+    pub job_id: u64,
+    pub conversation_id: String,
+    /// `running` / `succeeded` / `no_op` / `failed` / `cancelled`（陈旧结果归
+    /// `cancelled`——本次任务未生效，原摘要水位保持）。
+    pub status: &'static str,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// 成功时被摘要覆盖的消息数。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub covered_count: Option<usize>,
+    /// 保留的完整 user turn 数。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kept_turns: Option<usize>,
 }
 
 /// 0.21.23: 记忆健康度一览（composer bar popup 展示）。
@@ -173,12 +217,8 @@ impl ChatService {
         Some(trimmed.to_string())
     }
 
-    /// 0.21.23: 摘要任务是否在途（手动压缩路径的显式提示用）。
-    pub fn is_summary_in_flight(&self) -> bool {
-        self.summary_in_flight.load(Ordering::SeqCst)
-    }
-
-    /// 0.21.23: 摘要开关快照（手动压缩 command 与 Done 分发共用门控）。
+    /// 0.21.23: 摘要开关快照（Done 分发门控用；旧 compress_context_now 调用方
+    /// 已随 0.27.8 删除，现仅 interceptor 消费）。
     pub async fn summary_enabled_snapshot(&self) -> bool {
         let cfg_handle = self.persistent_memory.config_handle();
         let cfg = cfg_handle.read().await;
@@ -534,6 +574,327 @@ impl ChatService {
                 );
             }
         }
+    }
+
+    // ── 0.27.8 手动压缩（/compact 与 80% 告警按钮共用，phase §3.8/§5.8） ──────
+
+    /// 手动压缩入口：预检（单活跃/在途/无内容/未满边界）后 spawn 后台任务。
+    ///
+    /// 与自动摘要的关键差异（§5.8）：
+    /// - **不受全局 summary_enabled 约束**——显式 /compact 可生成，成功后为该
+    ///   会话记录手动摘要启用状态（load 侧据此注入，§5.8.2）
+    /// - **手动边界**：保留最近 `MANUAL_COMPACT_KEEP_TURNS` 个完整 user turn，
+    ///   压缩其之前全部消息（自动路径按 token 水位裁剪边界，两者独立）
+    /// - **冷构造 agent**：直接按当前模型配置构造无工具裸 Agent，不要求先发
+    ///   消息建立缓存（旧 compress_context_now 的限制在此解除）
+    /// - **CAS 提交**：冻结高水位，编辑/截断/删除推进过水位则陈旧结果放弃
+    pub async fn start_manual_compact(
+        self: &Arc<Self>,
+        conversation_id: &str,
+    ) -> ManualCompactPrecheck {
+        // 1. AI 请求进行中不允许压缩（与旧 compress_context_now 同门禁：
+        //    生成中的注入预算与 prompt 存在时序窗口）
+        if self.current_request_context().is_some() {
+            return ManualCompactPrecheck::Busy;
+        }
+        // 2. 摘要任务在途（自动或手动共用单槽）——重复触发可识别
+        if self
+            .summary_in_flight
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            tracing::debug!(conversation_id, "手动压缩: 已有摘要任务在途，跳过");
+            return ManualCompactPrecheck::InFlight;
+        }
+        // 确保所有退出路径都释放标志（含预检 early-return）
+        let _summary_guard = SummaryInFlightGuard(&self.summary_in_flight);
+
+        // 3. 预检：水位以上是否有消息
+        let pool = self.persistent_memory.pool().clone();
+        let watermark = match blink_infra::data::conversations::get_summarized_until(
+            &pool,
+            conversation_id,
+        )
+        .await
+        {
+            Ok(wm) => wm,
+            Err(e) => {
+                tracing::warn!(conversation_id, error = %e, "手动压缩: 读取水位失败");
+                // 水位读不出按 0 处理（全量候选），任务内再全量加载
+                0
+            }
+        };
+        let count = blink_infra::data::conversations::count_messages_after_watermark(
+            &pool,
+            conversation_id,
+            watermark,
+        )
+        .await
+        .unwrap_or(0);
+        if count == 0 {
+            return ManualCompactPrecheck::NoContent;
+        }
+
+        // 4. spawn 后台任务；job 事件按 job_id/conversation_id 推送状态
+        let job_id = MANUAL_COMPACT_JOB_SEQ.fetch_add(1, Ordering::Relaxed);
+        let chat = self.clone();
+        let conv = conversation_id.to_string();
+        tokio::spawn(async move {
+            chat.run_manual_compact_job(job_id, &conv, watermark).await;
+        });
+        tracing::info!(conversation_id, job_id, "手动压缩: 任务已启动");
+        ManualCompactPrecheck::Started { job_id }
+    }
+
+    /// 手动压缩后台任务主体：加载 → turn 边界 → 分段摘要 → 合并 → CAS 提交。
+    ///
+    /// 输入冻结 `frozen_watermark`（spawn 前读取）；提交前 CAS 校验水位未变。
+    async fn run_manual_compact_job(
+        self: Arc<Self>,
+        job_id: u64,
+        conversation_id: &str,
+        frozen_watermark: i64,
+    ) {
+        self.emit_compact_job(&CompactJobEvent {
+            job_id,
+            conversation_id: conversation_id.to_string(),
+            status: "running",
+            error: None,
+            covered_count: None,
+            kept_turns: None,
+        });
+
+        let pool = self.persistent_memory.pool().clone();
+        let orphan_ids = [
+            format!("{}{conversation_id}", SUMMARY_CONV_PREFIX),
+            format!("{}{conversation_id}", MERGE_CONV_PREFIX),
+        ];
+
+        // 任务主体；所有 early-return 只退出此块，orphan 清理与事件兜底随后执行
+        let outcome: Result<usize, String> = async {
+            // 1. 加载水位以上消息（升序）
+            let rows = match blink_infra::data::conversations::
+                load_window_messages_with_ids_after_watermark(
+                    &pool,
+                    conversation_id,
+                    MANUAL_COMPACT_LOAD_LIMIT,
+                    frozen_watermark,
+                )
+                .await
+            {
+                Ok(rows) => rows,
+                Err(e) => return Err(format!("加载消息失败: {e}")),
+            };
+
+            // 2. 手动边界（保留最近两个完整 user turn）
+            let flags: Vec<(i64, bool)> = rows
+                .iter()
+                .map(|(id, role, content)| {
+                    (*id, crate::ai::summary::is_user_prompt_row(role, content))
+                })
+                .collect();
+            let Some(boundary) = crate::ai::summary::compute_manual_compact_boundary(
+                &flags,
+                crate::ai::summary::MANUAL_COMPACT_KEEP_TURNS,
+            ) else {
+                return Err(MANUAL_COMPACT_NOOP.to_string()); // no-op 用哨兵串区分
+            };
+
+            // 3. 被压缩区间 = 水位以上、边界及之前的消息（边界本身被压缩）
+            let target_rows: Vec<&(i64, String, String)> =
+                rows.iter().filter(|(id, _, _)| *id <= boundary).collect();
+            if target_rows.is_empty() {
+                return Err(MANUAL_COMPACT_NOOP.to_string());
+            }
+
+            // 4. 反序列化 + token 估算（分段预算用）
+            use rig_core::completion::Message;
+            let mut messages: Vec<Message> = Vec::with_capacity(target_rows.len());
+            for (_, _, content) in &target_rows {
+                match serde_json::from_str::<Message>(content) {
+                    Ok(msg) => messages.push(msg),
+                    Err(e) => {
+                        tracing::warn!(conversation_id, error = %e, "手动压缩: 消息反序列化失败，跳过该条");
+                    }
+                }
+            }
+            if messages.is_empty() {
+                return Err(MANUAL_COMPACT_NOOP.to_string());
+            }
+            let tokens: Vec<usize> = messages
+                .iter()
+                .map(|msg| {
+                    crate::ai::memory::estimate_tokens(&crate::ai::memory::extract_message_text(
+                        msg,
+                    ))
+                })
+                .collect();
+
+            // 5. 分段预算（摘要模型 = 当前模型配置，冷构造无工具裸 Agent）
+            let budget = match self.resolve_current_entries(super::ConversationKind::Persistent) {
+                Ok(resolved) => crate::ai::summary::manual_summary_input_budget(
+                    resolved.model.context_window,
+                ),
+                Err(e) => {
+                    tracing::warn!(conversation_id, error = %e, "手动压缩: 解析模型失败，用默认预算");
+                    crate::ai::summary::manual_summary_input_budget(None)
+                }
+            };
+            let Some(provider) = self.build_bare_summary_agent().await else {
+                return Err("摘要 Agent 构造失败（模型未配置或凭据不可用）".to_string());
+            };
+
+            // 6. 分段生成摘要（各段结果暂存，统一提交）
+            let segments = crate::ai::summary::plan_summary_segments(&tokens, budget);
+            let summary_conv_id = format!("{}{conversation_id}", SUMMARY_CONV_PREFIX);
+            let mut segment_summaries: Vec<String> = Vec::with_capacity(segments.len());
+            for (start, end) in &segments {
+                let messages_text =
+                    crate::ai::summary::format_messages_for_summary(&messages[*start..*end]);
+                let prompt = crate::ai::summary::build_summary_prompt(&messages_text);
+                let Some(summary) = Self::run_bare_llm_text_call(
+                    &provider,
+                    &summary_conv_id,
+                    &prompt,
+                    std::time::Duration::from_secs(60),
+                )
+                .await
+                else {
+                    return Err("摘要生成失败（模型返回空结果/超时）".to_string());
+                };
+                segment_summaries.push(summary);
+            }
+
+            // 7. 多段合并（fold：相邻两段逐次合并为一段）
+            let merge_conv_id = format!("{}{conversation_id}", MERGE_CONV_PREFIX);
+            let mut merged = segment_summaries;
+            while merged.len() > 1 {
+                let a = merged.remove(0);
+                let b = merged.remove(0);
+                let prompt = crate::ai::summary::build_merge_prompt(&a, &b);
+                let Some(text) = Self::run_bare_llm_text_call(
+                    &provider,
+                    &merge_conv_id,
+                    &prompt,
+                    std::time::Duration::from_secs(30),
+                )
+                .await
+                else {
+                    return Err("分段摘要合并失败".to_string());
+                };
+                merged.push(text);
+            }
+            let Some(final_summary) = merged.into_iter().next() else {
+                return Err("分段规划为空".to_string());
+            };
+
+            // 8. CAS 提交——水位已变（编辑/截断/删除/并发摘要）则陈旧结果放弃
+            let covered_count = messages.len();
+            let summary_count =
+                blink_infra::data::conversations::count_summaries(&pool, conversation_id)
+                    .await
+                    .unwrap_or(0);
+            let next_idx = crate::ai::summary::next_summary_idx(summary_count);
+            let token_est = crate::ai::memory::estimate_tokens(&final_summary) as i64;
+            let start_rowid = target_rows.first().map(|(id, _, _)| *id).unwrap_or(0);
+            let committed = blink_infra::data::conversations::
+                insert_summary_and_advance_watermark_if_unchanged(
+                    &pool,
+                    conversation_id,
+                    next_idx,
+                    start_rowid,
+                    boundary,
+                    &final_summary,
+                    token_est,
+                    frozen_watermark,
+                )
+                .await
+                .map_err(|e| format!("摘要落库失败: {e}"))?;
+            if !committed {
+                tracing::info!(conversation_id, job_id, "手动压缩: 水位已变化，陈旧结果放弃提交");
+                return Err(MANUAL_COMPACT_STALE.to_string()); // cancelled 哨兵
+            }
+
+            // 9. 记录手动摘要启用状态（全局摘要关闭时 load 仍注入，§5.8.2）
+            if let Err(e) = blink_infra::data::conversations::set_conversation_manual_summary(
+                &pool,
+                conversation_id,
+                true,
+            )
+            .await
+            {
+                // 标记失败不回滚摘要（摘要已提交有效）；只 warn——下次手动压缩会重写
+                tracing::warn!(conversation_id, error = %e, "手动压缩: 写 manual_summary 标记失败");
+            }
+
+            // 10. 段合并 + 推送更新后的上下文状态
+            self.maybe_merge_summaries(conversation_id, &pool).await;
+            self.emit_context_status_updated(conversation_id).await;
+
+            tracing::info!(
+                conversation_id,
+                job_id,
+                start_rowid,
+                boundary,
+                covered_count,
+                token_est,
+                "手动压缩: 摘要已提交"
+            );
+            Ok(covered_count)
+        }
+        .await;
+
+        // 11. 无条件清理 LLM 调用产生的 orphan 对话
+        for orphan_id in &orphan_ids {
+            if let Err(e) =
+                blink_infra::data::conversations::delete_conversation(&pool, orphan_id).await
+            {
+                tracing::debug!(conversation_id, orphan_id, error = %e, "手动压缩: 清理 orphan 对话失败（可能不存在）");
+            }
+        }
+
+        // 12. 终态事件（no-op / cancelled 用哨兵串区分失败）
+        let event = match &outcome {
+            Ok(covered_count) => CompactJobEvent {
+                job_id,
+                conversation_id: conversation_id.to_string(),
+                status: "succeeded",
+                error: None,
+                covered_count: Some(*covered_count),
+                kept_turns: Some(crate::ai::summary::MANUAL_COMPACT_KEEP_TURNS),
+            },
+            Err(message) if message == MANUAL_COMPACT_NOOP => CompactJobEvent {
+                job_id,
+                conversation_id: conversation_id.to_string(),
+                status: "no_op",
+                error: None,
+                covered_count: None,
+                kept_turns: None,
+            },
+            Err(message) if message == MANUAL_COMPACT_STALE => CompactJobEvent {
+                job_id,
+                conversation_id: conversation_id.to_string(),
+                status: "cancelled",
+                error: Some("对话内容已变化，本次压缩结果已放弃".to_string()),
+                covered_count: None,
+                kept_turns: None,
+            },
+            Err(message) => CompactJobEvent {
+                job_id,
+                conversation_id: conversation_id.to_string(),
+                status: "failed",
+                error: Some(message.clone()),
+                covered_count: None,
+                kept_turns: None,
+            },
+        };
+        self.emit_compact_job(&event);
+    }
+
+    /// 推送手动压缩任务状态事件（定向 chat 窗口）。
+    fn emit_compact_job(&self, event: &CompactJobEvent) {
+        let payload = serde_json::to_value(event).unwrap_or_default();
+        let _ = self.emitter.emit_to("chat", EventNames::CHAT_COMPACT_JOB, payload);
     }
 
     /// 0.21.19: 段合并——summary 段 ≥ 3 时合并最旧两段。

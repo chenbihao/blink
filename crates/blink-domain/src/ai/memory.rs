@@ -459,10 +459,21 @@ impl SqliteConversationMemory {
         };
 
         // 0.21.19: 摘要启用时，读水位并跳过已摘要的消息
+        // 0.27.8: 有效摘要状态 = 全局开关 || 该会话已手动压缩（phase §5.8.2——
+        // 显式 /compact 提交过的会话即使全局摘要关闭，load 仍读水位并注入摘要
+        // 块；从未手动压缩的旧会话不被隐式开启摘要）。
         let mut summarized_count = 0usize;
         let mut summary_tokens = 0usize;
 
-        let rows = if cfg.summary_enabled {
+        let summary_effective = cfg.summary_enabled
+            || blink_infra::data::conversations::is_conversation_manual_summary(
+                &pool,
+                conversation_id,
+            )
+            .await
+            .unwrap_or(false);
+
+        let rows = if summary_effective {
             let watermark =
                 blink_infra::data::conversations::get_summarized_until(&pool, conversation_id)
                     .await
@@ -563,7 +574,8 @@ impl SqliteConversationMemory {
         drop_leading_orphan_tool_results(&mut messages);
 
         // 0.21.19: 摘要块注入——在 <memory> 块之前插入 <summary> 块
-        if cfg.summary_enabled && summarized_count > 0 {
+        // 0.27.8: 门控从全局开关改为有效会话状态（summary_effective）
+        if summary_effective && summarized_count > 0 {
             let summaries =
                 blink_infra::data::conversations::load_summaries(&pool, conversation_id)
                     .await
@@ -2617,6 +2629,96 @@ mod tests {
             !texts.iter().any(|t| t.contains("旧消息2")),
             "不应包含已摘要的旧消息2"
         );
+    }
+
+    /// 0.27.8: 全局摘要关闭，但会话手动压缩过（manual_summary 标记）——
+    /// load 仍读水位跳过已摘要消息并注入摘要块（phase §5.8.2：
+    /// 自动开关不妨碍已提交手动摘要）。
+    #[tokio::test]
+    async fn manual_summary_flag_overrides_global_switch_off() {
+        let pool = setup_pool().await;
+        let config = Arc::new(RwLock::new(MemoryConfig {
+            mode: WindowMode::TokenAware,
+            window_size: SLIDING_WINDOW_SIZE,
+            context_limit: None,
+            trigger_ratio: 0.8,
+            compress_ratio: 0.7,
+            history_budget: None,
+            recall_enabled: false,
+            recall_top_k: 3,
+            summary_enabled: false, // 全局摘要关闭
+            recall_scope: RecallScope::ThisConversation,
+        }));
+        let mem = SqliteConversationMemory::with_config(pool.clone(), config);
+
+        blink_infra::data::conversations::create_conversation(&pool, "c1", Some("test"))
+            .await
+            .unwrap();
+        blink_infra::data::conversations::create_conversation(&pool, "c2", Some("plain"))
+            .await
+            .unwrap();
+
+        let msg_json = |text: &str| serde_json::to_string(&user_msg(text)).unwrap();
+        let id1 = blink_infra::data::conversations::append_message(
+            &pool,
+            "c1",
+            "user",
+            &msg_json("旧消息1"),
+        )
+        .await
+        .unwrap();
+        let id2 = blink_infra::data::conversations::append_message(
+            &pool,
+            "c1",
+            "user",
+            &msg_json("旧消息2"),
+        )
+        .await
+        .unwrap();
+        let _id3 = blink_infra::data::conversations::append_message(
+            &pool,
+            "c1",
+            "user",
+            &msg_json("新消息1"),
+        )
+        .await
+        .unwrap();
+
+        // 手动压缩提交：摘要落库 + manual_summary 标记
+        blink_infra::data::conversations::insert_summary_and_advance_watermark(
+            &pool, "c1", 0, id1, id2, "手动摘要内容", 8,
+        )
+        .await
+        .unwrap();
+        blink_infra::data::conversations::set_conversation_manual_summary(&pool, "c1", true)
+            .await
+            .unwrap();
+
+        // c1：全局关闭但手动压缩过 → 仍注入摘要、跳过水位以下
+        let result = mem.load_with_stats("c1").await.unwrap();
+        assert_eq!(result.summarized_count, 2, "手动压缩过的会话应跳过已摘要消息");
+        let has_summary = result
+            .messages
+            .iter()
+            .any(|m| matches!(m, Message::System { content } if content.contains("<summary>")));
+        assert!(has_summary, "全局关闭不妨碍已提交手动摘要注入");
+        let texts: Vec<String> = result.messages.iter().map(extract_message_text).collect();
+        assert!(texts.iter().any(|t| t.contains("新消息1")));
+        assert!(!texts.iter().any(|t| t.contains("旧消息1")));
+
+        // c2：从未手动压缩 → 不被隐式开启摘要（无水位读取语义变化）
+        blink_infra::data::conversations::append_message(
+            &pool,
+            "c2",
+            "user",
+            &msg_json("普通消息"),
+        )
+        .await
+        .unwrap();
+        let result2 = mem.load_with_stats("c2").await.unwrap();
+        assert_eq!(result2.summarized_count, 0);
+        let texts2: Vec<String> = result2.messages.iter().map(extract_message_text).collect();
+        assert!(texts2.iter().any(|t| t.contains("普通消息")));
     }
 
     /// 摘要关闭时（summary_enabled=false），完全回退纯截断行为。

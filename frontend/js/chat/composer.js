@@ -4,11 +4,11 @@
  * 自增高 textarea + 底部工具栏（深度思考开关 + 发送/停止按钮）。
  * Enter 发送，Shift+Enter 换行。生成中按钮切换为停止。
  *
- * 0.12.3 语音输入对齐主窗口：
- * - 移除麦克风按钮，改为热键驱动（hold Alt+Space）
- * - 语音指示器（5 条波形 + "语音输入中" 标签）同主窗口 G1 风格
- * - voice-partial(target="chat") 实时更新 textarea
- * - voice-recording-start/end + voice-level 驱动指示器 show/hide + 波形动画
+ * 0.27.7 斜杠命令（phase §九）：
+ * - composer 维护单调递增 inputRevision（用户输入 / 面板开闭 / 附件增删时 +1），
+ *   命令面板等弹层的异步结果回写前经 main.js 注入的 getter 核对，过期即丢弃
+ * - IME 组合（compositionstart~end）期间不处理面板快捷采纳
+ * - 旧 /skill 专属提示弹层（0.13.3 skill-hint）由 command-palette.js 统一接管
  *
  * 0.23.12 音频附件：
  * - 当前会话 id 经 initComposer({getConversationId}) 注入，不依赖未导入的全局绑定
@@ -20,6 +20,7 @@
 import * as ipc from "./ipc.js";
 import {iconHTML} from "../shared/icon.js";
 import {buildOutgoingMessage} from "./outgoing.js";
+import {closePalette, handlePaletteKeydown, onComposerInput} from "./command-palette.js";
 
 /** @type {HTMLTextAreaElement} */
 let textarea = null;
@@ -51,9 +52,6 @@ let voiceRecording = false;
 /** @type {string} 录音开始前的 textarea 文本（用作 base，识别结果追加其后） */
 let voiceBaseText = "";
 
-/** @type {HTMLElement} /skill 命令提示弹层 */
-let skillHintEl = null;
-
 /** @type {HTMLElement} 音频附件 chips 容器（0.23.12） */
 let attachmentsEl = null;
 
@@ -66,35 +64,24 @@ let audioAttachments = [];
 /** @type {boolean} attach picker 是否进行中（防重复打开，0.23.12） */
 let attaching = false;
 
-/** @type {Array} 缓存的 skill 列表（避免每次输入都请求） */
-let cachedSkills = null;
+/**
+ * 0.27.7 composer 输入代次（§九）：用户输入、面板开/关、附件增删时 +1。
+ * 弹层异步结果回写前核对，不匹配即丢弃（沿用 skillHintRevision 先例）。
+ */
+let inputRevision = 0;
 
-/** @type {number} skill 缓存过期时间戳 */
-let skillCacheExpiry = 0;
-
-/** @type {boolean|null} 当前对话模式是否允许 Skill；null 表示尚未读取配置 */
-let skillHintsEnabled = null;
-
-/** 异步提示请求代次；输入或配置变化后，旧请求不得回写 DOM。 */
-let skillHintRevision = 0;
-
-/** AI 配置变化时由 chat 入口调用，避免纯对话切换后继续使用旧 Skill 缓存。 */
-export function invalidateSkillCache() {
-    cachedSkills = null;
-    skillCacheExpiry = 0;
-    skillHintsEnabled = null;
-    skillHintRevision += 1;
-    if (skillHintEl) skillHintEl.hidden = true;
+/** 当前输入代次（command-palette 经 main.js 注入此 getter 做过期校验）。 */
+export function composerInputRevision() {
+    return inputRevision;
 }
 
-/** 只向对话输入提示实际可激活的 Skill；设置页仍可展示 disabled 条目。 */
-export function filterActiveSkills(skills, query = "") {
-    const normalizedQuery = query.trim().toLowerCase();
-    return (Array.isArray(skills) ? skills : []).filter((skill) =>
-        !skill.disabled &&
-        (!normalizedQuery || String(skill.name || "").toLowerCase().includes(normalizedQuery))
-    );
+/** 推进输入代次（弹层数据捕获点之前的输入变化都会使旧结果失效）。 */
+function bumpInputRevision() {
+    inputRevision += 1;
 }
+
+/** IME 组合中标志——组合期间不处理面板快捷采纳（§8.3/§九）。 */
+let composing = false;
 
 /**
  * 初始化 composer。
@@ -114,23 +101,34 @@ export function initComposer(callbacks) {
 
     if (!textarea || !sendBtn) return;
 
-    // textarea 自增高 + 更新发送按钮状态 + /skill 检测
+    // textarea 自增高 + 更新发送按钮状态 + 0.27.7 斜杠命令面板触发
+    // IME 组合中不触发面板（§8.3 组合输入不执行），compositionend 按终稿刷新
     textarea.addEventListener("input", () => {
         autoResize();
         updateSendButtonState();
-        checkSkillHint();
+        bumpInputRevision();
+        if (!composing) onComposerInput(textarea.value);
     });
 
-    // Enter 发送 / Shift+Enter 换行 / Escape 关闭 skill hint
-    // 流式模式（stop 按钮）下 Enter 不发送——避免用户预输入时误触发
+    // IME 组合 guard（§九）：组合期间不处理快捷采纳；结束后按终稿刷新面板
+    textarea.addEventListener("compositionstart", () => {
+        composing = true;
+    });
+    textarea.addEventListener("compositionend", () => {
+        composing = false;
+        bumpInputRevision();
+        onComposerInput(textarea.value);
+    });
+
+    // 命令面板快捷键优先（↑/↓/Tab/Enter/Esc，IME 组合中跳过）；
+    // Enter 发送 / Shift+Enter 换行——流式模式（stop 按钮）下 Enter 不发送，
+    // 避免用户预输入时误触发
     textarea.addEventListener("keydown", (e) => {
+        if (!composing && handlePaletteKeydown(e)) return;
         if (e.key === "Enter" && !e.shiftKey) {
             if (sendBtn.classList.contains("chat-stop-btn")) return;
             e.preventDefault();
             handleSend();
-        } else if (e.key === "Escape" && skillHintEl && !skillHintEl.hidden) {
-            skillHintEl.hidden = true;
-            e.stopPropagation();
         }
     });
 
@@ -148,9 +146,6 @@ export function initComposer(callbacks) {
     attachmentsEl = document.getElementById("chat-audio-attachments");
     if (attachBtn) attachBtn.addEventListener("click", handleAttachAudio);
     renderAudioAttachments();
-
-    // 0.13.3: /skill 命令提示初始化
-    skillHintEl = document.getElementById("skill-hint");
 
     // 初始状态
     updateSendButtonState();
@@ -191,6 +186,8 @@ export function clearInput() {
     textarea.value = "";
     autoResize();
     updateSendButtonState();
+    bumpInputRevision();
+    closePalette();
 }
 
 /**
@@ -205,6 +202,8 @@ export function setInputValue(text) {
     textarea.setSelectionRange(text.length, text.length);
     autoResize();
     updateSendButtonState();
+    bumpInputRevision();
+    onComposerInput(text);
 }
 
 /**
@@ -212,6 +211,31 @@ export function setInputValue(text) {
  */
 export function focusInput() {
     if (textarea) textarea.focus();
+}
+
+/**
+ * 0.27.8: 在光标/选区处插入文本（/prompt 提示词插入用，phase §5.8.5）。
+ *
+ * 保留选区外其他草稿与附件、不自动发送；插入后光标移到插入文本末尾并显式
+ * 滚动跟随（spec-frontend §5.8 程序化写入铁则）。无焦点时退化为追加到末尾。
+ * @param {string} text
+ */
+export function insertAtCursor(text) {
+    if (!textarea || !text) return;
+    const start = textarea.selectionStart ?? textarea.value.length;
+    const end = textarea.selectionEnd ?? start;
+    textarea.value = textarea.value.slice(0, start) + text + textarea.value.slice(end);
+    const pos = start + text.length;
+    textarea.setSelectionRange(pos, pos);
+    autoResize();
+    updateSendButtonState();
+    bumpInputRevision();
+    closePalette();
+    textarea.focus();
+    // 程序化写入不假设浏览器跟随光标——显式滚到光标处
+    requestAnimationFrame(() => {
+        textarea.scrollTop = textarea.scrollHeight;
+    });
 }
 
 /**
@@ -342,6 +366,7 @@ export function updateVoicePartial(data) {
     const base = voiceBaseText ? voiceBaseText + (voiceBaseText.endsWith("\n") ? "" : " ") : "";
     textarea.value = base + partial;
     autoResize();
+    bumpInputRevision();
 }
 
 /**
@@ -426,6 +451,7 @@ async function handleAttachAudio() {
 
 function renderAudioAttachments() {
     if (!attachmentsEl) return;
+    bumpInputRevision(); // 附件增删推进输入代次（§九：弹层异步结果防过期）
     attachmentsEl.innerHTML = "";
     for (const attachment of audioAttachments) {
         const chip = document.createElement("span");
@@ -505,117 +531,3 @@ const sendIcon = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" str
 
 const stopIcon = `<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>`;
 
-// ── 0.13.3 /skill 命令提示 ────────────────────────────────────────────────────
-
-/**
- * 检测 textarea 内容是否以 /skill 开头，若是则显示可用技能列表。
- *
- * 提示弹层出现在 textarea 上方，列出匹配的 skill 名称 + 来源 + 描述。
- * 点击 skill 条目自动填充 `/skill <name> ` 到 textarea 并隐藏提示。
- * 按 Escape 隐藏提示。
- */
-async function checkSkillHint() {
-    if (!skillHintEl || !textarea) return;
-
-    const revision = ++skillHintRevision;
-
-    const value = textarea.value.trim();
-    if (!value.toLowerCase().startsWith("/skill")) {
-        skillHintEl.hidden = true;
-        return;
-    }
-
-    // 加载 skill 列表（缓存 30s）
-    const now = Date.now();
-    if (!cachedSkills || now > skillCacheExpiry) {
-        try {
-            const {invoke} = await import("../shared/tauri.js");
-            const aiConfig = await invoke("get_config_section", {key: "app.ai"});
-            if (revision !== skillHintRevision) return;
-            const agentMode = aiConfig?.chat_config?.agent_mode
-                || (aiConfig?.chat_config?.pure_chat ? "pure_chat" : "full");
-            skillHintsEnabled = agentMode !== "pure_chat";
-            if (!skillHintsEnabled) {
-                cachedSkills = [];
-                skillCacheExpiry = now + 30000;
-                skillHintEl.hidden = true;
-                return;
-            }
-            cachedSkills = await invoke("list_skills");
-            if (revision !== skillHintRevision) return;
-            skillCacheExpiry = now + 30000; // 30s 缓存
-        } catch (e) {
-            console.error("[skill-hint] list_skills failed:", e);
-            skillHintEl.hidden = true;
-            return;
-        }
-    }
-
-    if (!skillHintsEnabled || revision !== skillHintRevision) {
-        skillHintEl.hidden = true;
-        return;
-    }
-
-    // 等待 IPC 期间用户可能已经删除/替换了命令，旧结果不能重新打开提示。
-    if (!textarea.value.trim().toLowerCase().startsWith("/skill")) return;
-
-    const activeSkills = filterActiveSkills(cachedSkills);
-    if (activeSkills.length === 0) {
-        skillHintEl.innerHTML = `<div class="skill-hint-empty">未发现 Skill。请在设置页 AI tab 配置来源目录并刷新。</div>`;
-        skillHintEl.hidden = false;
-        return;
-    }
-
-    // 提取 /skill 后面的输入（用于过滤）
-    const query = value.slice(6).trim().toLowerCase(); // 去掉 "/skill"
-    const filtered = filterActiveSkills(activeSkills, query);
-
-    if (filtered.length === 0) {
-        skillHintEl.innerHTML = `<div class="skill-hint-empty">未匹配到 "${escapeHtml(query)}" 的 Skill</div>`;
-        skillHintEl.hidden = false;
-        return;
-    }
-
-    // 渲染提示列表
-    skillHintEl.innerHTML = filtered
-        .slice(0, 8) // 最多 8 条
-        .map((s) => {
-            const sourceLabel = {blink: "Blink", claude: "Claude", zcode: "ZCode"}[s.source] || s.source;
-            return `<div class="skill-hint-item" data-skill-name="${escapeAttr(s.name)}">
-        <span class="skill-hint-name">${escapeHtml(s.name)}</span>
-        <span class="skill-hint-source">${sourceLabel}</span>
-        <span class="skill-hint-desc">${escapeHtml(s.description)}</span>
-      </div>`;
-        })
-        .join("");
-
-    skillHintEl.hidden = false;
-
-    // 绑定点击事件
-    skillHintEl.querySelectorAll(".skill-hint-item").forEach((item) => {
-        item.addEventListener("click", () => {
-            const name = item.dataset.skillName;
-            textarea.value = `/skill ${name} `;
-            textarea.focus();
-            // 光标移到末尾
-            const len = textarea.value.length;
-            textarea.setSelectionRange(len, len);
-            skillHintEl.hidden = true;
-            autoResize();
-            updateSendButtonState();
-        });
-    });
-}
-
-function escapeHtml(s) {
-    return String(s ?? "")
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#39;");
-}
-
-function escapeAttr(s) {
-    return escapeHtml(s);
-}

@@ -1,6 +1,9 @@
 //! ai 域命令（0.14.6 §2.4 从 commands.rs 拆分）。
 
-use super::shared::{BuiltinToolSummary, ComposerBarSnapshot, McpServerSummary};
+use super::shared::{
+    BuiltinToolSummary, ComposerBarSnapshot, McpServerSummary, SlashCommandSnapshot,
+    SlashMcpServer, SlashToolEntry,
+};
 use crate::domain::event_names::EventNames;
 use tauri::{Emitter, Manager};
 

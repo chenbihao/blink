@@ -11,6 +11,7 @@ import * as state from "./state.js";
 import * as ipc from "./ipc.js";
 import {escapeAttr, escapeText} from "./utils.js";
 import {hideThinkingDropdown, setThinkingModelId, syncThinkingControl} from "./thinking-selector.js";
+import {openExclusive, registerPopup} from "./composer-popups.js";
 
 /** @type {HTMLElement} 模型触发器按钮 */
 let modelTrigger = null;
@@ -227,11 +228,13 @@ export function bindModelSelector() {
     modelDropdown = document.getElementById("chat-model-dropdown");
     modelFlyout = document.getElementById("chat-model-flyout");
     if (!modelTrigger || !modelDropdown) return;
+    // 0.27.7 接入弹层互斥仲裁（§九）：注册关闭函数，打开前由 openExclusive 收掉其余弹层
+    registerPopup("model", hideModelDropdown);
 
-    // 触发器点击 toggle 下拉（0.21.18：先收掉思考下拉，两下拉互斥不同时展开）
+    // 触发器点击 toggle 下拉（0.21.18：先收掉思考下拉，两下拉互斥不同时展开；
+    // 0.27.7 起互斥统一走 composer-popups 仲裁）
     modelTrigger.addEventListener("click", (e) => {
         e.stopPropagation();
-        hideThinkingDropdown();
         toggleDropdown();
     });
 
@@ -277,11 +280,22 @@ async function selectChatModel(id) {
 
 function toggleDropdown() {
     if (modelDropdown.hidden) {
-        modelDropdown.hidden = false;
-        modelTrigger.classList.add("active");
+        openModelDropdown();
     } else {
         hideModelDropdown();
     }
+}
+
+/**
+ * 打开模型下拉（不 toggle；0.27.7 供 /model 命令复用——与左下角手动点击
+ * 完全同款 flyout，phase §8.3 定案）。打开前经仲裁收掉其余弹层。
+ */
+export function openModelDropdown() {
+    if (!modelDropdown || !modelDropdown.hidden) return;
+    openExclusive("model");
+    hideThinkingDropdown(); // 0.21.18 语义保留：两 composer 下拉互斥
+    modelDropdown.hidden = false;
+    if (modelTrigger) modelTrigger.classList.add("active");
 }
 
 export function hideModelDropdown() {

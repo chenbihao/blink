@@ -20,6 +20,48 @@ pub struct McpServerSummary {
     pub tool_names: Vec<String>,
 }
 
+/// /tools 工具快照单条（0.27.7 斜杠命令，phase §5.7.4）。
+///
+/// 复用 Agent 实际工具组装规则（模式 / allowlist / 运行时可用性 / MCP 开关），
+/// 只读、无副作用——不因查看主动连接。
+#[derive(Clone, Debug, Serialize)]
+pub struct SlashToolEntry {
+    pub name: String,
+    pub description: String,
+    /// `builtin` 或 `mcp:<server_name>`。
+    pub source: String,
+}
+
+/// /mcp 单 server 连接状态（0.27.7，phase §5.7.4）。
+///
+/// `status`: `online` / `connecting` / `offline` / `disabled`（配置关闭）。
+#[derive(Clone, Debug, Serialize)]
+pub struct SlashMcpServer {
+    pub name: String,
+    pub transport: String,
+    pub status: String,
+    pub tool_count: usize,
+    /// 非 disabled 的 tool 名（离线 server 为空）。
+    pub tool_names: Vec<String>,
+}
+
+/// 斜杠命令动态内容快照（0.27.7，/tools /mcp /skill 数据源，一次 IPC 聚合）。
+#[derive(Clone, Debug, Serialize)]
+pub struct SlashCommandSnapshot {
+    /// `full` / `pure_chat`。
+    pub mode: String,
+    pub tools: Vec<SlashToolEntry>,
+    /// 工具池为空的原因：`pure_chat`（纯对话模式未启用工具）或 None（确实无工具）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools_empty_reason: Option<String>,
+    /// 工具池口径：`live`（缓存 Agent 真实池）/ `estimate`（allowlist 估算兜底）。
+    pub tools_source: String,
+    pub mcp_servers: Vec<SlashMcpServer>,
+    /// Skill 功能开关 + 已扫描数量（可用性判定由前端组合）。
+    pub skills_enabled: bool,
+    pub skill_count: usize,
+}
+
 /// Composer bar 悬浮预览快照——一次 IPC 聚合所有 popup 数据。
 #[derive(Clone, Debug, Serialize)]
 pub struct ComposerBarSnapshot {

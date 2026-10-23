@@ -39,6 +39,13 @@ export const EVENTS = Object.freeze({
     CHAT_TITLE_UPDATED: 'blink://chat-title-updated',
     CHAT_PREFILL: 'blink://chat-prefill',
     CHAT_LOAD_CONVERSATION: 'blink://chat-load-conversation',
+    /**
+     * 0.27.8 手动压缩（/compact 与告警按钮）任务状态：
+     * { job_id, conversation_id, status: "running"|"succeeded"|"no_op"|"failed"|"cancelled",
+     *   error?, covered_count?, kept_turns? }
+     * 前端按 job_id/conversation_id 消费，不用超时猜成功。
+     */
+    CHAT_COMPACT_JOB: 'blink://chat-compact-job',
 
     // ── 语音 ──
     VOICE_RECORDING_START: 'blink://voice-recording-start',

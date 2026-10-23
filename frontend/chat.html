@@ -148,8 +148,8 @@
             <!-- Composer（语音指示器放在 input-wrap 内部，position:absolute 相对于 input-wrap） -->
             <div class="chat-composer">
                 <div class="chat-composer-input-wrap">
-                    <!-- 0.13.3: /skill 命令提示 -->
-                    <div class="skill-hint" hidden id="skill-hint"></div>
+                    <!-- 0.27.7: 斜杠命令面板（触发/键盘路由见 command-palette.js） -->
+                    <div class="chat-palette" hidden id="chat-command-palette"></div>
                     <!-- 语音指示器（同主窗口风格：5 条波形 + 标签） -->
                     <div class="voice-indicator hidden" id="voice-indicator">
                         <div class="voice-wave">
@@ -189,6 +189,10 @@
                             <!-- 0.23.12: 音频附件（本地 WAV 经 ResourceStore 签发 ref，AI 用 transcribe_audio 转写） -->
                             <button class="chat-attach-btn" id="chat-attach-btn" title="附加音频文件（转写）">
                                 <svg class="icon" aria-hidden="true"><use href="#icon-audio-lines"/></svg>
+                            </button>
+                            <!-- 0.27.8: 提示词快捷条（与 /prompt 同入口，光标处插入、不自动发送；title 由 main.js 按 i18n 设置） -->
+                            <button class="chat-attach-btn" id="chat-prompt-btn">
+                                <svg class="icon" aria-hidden="true"><use href="#icon-quote"/></svg>
                             </button>
                         </div>
                         <!-- 上下文窗口指示器（发送按钮左边） -->

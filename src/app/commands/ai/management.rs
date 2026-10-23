@@ -272,19 +272,9 @@ pub async fn fetch_ai_models(
 /// - `threshold`: 5000（硬编码告警阈值）
 #[tauri::command]
 pub async fn get_system_prompt_info(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
-    use crate::domain::ai::prompt::{
-        ToolSourceSummary, build_prompt_infos, chat_system_prompt_with_skills,
-    };
+    use crate::domain::ai::prompt::{ToolSourceSummary, chat_system_prompt_with_skills};
     use crate::domain::ai::token_budget::{estimate_text_tokens, estimate_tools_tokens};
-    use crate::domain::capability::CapabilityRegistry;
-    use crate::domain::capability::{build_capability_tools, inject_plugin_settings};
-    use crate::domain::plugin::PluginEngine;
-    use std::sync::Arc;
     use tauri::Manager;
-
-    let cap_reg = app.state::<Arc<CapabilityRegistry>>();
-    let plugin_engine = app.state::<Arc<PluginEngine>>();
-    let pools = app.state::<crate::infra::data::DbPools>();
 
     // 1. Skill 阶段 1 摘要快照（与对话启动态一致）
     let skill_summaries = app
@@ -292,41 +282,8 @@ pub async fn get_system_prompt_info(app: tauri::AppHandle) -> Result<serde_json:
         .map(|chat| chat.skill_summaries())
         .unwrap_or_default();
 
-    // 2. AI 授权 allowlist
-    let allowlist =
-        crate::domain::config::ai_capability_access::AiCapabilityAccessStore::enabled_set(
-            &pools.config,
-        )
-        .await;
-
-    // 3. 估算口径（兜底）：与 service.rs AI lane 同逻辑
-    let mut tools = build_capability_tools(&cap_reg);
-
-    // 参数动态注入 + hints 收集
-    let mut plugin_hints: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
-    for ph in plugin_engine.all_plugins() {
-        let manifest = ph.manifest();
-        for td in &manifest.tools {
-            let id = crate::domain::plugin::plugin_tool_id(&manifest.id, &td.name);
-            if let Some(bindings) = &td.setting_bindings
-                && let Some(pos) = tools.iter().position(|s| s.name == id)
-            {
-                let settings = plugin_engine.get_settings(&manifest.id);
-                tools[pos] =
-                    inject_plugin_settings(tools[pos].clone(), settings.as_ref(), bindings);
-            }
-            if let Some(hint) = &td.hint {
-                plugin_hints.insert(id, hint.clone());
-            }
-        }
-    }
-
-    // 4. 按 allowlist 过滤——与 tool_adapter.rs 生产过滤语义一致。
-    // policy 级「允许 AI」过滤不复刻，估算略偏保守方向，可接受。
-    tools.retain(|t| allowlist.contains(&t.name));
-
-    let estimated_infos = build_prompt_infos(tools, &plugin_hints);
+    // 2+3+4. 估算口径（兜底）——0.27.7 抽出为共用函数（含 allowlist 过滤）
+    let estimated_infos = estimate_tool_infos(&app).await;
 
     // 0.21.22.1: 展示口径与预算侧同源——优先取当前缓存 Agent 的真实 tool 池快照
     // （`AgentProvider::tool_prompt_infos`，含 MCP 工具与 allowlist 实际过滤；
@@ -370,6 +327,182 @@ pub async fn get_system_prompt_info(app: tauri::AppHandle) -> Result<serde_json:
         "preview": preview,
         "threshold": 5000,
     }))
+}
+
+/// 0.27.7: 估算口径工具池（无缓存 Agent 时的兜底）。
+///
+/// 与对话启动态 AI lane 同逻辑：build_capability_tools → 插件参数动态注入 +
+/// hints 收集 → AI allowlist 过滤（policy 级「允许 AI」过滤不复刻，估算略偏
+/// 保守方向）。由 `get_system_prompt_info` 与 `get_slash_command_snapshot` 共用。
+async fn estimate_tool_infos(
+    app: &tauri::AppHandle,
+) -> Vec<crate::domain::ai::prompt::ToolPromptInfo> {
+    use crate::domain::ai::prompt::build_prompt_infos;
+    use crate::domain::capability::{build_capability_tools, inject_plugin_settings};
+    use crate::domain::plugin::PluginEngine;
+    use tauri::Manager;
+
+    let cap_reg = app.state::<std::sync::Arc<crate::domain::capability::CapabilityRegistry>>();
+    let plugin_engine = app.state::<std::sync::Arc<PluginEngine>>();
+    let pools = app.state::<crate::infra::data::DbPools>();
+    let allowlist =
+        crate::domain::config::ai_capability_access::AiCapabilityAccessStore::enabled_set(
+            &pools.config,
+        )
+        .await;
+
+    let mut tools = build_capability_tools(&cap_reg);
+    let mut plugin_hints: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for ph in plugin_engine.all_plugins() {
+        let manifest = ph.manifest();
+        for td in &manifest.tools {
+            let id = crate::domain::plugin::plugin_tool_id(&manifest.id, &td.name);
+            if let Some(bindings) = &td.setting_bindings
+                && let Some(pos) = tools.iter().position(|s| s.name == id)
+            {
+                let settings = plugin_engine.get_settings(&manifest.id);
+                tools[pos] =
+                    inject_plugin_settings(tools[pos].clone(), settings.as_ref(), bindings);
+            }
+            if let Some(hint) = &td.hint {
+                plugin_hints.insert(id, hint.clone());
+            }
+        }
+    }
+    tools.retain(|t| allowlist.contains(&t.name));
+    build_prompt_infos(tools, &plugin_hints)
+}
+
+/// 获取斜杠命令动态内容快照（0.27.7，/tools /mcp /skill 数据源，phase §5.7.4/8.3）。
+///
+/// 只读、无副作用：工具池优先取缓存 Agent 的真实池快照（live），无缓存时用
+/// allowlist 估算兜底；**不调用 prepare_enabled，不因查看主动连接 MCP**——
+/// 连接状态以 manager 当前 statuses/connected map 为准。pure_chat 模式工具池
+/// 为空并注明原因（/mcp 仍可看连接状态，§5.7.5）。
+#[tauri::command]
+pub async fn get_slash_command_snapshot(
+    app: tauri::AppHandle,
+) -> Result<SlashCommandSnapshot, String> {
+    use tauri::Manager;
+
+    let chat = app.try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>();
+    let pure_chat = chat.as_ref().is_some_and(|c| c.is_pure_chat_mode());
+
+    // ── 工具池：live 优先，estimate 兜底（与 get_system_prompt_info 同源）──
+    let (tool_infos, tools_source) = if pure_chat {
+        (Vec::new(), "live")
+    } else if let Some(infos) = chat
+        .as_ref()
+        .and_then(|c| c.cached_agent_ref())
+        .filter(|p| !p.tool_prompt_infos().is_empty())
+        .map(|p| p.tool_prompt_infos().to_vec())
+    {
+        (infos, "live")
+    } else {
+        (estimate_tool_infos(&app).await, "estimate")
+    };
+    let tools_empty_reason = if tool_infos.is_empty() && pure_chat {
+        Some("pure_chat".to_string())
+    } else {
+        None
+    };
+
+    // MCP tool 来源对照（仅在线 server 的 tool 会出现在池中）
+    let manager = app.state::<std::sync::Arc<crate::domain::mcp::McpClientManager>>();
+    let mcp_source_map: std::collections::HashMap<String, String> = manager
+        .get_tool_sources()
+        .await
+        .into_iter()
+        .map(|s| (s.tool_name, s.server_name))
+        .collect();
+
+    let tools: Vec<SlashToolEntry> = tool_infos
+        .into_iter()
+        .map(|info| {
+            let source = mcp_source_map
+                .get(&info.name)
+                .map(|server| format!("mcp:{server}"))
+                .unwrap_or_else(|| "builtin".to_string());
+            SlashToolEntry {
+                name: info.name,
+                description: info.description,
+                source,
+            }
+        })
+        .collect();
+
+    // ── MCP 服务状态：disabled（配置关闭）> online（connected map 为真相源）
+    //   > connecting > offline（含 reason）；只读，不触发连接 ──
+    let pools = app.state::<crate::infra::data::DbPools>();
+    let configs = crate::domain::mcp::McpServerConfigStore::load_all(&pools.config)
+        .await
+        .map_err(|e| e.to_string())?;
+    let statuses = manager.get_statuses().await;
+
+    let mut mcp_servers = Vec::with_capacity(configs.len());
+    for config in configs {
+        let transport = match &config.transport {
+            crate::domain::mcp::config::McpTransport::Stdio => "stdio",
+            crate::domain::mcp::config::McpTransport::Sse { .. } => "sse",
+            crate::domain::mcp::config::McpTransport::Http { .. } => "http",
+        };
+        // connected map 是 online 的真相源（statuses 可能被 transient 探测覆盖）
+        let server_tools = manager.get_server_tools(&config.name).await;
+        let online = server_tools.is_some();
+        let tool_names: Vec<String> = server_tools
+            .map(|tools| {
+                tools
+                    .into_iter()
+                    .filter(|t| !t.disabled)
+                    .map(|t| t.name)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let status = if !config.enabled {
+            "disabled"
+        } else if online {
+            "online"
+        } else if matches!(
+            statuses.get(&config.name),
+            Some(crate::domain::mcp::McpServerStatus::Connecting)
+        ) {
+            "connecting"
+        } else {
+            "offline"
+        };
+        mcp_servers.push(SlashMcpServer {
+            name: config.name,
+            transport: transport.to_string(),
+            status: status.to_string(),
+            tool_count: tool_names.len(),
+            tool_names,
+        });
+    }
+
+    // ── Skill 可用性：功能开关 + 扫描数量（不笼统隐藏管理入口，§5.7.5）──
+    let (skills_enabled, skill_count) = match chat.as_ref() {
+        Some(c) => (c.skill_registry().is_enabled(), c.skill_registry().count()),
+        None => (false, 0),
+    };
+
+    tracing::debug!(
+        tools = tools.len(),
+        tools_source,
+        mcp = mcp_servers.len(),
+        pure_chat,
+        "get_slash_command_snapshot: 斜杠命令快照已聚合"
+    );
+
+    Ok(SlashCommandSnapshot {
+        mode: if pure_chat { "pure_chat" } else { "full" }.to_string(),
+        tools,
+        tools_empty_reason,
+        tools_source: tools_source.to_string(),
+        mcp_servers,
+        skills_enabled,
+        skill_count,
+    })
 }
 
 /// 测试 AI 供应商连通性(0.9.4)。
@@ -484,87 +617,59 @@ pub async fn get_context_window_status(
     Ok(chat.get_or_compute_context_status(&conversation_id).await)
 }
 
-/// 0.21.23: 手动压缩结果——command 立即返回，摘要后台执行。
+/// 0.27.8: 手动压缩任务 command 结果（/compact 与 80% 告警按钮共用，phase §5.8.4）。
+///
+/// `status` 为预检投影：任务启动后经 `CHAT_COMPACT_JOB` 事件按
+/// job_id/conversation_id 推送 running/succeeded/no_op/failed/cancelled。
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct CompressContextOutcome {
-    /// 摘要任务是否已后台触发（summary_enabled 且无在途任务）。
-    /// 完成后经 `CHAT_CONTEXT_STATUS` 事件推送最新状态。
-    pub summary_triggered: bool,
-    /// 是否因已有摘要任务在途而跳过（本轮仅裁剪，前端显式提示）。
-    pub summary_in_flight: bool,
-    /// 立即返回的裁剪后状态（不含后台摘要结果）。
-    pub status: crate::domain::ai::chat_service::ContextWindowStatus,
+pub struct CompactConversationOutcome {
+    /// `started` / `busy`（AI 请求进行中）/ `in_flight`（已有摘要任务）/
+    /// `no_content`（空会话）/ `noop` 由预检在任务内推送（此处 started 只表示受理）。
+    pub status: &'static str,
+    /// 任务 id（仅 started 携带；前端与事件对账识别重复触发）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<u64>,
 }
 
-/// 强制压缩当前对话的上下文窗口（0.13.6 / 0.21.19 扩展 / 0.21.23 异步化）。
+/// 手动压缩当前对话（0.27.8，phase §3.8/§5.8——/compact 与告警按钮共用执行逻辑）。
 ///
-/// 裁剪部分（`load_with_stats` 走 token_aware_truncate，纯本地 DB 操作）同步
-/// 完成后立即返回；摘要生成（LLM，最长 30s）后台执行，完成后经
-/// `CHAT_CONTEXT_STATUS` 事件推送（`maybe_spawn_summary_task` 收尾已 emit）。
-/// 此前同步 await 摘要让 IPC 挂起最长 30s。
-///
-/// 注意：本命令实际执行的裁剪基于上一轮 stream_prompt 注入的
-/// history_budget（compute_context_status 内部先 load 后注入）；本命令
-/// 注入的新预算不含 pending/system 扣减，仅作兜底，下一轮 stream_prompt
-/// 前会被重算覆盖。
+/// 替代旧 `compress_context_now`（0.21.23 异步化版本，已删）：
+/// - 不再要求先发消息建立缓存 Agent——摘要 Agent 冷构造（无工具）
+/// - 不受全局 summary_enabled 约束；成功后记录会话手动摘要启用状态
+/// - 手动边界保留最近两轮完整 user turn；分段输入不超摘要模型预算
+/// - 提交冻结高水位（CAS），编辑/截断/删除后的陈旧结果放弃
 #[tauri::command]
-pub async fn compress_context_now(
+pub async fn compact_conversation(
     app: tauri::AppHandle,
     conversation_id: String,
-) -> Result<CompressContextOutcome, String> {
+) -> Result<CompactConversationOutcome, String> {
     use tauri::Manager;
     let chat = app
         .try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
         .ok_or("ChatService 未注册")?;
 
-    // 0.21.18: 流式进行中不允许手动压缩——compute_context_status 注入的预算
-    // 与实际 prompt 注入存在时序窗口，那一轮可能少裁。等当前回复完成后再压缩。
-    if chat.current_request_context().is_some() {
-        return Err("对话进行中，请等待当前回复完成后再压缩".to_string());
-    }
-
-    let resolved = chat
-        .resolve_current_entries(crate::domain::ai::chat_service::ConversationKind::Persistent)
-        .map_err(|e| e.to_string())?;
-
-    // 从缓存获取 AgentProvider（若缓存未命中则返回错误，提示用户先发一条消息）
-    let provider = chat
-        .cached_agent_ref()
-        .ok_or("Agent 未构造，请先发送一条消息后再压缩")?;
-
-    // 裁剪 + 立即返回的状态（0.21.19.1 F2: 摘要开关关闭时只走这一步）。
-    // 不在此 emit CHAT_CONTEXT_STATUS——返回值已携带状态（前端 updateContextIndicator
-    // 直接消费），即时 emit 会与摘要完成事件混淆：前端用「下一个事件 = 摘要完成」
-    // 解除压缩按钮 loading 态，摘要完成由 maybe_spawn_summary_task 收尾 emit 推送。
-    let status = chat
-        .compute_context_status(&conversation_id, None, None, &provider, &resolved)
-        .await;
-
-    // 0.21.23: 摘要后台触发——in-flight 时显式标注（旧实现静默跳过摘要只返回裁剪）。
-    // check-then-spawn 之间存在极窄竞态（另一摘要恰好在此启动），spawned 任务
-    // 内部的 in-flight guard 会兜底跳过，前端 35s loading 超时兜底收回。
-    let summary_enabled = chat.summary_enabled_snapshot().await;
-    let (summary_triggered, summary_in_flight) = if !summary_enabled {
-        (false, false)
-    } else if chat.is_summary_in_flight() {
-        tracing::debug!(conversation_id = %conversation_id, "手动压缩: 摘要进行中，本轮仅裁剪");
-        (false, true)
-    } else {
-        let chat = chat.inner().clone();
-        let conv = conversation_id.clone();
-        tokio::spawn(async move {
-            // 手动压缩时用户已明确要压缩——用 100 强制触发阈值判定
-            chat.maybe_spawn_summary_task(&conv, 100).await;
-        });
-        tracing::info!(conversation_id = %conversation_id, "手动压缩: 裁剪完成，摘要任务已后台触发");
-        (true, false)
-    };
-
-    Ok(CompressContextOutcome {
-        summary_triggered,
-        summary_in_flight,
-        status,
-    })
+    Ok(
+        match chat
+            .start_manual_compact(&conversation_id)
+            .await
+        {
+            crate::domain::ai::chat_service::ManualCompactPrecheck::Started { job_id } => {
+                CompactConversationOutcome { status: "started", job_id: Some(job_id) }
+            }
+            crate::domain::ai::chat_service::ManualCompactPrecheck::Busy => {
+                CompactConversationOutcome { status: "busy", job_id: None }
+            }
+            crate::domain::ai::chat_service::ManualCompactPrecheck::InFlight => {
+                CompactConversationOutcome { status: "in_flight", job_id: None }
+            }
+            crate::domain::ai::chat_service::ManualCompactPrecheck::NoContent => {
+                CompactConversationOutcome { status: "no_content", job_id: None }
+            }
+            crate::domain::ai::chat_service::ManualCompactPrecheck::NoOp => {
+                CompactConversationOutcome { status: "noop", job_id: None }
+            }
+        },
+    )
 }
 
 /// 0.21.19: 获取对话的摘要内容（供前端渲染折叠分隔线）。

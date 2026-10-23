@@ -5,8 +5,8 @@
  * 其余退化为简单开关。选中档位经 set_model_reasoning_effort 持久化到
  * per-model 配置，空字符串 = omit（不发送，用模型默认档）。
  *
- * 互斥约定：两下拉（模型 / 思考）不同时展开——打开思考下拉前经
- * `beforeOpen` 回调收掉模型下拉（由 main.js 注入，避免模块间循环依赖）。
+ * 互斥约定（0.27.7 §九）：composer 弹层互斥统一走 composer-popups 仲裁——
+ * 打开思考下拉前 openExclusive("thinking") 收掉模型下拉 / 命令面板等。
  */
 
 import * as state from "./state.js";
@@ -14,6 +14,7 @@ import * as ipc from "./ipc.js";
 import {setThinkingState} from "./composer.js";
 import {escapeAttr} from "./utils.js";
 import {EFFORT_LEVELS} from "../shared/effort-levels.js";
+import {openExclusive, registerPopup} from "./composer-popups.js";
 
 /** 当前选中模型 id（"{provider}:{model}"），供持久化思考强度定位 */
 let currentThinkingModelId = null;
@@ -24,22 +25,18 @@ let thinkingTrigger = null;
 /** @type {HTMLElement} 思考等级下拉容器 */
 let thinkingDropdown = null;
 
-/** 打开下拉前收掉另一侧下拉（main.js 注入 hideModelDropdown） */
-let beforeOpen = null;
-
 /**
  * 初始化思考控件交互。
- * @param {{beforeOpen: () => void}} opts
  */
-export function initThinkingSelector(opts = {}) {
-    beforeOpen = opts.beforeOpen || null;
+export function initThinkingSelector() {
     thinkingTrigger = document.getElementById("chat-thinking-btn");
     thinkingDropdown = document.getElementById("chat-thinking-dropdown");
     if (!thinkingTrigger || !thinkingDropdown) return;
+    // 0.27.7 接入弹层互斥仲裁（§九）
+    registerPopup("thinking", hideThinkingDropdown);
 
     thinkingTrigger.addEventListener("click", (e) => {
         e.stopPropagation();
-        beforeOpen?.(); // 0.21.18：先收掉模型下拉，两下拉互斥不同时展开
         if (state.supportsEffort) {
             toggleThinkingDropdown();
         } else {
@@ -162,6 +159,7 @@ async function applyThinkingEffort(effort) {
 
 function toggleThinkingDropdown() {
     if (thinkingDropdown.hidden) {
+        openExclusive("thinking"); // 0.27.7：互斥仲裁收掉其余弹层（含模型下拉）
         renderThinkingDropdown();
         thinkingDropdown.hidden = false;
         thinkingTrigger.classList.add("active");

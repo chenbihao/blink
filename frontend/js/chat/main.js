@@ -14,11 +14,12 @@ import {escapeAttr, escapeText} from "./utils.js";
 import {
     clearInput,
     clearSentAttachments,
+    composerInputRevision,
     focusInput,
     hideVoiceIndicator,
     initComposer,
-    invalidateSkillCache,
     clearAudioAttachments,
+    insertAtCursor,
     isVoiceRecording,
     setInputMode,
     setInputValue,
@@ -33,7 +34,8 @@ import {initSidebar, refreshSidebar, setActiveConversation, toggleSidebar} from 
 // 0.21.23：思考控件与模型选择器（含 flyout 定位）从本文件下沉为独立模块——
 // 软规则：main.js 不再吸收新的交互模块，只保留装配与全局事件分发
 import {effectiveThinkingEnabled, initThinkingSelector, syncThinkingControl} from "./thinking-selector.js";
-import {bindModelSelector, hideModelDropdown, refreshModelSelector, updateProviderLabel} from "./model-selector.js";
+import {bindModelSelector, openModelDropdown, refreshModelSelector, updateProviderLabel} from "./model-selector.js";
+import {initCommandPalette, invalidatePromptCache, invalidateSlashSnapshotCache, isPaletteOpen, closePalette, openPromptPalette} from "./command-palette.js";
 import {applyThemeFromConfig} from "../shared/theme.js";
 import {getCurrentWindow, invoke, listen} from "../shared/tauri.js";
 import {EVENTS} from "../shared/event-names.js";
@@ -73,7 +75,7 @@ async function init() {
     listen(EVENTS.CONFIG_CHANGED, (e) => {
         applyThemeFromConfig();
         if (e?.payload?.key === "ai_config") {
-            invalidateSkillCache();
+            invalidateSlashSnapshotCache();
             refreshModelSelector();
             refreshToolPool(true);
             invalidateComposerBarCache();
@@ -82,6 +84,7 @@ async function init() {
         // 0.13.0：MCP 配置变更时刷新 tool 池
         if (e?.payload?.key === "mcp:servers") {
             // 配置 command 已负责 generation 失效与按需后台连接；这里仅刷新只读快照。
+            invalidateSlashSnapshotCache();
             if (!windowActivated) return;
             refreshToolPool(true);
             invalidateComposerBarCache();
@@ -173,6 +176,7 @@ async function init() {
     await ipc.listenChatConfirm(handleConfirmEvent);
     await ipc.listenChatTitleUpdated(handleTitleUpdated);
     await ipc.listenContextStatus(handleContextStatus);
+    await ipc.listenChatCompactJob(handleCompactJob);
     await ipc.listenSkillActivated(handleSkillActivated);
     await ipc.listenVoicePartial(handleVoicePartial);
     await ipc.listenVoiceRecordingStart(handleVoiceRecordingStart);
@@ -231,8 +235,34 @@ async function init() {
     // 模型选择器交互（0.21.23 下沉 model-selector.js，含供应商 flyout 定位）
     bindModelSelector();
     // 0.21.17：思考控件交互（支持等级 → 强度下拉，否则 → 简单开关）；
-    // 0.21.23 下沉 thinking-selector.js，beforeOpen 注入互斥收起模型下拉
-    initThinkingSelector({beforeOpen: hideModelDropdown});
+    // 0.27.7 起弹层互斥统一走 composer-popups 仲裁，不再注入 beforeOpen
+    initThinkingSelector();
+
+    // 0.27.7：斜杠命令面板（/new /model /tools /skill /mcp，phase §5.7/§8.3）
+    // 0.27.8：/compact /prompt（phase §5.8）
+    initCommandPalette({
+        onCommand: handleSlashCommand,
+        getInputRevision: composerInputRevision,
+        insertTextAtCursor: insertAtCursor,
+    });
+
+    // 0.27.8：提示词快捷条按钮（与 /prompt 同入口、同数据源）。
+    // 打开后焦点回 composer——面板键盘路由依赖 textarea keydown（§九）。
+    const promptBtn = document.getElementById("chat-prompt-btn");
+    if (promptBtn) {
+        promptBtn.title = t("chat.cmd.prompt.btn_title");
+        promptBtn.addEventListener("click", () => {
+            focusInput();
+            openPromptPalette();
+        });
+    }
+
+    // 0.27.8：提示词库变更 → 面板缓存失效（打开中则原地刷新由下次打开自然发生）
+    listen(EVENTS.PROMPT_LIBRARY_CHANGED, (e) => {
+        if (e?.payload?.scope === "chat" || e?.payload?.scope === undefined) {
+            invalidatePromptCache();
+        }
+    });
 
     // 0.12.7 §1：面包屑标题编辑（事件委托）
     bindBreadcrumbEdit();
@@ -735,8 +765,6 @@ async function handleTitleUpdated(event) {
  */
 function handleContextStatus(event) {
     const status = event.payload;
-    // 0.21.23: 摘要后台完成会再推一次本事件——提示条重渲染，loading 态自然解除
-    clearCompressLoadingTimer();
     components.updateContextIndicator(status);
     components.renderContextWarning(status.usage_percent, status.summary_enabled, handleContextWarningAction);
     // 0.13.6: 保存 recall_count 供 finalizeDone 渲染
@@ -772,50 +800,87 @@ async function renderSummarySeparatorIfNeeded(summarizedCount) {
 }
 
 /**
- * 压缩提示条操作回调（0.13.6）。
- * - compress: 调后端 compress_context_now 强制走一遍 token_aware_truncate
+ * 0.27.8: 手动压缩共用执行逻辑（/compact 与 80% 告警按钮，phase §5.8.4）。
  *
- * 0.21.23: compress_context_now 异步化——裁剪（本地 DB 操作）同步完成即返回，
- * 摘要（LLM，最长 30s）后台执行，完成后经 CHAT_CONTEXT_STATUS 事件推送
- * （handleContextStatus 重渲染提示条，loading 态自然解除）；35s 兜底收回
- * 防事件丢失卡死。in-flight 时显式提示「压缩进行中，本轮仅裁剪」。
+ * command 只做预检即返回；任务终态经 CHAT_COMPACT_JOB 事件按
+ * job_id/conversation_id 推送（handleCompactJob 消费），不用超时猜成功。
  */
-let compressLoadingTimer = null;
-
-function clearCompressLoadingTimer() {
-    if (compressLoadingTimer) {
-        clearTimeout(compressLoadingTimer);
-        compressLoadingTimer = null;
+async function runManualCompact() {
+    if (state.isStreaming) {
+        components.renderSignal(t("chat.cmd.compact.busy"), "warning");
+        return;
+    }
+    try {
+        const result = await ipc.compactConversation(state.conversationId);
+        switch (result?.status) {
+            case "started":
+                components.renderSignal(t("chat.cmd.compact.started"), "info");
+                break;
+            case "busy":
+                components.renderSignal(t("chat.cmd.compact.busy"), "warning");
+                break;
+            case "in_flight":
+                components.renderSignal(t("chat.cmd.compact.in_flight"), "info");
+                break;
+            case "no_content":
+                components.renderSignal(t("chat.cmd.compact.no_content"), "info");
+                break;
+            case "noop":
+                components.renderSignal(t("chat.cmd.compact.noop"), "info");
+                break;
+            default:
+                break;
+        }
+    } catch (e) {
+        console.error("[chat] 手动压缩失败:", e);
+        components.renderSignal(t("chat.cmd.compact.failed", {msg: String(e)}), "warning");
     }
 }
 
+/**
+ * 0.27.8: 手动压缩任务终态事件（按 conversation_id 过滤，只影响所属会话）。
+ *
+ * 成功后摘要分隔线/容量环由随后推送的 CHAT_CONTEXT_STATUS 更新
+ * （任务收尾 emit_context_status_updated）。
+ */
+function handleCompactJob(event) {
+    const payload = event.payload;
+    if (!payload || payload.conversation_id !== state.conversationId) return;
+    switch (payload.status) {
+        case "succeeded":
+            components.renderSignal(
+                t("chat.cmd.compact.done", {
+                    n: payload.covered_count ?? 0,
+                    turns: payload.kept_turns ?? 2,
+                }),
+                "info"
+            );
+            break;
+        case "no_op":
+            components.renderSignal(t("chat.cmd.compact.noop"), "info");
+            break;
+        case "cancelled":
+            components.renderSignal(t("chat.cmd.compact.cancelled"), "warning");
+            break;
+        case "failed":
+            components.renderSignal(
+                t("chat.cmd.compact.failed", {msg: payload.error || "unknown"}),
+                "warning"
+            );
+            break;
+        default:
+            break; // running 不打扰
+    }
+}
+
+/**
+ * 压缩提示条操作回调（0.13.6 / 0.27.8）。
+ * - compress: 调 runManualCompact——与 /compact 共用手动摘要语义
+ *   （旧 compress_context_now「立即裁剪」链路已由 0.27.8 取代）
+ */
 async function handleContextWarningAction(action) {
     if (action === "compress") {
-        try {
-            const result = await ipc.compressContextNow(state.conversationId);
-            if (result?.status) {
-                components.updateContextIndicator(result.status);
-            }
-            if (result?.summary_in_flight) {
-                // 已有压缩任务在途：本轮只完成了裁剪——显式提示，不再静默跳过
-                components.removeContextWarning();
-                components.renderSignal("压缩进行中，本轮仅裁剪", "info");
-            } else if (result?.summary_triggered) {
-                // 摘要后台执行：按钮进入 loading 态防重复触发
-                components.setContextWarningLoading(true);
-                clearCompressLoadingTimer();
-                compressLoadingTimer = setTimeout(() => {
-                    compressLoadingTimer = null;
-                    components.setContextWarningLoading(false);
-                }, 35_000);
-            } else {
-                // 摘要关闭：等价旧「立即裁剪」行为
-                components.removeContextWarning();
-            }
-        } catch (e) {
-            console.error("[chat] 压缩失败:", e);
-            components.setContextWarningLoading(false);
-        }
+        await runManualCompact();
     }
 }
 
@@ -852,6 +917,13 @@ document.addEventListener("keydown", (e) => {
 
 function handleEsc(e) {
     if (e.key !== "Escape") return;
+    // 0.27.7：命令面板打开时 Esc 只关面板，不隐藏窗口（§九：Esc 只关弹层）。
+    // textarea 内的 Esc 已由面板 keydown 拦截；这里兜底焦点不在 composer 的场景。
+    if (isPaletteOpen()) {
+        closePalette();
+        focusInput();
+        return;
+    }
     e.preventDefault();
     if (state.isStreaming) {
         handleStop();
@@ -912,6 +984,43 @@ function handleVoiceError(event) {
 }
 
 // ── 新对话 ──────────────────────────────────────
+
+/**
+ * 0.27.7/0.27.8 斜杠命令执行器（command-palette 采纳后分发，phase §8.3）。
+ *
+ * - /new：复用新对话链路；生成中禁用并提示先停止（不清输入外的任何状态）
+ * - /model：打开与左下角同款模型 flyout（选择即切换对话窗口默认模型，
+ *   与手动切换完全同效；首版不支持命令直接带参——2026-10-23 定案）
+ * - /compact：手动压缩（与 80% 告警按钮共用 runManualCompact）
+ * - /prompt：打开提示词选择（scope=chat；采纳由面板光标插入，不经此分发）
+ * - /tools /mcp /skill 的面板内展示由 command-palette 自理，不经此分发
+ * @param {string} name 命令名（不含 /）
+ */
+function handleSlashCommand(name) {
+    switch (name) {
+        case "new":
+            if (state.isStreaming) {
+                components.renderSignal(t("chat.cmd.new.streaming"), "warning");
+                focusInput();
+                return;
+            }
+            handleNewConversation();
+            break;
+        case "model":
+            focusInput();
+            openModelDropdown();
+            break;
+        case "compact":
+            runManualCompact();
+            break;
+        case "prompt":
+            focusInput();
+            openPromptPalette();
+            break;
+        default:
+            break;
+    }
+}
 
 async function handleNewConversation(groupId = null) {
     if (state.isStreaming) {

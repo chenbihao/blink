@@ -330,3 +330,142 @@
     text-align: right;
     flex-shrink: 0;
 }
+
+/* ── 0.27.7 斜杠命令面板（command-palette.js，替代 0.13.3 skill-hint） ── */
+
+.chat-palette {
+    position: absolute;
+    bottom: 100%;
+    left: 0;
+    right: 0;
+    max-height: 300px;
+    overflow-y: auto;
+    background: var(--surface);
+    border: 1px solid var(--border-glow);
+    border-radius: 8px 8px 0 0;
+    box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.08);
+    z-index: 20;
+    padding: 4px 0;
+    scrollbar-width: thin;
+}
+
+.chat-palette[hidden] {
+    display: none;
+}
+
+.cp-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 14px;
+    min-width: 0;
+}
+
+.cp-row[data-adopt] {
+    cursor: pointer;
+    transition: background var(--transition-fast);
+}
+
+.cp-row[data-adopt]:hover,
+.cp-row.cp-row-highlight {
+    background: var(--accent-bg);
+}
+
+.cp-row-icon {
+    display: inline-flex;
+    color: var(--accent);
+    flex-shrink: 0;
+}
+
+.cp-row-icon .icon {
+    width: 14px;
+    height: 14px;
+}
+
+.cp-row-title {
+    font-family: var(--font-mono, "Cascadia Code", "Consolas", monospace);
+    font-size: var(--text-sm, 13px);
+    font-weight: var(--weight-medium, 500);
+    color: var(--text);
+    flex-shrink: 0;
+}
+
+.cp-row-arg {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    background: var(--surface-2);
+    color: var(--text-sub);
+    font-weight: var(--weight-semibold, 600);
+    flex-shrink: 0;
+}
+
+.cp-row-desc {
+    font-size: var(--text-xs, 12px);
+    color: var(--text-sub);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+}
+
+.cp-empty,
+.cp-loading,
+.cp-note {
+    padding: 10px 14px;
+    font-size: var(--text-sm, 13px);
+    color: var(--text-sub);
+}
+
+.cp-note {
+    padding: 4px 14px 6px;
+    font-size: var(--text-xs, 12px);
+}
+
+.cp-section-title {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px 4px;
+    font-size: var(--text-sm, 13px);
+    font-weight: var(--weight-semibold, 600);
+    color: var(--text);
+    position: sticky;
+    top: 0;
+    background: var(--surface);
+}
+
+.cp-section-count {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    background: var(--surface-2);
+    color: var(--text-sub);
+}
+
+/* MCP 状态点（与 composer-bar-popup 的 cbp-mcp-* 同语义色） */
+.cp-mcp-dot {
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: var(--text-dim, #6c7086);
+}
+
+.cp-mcp-dot[data-status="online"] {
+    background: var(--green, #a6e3a1);
+    box-shadow: 0 0 4px rgba(166, 227, 161, 0.5);
+}
+
+.cp-mcp-dot[data-status="connecting"] {
+    background: var(--yellow, #f9e2af);
+}
+
+.cp-mcp-dot[data-status="offline"] {
+    background: var(--red, #f38ba8);
+}
+
+.cp-mcp-dot[data-status="disabled"] {
+    background: var(--text-dim, #6c7086);
+}

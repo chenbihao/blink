@@ -1998,7 +1998,10 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
         app::commands::batch_set_mcp_enabled,
         // 0.13.6 上下文窗口状态
         app::commands::get_context_window_status,
-        app::commands::compress_context_now,
+        // 0.27.8 手动压缩（/compact 与告警按钮共用；替代已删的 compress_context_now）
+        app::commands::compact_conversation,
+        // 0.27.7 斜杠命令动态快照（/tools /mcp /skill）
+        app::commands::get_slash_command_snapshot,
         // 0.21.19 摘要压缩
         app::commands::get_context_summary,
         // 0.13.4 MCP server（暴露 Blink 能力）

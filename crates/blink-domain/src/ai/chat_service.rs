@@ -52,7 +52,7 @@ mod summary_task;
 
 use context_status::ContextStatusCache;
 pub use context_status::ContextWindowStatus;
-pub use summary_task::MemoryHealthSummary;
+pub use summary_task::{CompactJobEvent, ManualCompactPrecheck, MemoryHealthSummary};
 
 // Agent 缓存 key——provider/model/fingerprint/preamble_hash/MCP epoch/kind 任一变化即 cache miss。
 // ── 0.17.6: 对话类型 ────────────────────────────────────────────────────────

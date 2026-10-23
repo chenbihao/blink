@@ -176,6 +176,9 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
     // 0.21.19 迁移：conversations 表加 summarized_until 列（若不存在）
     migrate_add_summarized_until_column(pool).await?;
 
+    // 0.27.8 迁移：conversations 表加 manual_summary 列（手动压缩启用标记）
+    migrate_add_manual_summary_column(pool).await?;
+
     // 0.13.2: memory_fts 全文检索虚拟表（trigram 分词器，中文友好）
     // 归档滑动窗口截断的旧消息，供 BM25 检索召回
     sqlx::query(
@@ -215,6 +218,32 @@ async fn migrate_add_summarized_until_column(pool: &SqlitePool) -> Result<(), St
         .await
         .map_err(|e| e.to_string())?;
         tracing::info!("conversations 表已迁移：新增 summarized_until 列");
+    }
+    Ok(())
+}
+
+/// 0.27.8: 检测 `conversations` 表是否有 `manual_summary` 列，没有则 `ALTER TABLE ADD COLUMN`。
+///
+/// `manual_summary` 是会话级手动摘要启用标记——显式 /compact 成功提交后置 1；
+/// 全局摘要开关关闭时，load 侧据它决定是否仍读水位/注入摘要块（phase §5.8.2：
+/// 从未手动压缩的旧会话不被隐式开启摘要）。
+async fn migrate_add_manual_summary_column(pool: &SqlitePool) -> Result<(), String> {
+    let columns: Vec<(String,)> =
+        sqlx::query_as("SELECT name FROM pragma_table_info('conversations')")
+            .fetch_all(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+    let has_manual_summary = columns.iter().any(|(name,)| name == "manual_summary");
+    if !has_manual_summary {
+        sqlx::query(sqlx::AssertSqlSafe(
+            "ALTER TABLE conversations ADD COLUMN manual_summary INTEGER NOT NULL DEFAULT 0"
+                .to_string(),
+        ))
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        tracing::info!("conversations 表已迁移：新增 manual_summary 列");
     }
     Ok(())
 }
@@ -1385,6 +1414,115 @@ pub async fn get_summarized_until(pool: &SqlitePool, conversation_id: &str) -> R
             .await
             .map_err(|e| e.to_string())?;
     Ok(row.and_then(|(v,)| v).unwrap_or(0))
+}
+
+/// 0.27.8: 手动摘要的 CAS 提交——仅当水位仍等于 `expected_watermark` 时插入
+/// 摘要段并推进水位（phase §5.8.3：摘要输入冻结高水位，编辑/截断/删除推进
+/// 过水位的陈旧结果放弃提交）。
+///
+/// 返回 `Ok(true)` = 已提交；`Ok(false)` = 水位已变化，本次结果作废
+/// （不写任何数据，原摘要水位保持）。
+pub async fn insert_summary_and_advance_watermark_if_unchanged(
+    pool: &SqlitePool,
+    conversation_id: &str,
+    idx: i64,
+    start_rowid: i64,
+    end_rowid: i64,
+    content: &str,
+    token_est: i64,
+    expected_watermark: i64,
+) -> Result<bool, String> {
+    let now = chrono::Utc::now().timestamp();
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+
+    // 事务内先核水位（SQLite 单写者，事务保证读到提交后的最新值）
+    let current: Option<(Option<i64>,)> =
+        sqlx::query_as("SELECT summarized_until FROM conversations WHERE id = ?1")
+            .bind(conversation_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+    let current = current.and_then(|(v,)| v).unwrap_or(0);
+    if current != expected_watermark {
+        // 不提交任何数据——回滚即丢弃（tx drop = rollback）
+        return Ok(false);
+    }
+
+    sqlx::query(
+        "INSERT INTO conversation_summaries \
+         (conversation_id, idx, start_rowid, end_rowid, content, token_est, created_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+    )
+    .bind(conversation_id)
+    .bind(idx)
+    .bind(start_rowid)
+    .bind(end_rowid)
+    .bind(content)
+    .bind(token_est)
+    .bind(now)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    sqlx::query(
+        "UPDATE conversations SET summarized_until = ?1 \
+         WHERE id = ?2 AND summarized_until = ?3",
+    )
+    .bind(end_rowid)
+    .bind(conversation_id)
+    .bind(expected_watermark)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    tx.commit().await.map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+/// 0.27.8: 设置会话的手动摘要启用标记（显式 /compact 成功提交后置 true）。
+pub async fn set_conversation_manual_summary(
+    pool: &SqlitePool,
+    conversation_id: &str,
+    enabled: bool,
+) -> Result<(), String> {
+    sqlx::query("UPDATE conversations SET manual_summary = ?1 WHERE id = ?2")
+        .bind(enabled as i64)
+        .bind(conversation_id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 0.27.8: 读取会话的手动摘要启用标记。对话不存在返回 false。
+pub async fn is_conversation_manual_summary(
+    pool: &SqlitePool,
+    conversation_id: &str,
+) -> Result<bool, String> {
+    let row: Option<(i64,)> =
+        sqlx::query_as("SELECT manual_summary FROM conversations WHERE id = ?1")
+            .bind(conversation_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    Ok(row.is_some_and(|(v,)| v != 0))
+}
+
+/// 0.27.8: 统计水位以上的消息数（手动压缩预检——空会话/新会话 no-content 判定）。
+pub async fn count_messages_after_watermark(
+    pool: &SqlitePool,
+    conversation_id: &str,
+    watermark: i64,
+) -> Result<i64, String> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM messages WHERE conversation_id = ?1 AND id > ?2",
+    )
+    .bind(conversation_id)
+    .bind(watermark)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(count)
 }
 
 /// 加载对话的所有摘要段（按 idx 升序）。
@@ -2884,6 +3022,87 @@ mod tests {
         assert!(
             !convs.iter().any(|c| c.id.starts_with("__")),
             "不应返回 __ 前缀的内部对话"
+        );
+    }
+
+    // ── 0.27.8: 手动摘要 CAS 提交 / manual_summary 标记 / 水位计数 ──────────
+
+    #[tokio::test]
+    async fn manual_summary_cas_commit_succeeds_when_watermark_unchanged() {
+        let pool = setup_pool().await;
+        create_conversation(&pool, "c1", Some("t")).await.unwrap();
+        let id1 = append_message(&pool, "c1", "user", "{}").await.unwrap();
+        let id2 = append_message(&pool, "c1", "assistant", "{}").await.unwrap();
+
+        let committed = insert_summary_and_advance_watermark_if_unchanged(
+            &pool, "c1", 0, 1, id2, "摘要", 10, 0,
+        )
+        .await
+        .unwrap();
+        assert!(committed, "水位未变应提交成功");
+        assert_eq!(get_summarized_until(&pool, "c1").await.unwrap(), id2);
+        assert_eq!(count_summaries(&pool, "c1").await.unwrap(), 1);
+        let _ = id1;
+    }
+
+    #[tokio::test]
+    async fn manual_summary_cas_commit_rejected_when_watermark_advanced() {
+        let pool = setup_pool().await;
+        create_conversation(&pool, "c1", Some("t")).await.unwrap();
+        let id1 = append_message(&pool, "c1", "user", "{}").await.unwrap();
+        append_message(&pool, "c1", "assistant", "{}").await.unwrap();
+
+        // 另一路任务已把水位推进到 id1（模拟自动摘要/并发手动压缩）
+        insert_summary_and_advance_watermark(&pool, "c1", 0, 1, id1, "旧摘要", 5)
+            .await
+            .unwrap();
+
+        let committed = insert_summary_and_advance_watermark_if_unchanged(
+            &pool, "c1", 1, id1 + 1, id1 + 1, "陈旧摘要", 8, 0, // 冻结水位是 0，已被推进
+        )
+        .await
+        .unwrap();
+        assert!(!committed, "水位已变化应放弃提交（陈旧结果不推进水位）");
+        // 无新写入：段数仍 1、水位仍 id1
+        assert_eq!(count_summaries(&pool, "c1").await.unwrap(), 1);
+        assert_eq!(get_summarized_until(&pool, "c1").await.unwrap(), id1);
+    }
+
+    #[tokio::test]
+    async fn manual_summary_flag_roundtrip_and_default_off() {
+        let pool = setup_pool().await;
+        create_conversation(&pool, "c1", Some("t")).await.unwrap();
+        create_conversation(&pool, "c2", Some("t")).await.unwrap();
+
+        assert!(!is_conversation_manual_summary(&pool, "c1").await.unwrap());
+        set_conversation_manual_summary(&pool, "c1", true)
+            .await
+            .unwrap();
+        assert!(is_conversation_manual_summary(&pool, "c1").await.unwrap());
+        // 其他会话不受影响（迁移旧会话不被隐式开启）
+        assert!(!is_conversation_manual_summary(&pool, "c2").await.unwrap());
+        // 不存在的会话返回 false
+        assert!(!is_conversation_manual_summary(&pool, "missing").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn count_messages_after_watermark_filters_correctly() {
+        let pool = setup_pool().await;
+        create_conversation(&pool, "c1", Some("t")).await.unwrap();
+        let id1 = append_message(&pool, "c1", "user", "{}").await.unwrap();
+        let id2 = append_message(&pool, "c1", "assistant", "{}").await.unwrap();
+
+        assert_eq!(
+            count_messages_after_watermark(&pool, "c1", 0).await.unwrap(),
+            2
+        );
+        assert_eq!(
+            count_messages_after_watermark(&pool, "c1", id1).await.unwrap(),
+            1
+        );
+        assert_eq!(
+            count_messages_after_watermark(&pool, "c1", id2).await.unwrap(),
+            0
         );
     }
 }

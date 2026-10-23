@@ -52,6 +52,11 @@ impl EventNames {
     pub const CHAT_PREFILL: &str = "blink://chat-prefill";
     /// 0.17.6a: promote 临时对话后，通知 chat 窗口切换到该 conversation。payload: conversation_id
     pub const CHAT_LOAD_CONVERSATION: &str = "blink://chat-load-conversation";
+    /// 0.27.8: 手动压缩（/compact 与 80% 告警按钮）任务状态。payload:
+    /// `{ job_id, conversation_id, status: "running"|"succeeded"|"no_op"|"failed"
+    ///    |"cancelled", error?, covered_count?, kept_turns? }`。前端按
+    /// job_id/conversation_id 消费，不用超时猜成功（phase §3.8/§5.8.3）。
+    pub const CHAT_COMPACT_JOB: &str = "blink://chat-compact-job";
 
     // ── 语音 ──
     pub const VOICE_RECORDING_START: &str = "blink://voice-recording-start";

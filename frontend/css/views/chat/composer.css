@@ -144,28 +144,8 @@
     background: var(--surface-2);
 }
 
-/* 0.21.23: 手动压缩异步化——摘要后台执行期间按钮 loading 态（禁用 + 弱化 + 脉冲） */
-.chat-context-warning-btn.loading {
-    opacity: 0.6;
-    cursor: progress;
-    animation: chat-warning-btn-pulse 1.2s ease-in-out infinite;
-}
-
-.chat-context-warning-btn:disabled {
-    pointer-events: none;
-}
-
-@keyframes chat-warning-btn-pulse {
-
-    0%,
-    100% {
-        opacity: 0.6;
-    }
-
-    50% {
-        opacity: 0.85;
-    }
-}
+/* 0.27.8: 旧 loading 态样式已随 setContextWarningLoading 删除（按钮动作改为
+ * /compact 共用语义，任务状态经 CHAT_COMPACT_JOB 事件反馈，按钮不再进 loading） */
 
 .chat-context-warning-close {
     background: none;

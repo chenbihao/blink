@@ -136,6 +136,98 @@ pub fn format_messages_for_summary(messages: &[rig_core::completion::Message]) -
 /// 摘要请求的 max_tokens 上限（D5）。
 pub const SUMMARY_MAX_TOKENS: usize = 600;
 
+/// 0.27.8 手动压缩：完整 user turn 保留数（phase §3.8——手动压缩覆盖最近
+/// 两轮完整 user turn 之前的上下文）。
+pub const MANUAL_COMPACT_KEEP_TURNS: usize = 2;
+
+/// 0.27.8 手动压缩：单段摘要输入的 token 预算（phase §5.8.1——长历史分段
+/// 输入不超摘要模型预算）。
+///
+/// 由摘要模型 context window 推导：取 50%，钳制在 [2000, 24000]；
+/// 未知窗口用 8000 保守值。集中命名，不散落硬编码。
+pub fn manual_summary_input_budget(context_window: Option<u32>) -> usize {
+    match context_window {
+        Some(w) => ((w as usize) * 50 / 100).clamp(2_000, 24_000),
+        None => 8_000,
+    }
+}
+
+/// 0.27.8 手动压缩边界（phase §3.8/§5.8.1）。
+///
+/// `rows`：水位以上消息（升序 `(rowid, 是否真实用户提问)`）。"真实用户提问"
+/// 指带文本的 user 消息——ToolResult 投递同为 user 角色但不算 turn 起点，
+/// 由调用方预先判定（`is_user_prompt_row`）。
+///
+/// 完整 user turn = 该 user 消息之后还有消息（回复已到）。保留最近
+/// `keep_turns` 个完整 turn，压缩其之前的全部消息；返回被压缩区间的
+/// 最后一条 rowid（水位以上、保留区之前的消息）。不足边界（完整 turn
+/// 数 ≤ keep_turns 或保留区从首行开始）返回 None（no-op，不动 DB）。
+///
+/// 边界总是落在某个 user 消息的前一条——turn 内的 assistant/工具消息与
+/// 其 ToolResult 配对同进同退，不会被拆散。
+pub fn compute_manual_compact_boundary(rows: &[(i64, bool)], keep_turns: usize) -> Option<i64> {
+    if keep_turns == 0 || rows.is_empty() {
+        return None;
+    }
+    // 完整 turn 起点索引（后续还有消息）
+    let turn_starts: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(i, (_, is_user))| *is_user && i + 1 < rows.len())
+        .map(|(i, _)| i)
+        .collect();
+    // 需要至少 keep_turns + 1 个完整 turn：保留 keep_turns 后仍有 ≥1 轮可压缩
+    if turn_starts.len() < keep_turns + 1 {
+        return None;
+    }
+    let keep_from = turn_starts[turn_starts.len() - keep_turns];
+    if keep_from == 0 {
+        return None; // 保留区从首行开始，无前缀可压缩
+    }
+    Some(rows[keep_from - 1].0)
+}
+
+/// 0.27.8 判定持久化消息行是否"真实用户提问"（turn 起点）。
+///
+/// role 为 user 且反序列化后含非空文本——ToolResult 投递（同为 user 角色）
+/// 与损坏行都不算。参数用 (role, content JSON) 原始行形态，供
+/// `load_window_messages_with_ids_after_watermark` 结果直接消费。
+pub fn is_user_prompt_row(role: &str, content: &str) -> bool {
+    use rig_core::completion::Message;
+    if role != "user" {
+        return false;
+    }
+    match serde_json::from_str::<Message>(content) {
+        Ok(msg) => !crate::ai::memory::extract_message_text(&msg).is_empty(),
+        Err(_) => false,
+    }
+}
+
+/// 0.27.8 手动压缩输入分段（phase §5.8.1）。
+///
+/// 按消息粒度把 `tokens`（每条消息的估算 token）切成连续段，每段总量
+/// ≤ `budget`；单条超过 budget 的消息独占一段（不再细切——由模型尽力，
+/// 失败在任务层明示）。返回段区间 `[start, end)`（end-exclusive，相对
+/// 消息数组索引）。空输入返回空 vec。
+pub fn plan_summary_segments(tokens: &[usize], budget: usize) -> Vec<(usize, usize)> {
+    if tokens.is_empty() || budget == 0 {
+        return Vec::new();
+    }
+    let mut segments = Vec::new();
+    let mut start = 0usize;
+    let mut total = 0usize;
+    for (index, &token) in tokens.iter().enumerate() {
+        if index > start && total + token > budget {
+            segments.push((start, index));
+            start = index;
+            total = 0;
+        }
+        total += token;
+    }
+    segments.push((start, tokens.len()));
+    segments
+}
+
 // ── 单测 ───────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -252,5 +344,108 @@ mod tests {
         assert!(formatted.contains("[用户] hello"));
         assert!(formatted.contains("[助手] world"));
         assert!(!formatted.contains("[]")); // 空消息不应出现
+    }
+
+    // ── 0.27.8 手动压缩：边界 / turn 判定 / 分段 / 预算 ─────────────────────
+
+    /// 行便捷构造：(rowid, 是否用户提问)。u = 用户提问，a = 其他消息。
+    fn rows(spec: &str) -> Vec<(i64, bool)> {
+        spec.chars()
+            .enumerate()
+            .filter(|(_, c)| *c != '|')
+            .map(|(i, c)| (i as i64 + 1, c == 'u'))
+            .collect()
+    }
+
+    #[test]
+    fn manual_boundary_keeps_last_two_turns() {
+        // u a u a u a：3 个完整 turn，保留后 2，压缩第 1 turn（rowid 1-2）
+        assert_eq!(
+            compute_manual_compact_boundary(&rows("uauaua"), MANUAL_COMPACT_KEEP_TURNS),
+            Some(2)
+        );
+        // turn 间穿插的工具投递行（a）跟随所属 turn，不被单独保留
+        assert_eq!(
+            compute_manual_compact_boundary(&rows("uaauaua"), MANUAL_COMPACT_KEEP_TURNS),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn manual_boundary_noop_when_turns_insufficient() {
+        // 0/1/2 个完整 turn：无前缀可压缩
+        assert_eq!(compute_manual_compact_boundary(&rows(""), 2), None);
+        assert_eq!(compute_manual_compact_boundary(&rows("uaua"), 2), None);
+        assert_eq!(compute_manual_compact_boundary(&rows("uauau"), 2), None);
+        // 最后一个 turn 未获回复（不完整）不计入保留数：ua ua u → 完整 turn 仅 2
+        assert_eq!(compute_manual_compact_boundary(&rows("uauau"), 2), None);
+        // keep_turns = 0 防御
+        assert_eq!(compute_manual_compact_boundary(&rows("uauaua"), 0), None);
+    }
+
+    #[test]
+    fn manual_boundary_tool_delivery_rows_not_turn_starts() {
+        // t = ToolResult 投递（user 角色但无文本，不算 turn 起点）：
+        // u t a | u t a | u a —— 实际 3 个完整 user turn（起点 u@1/4/7）
+        let r = rows("utautaua");
+        assert_eq!(compute_manual_compact_boundary(&r, 2), Some(3));
+    }
+
+    #[test]
+    fn manual_boundary_boundary_never_splits_turn() {
+        // 边界必须落在保留区首个 user 提问的前一行
+        let r = rows("aauauaua");
+        let boundary = compute_manual_compact_boundary(&r, 2).unwrap();
+        // rows: a(1) a(2) u(3) a(4) u(5) a(6) u(7) a(8)；保留 u(5) 起 → 边界 = 4
+        assert_eq!(boundary, 4);
+    }
+
+    #[test]
+    fn user_prompt_row_detection() {
+        use rig_core::completion::Message;
+        use rig_core::completion::message::{Text, UserContent};
+        let user_text = serde_json::to_string(&Message::User {
+            content: vec![UserContent::Text(Text::new("你好"))],
+        })
+        .unwrap();
+        // ToolResult 投递：user 角色但无 Text 内容
+        let tool_delivery = serde_json::json!({
+            "role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]
+        })
+        .to_string();
+
+        assert!(is_user_prompt_row("user", &user_text));
+        assert!(!is_user_prompt_row("user", &tool_delivery), "ToolResult 投递不算 turn 起点");
+        assert!(!is_user_prompt_row("assistant", &user_text));
+        assert!(!is_user_prompt_row("user", "{bad json"));
+    }
+
+    #[test]
+    fn summary_segments_within_budget_single() {
+        assert_eq!(plan_summary_segments(&[100, 200, 300], 1000), vec![(0, 3)]);
+        assert_eq!(plan_summary_segments(&[], 1000), Vec::<(usize, usize)>::new());
+    }
+
+    #[test]
+    fn summary_segments_splits_on_budget() {
+        // 预算 500：[400, 300, 200] → [0,1) + [1,3)（300+200=500 ≤ 预算）
+        assert_eq!(plan_summary_segments(&[400, 300, 200], 500), vec![(0, 1), (1, 3)]);
+    }
+
+    #[test]
+    fn summary_segments_oversized_message_alone() {
+        // 单条 900 超预算 500：独占一段，不细切
+        assert_eq!(plan_summary_segments(&[100, 900, 100], 500), vec![(0, 1), (1, 2), (2, 3)]);
+        // 预算 0 防御
+        assert_eq!(plan_summary_segments(&[100], 0), Vec::<(usize, usize)>::new());
+    }
+
+    #[test]
+    fn manual_summary_input_budget_clamped() {
+        assert_eq!(manual_summary_input_budget(None), 8_000);
+        assert_eq!(manual_summary_input_budget(Some(1_000)), 2_000); // 下限钳制
+        assert_eq!(manual_summary_input_budget(Some(8_192)), 4_096); // 50%
+        assert_eq!(manual_summary_input_budget(Some(1_000_000)), 24_000); // 上限钳制
     }
 }

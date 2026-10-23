@@ -1152,8 +1152,11 @@ export function updateContextIndicator(status) {
  * - 压缩开启："旧消息将被自动压缩"，按钮文字"立即压缩"
  * - 摘要关闭："旧消息将被裁剪归档"，按钮文字"立即裁剪"
  *
+ * 0.27.8：按钮动作改为与 /compact 共用的手动摘要语义（runManualCompact）；
+ * 按钮文案统一为"立即压缩"。
+ *
  * @param {number} usagePercent 当前占用百分比
- * @param {boolean} summaryEnabled 摘要压缩是否开启
+ * @param {boolean} summaryEnabled 摘要压缩是否开启（文案区分用）
  * @param {(action: 'compress') => void} onAction
  */
 export function renderContextWarning(usagePercent, summaryEnabled, onAction) {
@@ -1185,35 +1188,5 @@ export function renderContextWarning(usagePercent, summaryEnabled, onAction) {
     warning.querySelector(".chat-context-warning-close").addEventListener("click", () => warning.remove());
     messagesEl.appendChild(warning);
     scrollToBottom();
-}
-
-/**
- * 移除压缩提示条。
- */
-export function removeContextWarning() {
-    const existing = document.querySelector(".chat-context-warning");
-    if (existing) existing.remove();
-}
-
-/**
- * 0.21.23: 压缩按钮 loading 态（手动压缩异步化——摘要后台执行期间禁用防重复触发）。
- *
- * loading 解除信号：下一个 CHAT_CONTEXT_STATUS 事件（摘要完成推送）重渲染提示条，
- * 或 main.js 的 35s 兜底超时。
- * @param {boolean} loading
- */
-export function setContextWarningLoading(loading) {
-    const warning = document.querySelector(".chat-context-warning");
-    const btn = warning?.querySelector('[data-action="compress"]');
-    if (!btn) return;
-    btn.disabled = loading;
-    btn.classList.toggle("loading", loading);
-    if (loading) {
-        if (!btn.dataset.label) btn.dataset.label = btn.textContent;
-        btn.textContent = "压缩中…";
-    } else if (btn.dataset.label) {
-        btn.textContent = btn.dataset.label;
-        delete btn.dataset.label;
-    }
 }
 
