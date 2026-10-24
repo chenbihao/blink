@@ -5,8 +5,10 @@
 //! 可达几十 KB），因此由设置页「AI HTTP 请求/响应体日志」开关控制，**默认关闭**：
 //!
 //! - 关闭（默认）：纯透传，零日志开销
-//! - 开启：以 **debug** 级打印（`blink::ai::http` target）——请求体 + 响应状态码
-//!   （`send`，非流式）+ 逐 chunk 原始 SSE 帧（`send_streaming`，对话）
+//! - 开启：请求体以 **trace** 级、响应状态码/SSE 帧以 **debug** 级打印
+//!   （`blink::ai::http` target）——`send` 非流式 + `send_streaming` 对话。
+//!   请求体与 URI 中的图片/base64 与密钥参数均已脱敏（`redact_image_payload`
+//!   / `redact_uri_query`）
 //!
 //! 该层拿到的是真实发出的请求 JSON 与真实收到的 SSE 帧，用于排查 provider 兼容问题
 //! （如本地 qwen 思考块为何不显示——直接看响应里有没有 `reasoning_content` 字段）。
@@ -201,15 +203,68 @@ impl HttpClientExt for LoggingHttpClient {
     }
 }
 
-/// 打印请求体（trace；0.27.10 起图片/base64 脱敏——只留长度元数据）。
+/// 打印请求体（trace；0.27.10 起图片/base64 脱敏——只留长度元数据；
+/// URI query 中 Gemini `?key=` 等敏感参数同步脱敏）。
 fn log_request(method: &Method, uri: &Uri, bytes: &Bytes) {
     tracing::trace!(
         target: TARGET,
         method = %method,
-        uri = %uri,
+        uri = %redact_uri_query(uri),
         body = redact_image_payload(&truncate_lossy(bytes)),
         "HTTP 请求体"
     );
+}
+
+/// URI query 敏感参数脱敏：Gemini 协议把 API key 放 `?key=`，其余常见
+/// 凭据参数名一并遮蔽——日志只留参数名与值长度，非敏感参数原样保留。
+fn redact_uri_query(uri: &Uri) -> String {
+    let Some(query) = uri.query() else {
+        return uri.to_string();
+    };
+    let redacted = query
+        .split('&')
+        .map(|pair| {
+            let (name, value) = match pair.split_once('=') {
+                Some((n, v)) => (n, v),
+                None => (pair, ""),
+            };
+            if is_sensitive_query_param(name) {
+                format!("{name}=<redacted:{}ch>", value.chars().count())
+            } else {
+                pair.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+    let mut out = String::with_capacity(uri.to_string().len());
+    if let Some(scheme) = uri.scheme_str() {
+        out.push_str(scheme);
+        out.push_str("://");
+    }
+    if let Some(auth) = uri.authority() {
+        out.push_str(auth.as_str());
+    }
+    out.push_str(uri.path());
+    out.push('?');
+    out.push_str(&redacted);
+    out
+}
+
+/// 敏感 query 参数名（大小写不敏感）。
+fn is_sensitive_query_param(name: &str) -> bool {
+    const SENSITIVE: &[&str] = &[
+        "key",
+        "token",
+        "api_key",
+        "apikey",
+        "secret",
+        "access_token",
+        "refresh_token",
+        "signature",
+        "password",
+        "client_secret",
+    ];
+    SENSITIVE.iter().any(|s| name.eq_ignore_ascii_case(s))
 }
 
 /// 0.27.10：图片 payload 脱敏（phase §3.4——HTTP 正文日志对图片/base64
@@ -295,7 +350,8 @@ fn truncate_lossy(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod redact_tests {
-    use super::redact_image_payload;
+    use super::{redact_image_payload, redact_uri_query};
+    use rig_core::http_client::Uri;
 
     #[test]
     fn redact_leaves_normal_bodies_untouched() {
@@ -326,5 +382,38 @@ mod redact_tests {
         assert!(out.contains("<redacted-image:1500ch>"));
         assert!(out.contains("<redacted-image:1200ch>"));
         assert!(!out.contains(&b64a) && !out.contains(&b64b));
+    }
+
+    #[test]
+    fn uri_query_redacts_gemini_key() {
+        let uri: Uri = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=AIzaSyD-1234567890abcdef"
+            .parse()
+            .unwrap();
+        let out = redact_uri_query(&uri);
+        assert!(!out.contains("AIzaSyD"), "Gemini API key 不进日志: {out}");
+        assert!(out.contains("key=<redacted:"), "保留参数名与长度: {out}");
+        assert!(
+            out.starts_with("https://generativelanguage.googleapis.com/v1beta/"),
+            "路径原样保留: {out}"
+        );
+    }
+
+    #[test]
+    fn uri_query_keeps_normal_params_and_no_query() {
+        let uri: Uri = "https://api.example.com/v1/chat?stream=true&model=gpt".parse().unwrap();
+        assert_eq!(redact_uri_query(&uri), uri.to_string(), "非敏感参数原样");
+
+        let plain: Uri = "https://api.example.com/v1/models".parse().unwrap();
+        assert_eq!(redact_uri_query(&plain), plain.to_string(), "无 query 原样");
+    }
+
+    #[test]
+    fn uri_query_redacts_common_credential_param_names() {
+        for name in ["token", "API_KEY", "Access_Token", "client_secret"] {
+            let uri: Uri = format!("https://x.test/p?{name}=secretvalue&ok=1").parse().unwrap();
+            let out = redact_uri_query(&uri);
+            assert!(!out.contains("secretvalue"), "{name} 值被遮蔽: {out}");
+            assert!(out.contains("ok=1"), "其余参数保留: {out}");
+        }
     }
 }

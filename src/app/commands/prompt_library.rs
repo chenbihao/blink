@@ -98,7 +98,11 @@ pub struct PromptUpsertInput {
     /// 自建条目的正文（内置条目忽略该字段，content 由目录种子升级）。
     pub content: Option<String>,
     /// 内置条目的用户覆盖；Some(None) = 清除覆盖（等价 reset）。
-    #[serde(default)]
+    ///
+    /// serde 默认把 JSON `null` 与字段缺省都反序列化成外层 None，
+    /// `Some(None)` 三态在 JSON IPC 上不可表达——显式 null 必须经
+    /// [`deserialize_double_option`] 才能到达存储层（否则清空覆盖保存静默失效）。
+    #[serde(default, deserialize_with = "deserialize_double_option")]
     pub override_content: Option<Option<String>>,
     /// 新建条目的作用域（更新时忽略——scope 不可变，§3.7）。
     pub scope: Option<String>,
@@ -108,6 +112,16 @@ pub struct PromptUpsertInput {
     pub sort_order: Option<i64>,
     /// 乐观并发版本（更新必填；新建忽略）。
     pub expected_revision: Option<i64>,
+}
+
+/// `Option<Option<T>>` 三态反序列化：字段缺省 → None（不修改），显式
+/// `null` → `Some(None)`（清除），值 → `Some(Some(v))`。
+fn deserialize_double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    serde::Deserialize::deserialize(deserializer).map(Some)
 }
 
 /// 新建 / 更新条目。
@@ -222,15 +236,21 @@ pub async fn prompt_library_delete(
     Ok(())
 }
 
-/// 恢复默认：清除内置条目的用户覆盖。
+/// 恢复默认：清除内置条目的用户覆盖（携带 expected_revision 做乐观并发，
+/// 陈旧版本返回 `prompt_conflict`）。
 #[tauri::command]
 pub async fn prompt_library_reset(
     app: tauri::AppHandle,
     id: String,
+    expected_revision: Option<i64>,
 ) -> Result<PromptEntryView, crate::app::command_error::CommandError> {
-    let row = blink_infra::data::prompt_library::reset_override(&pool(&app), &id)
-        .await
-        .map_err(map_store_error)?;
+    let row = blink_infra::data::prompt_library::reset_override(
+        &pool(&app),
+        &id,
+        expected_revision,
+    )
+    .await
+    .map_err(map_store_error)?;
     tracing::info!(%id, "提示词库：内置条目已恢复默认");
     emit_changed(&app, row.scope);
     Ok(to_view(&row))

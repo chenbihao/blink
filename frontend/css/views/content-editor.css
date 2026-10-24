@@ -978,7 +978,7 @@
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
-    box-shadow: var(--shadow-lg, 0 8px 24px rgba(0, 0, 0, 0.35));
+    box-shadow: 0 8px 24px var(--shadow);
 }
 
 .editor-preset-menu-item {
@@ -995,5 +995,6 @@
 }
 
 .editor-preset-menu-item:hover {
-    background: var(--accent-dim, rgba(128, 128, 128, 0.15));
+    /* 与 chat 弹层菜单项（cp-row）同档 hover 背景 */
+    background: var(--accent-bg);
 }

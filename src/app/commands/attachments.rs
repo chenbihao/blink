@@ -676,6 +676,17 @@ async fn sniff_and_sign_file(
     let is_png = n >= 4 && &head[..4] == &[0x89, b'P', b'N', b'G'];
     let is_jpeg = n >= 3 && &head[..3] == &[0xFF, 0xD8, 0xFF];
     if is_png || is_jpeg {
+        // 编码体积预检（与文本路径 256KiB 预检口径一致）：发送时同样会被
+        // read_all_bounded(8MiB) 拒绝，签发层先拒可给用户即时反馈，不签出
+        // 必然失效的引用
+        if let Ok(meta) = tokio::fs::metadata(path).await
+            && meta.len() > crate::domain::ai::vision::MAX_ENCODED_BYTES_PER_IMAGE
+        {
+            return Err(format!(
+                "图片体积 {:.1} MiB 超过单图 8 MiB 上限，请压缩后再附加",
+                meta.len() as f64 / (1024.0 * 1024.0)
+            ));
+        }
         let spec = ResourceGrantSpec::new(
             ResourceUseSet::single(ResourceUse::VisionImage),
             ReusePolicy::Reusable,

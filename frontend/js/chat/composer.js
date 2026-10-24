@@ -76,6 +76,9 @@ let attachments = [];
 /** 单轮附件上限（与后端 MAX_CHAT_ATTACHMENTS 对齐）。 */
 const MAX_ATTACHMENTS = 8;
 
+/** 超限未附加提示（一次性；点击提示 chip 或下次批量添加时清除）。 */
+let attachmentOverflowNotice = null;
+
 /**
  * 0.27.7 composer 输入代次（§九）：用户输入、面板开/关、附件增删时 +1。
  * 弹层异步结果回写前核对，不匹配即丢弃（沿用 skillHintRevision 先例）。
@@ -158,10 +161,15 @@ export function initComposer(callbacks) {
         }
     });
 
-    // 0.27.9: 附件按钮打开 @ 附件面板（与 @ 触发共用，phase §5.9.4）
+    // 0.27.9: 附件按钮打开 @ 附件面板（与 @ 触发共用，phase §5.9.4）；
+    // stopPropagation 阻止冒泡到 document 的 click-outside 关闭逻辑（面板开即关）
     attachBtn = document.getElementById("chat-attach-btn");
     attachmentsEl = document.getElementById("chat-audio-attachments");
-    if (attachBtn) attachBtn.addEventListener("click", openAttachmentPalette);
+    if (attachBtn)
+        attachBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            openAttachmentPalette();
+        });
     renderAttachments();
 
     // 0.27.10: 粘贴图片——剪贴板有文本时走默认文本粘贴（不覆盖已有文字）；
@@ -432,15 +440,21 @@ export function hasAttachments() {
 /**
  * 批量添加附件（@ 面板采纳 / open_chat 草稿事务预填入口）。
  *
- * 按 ref 去重（同一 ref 重复附加不堆叠），超出单轮上限的尾部丢弃；
+ * 按 ref 去重（同一 ref 重复附加不堆叠）；超出单轮上限的项不静默丢弃——
+ * chip 区显示可关闭的超限提示，并经返回值供调用方感知。
  * 会话一致性由调用方保证（面板/预填流在会话切换时撤销或转移）。
  * @param {Array<{kind: string, ref: string, display: string, truncated?: boolean, tokenEst?: number|null}>} list
+ * @returns {{rejected: Array<object>}} 因超限未添加的项
  */
 export function addAttachments(list) {
     const incoming = (Array.isArray(list) ? list : [])
         .filter((a) => a && typeof a.ref === "string" && a.ref.startsWith("rref_"));
+    const rejected = [];
     for (const item of incoming) {
-        if (attachments.length >= MAX_ATTACHMENTS) break;
+        if (attachments.length >= MAX_ATTACHMENTS) {
+            rejected.push(item);
+            continue;
+        }
         if (attachments.some((existing) => existing.ref === item.ref)) continue;
         attachments.push({
             kind: item.kind || "text_file",
@@ -450,8 +464,12 @@ export function addAttachments(list) {
             tokenEst: item.tokenEst ?? null,
         });
     }
+    attachmentOverflowNotice = rejected.length
+        ? t("chat.attach.overflow", {count: rejected.length, max: MAX_ATTACHMENTS})
+        : null;
     renderAttachments();
     updateSendButtonState();
+    return {rejected};
 }
 
 /**
@@ -460,6 +478,7 @@ export function addAttachments(list) {
  */
 export function clearAttachments() {
     attachments = [];
+    attachmentOverflowNotice = null;
     renderAttachments();
     updateSendButtonState();
 }
@@ -556,7 +575,19 @@ function renderAttachments() {
         chip.append(icon, name, remove);
         attachmentsEl.appendChild(chip);
     }
-    attachmentsEl.classList.toggle("hidden", attachments.length === 0);
+    if (attachmentOverflowNotice) {
+        const notice = document.createElement("button");
+        notice.type = "button";
+        notice.className = "chat-audio-chip chat-audio-chip-notice";
+        notice.title = attachmentOverflowNotice;
+        notice.textContent = attachmentOverflowNotice;
+        notice.addEventListener("click", () => {
+            attachmentOverflowNotice = null;
+            renderAttachments();
+        });
+        attachmentsEl.appendChild(notice);
+    }
+    attachmentsEl.classList.toggle("hidden", attachments.length === 0 && !attachmentOverflowNotice);
 }
 
 async function removeAttachment(ref) {

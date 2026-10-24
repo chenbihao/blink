@@ -967,6 +967,42 @@ fn strip_image_parts(messages: &mut [Message]) {
     }
 }
 
+/// 0.27.9：文本附件上下文不重放（§3.3 单次注入）——临时会话没有持久层的
+/// 预写/位置去重机制，rig append 的首条 user 是完整 model_input（围栏块 +
+/// 可见正文），下轮会整块重放。按头部围栏剥离附件块、保留可见正文。
+///
+/// 围栏恒由 `compose_model_input` 放在 model_input 头部，只匹配开头；正文
+/// 恰以同名字面量开头且无结束围栏时保守不剥。
+fn strip_attachment_fence_from_messages(messages: &mut [Message]) {
+    use rig_core::completion::message::UserContent;
+    for msg in messages.iter_mut() {
+        if let Message::User { content } = msg {
+            for part in content.iter_mut() {
+                if let UserContent::Text(t) = part {
+                    let stripped = strip_attachment_fence(&t.text);
+                    if stripped.len() != t.text.len() {
+                        t.text = stripped.to_string();
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// 剥离文本头部的附件围栏块，返回剩余正文（无围栏时原样返回）。
+fn strip_attachment_fence(text: &str) -> &str {
+    let begin = crate::ai::attachment::ATTACHMENT_FENCE_BEGIN;
+    let end_marker = crate::ai::attachment::ATTACHMENT_FENCE_END;
+    let Some(after_begin) = text.strip_prefix(begin) else {
+        return text;
+    };
+    let Some(end_rel) = after_begin.find(end_marker) else {
+        return text; // 有开始无结束（异常流）：保守不剥
+    };
+    let rest = &after_begin[end_rel + end_marker.len()..];
+    rest.strip_prefix('\n').unwrap_or(rest)
+}
+
 impl ConversationMemory for SqliteConversationMemory {
     fn load<'a>(
         &'a self,
@@ -1158,6 +1194,9 @@ impl ConversationMemory for EphemeralConversationMemory {
             // 0.27.10：图片 part 不进临时记忆（下轮不重放，promote 导出无图）
             let mut messages = messages;
             strip_image_parts(&mut messages);
+            // 0.27.9：文本附件围栏块同样不重放（临时会话无预写/位置去重，
+            // 剥离后只留可见正文——§3.3 单次注入）
+            strip_attachment_fence_from_messages(&mut messages);
             let mut convs = self.conversations.write().await;
             let vec = convs.entry(conversation_id.to_string()).or_default();
             vec.extend(messages);
@@ -1262,6 +1301,9 @@ mod tests {
         }
     }
 
+    /// 预写 user 在 load 时跳过（rig 会追加一次 prompt），append 清除标记后
+    /// 恢复完整历史（0.21.16 预写回归锚）。
+    #[tokio::test]
     async fn prewrite_user_skipped_in_load_then_restored_after_append() {
         let pool = setup_pool().await;
         let mem = SqliteConversationMemory::new(pool);
@@ -2175,6 +2217,45 @@ mod tests {
 
         let loaded = mem.load(&ConversationId::new("c1")).await.unwrap();
         assert_eq!(loaded.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn ephemeral_append_strips_attachment_fence() {
+        // 0.27.9 单次注入：临时会话没有预写/位置去重，append 进来的首条
+        // user 是完整 model_input（围栏块 + 可见正文）——围栏块必须剥掉，
+        // 下轮不重放附件内容，可见正文保留。
+        use crate::ai::attachment::{compose_model_input, ResolvedAttachment, TextInjection};
+
+        let injection = TextInjection {
+            text: "文件正文内容".into(),
+            token_est: 10,
+            original_token_est: 10,
+            truncated: false,
+        };
+        let resolved = vec![ResolvedAttachment::TextFile {
+            r#ref: "rref_bbbbccccddddeeee".into(),
+            display: "笔记.txt".into(),
+            injection,
+        }];
+        let model_input = compose_model_input("总结一下", &resolved);
+        assert!(
+            model_input.starts_with(crate::ai::attachment::ATTACHMENT_FENCE_BEGIN),
+            "前置：compose 产出的 model_input 以围栏开头"
+        );
+
+        let mem = EphemeralConversationMemory::new();
+        mem.append(&ConversationId::new("c1"), vec![user_msg(&model_input), assistant_msg("好的")])
+            .await
+            .unwrap();
+
+        let loaded = mem.load(&ConversationId::new("c1")).await.unwrap();
+        let dumped = format!("{loaded:?}");
+        assert!(!dumped.contains("文件正文内容"), "附件内容不重放: {dumped}");
+        assert!(!dumped.contains("rref_"), "附件 ref 不进临时记忆: {dumped}");
+        assert!(
+            dumped.contains("总结一下"),
+            "可见正文保留: {dumped}"
+        );
     }
 
     #[tokio::test]

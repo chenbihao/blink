@@ -982,6 +982,7 @@ export const zh = {
     "chat.attach.file_group": "{n} 个文件",
     "chat.attach.none_attachable": "无可附加文件",
     "chat.attach.fail_title": "部分文件无法附加",
+    "chat.attach.overflow": "{count} 项超出单轮 {max} 个附件上限，未附加",
     "chat.attach.audio_fallback": "音频附件",
     "chat.attach.text_fallback": "文本附件",
     "chat.attach.image_fallback": "图片附件",

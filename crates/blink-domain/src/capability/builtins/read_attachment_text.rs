@@ -18,7 +18,6 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use crate::ai::attachment::TEXT_FILE_MAX_BYTES;
-use crate::ai::token_budget::estimate_text_tokens;
 use crate::capability::{
     AiDefault, Capability, CapabilityError, CapabilityPolicy, CapabilityResult, CapabilitySchema,
     ConfirmationPolicy, DangerClass, InvokeContext, ItemResult, McpDefault, OriginSet,
@@ -195,27 +194,14 @@ pub fn read_page(bytes: &[u8], cursor: u64, limit_tokens: usize) -> Result<TextP
         });
     }
 
-    // 预算切片：逐字符累计，超预算停在最后一个完整字符
-    let mut char_bytes = 0usize;
-    let mut used_tokens = 0usize;
-    let mut stopped_early = false;
-    for ch in full.chars() {
-        let ch_tokens = estimate_text_tokens(&ch.to_string());
-        if used_tokens + ch_tokens > limit_tokens && char_bytes > 0 {
-            stopped_early = true;
-            break;
-        }
-        used_tokens += ch_tokens;
-        char_bytes += ch.len_utf8();
-    }
-    let taken: &str = if stopped_early {
-        &full[..char_bytes]
-    } else {
-        full
-    };
+    // 预算切片：复用 utf8_safe_token_prefix 的成本模型（CJK 1 token、其他
+    // 4 char/token 向上取整）——与全局估算一致；此前逐字符单独估算导致
+    // ASCII 内容 4 倍保守（单字符即 1 token），续读往返次数虚高
+    let taken = crate::ai::token_budget::utf8_safe_token_prefix(full, limit_tokens);
+    let stopped_early = taken.len() < full.len();
     let end_byte = (cursor + bom_len + taken.len()) as u64;
     Ok(TextPage {
-        text: taken.to_string(),
+        text: taken,
         start_byte: cursor as u64,
         end_byte,
         eof: !stopped_early && end_byte == bytes.len() as u64,

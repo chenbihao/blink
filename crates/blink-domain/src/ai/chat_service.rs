@@ -1082,12 +1082,14 @@ impl ChatService {
                 .join("；");
             return Err(ChatError::Attachment { details });
         }
-        let (resolved_attachments, image_parts, pending_image_tokens_est) =
-            self.resolve_attachments(&valid_inputs).await?;
-
         // 0.27.10 前后端双校验（§3.4）：带图片请求要求当前模型声明 Vision 能力；
-        // 失败保留草稿（前端不清输入），提示切换模型或移除图片。
-        if !image_parts.is_empty() {
+        // 失败保留草稿（前端不清输入），提示切换模型或移除图片。检查放在
+        // resolve_attachments（逐图解码/归一化，最重的一步）之前——非 Vision
+        // 模型不白付解码开销。
+        if valid_inputs
+            .iter()
+            .any(|a| a.kind == crate::ai::attachment::AttachmentKind::Image)
+        {
             let vision_ok = self
                 .resolve_current_entries(kind)
                 .map(|entries| {
@@ -1099,11 +1101,13 @@ impl ChatService {
                 .unwrap_or(false);
             if !vision_ok {
                 return Err(ChatError::Attachment {
-                    details: "当前模型未启用「视觉输入」能力，无法发送图片附件。                              请在设置中为该模型勾选视觉输入、切换到支持视觉的模型，或移除图片附件"
+                    details: "当前模型未启用「视觉输入」能力，无法发送图片附件。请在设置中为该模型勾选视觉输入、切换到支持视觉的模型，或移除图片附件"
                         .into(),
                 });
             }
         }
+        let (resolved_attachments, image_parts, pending_image_tokens_est) =
+            self.resolve_attachments(&valid_inputs).await?;
 
         let model_input =
             crate::ai::attachment::compose_model_input(&visible_message, &resolved_attachments);

@@ -141,10 +141,10 @@ impl NormalizedImage {
 /// 归一化主入口（**必须**在 `spawn_blocking` 中调用——解码/缩放/重编码为
 /// CPU 密集操作，禁止在 async 上下文裸跑，spec-backend §一）。
 ///
-/// 步骤：解码（分配上限防解码炸弹）→ EXIF 方向归一化 → 长边 >2048 缩放 →
-/// 重编码（PNG 保 PNG / JPEG 保 JPEG，JPEG 87 质量近似原视觉）→ 重校验
-/// 归一化后编码体积。JPEG 尺寸信息可从头解析，但统一走 image crate 解码
-/// 简化路径；24MP 上限在解码器 limits 上生效（先于像素缓冲分配）。
+/// 步骤：头部尺寸预检（§3.4：24MP 限制必须在大分配前生效——`into_dimensions`
+/// 只读 PNG/JPEG 头不解码像素）→ 解码（limits 兜底）→ EXIF 方向归一化 →
+/// 长边 >2048 缩放 → 重编码（PNG 保 PNG / JPEG 保 JPEG，JPEG 87 质量近似
+/// 原视觉）→ 重校验归一化后编码体积。
 pub fn normalize_image(bytes: Vec<u8>) -> Result<NormalizedImage, VisionError> {
     validate_encoded(&bytes)?;
     let source_format = match sniff_format(&bytes) {
@@ -153,7 +153,22 @@ pub fn normalize_image(bytes: Vec<u8>) -> Result<NormalizedImage, VisionError> {
         _ => unreachable!("validate_encoded 已拒绝其余格式"),
     };
 
-    // 解码上限：总像素 24MP + 单行 512MB 防御（image crate Limits）
+    // 24MP 头部预检：超限在此拒绝，不把超大像素缓冲解码进内存
+    let (w, h) = image::ImageReader::new(std::io::Cursor::new(&bytes))
+        .with_guessed_format()
+        .map_err(|e| err(format!("图片格式探测失败: {e}")))?
+        .into_dimensions()
+        .map_err(|e| err(format!("图片尺寸读取失败: {e}")))?;
+    let pixels = w as u64 * h as u64;
+    if pixels > MAX_PIXELS {
+        return Err(err(format!(
+            "图片 {w}×{h}（{:.1} MP）超过 24 MP 上限，请缩小后再附加",
+            pixels as f64 / 1_000_000.0
+        )));
+    }
+
+    // 解码器 limits 兜底（头部与实际流不一致的异常流；宽高 20000 + 单次分配
+    // 512MB，正常流已被上面的头部预检挡住）
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(20_000);
     limits.max_image_height = Some(20_000);
@@ -166,22 +181,14 @@ pub fn normalize_image(bytes: Vec<u8>) -> Result<NormalizedImage, VisionError> {
         .map_err(|e| err(format!("图片解码器创建失败: {e}")))?;
     decoder
         .set_limits(limits)
-        .map_err(|_| err("图片尺寸超过 24MP 上限，请缩小后再附加"))?;
+        .map_err(|_| err("图片尺寸超出解码上限，请缩小后再附加"))?;
     let decoded = DynamicImage::from_decoder(decoder).map_err(|e| err(format!("图片解码失败: {e}")))?;
-
-    let (w, h) = (decoded.width(), decoded.height());
-    let pixels = w as u64 * h as u64;
-    if pixels > MAX_PIXELS {
-        return Err(err(format!(
-            "图片 {w}×{h}（{:.1} MP）超过 24 MP 上限，请缩小后再附加",
-            pixels as f64 / 1_000_000.0
-        )));
-    }
 
     // EXIF 方向归一化（JPEG 可能携带 Orientation；PNG/其他无方向语义）
     let oriented = apply_exif_orientation(decoded, &bytes, source_format);
 
-    // 长边 ≤2048 缩放（超过才缩，等比）
+    // 长边 ≤2048 缩放（超过才缩，等比）；宽高取旋转后实际值（Orientation
+    // 5-8 是 90°/270°，宽高互换）
     let (image_final, width, height) = {
         let long_edge = oriented.width().max(oriented.height());
         if long_edge > MAX_LONG_EDGE {
@@ -191,7 +198,8 @@ pub fn normalize_image(bytes: Vec<u8>) -> Result<NormalizedImage, VisionError> {
             let resized = oriented.resize_exact(nw, nh, FilterType::Lanczos3);
             (resized, nw, nh)
         } else {
-            (oriented, w, h)
+            let (ow, oh) = (oriented.width(), oriented.height());
+            (oriented, ow, oh)
         }
     };
 
@@ -362,11 +370,15 @@ mod tests {
 
     #[test]
     fn normalize_rejects_pixel_bomb() {
-        // image crate limits 在宽/高 20000 拦截（24MP 由显式像素校验兜底）
-        let result = normalize_image(tiny_png(2, 2));
-        assert!(result.is_ok());
-        // 伪造超大尺寸 PNG 头不易构造——上限行为由 limits 路径覆盖，
-        // 此处只锁「正常小图不被误拦」。
+        // 24MP 头部预检：6000×4001 = 24.006MP，在解码前（大分配前）被拒。
+        // 纯色 PNG 编码后极小；构造期间的 72MB 像素缓冲只是测试进程临时内存。
+        let bomb = tiny_png(6000, 4001);
+        let result = normalize_image(bomb);
+        assert!(result.is_err(), "超 24MP 的图应被拒绝");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("24"), "错误信息应提示 24MP 上限: {msg}");
+        // 正常小图不被误拦
+        assert!(normalize_image(tiny_png(2, 2)).is_ok());
     }
 
     #[test]

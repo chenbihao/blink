@@ -26,11 +26,33 @@ use super::ChatService;
 ///
 /// 确保所有退出路径（含 early-return）都释放标志。guard 持有 `AtomicBool` 的引用，
 /// 生命周期不超过 `ChatService`（函数内局部，安全）。
-struct SummaryInFlightGuard<'a>(&'a AtomicBool);
+///
+/// `disarm`：把释放责任移交给 spawn 出去的任务主体——手动压缩 job 全程
+/// 持标志（分段 LLM 可达数分钟），主函数 spawn 成功后 disarm、返回时不再释放。
+struct SummaryInFlightGuard<'a> {
+    flag: &'a AtomicBool,
+    armed: std::cell::Cell<bool>,
+}
+
+impl<'a> SummaryInFlightGuard<'a> {
+    fn new(flag: &'a AtomicBool) -> Self {
+        Self {
+            flag,
+            armed: std::cell::Cell::new(true),
+        }
+    }
+
+    /// 解除本地释放责任（标志保持占用，由接管方负责最终复位）。
+    fn disarm(&self) {
+        self.armed.set(false);
+    }
+}
 
 impl Drop for SummaryInFlightGuard<'_> {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::SeqCst);
+        if self.armed.get() {
+            self.flag.store(false, Ordering::SeqCst);
+        }
     }
 }
 
@@ -259,7 +281,7 @@ impl ChatService {
         }
         // 确保所有退出路径（含 early-return）都释放标志——配合 F3 内部 async 块收尾。
         // `_` 前缀抑制 unused 告警，Drop 在作用域结束时释放（含所有 early-return）。
-        let _summary_guard = SummaryInFlightGuard(&self.summary_in_flight);
+        let _summary_guard = SummaryInFlightGuard::new(&self.summary_in_flight);
 
         // 0.21.19.1 F2: 检查 summary_enabled——关闭时直接 return，不产生 DB 写入与 LLM 调用。
         // 手动压缩路径（compress_context_now）也经此入口，开关关闭时点"立即裁剪"不再触发摘要。
@@ -606,8 +628,9 @@ impl ChatService {
             tracing::debug!(conversation_id, "手动压缩: 已有摘要任务在途，跳过");
             return ManualCompactPrecheck::InFlight;
         }
-        // 确保所有退出路径都释放标志（含预检 early-return）
-        let _summary_guard = SummaryInFlightGuard(&self.summary_in_flight);
+        // 占位 guard 只覆盖预检 early-return；spawn 成功后 disarm，释放责任
+        // 移交给 run_manual_compact_job 内的 job guard（任务全程持标志）。
+        let summary_guard = SummaryInFlightGuard::new(&self.summary_in_flight);
 
         // 3. 预检：水位以上是否有消息
         let pool = self.persistent_memory.pool().clone();
@@ -642,6 +665,9 @@ impl ChatService {
         tokio::spawn(async move {
             chat.run_manual_compact_job(job_id, &conv, watermark).await;
         });
+        // spawn 成功（失败会 panic，guard 仍 armed 会释放）：单活跃标志由
+        // 任务主体持有到终态，本函数返回不释放
+        summary_guard.disarm();
         tracing::info!(conversation_id, job_id, "手动压缩: 任务已启动");
         ManualCompactPrecheck::Started { job_id }
     }
@@ -655,6 +681,9 @@ impl ChatService {
         conversation_id: &str,
         frozen_watermark: i64,
     ) {
+        // 单活跃占位接管：start_manual_compact 已 disarm，本 guard 覆盖任务
+        // 全程（含所有 early-return 与 panic unwind），终态时释放标志
+        let _job_guard = SummaryInFlightGuard::new(&self.summary_in_flight);
         self.emit_compact_job(&CompactJobEvent {
             job_id,
             conversation_id: conversation_id.to_string(),
@@ -1050,7 +1079,7 @@ mod tests {
         );
         // guard 持有引用——作用域结束后 Drop 应释放标志
         {
-            let _guard = SummaryInFlightGuard(&flag);
+            let _guard = SummaryInFlightGuard::new(&flag);
             assert!(flag.load(Ordering::SeqCst), "guard 生存期内标志应为 true");
         }
         assert!(
@@ -1066,7 +1095,7 @@ mod tests {
 
         // 模拟 early-return 场景：guard 在函数内创建，函数通过 ? 提前退出后 Drop 仍执行
         fn inner(flag: &AtomicBool) -> Result<(), &'static str> {
-            let _guard = SummaryInFlightGuard(flag);
+            let _guard = SummaryInFlightGuard::new(flag);
             // 模拟 early return（如配置检查失败）
             Err("模拟错误")
         }
@@ -1077,6 +1106,22 @@ mod tests {
             !flag.load(Ordering::SeqCst),
             "early-return 后 guard Drop 仍应释放标志"
         );
+    }
+
+    #[test]
+    fn summary_in_flight_guard_disarm_keeps_flag_held() {
+        // 手动压缩任务模式：spawn 后 disarm，主函数返回不释放；任务主体
+        // 的 guard Drop 才复位——否则任务运行期再触发会启动第二个任务
+        let flag = AtomicBool::new(true);
+        let job_guard = {
+            let outer = SummaryInFlightGuard::new(&flag);
+            outer.disarm();
+            drop(outer);
+            assert!(flag.load(Ordering::SeqCst), "disarm 后 Drop 不释放标志");
+            SummaryInFlightGuard::new(&flag)
+        };
+        drop(job_guard);
+        assert!(!flag.load(Ordering::SeqCst), "任务主体 guard Drop 释放标志");
     }
 
     // ── 0.21.19.1 F2: MemoryConfig 默认 summary_enabled = false ──────────────

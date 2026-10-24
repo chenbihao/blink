@@ -116,7 +116,12 @@ pub fn is_loopback_host(host: Option<&str>) -> bool {
     match host {
         None => true, // 无 host 的 URL 不值得经代理外发
         Some("localhost") => true,
-        Some(host) => host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback()),
+        // IPv6 字面量在 Url 中带方括号（`http://[::1]:1/` → host_str == "[::1]"），
+        // 去括号后才能 parse 成 IpAddr
+        Some(host) => host
+            .trim_matches(['[', ']'])
+            .parse::<IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback()),
     }
 }
 
@@ -154,8 +159,6 @@ pub enum RequestCategory {
     Update,
     /// MCP HTTP/SSE transport（长连接，无总超时）。
     Mcp,
-    /// 插件 core HTTP 代发（宿主按次代理，per-request 1-60s 超时）。
-    PluginHttp,
     /// 云端 STT / 示例音频等小请求（调用方带 per-request 超时）。
     CloudStt,
 }
@@ -164,7 +167,7 @@ impl RequestCategory {
     /// 连接超时——建连阶段的黑 hole 保护，不影响已建立连接。
     fn connect_timeout(self) -> Duration {
         match self {
-            Self::Ai | Self::Update | Self::PluginHttp | Self::CloudStt => {
+            Self::Ai | Self::Update | Self::CloudStt => {
                 Duration::from_secs(10)
             }
             Self::Download => Duration::from_secs(30),
@@ -299,7 +302,21 @@ fn build_client(policy: &NetPolicy, category: RequestCategory) -> reqwest::Clien
             resolve_proxy_for_url(url, &policy)
         }));
     }
-    builder.build().unwrap_or_default()
+    match builder.build() {
+        Ok(client) => client,
+        Err(e) => {
+            // 极罕见（如 TLS 后端初始化失败）。不能退回 Client::default()——
+            // 它会读 HTTP_PROXY/系统代理，恰好违背「空配置显式直连」铁则；
+            // 以 no_proxy 直连兜底重建，保住直连语义与类别超时
+            tracing::error!(error = %e, category = ?category, "net: client 构建失败，退回无代理直连兜底");
+            reqwest::Client::builder()
+                .connect_timeout(category.connect_timeout())
+                .pool_idle_timeout(Duration::from_secs(90))
+                .no_proxy()
+                .build()
+                .expect("no_proxy 直连兜底构建不应失败")
+        }
+    }
 }
 
 // ── 进程级单例 ─────────────────────────────────────────────────────────────
@@ -329,7 +346,8 @@ pub fn rig_http_client() -> rig_reqwest::ReqwestClient {
 }
 
 /// 便捷：带代理策略的 builder 起点——调用方还需自定义重定向策略等
-/// client 层选项、无法走 [`client`] 缓存池时使用（如插件代发按请求分档）。
+/// client 层选项、无法走 [`client`] 缓存池时使用（如插件代发按请求
+/// 分档重定向策略；代价是每次新建连接池，插件调用低频可接受）。
 pub fn proxied_builder() -> reqwest::ClientBuilder {
     let policy = global().policy();
     let mut builder = reqwest::Client::builder().connect_timeout(Duration::from_secs(10));
@@ -375,8 +393,13 @@ mod tests {
         assert!(is_loopback_host(Some("127.0.0.1")));
         assert!(is_loopback_host(Some("127.255.0.3")));
         assert!(is_loopback_host(Some("::1")));
+        // Url 对 IPv6 host 的序列化带方括号——必须经 Url::parse 验证，不能只测裸串
+        let v6 = reqwest::Url::parse("http://[::1]:8080/api").unwrap();
+        assert_eq!(v6.host_str(), Some("[::1]"));
+        assert!(is_loopback_host(v6.host_str()), "IPv6 loopback 字面量直连");
         assert!(!is_loopback_host(Some("192.168.1.2")));
         assert!(!is_loopback_host(Some("api.openai.com")));
+        assert!(!is_loopback_host(Some("[2001:db8::1]")), "非 loopback IPv6");
     }
 
     #[test]

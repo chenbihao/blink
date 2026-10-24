@@ -181,7 +181,7 @@ pub async fn insert(
     .await
     .map_err(|e| {
         // 主键冲突 = 复制到已存在 id / 重放，按冲突语义报
-        if e.to_string().contains("UNIQUE") {
+        if e.as_database_error().is_some_and(|db| db.is_unique_violation()) {
             PromptStoreError::Conflict
         } else {
             PromptStoreError::Db(e.to_string())
@@ -265,24 +265,36 @@ pub async fn delete(pool: &SqlitePool, id: &str) -> Result<(), PromptStoreError>
 }
 
 /// 恢复默认：清除 override_content（仅内置条目），revision +1。
+///
+/// `expected_revision` 语义与 [`update`] 一致：None 无条件写，Some 且不匹配
+/// → [`PromptStoreError::Conflict`]（与并发编辑的 A 窗口互斥，spec §7.5）。
 pub async fn reset_override(
     pool: &SqlitePool,
     id: &str,
+    expected_revision: Option<i64>,
 ) -> Result<PromptLibraryRow, PromptStoreError> {
     let existing = get(pool, id).await?;
     if !existing.builtin {
         return Err(PromptStoreError::NotBuiltin);
     }
     let now = chrono::Utc::now().timestamp();
-    sqlx::query(
+    let rows_affected = sqlx::query(
         "UPDATE prompt_library
          SET override_content = NULL, revision = revision + 1, updated_at = ?2
-         WHERE id = ?1",
+         WHERE id = ?1 AND (?3 IS NULL OR revision = ?3)",
     )
     .bind(id)
     .bind(now)
+    .bind(expected_revision)
     .execute(pool)
-    .await?;
+    .await?
+    .rows_affected();
+    if rows_affected == 0 {
+        if get(pool, id).await.is_ok() {
+            return Err(PromptStoreError::Conflict);
+        }
+        return Err(PromptStoreError::NotFound);
+    }
     get(pool, id).await
 }
 
@@ -503,16 +515,26 @@ mod tests {
         )
         .await
         .unwrap();
-        let row = reset_override(&pool, "builtin.editor.tidy").await.unwrap();
+        let updated = get(&pool, "builtin.editor.tidy").await.unwrap();
+        let row = reset_override(&pool, "builtin.editor.tidy", Some(updated.revision))
+            .await
+            .unwrap();
         assert_eq!(row.override_content, None, "恢复默认清除覆盖");
         assert!(row.revision >= 3);
+        // revision CAS：陈旧版本号拒绝
+        assert_eq!(
+            reset_override(&pool, "builtin.editor.tidy", Some(1))
+                .await
+                .unwrap_err(),
+            PromptStoreError::Conflict
+        );
 
         // 自建：可删；reset 报 NotBuiltin
         insert(&pool, "uuid-1", "自定义", "正文", PromptScope::Chat, 10)
             .await
             .unwrap();
         assert_eq!(
-            reset_override(&pool, "uuid-1").await.unwrap_err(),
+            reset_override(&pool, "uuid-1", None).await.unwrap_err(),
             PromptStoreError::NotBuiltin
         );
         delete(&pool, "uuid-1").await.unwrap();

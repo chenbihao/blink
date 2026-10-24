@@ -138,6 +138,7 @@ fn collect_selection_inner(
     // 1) Explorer 窗口/Win11 标签页：遍历条目匹配冻结 HWND。
     //    多条目同 HWND（多标签页）时逐个取活动视图，首个有选中即用。
     let count = unsafe { shell_windows.Count() }.unwrap_or(0);
+    let mut matched_hwnd = false;
     for index in 0..count {
         let Ok(dispatch) = (unsafe {
             shell_windows.Item(&windows::Win32::System::Variant::VARIANT::from(index))
@@ -153,13 +154,21 @@ fn collect_selection_inner(
         if hwnd.0 != source_hwnd {
             continue;
         }
+        matched_hwnd = true;
         if let Some(state) = selection_from_dispatch(&dispatch, source_pid, generation) {
             return Some(state);
         }
     }
 
+    // 来源是 Explorer 窗口但窗口内无选中：不得落入桌面视图，否则桌面图标
+    // 残留选中会被错误归属为该窗口的本代选中（§3.2 回写前核对来源）。
+    if matched_hwnd {
+        return None;
+    }
+
     // 2) 桌面：冻结 HWND 无窗口条目匹配（Progman/WorkerW 不在 IShellWindows
     //    普通枚举里），走 FindWindowSW(SWC_DESKTOP) → 活动桌面视图。
+    //    返回的 desktop_hwnd 与 source_hwnd 同为桌面视图句柄，无需再比对。
     let missing = missing_param_variant();
     let mut desktop_hwnd: i32 = 0;
     let dispatch = unsafe {
@@ -316,12 +325,15 @@ impl ComStaGuard {
             )
         };
         if hr.is_ok() {
+            // S_OK 与 S_FALSE（已初始化）都是成功码，COM 契约要求两者都配对
+            // CoUninitialize（每对成功 CoInitializeEx 一次 uninit）
             ComStaGuard {
                 should_uninit: true,
             }
         } else {
-            // S_FALSE（已初始化）等其他情形：不配对 CoUninitialize
-            tracing::debug!(hr = hr.0, "files: CoInit STA 非成功码，跳过 uninit 配对");
+            // 失败码（如 E_OUTOFMEMORY / RPC_E_CHANGED_MODE）：未成功初始化，
+            // 不配对 CoUninitialize
+            tracing::debug!(hr = hr.0, "files: CoInit STA 失败，跳过 uninit 配对");
             ComStaGuard {
                 should_uninit: false,
             }

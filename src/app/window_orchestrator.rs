@@ -25,6 +25,24 @@ use crate::infra::platform::window;
 static FILE_SELECTION_ACTIVE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// 上一轮采集启动时刻（Unix 毫秒）。COM 跨进程调用不可中止，单次完成时限
+/// 靠惰性看门狗实现：下次 invoke 发现超时未归还即接管（§3.2）。
+static FILE_SELECTION_STARTED_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// 采集超时阈值：正常 STA COM 采集 <100ms；explorer 挂起时（CoCreateInstance
+/// 跨进程到 explorer）可长期阻塞，超过此值视为挂死。
+const FILE_SELECTION_STALE_MS: u64 = 10_000;
+
+/// 占位归还 guard——采集线程 panic 时也复位占位，防永久卡死。
+struct FileSelectionFlagGuard;
+
+impl Drop for FileSelectionFlagGuard {
+    fn drop(&mut self) {
+        FILE_SELECTION_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// 唤起编排：采集上下文快照 → 更新 SearchService → show 主窗口 → 异步提取选区。
 ///
 /// **采集时机很重要**：必须在 show() 之前调用，否则拿到的前台是 Blink 自己。
@@ -193,11 +211,31 @@ pub fn invoke_with_placement(app: &AppHandle, placement: window::MainWindowPlace
     // 回写前四重复核：代次（SearchService 侧）、开关（重读 config）、来源仍属
     // explorer、敏感门控（explorer 本身被列敏感时放弃）。日志不打印完整路径。
     if let (Some(hwnd), Some(ss), Some(snapshot_gen)) = (file_selection_hwnd, &search_service, snapshot_generation) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let mut skip_round = false;
         if FILE_SELECTION_ACTIVE
             .swap(true, std::sync::atomic::Ordering::SeqCst)
         {
-            tracing::trace!("invoke: 文件选中采集 worker 占用中，本轮跳过");
-        } else {
+            let started = FILE_SELECTION_STARTED_MS.load(std::sync::atomic::Ordering::SeqCst);
+            if started != 0 && now_ms.saturating_sub(started) > FILE_SELECTION_STALE_MS {
+                // 惰性看门狗：上一轮 COM 调用疑似挂死，本轮接管。
+                // 挂死线程晚到归还时会短暂提前释放本轮占位——最坏后果是
+                // 再下一轮提前并发采集，COM 采集无共享可变状态、回写有
+                // 代次核验，无害。
+                tracing::warn!(
+                    elapsed_ms = now_ms.saturating_sub(started),
+                    "invoke: 文件选中采集 worker 超时未归还，本轮接管"
+                );
+            } else {
+                tracing::trace!("invoke: 文件选中采集 worker 占用中，本轮跳过");
+                skip_round = true;
+            }
+        }
+        if !skip_round {
+            FILE_SELECTION_STARTED_MS.store(now_ms, std::sync::atomic::Ordering::SeqCst);
             let ss = ss.clone();
             let cfg_cell = app
                 .try_state::<Arc<std::sync::RwLock<ContextConfig>>>()
@@ -205,15 +243,22 @@ pub fn invoke_with_placement(app: &AppHandle, placement: window::MainWindowPlace
             let sensitive = context_cfg.sensitive_apps.clone();
             let app_clone = app.clone();
             std::thread::spawn(move || {
+                // panic 安全：闭包任何退出路径（含 unwind）都归还占位
+                let _flag_guard = FileSelectionFlagGuard;
                 let t_collect = std::time::Instant::now();
                 let pid = crate::infra::platform::selection::files::window_pid(hwnd);
                 let state = crate::infra::platform::selection::files::collect_selection(
                     hwnd, pid, snapshot_gen,
                 );
                 // 回写前复核：开关未翻转、来源窗口仍属 explorer、explorer 未被列敏感
+                // （锁中毒时取毒值——ContextConfig 是普通配置数据，无不变量依赖）
                 let cfg_now = cfg_cell
                     .as_ref()
-                    .map(|c| c.read().unwrap().clone())
+                    .map(|c| {
+                        c.read()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .clone()
+                    })
                     .unwrap_or_default();
                 let gate_ok = cfg_now.enabled
                     && cfg_now.file_selection_enabled
@@ -246,7 +291,6 @@ pub fn invoke_with_placement(app: &AppHandle, placement: window::MainWindowPlace
                     hit,
                     "[perf] invoke: async file selection (after show)"
                 );
-                FILE_SELECTION_ACTIVE.store(false, std::sync::atomic::Ordering::SeqCst);
             });
         }
     }

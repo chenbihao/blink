@@ -365,15 +365,25 @@ pub fn attachment_context_block(resolved: &[ResolvedAttachment]) -> Option<Strin
     Some(parts.join("\n"))
 }
 
-/// 组装本轮模型输入：附件上下文（仅本轮有效）+ 用户可见正文。
+/// 附件上下文块的机器围栏（单次注入语义，§3.3）：`compose_model_input`
+/// 把整块围起来，`EphemeralConversationMemory::append` 据此把块从历史剥离
+/// （临时会话下轮不重放附件内容）。围栏恒在 model_input 头部（compose
+/// 保证），正文含同名字面量不参与匹配。
+pub const ATTACHMENT_FENCE_BEGIN: &str = "<<<blink-attachments-begin>>>";
+/// 围栏结束标记（语义见 [`ATTACHMENT_FENCE_BEGIN`]）。
+pub const ATTACHMENT_FENCE_END: &str = "<<<blink-attachments-end>>>";
+
+/// 组装本轮模型输入：附件上下文（仅本轮有效，围栏标记）+ 用户可见正文。
 pub fn compose_model_input(visible: &str, resolved: &[ResolvedAttachment]) -> String {
     match attachment_context_block(resolved) {
         None => visible.to_string(),
         Some(block) => {
+            let fenced =
+                format!("{ATTACHMENT_FENCE_BEGIN}\n{block}\n{ATTACHMENT_FENCE_END}");
             if visible.is_empty() {
-                block
+                fenced
             } else {
-                format!("{block}\n{visible}")
+                format!("{fenced}\n{visible}")
             }
         }
     }
@@ -540,6 +550,8 @@ mod tests {
     #[test]
     fn compose_model_input_prepends_text_file_content() {
         let input = compose_model_input("总结一下", &[resolved_text(false)]);
+        assert!(input.starts_with(ATTACHMENT_FENCE_BEGIN), "附件块以围栏开始: {input}");
+        assert!(input.contains(ATTACHMENT_FENCE_END), "附件块以围栏结束: {input}");
         assert!(input.contains("----- 文件内容开始 -----"), "{input}");
         assert!(input.contains("全文"), "{input}");
         assert!(input.contains("resource_ref=\"rref_bbbbccccddddeeee\""), "{input}");
@@ -575,7 +587,8 @@ mod tests {
         let input = compose_model_input("", &[image]);
         assert!(input.contains("[图片附件 1]"), "{input}");
         assert!(input.contains("多模态"), "{input}");
-        assert!(!input.ends_with("\n"));
+        assert!(input.starts_with(ATTACHMENT_FENCE_BEGIN), "纯附件轮整体为围栏块");
+        assert!(input.ends_with(ATTACHMENT_FENCE_END));
     }
 
     #[test]

@@ -31,9 +31,10 @@ export function initPromptsTab(cfg) {
     if (!container) return;
     void reload(true);
 
-    // 变更事件：多窗口/编辑器消费方修改后同步刷新（隐藏中的条目也重列）
+    // 变更事件：多窗口/编辑器消费方修改后同步刷新（隐藏中的条目也重列）；
+    // 正在编辑时保留编辑卡 DOM（不重建，防丢输入），仅刷新列表区
     listen(EVENTS.PROMPT_LIBRARY_CHANGED, () => {
-        void reload(false);
+        void reload(false, editingId !== null);
     });
     onLangChange(() => {
         if (editingId === null) void reload(false);
@@ -43,8 +44,10 @@ export function initPromptsTab(cfg) {
 /**
  * 重新载入列表并渲染。
  * @param {boolean} resetEditing - true 清除编辑态（首次进入）
+ * @param {boolean} [preserveEditor] - true 时保留编辑卡 DOM 不重建（变更事件
+ *        到达但用户正在编辑——列表刷新、输入不丢；编辑卡按钮监听随节点保留）
  */
-async function reload(resetEditing) {
+async function reload(resetEditing, preserveEditor = false) {
     if (resetEditing) editingId = null;
     try {
         entries = await invoke("prompt_library_list", {scope: null});
@@ -52,7 +55,7 @@ async function reload(resetEditing) {
         console.error("prompt_library_list failed:", e);
         entries = [];
     }
-    render();
+    render(!preserveEditor || editingId === null);
 }
 
 /** 按当前过滤器可见的条目（纯展示过滤，不改数据）。 */
@@ -92,11 +95,19 @@ export function describePromptError(code, message) {
 
 // ── 渲染 ────────────────────────────────────────────────────────────────────
 
-function render() {
+/**
+ * 整表渲染。
+ * @param {boolean} [includeEditor] - false 时保留现有编辑卡 DOM（节点摘下
+ *        再挂回，用户输入与按钮监听不丢），仅重建工具栏与列表
+ */
+function render(includeEditor = true) {
     const container = document.getElementById("prompts-container");
     if (!container) return;
-    container.innerHTML = renderToolbar() + renderList() + renderEditor();
-    bindEvents(container);
+    const editorEl = !includeEditor ? document.getElementById("prompt-editor") : null;
+    if (editorEl) editorEl.remove();
+    container.innerHTML = renderToolbar() + renderList() + (includeEditor ? renderEditor() : "");
+    if (editorEl) container.appendChild(editorEl);
+    bindEvents(container, editorEl);
 }
 
 function renderToolbar() {
@@ -229,7 +240,7 @@ function renderEditor() {
 
 // ── 事件 ────────────────────────────────────────────────────────────────────
 
-function bindEvents(container) {
+function bindEvents(container, preservedEditor = null) {
     container.querySelectorAll(".prompt-scope-filter").forEach((button) => {
         button.addEventListener("click", () => {
             scopeFilter = button.dataset.scope;
@@ -243,6 +254,8 @@ function bindEvents(container) {
     });
 
     container.querySelectorAll("[data-act]").forEach((button) => {
+        // 保留挂回的编辑卡节点已带监听，重复绑定会双触发动作
+        if (preservedEditor?.contains(button)) return;
         const act = button.dataset.act;
         const id = button.dataset.id;
         button.addEventListener("click", () => void handleAction(act, id, button));
@@ -269,7 +282,7 @@ async function handleAction(act, id, button) {
             await move(id, act === "move-up" ? "up" : "down");
             break;
         case "reset":
-            await call("prompt_library_reset", {id}, button);
+            await call("prompt_library_reset", {id, expectedRevision: entry?.revision ?? null}, button);
             break;
         case "toggle-hidden":
             if (!entry) return;
@@ -333,12 +346,13 @@ async function save(payload, button) {
     } catch (e) {
         showEditorError(describePromptError(normalizeError(e).code, normalizeError(e).message));
     } finally {
-        button.disabled = false;
+        if (button) button.disabled = false;
     }
 }
 
 async function move(id, direction) {
-    const ids = reorderedIdsAfterMove(entries, id, direction);
+    // 只在当前过滤视图内换位（与注释语义一致）：全量列表会把视图外相邻条目拉进来
+    const ids = reorderedIdsAfterMove(visibleEntries(entries, scopeFilter), id, direction);
     if (!ids) return;
     try {
         await invoke("prompt_library_reorder", {orderedIds: ids});

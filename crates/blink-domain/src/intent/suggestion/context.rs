@@ -125,6 +125,7 @@ impl ContextProducer {
     /// 动作粒度禁用（disabled_builtin_actions）拦对应能力；
     /// 复制路径是显式用户动作，不受环境 binding 约束。display 为首项显示名，
     /// 前端按 kind + args 数量组数量文案。
+    #[allow(deprecated)] // struct literal 必须列全字段；ranking_hint 已废弃恒 None
     pub(crate) fn produce_file_selection(&self, snapshot: &AwarenessSnapshot) -> Vec<Suggestion> {
         let Some(selection) = snapshot.file_selection.as_ref() else {
             return Vec::new();

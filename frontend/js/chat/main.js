@@ -293,7 +293,9 @@ async function init() {
     const promptBtn = document.getElementById("chat-prompt-btn");
     if (promptBtn) {
         promptBtn.title = t("chat.cmd.prompt.btn_title");
-        promptBtn.addEventListener("click", () => {
+        promptBtn.addEventListener("click", (e) => {
+            // 阻止冒泡到 document 的 click-outside 关闭逻辑（面板开即关）
+            e.stopPropagation();
             focusInput();
             openPromptPalette();
         });

@@ -87,9 +87,10 @@ impl Capability for RevealInExplorer {
                 };
                 for batch in batches {
                     let select_arg = format!("/select,{batch}");
-                    let status = std::process::Command::new("explorer.exe")
-                        .arg(select_arg)
-                        .spawn();
+                    let status =
+                        blink_infra::platform::no_window(std::process::Command::new("explorer.exe"))
+                            .arg(select_arg)
+                            .spawn();
                     if let Err(e) = status {
                         tracing::error!(error = %e, dir = %parent, "调用 explorer.exe 失败");
                         return Err(CapabilityError::Internal {
@@ -109,25 +110,35 @@ impl Capability for RevealInExplorer {
 }
 
 /// 参数解析：`path`（单路径兼容）或 `paths`（多路径）二选一（0.27.3 抽出为纯函数）。
+/// 数组中混入非字符串项显式报错（与「非数组/空数组」一致，不静默少 reveal）。
 fn parse_reveal_paths(args: &Value) -> Result<Vec<String>, CapabilityError> {
     if let Some(list) = args.get("paths") {
-        let list = list
+        let raw = list
             .as_array()
             .ok_or_else(|| CapabilityError::InvalidArgs {
                 detail: "reveal_in_explorer: paths 必须是字符串数组".into(),
-            })?
-            .iter()
-            .filter_map(|v| v.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .collect::<Vec<_>>();
-        if list.is_empty() {
+            })?;
+        let mut parsed = Vec::with_capacity(raw.len());
+        for (index, value) in raw.iter().enumerate() {
+            let Some(s) = value.as_str() else {
+                return Err(CapabilityError::InvalidArgs {
+                    detail: format!(
+                        "reveal_in_explorer: paths 第 {} 项不是字符串",
+                        index + 1
+                    ),
+                });
+            };
+            let s = s.trim();
+            if !s.is_empty() {
+                parsed.push(s.to_string());
+            }
+        }
+        if parsed.is_empty() {
             return Err(CapabilityError::InvalidArgs {
                 detail: "reveal_in_explorer: paths 不能为空".into(),
             });
         }
-        return Ok(list);
+        return Ok(parsed);
     }
     let path = args
         .get("path")

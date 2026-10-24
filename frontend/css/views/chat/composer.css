@@ -553,6 +553,13 @@
     white-space: nowrap;
 }
 
+/* 超限未附加提示 chip（0.27.9：超 8 项不静默丢弃）——点击关闭 */
+.chat-audio-chip-notice {
+    cursor: pointer;
+    border-color: var(--warning);
+    color: var(--warning);
+}
+
 .chat-audio-chip-remove {
     display: inline-flex;
     align-items: center;

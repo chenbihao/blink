@@ -989,6 +989,7 @@ export const en = {
     "chat.attach.file_group": "{n} files",
     "chat.attach.none_attachable": "No attachable files",
     "chat.attach.fail_title": "Some files could not be attached",
+    "chat.attach.overflow": "{count} item(s) exceeded the {max}-attachment limit and were not attached",
     "chat.attach.audio_fallback": "Audio attachment",
     "chat.attach.text_fallback": "Text file",
     "chat.attach.image_fallback": "Image",
