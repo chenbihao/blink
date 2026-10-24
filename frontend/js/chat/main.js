@@ -37,7 +37,7 @@ import {initSidebar, refreshSidebar, setActiveConversation, toggleSidebar} from 
 import {effectiveThinkingEnabled, initThinkingSelector, syncThinkingControl} from "./thinking-selector.js";
 import {bindModelSelector, currentModelSupportsVision, openModelDropdown, refreshModelSelector, updateProviderLabel} from "./model-selector.js";
 import {initCommandPalette, invalidatePromptCache, invalidateSlashSnapshotCache, isPaletteOpen, closePalette, openPromptPalette} from "./command-palette.js";
-import {initAttachmentPalette} from "./attachment-palette.js";
+import {initAttachmentPalette, splitAtQuery} from "./attachment-palette.js";
 import {applyThemeFromConfig} from "../shared/theme.js";
 import {getCurrentWindow, invoke, listen} from "../shared/tauri.js";
 import {EVENTS} from "../shared/event-names.js";
@@ -286,6 +286,13 @@ async function init() {
         getConversationId: () => state.conversationId,
         getInputRevision: composerInputRevision,
         addAttachments,
+        // @ 触发采纳成功后清除输入框触发文本（按钮打开路径不触发）。
+        // 条件清除：异步签发期间用户可能已开始正常输入——只在输入仍是
+        // @ 触发形态时清空，避免误清用户新输入
+        clearTriggerText: () => {
+            const input = document.getElementById("chat-input");
+            if (input && splitAtQuery(input.value)) clearInput();
+        },
     });
 
     // 0.27.8：提示词快捷条按钮（与 /prompt 同入口、同数据源）。
@@ -329,6 +336,10 @@ async function init() {
         if (firstVisibleActivation) {
             ipc.ensureMcpConnected().catch(() => {
             });
+            // 0.27.12：侧边栏 0.26.18 起默认展开，但列表加载只在发送/切换等
+            // 事件路径触发——默认展开的初始渲染此前无人拉取（toggle 展开
+            // 路径有）。首次真正可见时加载一次，preheat 的隐藏 init 不触发。
+            refreshSidebar();
         }
         refreshToolPool(true);
         invalidateComposerBarCache();
@@ -363,6 +374,31 @@ function renderUserEntry(text, badges = []) {
     if (text) {
         components.renderUserMessage(text);
     }
+}
+
+/**
+ * 渲染持久化的失败轮（0.27.12）：错误说明行 + 「重试」按钮。
+ * 重试 = 预填原文到 composer（不自动发送，可修改；附件需重新附加）。
+ * @param {string} errorText
+ * @param {string} userText
+ */
+function renderFailedTurnError(errorText, userText) {
+    const el = components.renderSignal(
+        errorText ? `${t("chat.failed.prefix")}${errorText}` : t("chat.failed.prefix_no_reason"),
+        "error",
+    );
+    if (!el) return;
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "chat-context-warning-btn";
+    retry.style.marginLeft = "8px";
+    retry.style.flexShrink = "0";
+    retry.textContent = t("chat.failed.retry");
+    retry.addEventListener("click", () => {
+        setInputValue(userText);
+        focusInput();
+    });
+    el.appendChild(retry);
 }
 
 /**
@@ -529,31 +565,47 @@ async function handleEditMessage(msgIndex, newText) {
     await handleSend(newText, true);
 }
 
-// ── 重试（0.12.6：assistant 消息的 retry 按钮） ────────────────
+// ── 重试（0.12.6：消息的 retry 按钮）────────────────────────
 
 /**
- * 重试：重新发送最后一条用户消息。
- * 截断掉最后一条 assistant 回复（及可能的 tool 消息），
- * 找到最后一条 user 消息文本，重新发送。
+ * 重试：重新发送被点击的那轮 user 消息。
+ * 0.27.12：按事件锚点（msgEl）定位——assistant 锚点取其前最近的 user，
+ * user 锚点取自身；无锚点时维持旧行为（最后一条 user，防御性回落）。
+ * 截断该轮之后的消息（DB + state）再重发（handleEditMessage 语义）。
+ * @param {CustomEvent} [e] chat:retry 事件（detail.msgEl 为消息气泡）
  */
-async function handleRetry() {
+async function handleRetry(e) {
     if (state.isStreaming) return; // 生成中不允许重试
 
-    // 从 state.messages 反向找最后一条 user 消息
-    let lastUserIndex = -1;
-    for (let i = state.messages.length - 1; i >= 0; i--) {
-        if (state.messages[i].role === "user") {
-            lastUserIndex = i;
-            break;
+    let userIndex = -1;
+    const msgEl = e?.detail?.msgEl;
+    if (msgEl) {
+        // DOM .chat-msg 下标与 state.messages 对齐（startEditMessage 同款定位；
+        // 纯附件轮不产生 .chat-msg，错位与编辑功能同边界——既有局限）
+        const anchor = msgEl.closest(".chat-msg") || msgEl;
+        const domIndex = Array.from(document.querySelectorAll(".chat-msg")).indexOf(anchor);
+        if (domIndex >= 0) {
+            const from = state.messages[domIndex]?.role === "user" ? domIndex : domIndex - 1;
+            for (let i = from; i >= 0; i--) {
+                if (state.messages[i]?.role === "user") {
+                    userIndex = i;
+                    break;
+                }
+            }
         }
     }
-    if (lastUserIndex < 0) return;
+    if (userIndex < 0) {
+        // 无锚点/锚点未命中：最后一条 user（0.12.6 原行为）
+        for (let i = state.messages.length - 1; i >= 0; i--) {
+            if (state.messages[i].role === "user") {
+                userIndex = i;
+                break;
+            }
+        }
+    }
+    if (userIndex < 0) return;
 
-    const lastUserText = state.messages[lastUserIndex].content;
-
-    // 截断到最后一条 user 消息之前（保留到 lastUserIndex-1）
-    // 然后重新发送该用户消息（isEdit=true 跳过标题逻辑）
-    await handleEditMessage(lastUserIndex, lastUserText);
+    await handleEditMessage(userIndex, state.messages[userIndex].content);
 }
 
 // ── 停止 ────────────────────────────────────────
@@ -1207,6 +1259,8 @@ async function handleSwitchConversation(conversationId, groupId = null) {
                 if (msg.role === "user") {
                     // 0.27.9：历史加载渲染独立附件卡（DB 徽标 kind+name；兼容旧纯文件名=音频）
                     renderUserEntry(msg.text, msg.attachments ?? []);
+                    // 0.27.12：失败轮持久化呈现——错误行 + 重试（预填原文不自动发送）
+                    if (msg.failed) renderFailedTurnError(msg.error_text || "", msg.text);
                     state.addMessage({role: "user", content: msg.text});
                 } else if (msg.role === "assistant") {
                     // 包含 tool_name 的 assistant 消息渲染为工具调用卡片

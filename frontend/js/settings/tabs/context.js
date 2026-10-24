@@ -240,6 +240,9 @@ function bindCaptureEvents(container, save, saveClipboardEnabled) {
     container.querySelector(".context-enabled")?.addEventListener("change", save);
     container.querySelector('.plugin-field[data-key="clipboard_enabled"]')?.addEventListener("change", save);
     container.querySelector('.plugin-field[data-key="selection_enabled"]')?.addEventListener("change", save);
+    // 0.27.12 实机验收发现：此开关漏绑 change→save，切换后不落库（其余开关
+    // 触发 save 时才会连带写入当时的 DOM 值）——补上独立保存
+    container.querySelector('.plugin-field[data-key="file_selection_enabled"]')?.addEventListener("change", save);
     container.querySelector("#clipboard-enabled")?.addEventListener("change", saveClipboardEnabled);
 }
 

@@ -487,14 +487,42 @@ pub async fn chat_prompt(
                 }
             }
 
-            // 0.21.16: 汇总字段采集——Done 的 token 用量 / tool 调用次数
+            // 0.21.16: 汇总字段采集——Done 的 token 用量 / tool 次数
             match &chunk {
                 crate::domain::ai::agent_provider::ChatStreamChunk::Done { usage, .. } => {
                     last_input_tokens = usage.input_tokens;
                     last_output_tokens = usage.output_tokens;
+                    // 0.27.12：本轮成功——重发复用原预写行时清掉旧失败标记
+                    if is_persistent {
+                        let pools = app_clone.state::<crate::infra::data::DbPools>();
+                        let _ = crate::infra::data::conversations::clear_last_user_failed(
+                            &pools.ai,
+                            &conv_id_clone,
+                        )
+                        .await;
+                    }
                 }
                 crate::domain::ai::agent_provider::ChatStreamChunk::ToolCall { .. } => {
                     tool_count += 1;
+                }
+                // 0.27.12：失败持久化——Error chunk 时把预写 user 行标记为
+                // failed（错误摘要有界）；重开窗口后历史投影渲染失败态+重试。
+                // 临时会话不落库、无匹配行时静默；T2 自愈拦截的 Error 不会
+                // 到达转发层（interceptor 拦下重试），不误标。
+                crate::domain::ai::agent_provider::ChatStreamChunk::Error { message } => {
+                    if is_persistent {
+                        let bounded: String = message.chars().take(500).collect();
+                        let pools = app_clone.state::<crate::infra::data::DbPools>();
+                        if let Err(e) = crate::infra::data::conversations::mark_last_user_failed(
+                            &pools.ai,
+                            &conv_id_clone,
+                            &bounded,
+                        )
+                        .await
+                        {
+                            tracing::warn!(error = %e, "chat_prompt: 标记失败行未成功（不影响错误呈现）");
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -1123,6 +1151,13 @@ pub struct ChatMessageSnapshot {
     ///（0.23.12 记录，一律按 audio 解析）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attachments: Option<Vec<crate::domain::ai::attachment::AttachmentBadge>>,
+    /// 0.27.12：该轮发送失败（user 行 status='failed'）——历史投影渲染
+    /// 失败态与重试入口；不参与模型上下文（load_all_messages 不读此列）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failed: Option<bool>,
+    /// 0.27.12：失败原因摘要（有界，随 status 一起写入）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_text: Option<String>,
 }
 
 mod conversations;

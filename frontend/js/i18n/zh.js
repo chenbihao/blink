@@ -970,6 +970,9 @@ export const zh = {
     "chat.cmd.prompt.builtin": "内置",
     "chat.cmd.prompt.insert_hint": "在光标处插入",
     "chat.cmd.prompt.btn_title": "提示词库",
+    "chat.failed.prefix": "本轮发送失败：",
+    "chat.failed.prefix_no_reason": "本轮发送失败，请检查网络与模型配置后重试",
+    "chat.failed.retry": "重试",
 
     // ── 0.27.9 @ 附件面板（phase §5.9.4/§8.2） ──
     "chat.attach.button_title": "附加文件（@ 或点击打开）",

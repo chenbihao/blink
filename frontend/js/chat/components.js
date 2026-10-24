@@ -122,8 +122,8 @@ export function renderUserMessage(text) {
     if (onEditMessage) {
         actions.appendChild(createEditAction(() => startEditMessage(el, el.dataset.rawText || text)));
     }
-    // 重试 = 重新发送此用户消息（与 assistant 的 retry 对称）
-    actions.appendChild(createRetryAction());
+    // 重试 = 重新发送此用户消息（与 assistant 的 retry 对称；锚点为本气泡）
+    actions.appendChild(createRetryAction(el));
     el.appendChild(actions);
     messagesEl.appendChild(el);
     scrollToBottom();
@@ -337,10 +337,10 @@ export function finalizeAssistantMessage(el, text, thinkingText) {
     el.dataset.rawText = text;
     const thinkingHtml = renderThinkingBlock(thinkingText, true);
     el.innerHTML = thinkingHtml + `<div class="chat-assistant-content">${renderMarkdown(text)}</div>`;
-    // 0.12.6：hover 操作行（复制 + 重试）
+    // 0.12.6：hover 操作行（复制 + 重试；0.27.12 重试带消息锚点）
     const actions = createActionsRow();
     actions.appendChild(createCopyAction(() => el.dataset.rawText || ""));
-    actions.appendChild(createRetryAction());
+    actions.appendChild(createRetryAction(el));
     el.appendChild(actions);
     injectCodeCopyButtons(el);
     highlightCodeBlocks(el); // 0.12.5 §5.7：代码块语法高亮
@@ -407,14 +407,19 @@ function createCopyAction(rawTextOrGetter) {
 }
 
 /**
- * 重试按钮（仅 assistant 消息）。点击触发 resend 事件。
+ * 重试按钮（仅 assistant/user 消息）。点击触发 resend 事件。
+ * 0.27.12：事件携带消息 DOM 锚点——多条消息时重试的是被点击的这轮，
+ * 此前无锚点恒重发最后一条 user 消息（点旧消息的重试实际重发最新一轮）。
+ * @param {HTMLElement} [msgEl] 消息气泡元素（.chat-msg）
  * @returns {HTMLButtonElement}
  */
-function createRetryAction() {
+function createRetryAction(msgEl) {
     return createIconButton("retry", "重试", () => {
-        // 重试 = 重新发送最后一条用户消息
-        // 通过自定义事件冒泡到 main.js 处理
-        const evt = new CustomEvent("chat:retry", {bubbles: true});
+        // 通过自定义事件冒泡到 main.js 处理（锚点经 detail 传递）
+        const evt = new CustomEvent("chat:retry", {
+            bubbles: true,
+            detail: {msgEl},
+        });
         document.dispatchEvent(evt);
     });
 }
@@ -540,13 +545,13 @@ function startEditMessage(el, originalText) {
         el.textContent = originalText;
         el.dataset.rawText = originalText;
         // 附件卡片是 messagesEl 内独立元素（非 el 子节点），编辑/取消不动它
-        // 重新注入操作行
+        // 重新注入操作行（重试锚定本消息，与 renderUserMessage 一致）
         const row = createActionsRow();
         row.appendChild(createCopyAction(() => el.dataset.rawText || ""));
         if (onEditMessage) {
             row.appendChild(createEditAction(() => startEditMessage(el, el.dataset.rawText || originalText)));
         }
-        row.appendChild(createRetryAction());
+        row.appendChild(createRetryAction(el));
         el.appendChild(row);
     };
 

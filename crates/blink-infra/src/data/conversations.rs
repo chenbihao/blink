@@ -149,6 +149,10 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
     // 0.23.12 迁移：messages 表加 attachments 列（若不存在）
     migrate_add_attachments_column(pool).await?;
 
+    // 0.27.12 迁移：messages 表加 status/error_text 列（发送失败持久化，
+    // 若不存在）——只进前端历史投影，不参与模型上下文加载
+    migrate_add_message_status_columns(pool).await?;
+
     // 0.21.19: conversation_summaries 表（摘要压缩）
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS conversation_summaries (
@@ -292,6 +296,83 @@ async fn migrate_add_attachments_column(pool: &SqlitePool) -> Result<(), String>
         .map_err(|e| e.to_string())?;
         tracing::info!("messages 表已迁移：新增 attachments 列");
     }
+    Ok(())
+}
+
+/// 0.27.12：`messages` 表加 `status` / `error_text` 列（若不存在）。
+///
+/// 发送失败的持久化呈现：`status='failed'` + `error_text`（有界摘要）标记
+/// 在预写 user 行上，重开窗口后历史投影渲染失败态与重试入口。两列**不参与**
+/// 模型上下文加载（`load_all_messages` 不读它们），后续请求不受影响。
+async fn migrate_add_message_status_columns(pool: &SqlitePool) -> Result<(), String> {
+    let columns: Vec<(String,)> =
+        sqlx::query_as("SELECT name FROM pragma_table_info('messages')")
+            .fetch_all(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    let has_status = columns.iter().any(|(name,)| name == "status");
+    let has_error_text = columns.iter().any(|(name,)| name == "error_text");
+    if !has_status {
+        sqlx::query(sqlx::AssertSqlSafe(
+            "ALTER TABLE messages ADD COLUMN status TEXT".to_string(),
+        ))
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        tracing::info!("messages 表已迁移：新增 status 列");
+    }
+    if !has_error_text {
+        sqlx::query(sqlx::AssertSqlSafe(
+            "ALTER TABLE messages ADD COLUMN error_text TEXT".to_string(),
+        ))
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        tracing::info!("messages 表已迁移：新增 error_text 列");
+    }
+    Ok(())
+}
+
+/// 标记对话尾部 user 行为发送失败（0.27.12）。
+///
+/// 失败发生在「预写 user 落库之后、assistant 回复之前」，尾部 user 行即本轮
+/// 预写行；无匹配行（临时会话不落库/尾部非 user）时静默无操作。`error_text`
+/// 调用方负责有界截断。编辑重发（truncate）会删除旧行，标记随之自然清理。
+pub async fn mark_last_user_failed(
+    pool: &SqlitePool,
+    conversation_id: &str,
+    error_text: &str,
+) -> Result<(), String> {
+    sqlx::query(
+        "UPDATE messages SET status = 'failed', error_text = ?3 \
+         WHERE id = (SELECT MAX(id) FROM messages WHERE conversation_id = ?1 AND role = 'user') \
+           AND conversation_id = ?2",
+    )
+    .bind(conversation_id)
+    .bind(conversation_id)
+    .bind(error_text)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 清除尾部 user 行的失败标记（0.27.12，Done chunk 时调用——重发成功后
+/// 复用原预写行（append 去重），标记须随之清除；正常行无标记时为 no-op）。
+pub async fn clear_last_user_failed(
+    pool: &SqlitePool,
+    conversation_id: &str,
+) -> Result<(), String> {
+    sqlx::query(
+        "UPDATE messages SET status = NULL, error_text = NULL \
+         WHERE id = (SELECT MAX(id) FROM messages WHERE conversation_id = ?1 AND role = 'user') \
+           AND conversation_id = ?2 AND status = 'failed'",
+    )
+    .bind(conversation_id)
+    .bind(conversation_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -738,6 +819,26 @@ pub async fn load_all_messages(
     .fetch_all(pool)
     .await
     .map_err(|e| e.to_string())?;
+    Ok(rows)
+}
+
+/// 0.27.12：带失败状态的完整历史加载（前端历史投影专用）。
+///
+/// 与 [`load_all_messages`]（模型上下文路径）分列——status/error_text 只进
+/// 前端快照，绝不参与 rig memory 加载，后续请求不受失败标记影响。
+pub async fn load_all_messages_with_status(
+    pool: &SqlitePool,
+    conversation_id: &str,
+) -> Result<Vec<(String, String, i64, Option<String>, Option<String>, Option<String>)>, String> {
+    let rows: Vec<(String, String, i64, Option<String>, Option<String>, Option<String>)> =
+        sqlx::query_as(
+            "SELECT role, content, created_at, attachments, status, error_text FROM messages \
+             WHERE conversation_id = ?1 ORDER BY id ASC",
+        )
+        .bind(conversation_id)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(rows)
 }
 
@@ -3026,6 +3127,45 @@ mod tests {
     }
 
     // ── 0.27.8: 手动摘要 CAS 提交 / manual_summary 标记 / 水位计数 ──────────
+
+    // ── 0.27.12: 发送失败持久化（status/error_text 只进前端投影）────────────
+
+    #[tokio::test]
+    async fn failed_turn_mark_clear_and_projection() {
+        let pool = setup_pool().await;
+        create_conversation(&pool, "c1", Some("t")).await.unwrap();
+        append_message(&pool, "c1", "user", "{\"User\":[]}") // 旧 user 行
+            .await
+            .unwrap();
+        append_message(&pool, "c1", "user", "{\"User\":[]}") // 本轮预写行（尾部）
+            .await
+            .unwrap();
+
+        // 失败标记：只落尾部 user 行
+        mark_last_user_failed(&pool, "c1", "连接超时").await.unwrap();
+        let rows = load_all_messages_with_status(&pool, "c1").await.unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_ne!(
+            rows[0].4, Some("failed".to_string()),
+            "非尾部行不受标记影响"
+        );
+        assert_eq!(rows[1].4, Some("failed".to_string()), "尾部 user 行标记失败");
+        assert_eq!(rows[1].5, Some("连接超时".to_string()), "错误摘要随行");
+
+        // 模型上下文路径不受影响：load_all_messages 不读 status（4 元组签名不变）
+        let ctx_rows = load_all_messages(&pool, "c1").await.unwrap();
+        assert_eq!(ctx_rows.len(), 2);
+
+        // 成功清标记（Done 语义）：只清 failed 行，幂等
+        clear_last_user_failed(&pool, "c1").await.unwrap();
+        clear_last_user_failed(&pool, "c1").await.unwrap();
+        let rows = load_all_messages_with_status(&pool, "c1").await.unwrap();
+        assert_eq!(rows[1].4, None, "Done 后失败标记清除");
+
+        // 不存在的会话：静默无操作
+        mark_last_user_failed(&pool, "nonexistent", "e").await.unwrap();
+        clear_last_user_failed(&pool, "nonexistent").await.unwrap();
+    }
 
     #[tokio::test]
     async fn manual_summary_cas_commit_succeeds_when_watermark_unchanged() {

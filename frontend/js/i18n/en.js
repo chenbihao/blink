@@ -977,6 +977,9 @@ export const en = {
     "chat.cmd.prompt.builtin": "built-in",
     "chat.cmd.prompt.insert_hint": "insert at cursor",
     "chat.cmd.prompt.btn_title": "Prompt library",
+    "chat.failed.prefix": "This message failed to send: ",
+    "chat.failed.prefix_no_reason": "This message failed to send — check your network and model config, then retry",
+    "chat.failed.retry": "Retry",
 
     // ── 0.27.9 @ attachment palette (phase §5.9.4/§8.2) ──
     "chat.attach.button_title": "Attach files (@ or click)",

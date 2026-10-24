@@ -37,8 +37,13 @@ use rig_core::streaming::{Item as RigStreamItem, StreamEvent as RigStreamEvent, 
 
 
 /// 构造本轮 user 消息（0.27.10）：无图 = `Message::user(text)`（与既有行为
-/// 完全一致）；有图 = 非空正文 Text part 在前 + 逐图 `image_raw` part。
-/// 图片不落持久化历史——memory append 侧剥离（phase §3.4 单次注入语义）。
+/// 完全一致）；有图 = 非空正文 Text part 在前 + 逐图 base64 Image part。
+/// 0.27.12：image_raw → image_base64——rig 的 OpenAICompatible/Gemini wire
+/// 转换对 Raw 变体直接报错（"Raw files not supported, encode as base64
+/// first"），Base64 是三家 provider 的通行路径（OpenAI image_url data URL /
+/// Gemini inline_data / Anthropic base64 source）；归一化产物本就要编码
+/// 发送，编码前置到此。图片不落持久化历史——memory append 侧剥离
+/// （phase §3.4 单次注入语义）。
 fn build_prompt_message(user_msg: &str, image_parts: &[VisionImagePart]) -> rig_core::completion::Message {
     use rig_core::completion::message::{ImageMediaType, UserContent};
 
@@ -54,13 +59,19 @@ fn build_prompt_message(user_msg: &str, image_parts: &[VisionImagePart]) -> rig_
             "image/jpeg" => Some(ImageMediaType::JPEG),
             _ => Some(ImageMediaType::PNG),
         };
-        content.push(UserContent::image_raw(
-            part.bytes.clone(),
+        content.push(UserContent::image_base64(
+            base64_encode(&part.bytes),
             media_type,
             None,
         ));
     }
     rig_core::completion::Message::User { content }
+}
+
+/// 标准 base64 编码（无换行填充差异；provider wire 侧要求 base64 变体）。
+fn base64_encode(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
 #[cfg(test)]
@@ -1087,7 +1098,8 @@ mod tests {
     }
 
     /// 验证 `MaxTurnsReached` chunk 序列化（0.12.3 Phase C）。
-    /// 0.27.10：typed 多模态消息构造——无图保持纯文本；有图 Text 在前 + image_raw。
+    /// 0.27.10：typed 多模态消息构造——无图保持纯文本；有图 Text 在前 +
+    /// base64 Image parts（0.27.12：raw 变体被 OpenAICompatible/Gemini wire 拒绝）。
     #[test]
     fn build_prompt_message_with_and_without_images() {
         use rig_core::completion::message::UserContent;
@@ -1102,7 +1114,7 @@ mod tests {
             other => panic!("应为 User 消息: {other:?}"),
         }
 
-        // 有图：正文 Text part + PNG/JPEG image_raw parts
+        // 有图：正文 Text part + PNG/JPEG base64 Image parts
         let parts = vec![
             VisionImagePart { mime: "image/png".into(), bytes: vec![1, 2, 3] },
             VisionImagePart { mime: "image/jpeg".into(), bytes: vec![4, 5] },
@@ -1114,10 +1126,15 @@ mod tests {
                 assert!(matches!(content[0], UserContent::Text(_)));
                 assert!(matches!(content[1], UserContent::Image(_)));
                 assert!(matches!(content[2], UserContent::Image(_)));
-                // 序列化含 media type（wire 侧可识别格式），且含原始字节
+                // 序列化含 media type 与 base64 数据（wire 侧可识别格式，
+                // 非 raw 字节数组——OpenAICompatible/Gemini 拒绝 Raw 变体）
                 let json = serde_json::to_string(&msg).unwrap();
                 assert!(json.contains("\"media_type\":\"png\""), "{json}");
                 assert!(json.contains("\"media_type\":\"jpeg\""), "{json}");
+                assert!(
+                    json.contains(&base64_encode(&[1, 2, 3])),
+                    "图片数据为 base64 编码: {json}"
+                );
             }
             other => panic!("应为 User 消息: {other:?}"),
         }

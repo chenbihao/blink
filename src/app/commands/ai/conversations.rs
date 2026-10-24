@@ -78,11 +78,14 @@ pub async fn get_chat_messages(
     use rig_core::completion::message::{AssistantContent, UserContent};
 
     let pools = app.state::<crate::infra::data::DbPools>();
-    let rows =
-        crate::infra::data::conversations::load_all_messages(&pools.ai, &conversation_id).await?;
+    let rows = crate::infra::data::conversations::load_all_messages_with_status(
+        &pools.ai,
+        &conversation_id,
+    )
+    .await?;
 
     let mut snapshots: Vec<ChatMessageSnapshot> = Vec::with_capacity(rows.len());
-    for (role, content_json, created_at, attachments_json) in rows {
+    for (role, content_json, created_at, attachments_json, status, error_text) in rows {
         let msg: Message =
             serde_json::from_str(&content_json).map_err(|e| format!("反序列化消息失败: {e}"))?;
         // 0.27.9：附件徽标（kind+name）——解析失败按无附件降级；
@@ -158,6 +161,14 @@ pub async fn get_chat_messages(
                     tool_result: None,
                     created_at: Some(created_at),
                     attachments,
+                    // 0.27.12：失败态只对 user 行有意义（status 由
+                    // mark_last_user_failed 只写 user 行）
+                    failed: (status.as_deref() == Some("failed")).then_some(true),
+                    error_text: if status.as_deref() == Some("failed") {
+                        error_text
+                    } else {
+                        None
+                    },
                 });
             }
             Message::Assistant { content, .. } => {
@@ -194,6 +205,8 @@ pub async fn get_chat_messages(
                     tool_result: None,
                     created_at: Some(created_at),
                     attachments: None,
+                    failed: None,
+                    error_text: None,
                 });
             }
             Message::System { content } => {
@@ -206,6 +219,8 @@ pub async fn get_chat_messages(
                     tool_result: None,
                     created_at: Some(created_at),
                     attachments: None,
+                    failed: None,
+                    error_text: None,
                 });
             }
         }

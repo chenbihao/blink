@@ -49,6 +49,10 @@ let getConversationId = () => "";
 /** 附件添加回调（main.js 注入 composer.addAttachments） */
 let addAttachments = () => {};
 
+/** 清除 @ 触发文本（main.js 注入 composer.clearInput）。按钮打开的面板
+ * 不触发（输入可能是用户正文）；@ 触发契约下整段输入即触发文本。 */
+let clearTriggerText = null;
+
 /** 面板打开的显式入口（attach 按钮，非 @ 触发） */
 let manuallyOpened = false;
 
@@ -120,6 +124,9 @@ export function initAttachmentPalette(callbacks) {
     }
     if (typeof callbacks?.addAttachments === "function") {
         addAttachments = callbacks.addAttachments;
+    }
+    if (typeof callbacks?.clearTriggerText === "function") {
+        clearTriggerText = callbacks.clearTriggerText;
     }
     registerPopup("attach", closeAttachmentPalette);
 
@@ -319,10 +326,16 @@ function adoptHighlighted() {
 
 /** 采纳：picker / 会话引用 / 最近文件条目。失败结果逐项反馈，不静默丢项。 */
 async function adoptRow(kind, value) {
+    // @ 触发打开（非按钮）时，成功采纳后清掉输入框里的 @ 触发文本
+    // （closeAttachmentPalette 会重置 manuallyOpened，先记录）
+    const wasAtTrigger = !manuallyOpened;
+    const clearIfTriggered = () => {
+        if (wasAtTrigger) clearTriggerText?.();
+    };
     if (kind === "pick_file") {
         closeAttachmentPalette();
         const outcomes = await runPick(() => ipc.attachmentPickFiles(getConversationId()));
-        applyOutcomes(outcomes);
+        applyOutcomes(outcomes, clearIfTriggered);
         return;
     }
     if (kind === "pick_audio") {
@@ -340,6 +353,7 @@ async function adoptRow(kind, value) {
                     ref: picked.audioRef,
                     display: picked.displayName || t("chat.attach.audio_fallback"),
                 }]);
+                clearIfTriggered();
             }
         } catch (error) {
             console.warn("[attachment-palette] 音频选择失败:", error);
@@ -359,6 +373,7 @@ async function adoptRow(kind, value) {
             ref: ref.ref,
             display: attachmentDisplayName(ref, ref.kind),
         }]);
+        clearIfTriggered();
         return;
     }
     if (kind === "recent_image") {
@@ -371,6 +386,7 @@ async function adoptRow(kind, value) {
                     ref: signed.ref,
                     display: signed.display || t("chat.attach.image_fallback"),
                 }]);
+                clearIfTriggered();
             }
         } catch (error) {
             console.warn("[attachment-palette] 图片签发失败:", error);
@@ -382,7 +398,7 @@ async function adoptRow(kind, value) {
         const outcomes = await runPick(() =>
             ipc.attachmentAttachClipboardFiles(value, getConversationId())
         );
-        applyOutcomes(outcomes);
+        applyOutcomes(outcomes, clearIfTriggered);
         return;
     }
 }
@@ -402,8 +418,10 @@ async function runPick(invoker) {
     }
 }
 
-/** 把签发结果落进 composer；失败项留在面板内逐项展示（不静默丢项）。 */
-function applyOutcomes(outcomes) {
+/** 把签发结果落进 composer；失败项留在面板内逐项展示（不静默丢项）。
+ * @param {Array<object>} outcomes
+ * @param {() => void} [onOk] 有成功项时的回调（@ 触发文本清理） */
+function applyOutcomes(outcomes, onOk) {
     const okList = [];
     const failures = [];
     for (const outcome of outcomes) {
@@ -420,7 +438,10 @@ function applyOutcomes(outcomes) {
             failures.push({display: outcome.display, reason: outcome.reason || ""});
         }
     }
-    if (okList.length > 0) addAttachments(okList);
+    if (okList.length > 0) {
+        addAttachments(okList);
+        onOk?.();
+    }
     if (failures.length > 0) {
         // 重开面板显示失败原因（含成功提示），用户可继续选择其他文件
         manuallyOpened = true;

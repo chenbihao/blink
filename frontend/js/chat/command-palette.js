@@ -472,12 +472,12 @@ async function renderPromptList() {
         return;
     }
 
-    items = visible.map((entry) => ({kind: "prompt", value: entry.id}));
+    items = visible.map((entry) => ({kind: "prompt_entry", value: entry.id}));
     promptEntries = visible;
     paletteEl.innerHTML = `<div class="cp-section-title">${escapeText(t("chat.cmd.prompt.title"))}
             <span class="cp-section-count">${visible.length}</span></div>` +
         visible
-            .map((entry) => `<div class="cp-row" data-adopt="prompt" data-value="${escapeAttr(entry.id)}">
+            .map((entry) => `<div class="cp-row" data-adopt="prompt_entry" data-value="${escapeAttr(entry.id)}">
                 <span class="cp-row-icon">${iconHTML("quote")}</span>
                 <span class="cp-row-title">${escapeText(entry.name)}</span>
                 ${entry.builtin ? `<span class="cp-row-arg">${escapeText(t("chat.cmd.prompt.builtin"))}</span>` : ""}
@@ -514,7 +514,10 @@ function adoptHighlighted() {
     if (items.length === 0) return; // 未知命令/空列表：保留草稿不动作
     const item = items[Math.min(highlightIndex, items.length - 1)];
     if (item?.kind === "skill") adoptRow("skill", item.value);
-    else if (item?.kind === "prompt") adoptRow("prompt", item.value);
+    // 注意 kind 用 "prompt_entry" 而非 "prompt"——与命令名 /prompt 区分：
+    // adoptRow 的首参在「命令名」与「条目 kind」两个命名空间复用，撞名会让
+    // /prompt 命令误入条目分支（find("") 落空 → 静默无操作）
+    else if (item?.kind === "prompt_entry") adoptRow("prompt_entry", item.value);
     else if (item?.kind === "command") adoptRow(item.name, "");
 }
 
@@ -525,7 +528,7 @@ function adoptHighlighted() {
  * （保留其他草稿与附件、不自动发送，phase §5.8.5）。
  */
 function adoptRow(kind, value) {
-    if (kind === "prompt") {
+    if (kind === "prompt_entry") {
         const entry = promptEntries.find((item) => item.id === value);
         const content = entry?.effectiveContent ?? entry?.effective_content;
         closePalette();

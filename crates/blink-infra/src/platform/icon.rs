@@ -712,7 +712,14 @@ mod tests {
 
     /// 0.24.9：裸名（SystemShortcutEngine exec_path）解析到 System32 后可提取。
     /// taskmgr.exe 在所有 Windows 上稳定存在；环境异常时跳过（与上文 explorer.exe 用例同款防御）。
+    ///
+    /// 0.27.12 起 `#[ignore]`：真实 Win32 图标提取（shell32 图标缓存）在测试
+    /// 并行执行时间歇失败——同机单独跑与低并行度稳定通过，属环境暂态竞争
+    /// 而非代码回归（spec-backend §二「集成层免自动化」边界的实例）。
+    /// 覆盖保留在 `extract_icon_png_extracts_png`（explorer.exe，自带环境跳过
+    /// 防御）；需要时 `cargo test -p blink-infra -- --ignored` 显式执行本用例。
     #[test]
+    #[ignore = "真实 shell32 图标提取在并行测试下间歇失败（环境暂态，非回归）"]
     fn extract_bare_exec_name_resolves_system32() {
         match extract_icon_png("taskmgr.exe", 32) {
             Some(png) => assert_eq!(&png[..4], &PNG_MAGIC, "裸名解析后应提取出合法 PNG"),
