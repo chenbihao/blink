@@ -204,6 +204,7 @@ impl DefaultResourceStore {
                 reuse: spec.reuse,
                 group: 0,
                 owner: String::new(),
+                label: None,
             },
             created_at: Instant::now(),
             expires_at: Instant::now(),
@@ -259,6 +260,7 @@ impl DefaultResourceStore {
                 reuse: spec.reuse,
                 group: 0,
                 owner: String::new(),
+                label: None,
             },
             created_at: Instant::now(),
             expires_at: Instant::now(),
@@ -293,6 +295,7 @@ impl DefaultResourceStore {
                 .group
                 .unwrap_or_else(|| self.group_counter.fetch_add(1, Ordering::SeqCst)),
             owner: spec.owner,
+            label: spec.label,
         };
         entry.expires_at = entry.created_at + ttl;
         entry.remaining_reads = match spec.reuse {
@@ -475,6 +478,53 @@ impl DefaultResourceStore {
         before - entries.len()
     }
 
+    /// 按 owner 投影合法可见条目（0.27.9 @ 面板数据源）。
+    ///
+    /// 只返回未过期条目的非授权元数据（token/kind/mime/size/expires/uses），
+    /// 不含路径或字节；owner 由后端推导（如 `chat_attach:{cid}`），前端
+    /// 不能凭 owner 前缀枚举跨会话资源。
+    pub fn list_by_owner(&self, owner: &str) -> Vec<super::types::VisibleResource> {
+        let mut entries = self.lock_entries();
+        Self::evict_expired(&mut entries);
+        let now = Instant::now();
+        let mut list: Vec<super::types::VisibleResource> = entries
+            .iter()
+            .filter(|(_, e)| e.grant.owner == owner)
+            .map(|(token, e)| super::types::VisibleResource {
+                token: token.clone(),
+                backing_kind: e.backing.kind_str().to_string(),
+                mime: e.mime.clone(),
+                size_bytes: e.backing.size_bytes(),
+                expires_in_seconds: e.expires_at.duration_since(now).as_secs(),
+                uses: e.grant.uses.iter().map(|u| u.as_str().to_string()).collect(),
+                label: e.grant.label.clone(),
+            })
+            .collect();
+        // 新签发的排前面——面板展示稳定次序
+        list.sort_by(|a, b| b.token.cmp(&a.token));
+        list
+    }
+
+    /// 转移条目归属（0.27.9 草稿事务：确认消费后转移资源归属）。
+    ///
+    /// 仅当当前 owner 与 `expected_owner` 匹配时转移为 `new_owner`——
+    /// 防止跨会话/重复采纳误抢他人条目。返回是否转移成功。
+    pub fn transfer_owner(
+        &self,
+        resource_ref: &ResourceRef,
+        expected_owner: &str,
+        new_owner: &str,
+    ) -> bool {
+        let mut entries = self.lock_entries();
+        match entries.get_mut(resource_ref.as_str()) {
+            Some(entry) if entry.grant.owner == expected_owner => {
+                entry.grant.owner = new_owner.to_string();
+                true
+            }
+            _ => false,
+        }
+    }
+
     // ── 派生 ─────────────────────────────────────────────────────────────
 
     /// 从仍有效的 ref 派生新 grant——**权限衰减**语义（VAD 调试 clone 语义平移，
@@ -601,6 +651,7 @@ impl DefaultResourceStore {
                 reuse: effective_spec.reuse,
                 group: 0,
                 owner: String::new(),
+                label: None,
             },
             created_at: now,
             expires_at: now,

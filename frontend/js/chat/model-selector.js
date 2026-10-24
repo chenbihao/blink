@@ -39,6 +39,14 @@ export function updateProviderLabel(status) {
     label.textContent = modelName || "未配置模型";
 }
 
+/** 当前生效模型是否声明 Vision 能力（0.27.10 图片附件发送预检；后端校验兜底）。 */
+let currentSupportsVision = false;
+
+/** 读取当前生效模型的 Vision 能力标记。 */
+export function currentModelSupportsVision() {
+    return currentSupportsVision;
+}
+
 /** 拉取模型列表 + 状态，刷新下拉和标签 */
 export async function refreshModelSelector() {
     try {
@@ -54,6 +62,9 @@ export async function refreshModelSelector() {
         });
         // 记录当前模型 id（"{provider}:{model}"），供思考强度持久化定位
         setThinkingModelId(models.find((m) => m.is_selected)?.id ?? null);
+        // 0.27.10：当前生效模型 Vision 能力（selected 优先，回落 Main 档）
+        currentSupportsVision = (models.find((m) => m.is_selected) ?? models.find((m) => m.is_main))
+            ?.supports_vision === true;
         renderModelDropdown(models);
         updateProviderLabel(status);
         syncThinkingControl();

@@ -254,14 +254,28 @@ pub fn hide_chat_window(app: tauri::AppHandle) {
     crate::app::window_orchestrator::hide_chat_window(&app);
 }
 
-/// 前端 init 时拉取待填充文本（0.19）。
+/// 前端 init 时拉取待填充载荷（0.19；0.27.9 扩展为正文+附件+新建会话草稿）。
 ///
-/// 返回 `{revision, text}` 或 null。take 后 pending 清空。
-/// 冷启动路径：listener 尚未注册时 emit 丢失，前端主动 take 兜底。
+/// 返回 `{revision, text, attachments, newConversation}` 或 null。take 后
+/// pending 清空。冷启动路径：listener 尚未注册时 emit 丢失，前端主动 take 兜底。
 #[tauri::command]
 pub fn take_chat_prefill() -> Option<ChatPrefillPayload> {
-    crate::infra::platform::window::take_chat_prefill()
-        .map(|(revision, text)| ChatPrefillPayload { revision, text })
+    crate::infra::platform::window::take_chat_prefill().map(|(revision, data)| {
+        ChatPrefillPayload {
+            revision,
+            text: data.text,
+            attachments: data
+                .attachments
+                .into_iter()
+                .map(|a| ChatPrefillAttachmentPayload {
+                    kind: a.kind,
+                    r#ref: a.r#ref,
+                    display: a.display,
+                })
+                .collect(),
+            new_conversation: data.new_conversation,
+        }
+    })
 }
 
 /// 热窗口 event 路径：前端收到 CHAT_PREFILL 事件后调此命令清空 pending（0.19）。
@@ -272,11 +286,23 @@ pub fn ack_chat_prefill(revision: u64) {
     crate::infra::platform::window::ack_chat_prefill(revision);
 }
 
-/// chat prefill 返回载荷（0.19）。
+/// chat prefill 附件载荷（0.27.9；wire 与 ChatAttachmentInput 同形）。
 #[derive(Debug, Clone, serde::Serialize)]
+pub struct ChatPrefillAttachmentPayload {
+    pub kind: String,
+    pub r#ref: String,
+    pub display: String,
+}
+
+/// chat prefill 返回载荷（0.19；0.27.9 扩展）。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ChatPrefillPayload {
     pub revision: u64,
     pub text: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<ChatPrefillAttachmentPayload>,
+    pub new_conversation: bool,
 }
 
 /// 0.21.16: 实况落库——把已累计的部分 assistant 回复写入 DB（warn-and-continue）。
@@ -312,8 +338,9 @@ async fn persist_live_assistant(
 /// 0.12.6：`group_id` 参数注入分组级系统提示词。
 /// 0.17.6：`target_window`（默认 "chat"）+ `ephemeral`（默认 false）参数。
 /// 主窗口 AI 传 `target_window="main"` + `ephemeral=true`，使用临时对话记忆。
-/// 0.23.12：`attachments` 携带本轮音频附件**元数据**——后端只把 ref 注入本轮
-/// 模型输入，用户可见正文/标题/持久化历史保持干净（不含 `rref_` 技术块）。
+/// 0.27.9：`attachments` 携带本轮附件 `{kind, ref, display}` 元数据——后端
+/// 逐项校验后按 kind 解引用注入**本轮模型输入**（文本注入正文、图片走
+/// Vision 通道），用户可见正文/标题/持久化历史保持干净（不含 `rref_`）。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn chat_prompt(
@@ -751,6 +778,9 @@ pub fn get_chat_models(app: tauri::AppHandle) -> Vec<ChatModelOption> {
                     &model.id,
                     model.thinking_style,
                 ),
+                supports_vision: model
+                    .capabilities
+                    .contains(&ModelCapability::Vision),
                 reasoning_effort: model.reasoning_effort.clone(),
             });
         }
@@ -967,6 +997,9 @@ pub fn get_ephemeral_models(app: tauri::AppHandle) -> Vec<ChatModelOption> {
                     &model.id,
                     model.thinking_style,
                 ),
+                supports_vision: model
+                    .capabilities
+                    .contains(&ModelCapability::Vision),
                 reasoning_effort: model.reasoning_effort.clone(),
             });
         }
@@ -1061,6 +1094,9 @@ pub struct ChatModelOption {
     /// 0.21.17：该模型所属 provider 是否支持 reasoning_effort 等级（前端据此
     /// 决定思考控件是"强度下拉"还是"简单开关"）。
     pub supports_effort_levels: bool,
+    /// 0.27.10：该模型是否声明 Vision 能力（前端图片附件预检提示用；
+    /// 后端发送校验为最终防线，phase §3.4 双校验）。
+    pub supports_vision: bool,
     /// 0.21.17：该模型配置的思考强度（线值；None = auto/未配置）。
     pub reasoning_effort: Option<String>,
 }
@@ -1082,10 +1118,11 @@ pub struct ChatMessageSnapshot {
     /// 0.12.7 §6.4：消息创建时间戳（Unix 秒），前端据此插入时间分隔符
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<i64>,
-    /// 0.23.12：用户消息携带的音频附件**展示元数据**（仅文件名，无 ref），
-    /// 前端渲染消息气泡内的附件徽标；历史加载与导出消费
+    /// 0.27.9：用户消息携带的附件徽标（kind+name，无 ref），前端渲染消息
+    /// 气泡内的附件卡片；历史加载与导出消费。读侧兼容旧纯音频文件名数组
+    ///（0.23.12 记录，一律按 audio 解析）。
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub attachments: Option<Vec<String>>,
+    pub attachments: Option<Vec<crate::domain::ai::attachment::AttachmentBadge>>,
 }
 
 mod conversations;

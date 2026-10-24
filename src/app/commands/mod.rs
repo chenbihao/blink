@@ -4,6 +4,7 @@
 //! 0.14.6 §2.4：按域拆分到子模块，mod.rs 聚合 re-export。
 
 mod ai;
+mod attachments;
 mod clipboard;
 mod config;
 mod content_editor;
@@ -24,6 +25,7 @@ mod stt;
 mod terminal;
 
 pub use ai::*;
+pub use attachments::*;
 pub use clipboard::*;
 pub use config::*;
 pub use content_editor::*;

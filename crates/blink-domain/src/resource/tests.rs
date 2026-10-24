@@ -297,6 +297,62 @@ fn revoke_by_owner() {
     assert_eq!(store.stats().local_entries, 1);
 }
 
+// ── 0.27.9：list_by_owner 投影 / transfer_owner 归属转移 ────────────────────
+
+#[test]
+fn list_by_owner_projects_visible_entries_only() {
+    let store = DefaultResourceStore::default();
+    // 会话 owner 两条（文本/音频各一）+ 其他 owner 一条
+    let a = store
+        .issue_memory(
+            Bytes::from(vec![1, 2, 3]),
+            "image/png",
+            ResourceGrantSpec::new(ResourceUseSet::single(ResourceUse::AttachmentText), ReusePolicy::Reusable, "chat_attach:c1").with_label("a.txt"),
+        )
+        .unwrap();
+    store
+        .issue_memory(
+            Bytes::from(vec![4, 5]),
+            "audio/wav",
+            ResourceGrantSpec::new(ResourceUse::TranscribeAudio, ReusePolicy::Reusable, "chat_attach:c1").with_label("b.wav"),
+        )
+        .unwrap();
+    store
+        .issue_memory(
+            Bytes::from(vec![6]),
+            "image/png",
+            ResourceGrantSpec::new(ResourceUse::DecodeImage, ReusePolicy::Reusable, "other"),
+        )
+        .unwrap();
+
+    let list = store.list_by_owner("chat_attach:c1");
+    assert_eq!(list.len(), 2, "只投影本 owner 条目");
+    assert!(list.iter().all(|v| v.token != a.as_str() || v.label.as_deref() == Some("a.txt")));
+    assert!(list.iter().all(|v| v.uses.iter().any(|u| u == "attachment_text" || u == "transcribe_audio")));
+    assert!(list.iter().all(|v| v.expires_in_seconds > 0), "剩余有效期投影");
+    // 空 owner / 无匹配 → 空列表
+    assert!(store.list_by_owner("chat_attach:none").is_empty());
+}
+
+#[test]
+fn transfer_owner_requires_expected_owner() {
+    let store = DefaultResourceStore::default();
+    let r = store
+        .issue_memory(
+            Bytes::from(vec![1]),
+            "image/png",
+            ResourceGrantSpec::new(ResourceUse::VisionImage, ReusePolicy::Reusable, "chat_prefill"),
+        )
+        .unwrap();
+    // 错误 expected owner → 拒绝（防跨会话误抢）
+    assert!(!store.transfer_owner(&r, "chat_attach:wrong", "chat_attach:c1"));
+    // 正确 expected owner → 转移成功，revoke 按新 owner 生效
+    assert!(store.transfer_owner(&r, "chat_prefill", "chat_attach:c1"));
+    assert_eq!(store.list_by_owner("chat_attach:c1").len(), 1);
+    assert_eq!(store.list_by_owner("chat_prefill").len(), 0);
+    assert_eq!(store.revoke_by_owner("chat_attach:c1"), 1);
+}
+
 // ── use 授权（取代 scope）─────────────────────────────────────────────────
 
 #[test]

@@ -310,7 +310,7 @@ impl<'a> RuntimeCapabilities<'a> {
 pub trait SurfacePort: Send + Sync {
     fn open_settings(&self) -> Result<(), SurfaceError>;
     fn open_sticky_manager(&self) -> Result<(), SurfaceError>;
-    fn open_chat(&self, prefill: Option<&str>) -> Result<(), SurfaceError>;
+    fn open_chat(&self, draft: &crate::ai::attachment::OpenChatDraft) -> Result<(), SurfaceError>;
     fn open_clipboard_mode(&self) -> Result<(), SurfaceError>;
     /// 启动区域截图选区。async 因截图时序需等待 DWM 合成。
     ///
@@ -794,7 +794,7 @@ mod tests {
             fn open_sticky_manager(&self) -> Result<(), SurfaceError> {
                 Ok(())
             }
-            fn open_chat(&self, _: Option<&str>) -> Result<(), SurfaceError> {
+            fn open_chat(&self, _: &crate::ai::attachment::OpenChatDraft) -> Result<(), SurfaceError> {
                 Ok(())
             }
             fn open_clipboard_mode(&self) -> Result<(), SurfaceError> {

@@ -163,6 +163,16 @@ pub trait CapabilityEnv: Send + Sync {
         None
     }
 
+    /// 当前活跃 AI 请求已明确附加的 resource_ref 集合（0.27.9）。
+    ///
+    /// `read_attachment_text` 据此做请求级绑定校验——只接受执行上下文
+    /// 绑定的请求中已附加的 ref，不能由它获得任意路径读取权。AI 请求
+    /// 全进程单活跃，因此至多一个活跃集合；非聊天运行时（CLI/MCP minimal）
+    /// 默认 `None`，消费方按无绑定拒绝。
+    fn active_chat_attachment_refs(&self) -> Option<Vec<String>> {
+        None
+    }
+
     // ── pin 窗口操作（0.19.3 pin 能力化桥接）──────────────────────────
 
     /// 显示通用钉图窗口（0.19.6 command / Capability 共享语义）。

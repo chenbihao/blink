@@ -54,6 +54,8 @@ impl std::fmt::Display for ResourceRef {
 /// - `DecodeImage` — `write_clipboard` 图片模式 / `analyze_image_palette`（0.23.12）
 /// - `OcrImage` — `ocr_image`（0.23.12）
 /// - `PinImage` — `pin_image`（0.23.12）
+/// - `AttachmentText` — 聊天文本附件注入 + `read_attachment_text` 续读（0.27.9）
+/// - `VisionImage` — 聊天图片附件（Vision 输入，0.27.10）
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ResourceUse {
     /// 解码图片（写剪贴板 / 配色分析）。
@@ -66,6 +68,10 @@ pub enum ResourceUse {
     TranscribeAudio,
     /// 试听音频（前端回放字节）。
     PreviewAudio,
+    /// 聊天文本附件——注入本轮模型输入 / `read_attachment_text` 分页续读。
+    AttachmentText,
+    /// 聊天图片附件——Vision 模型输入（provider 适配层编码）。
+    VisionImage,
 }
 
 impl ResourceUse {
@@ -76,6 +82,8 @@ impl ResourceUse {
             Self::PinImage => "pin_image",
             Self::TranscribeAudio => "transcribe_audio",
             Self::PreviewAudio => "preview_audio",
+            Self::AttachmentText => "attachment_text",
+            Self::VisionImage => "vision_image",
         }
     }
 }
@@ -123,6 +131,8 @@ impl ResourceUseSet {
             ResourceUse::PinImage,
             ResourceUse::TranscribeAudio,
             ResourceUse::PreviewAudio,
+            ResourceUse::AttachmentText,
+            ResourceUse::VisionImage,
         ]
         .into_iter()
         .filter(move |u| self.contains(*u))
@@ -233,6 +243,8 @@ pub struct ResourceGrant {
     pub group: u64,
     /// 所有者标签——`revoke_by_owner` 的句柄（如 `chat_attach:<conv_id>`）。
     pub owner: String,
+    /// 展示标签（0.27.9 @ 面板 list 投影用；无授权语义）。
+    pub label: Option<String>,
 }
 
 /// 签发请求——调用方提交的 grant 规格。
@@ -246,6 +258,8 @@ pub struct ResourceGrantSpec {
     pub owner: String,
     pub group: Option<u64>,
     pub ttl_override: Option<Duration>,
+    /// 展示标签（0.27.9；签发方可选填，list 投影给 @ 面板显示）。
+    pub label: Option<String>,
 }
 
 impl ResourceGrantSpec {
@@ -261,6 +275,7 @@ impl ResourceGrantSpec {
             owner: owner.into(),
             group: None,
             ttl_override: None,
+            label: None,
         }
     }
 
@@ -271,6 +286,12 @@ impl ResourceGrantSpec {
 
     pub fn with_ttl(mut self, ttl: Duration) -> Self {
         self.ttl_override = Some(ttl);
+        self
+    }
+
+    /// 展示标签（0.27.9 @ 面板 list 投影用）。
+    pub fn with_label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
         self
     }
 }
@@ -288,6 +309,27 @@ pub struct ResourceMetadata {
     pub backing_kind: &'static str,
     /// 授予的 use 名列表（诊断用）。
     pub uses: Vec<&'static str>,
+}
+
+/// 按 owner 投影的合法可见条目（`list_by_owner` 返回；0.27.9 @ 面板数据源）。
+///
+/// 只含非授权元数据——token 供前端引用展示，不含路径或字节。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VisibleResource {
+    /// 资源 token（`rref_` 前缀）。
+    pub token: String,
+    /// backing 种类稳定字符串（memory / local_file）。
+    pub backing_kind: String,
+    /// MIME 类型（Memory 腿有；LocalFile 腿为 None）。
+    pub mime: Option<String>,
+    /// 逻辑体积（字节）。
+    pub size_bytes: u64,
+    /// 剩余秒数（向下取整，最小 0）。
+    pub expires_in_seconds: u64,
+    /// 授予的 use 名列表（按 use 推导附件种类）。
+    pub uses: Vec<String>,
+    /// 展示标签（签发方可选提供）。
+    pub label: Option<String>,
 }
 
 // ── OpenedResource ──────────────────────────────────────────────────────────

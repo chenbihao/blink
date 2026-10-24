@@ -41,11 +41,19 @@ export function openAIModelEditModal(providerId, modelId) {
         thinking_style: existing?.thinking_style ?? null,
     };
 
-    // 能力复选框回显
-    ["chat", "embedding"].forEach((cap) => {
+    // 能力复选框回显（0.27.10 增 vision；用户显式取消后目录预填不再勾回）
+    aiState._modelEditVisionTouched = false;
+    ["chat", "embedding", "vision"].forEach((cap) => {
         const cb = document.getElementById(`ai-model-edit-cap-${cap}`);
         if (cb) cb.checked = aiState._modelEditDraft.capabilities.includes(cap);
     });
+    const visionCb = document.getElementById("ai-model-edit-cap-vision");
+    if (visionCb && !visionCb.dataset.blinkBound) {
+        visionCb.dataset.blinkBound = "1";
+        visionCb.addEventListener("change", () => {
+            if (!visionCb.checked) aiState._modelEditVisionTouched = true;
+        });
+    }
 
     const $ = (id) => document.getElementById(id);
     $("ai-model-edit-title").textContent = t(isEdit ? "ai.model_modal.title.edit" : "ai.model_modal.title.add");
@@ -383,6 +391,7 @@ function renderModelFetchList(filter) {
         item.addEventListener("click", () => {
             const input = document.getElementById("ai-model-edit-id");
             if (input) input.value = item.dataset.modelId;
+            prefillVisionFromCatalog(item.dataset.modelId);
             // 0.21.21: 选中下拉项时预填 context_window
             const cwVal = item.dataset.contextWindow;
             if (cwVal && cwVal !== "") {
@@ -401,12 +410,30 @@ function renderModelFetchList(filter) {
     bindManualAddHandlers(dropdown);
 }
 
+/**
+ * 0.27.10：新建模型时按内置目录预填「视觉输入」勾选——只勾选、不取消
+ * （用户显式取消后不再自动改回）；编辑已有模型不触发（用户值优先，§3.4）。
+ */
+function prefillVisionFromCatalog(modelId) {
+    if (aiState._modelEditOriginalId != null) return; // 仅新建模式
+    if (!modelId) return;
+    import("../../../shared/tauri.js").then(({invoke}) => {
+        invoke("model_catalog_lookup", {modelId}).then((info) => {
+            if (info?.supports_vision !== true) return;
+            const cb = document.getElementById("ai-model-edit-cap-vision");
+            // 仅在用户未显式取消时勾选（checked 已 true 则不动）
+            if (cb && !cb.checked && !aiState._modelEditVisionTouched) cb.checked = true;
+        }).catch(() => {});
+    }).catch(() => {});
+}
+
 function bindManualAddHandlers(container) {
     container.querySelectorAll(".ai-manual-add").forEach((el) => {
         el.addEventListener("click", () => {
             const modelId = el.dataset.modelId;
             const input = document.getElementById("ai-model-edit-id");
             if (input && modelId) input.value = modelId;
+            prefillVisionFromCatalog(modelId);
             closeModelFetchDropdown();
         });
     });
@@ -453,7 +480,7 @@ async function validateAndSaveModel() {
     const cleanedCustom = (aiState._modelEditDraft.custom_parameters || []).filter((cp) => (cp.key || "").trim().length > 0);
 
     // 收集能力复选框
-    const selectedCaps = ["chat", "embedding"].filter((cap) => {
+    const selectedCaps = ["chat", "embedding", "vision"].filter((cap) => {
         const cb = document.getElementById(`ai-model-edit-cap-${cap}`);
         return cb && cb.checked;
     });

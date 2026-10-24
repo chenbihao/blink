@@ -34,7 +34,8 @@ pub use paste::PasteTarget;
 
 #[cfg(target_os = "windows")]
 pub use windows::{
-    ChatCloseCallback, PinImage, StickySpareCloseCallback, VOICE_W, WelcomeCloseCallback,
+    ChatCloseCallback, ChatPrefillAttachment, ChatPrefillData, PinImage, StickySpareCloseCallback,
+    VOICE_W, WelcomeCloseCallback,
     ack_chat_prefill, apply_cloak, center_of_active_monitor, clamp_context_menu, clamp_context_menu_at,
     clamp_to_work_area, compute_cursor_titlebar_position, destroy_sticky_window,
     enable_rounded_corners, flush_all_sticky_windows, force_topmost, get_foreground_hwnd,
@@ -47,7 +48,7 @@ pub use windows::{
     preheat_secondary_windows, refresh_pin_image, refresh_pin_image_by_label, restore_foreground,
     restore_foreground_g2, set_app_exiting, set_context_menu_payload, set_last_external_hwnd,
     cursor_pos_virtual, show_main_window_with_placement,
-    set_main_ai_active, set_sticky_close_fallback, show_chat_window, show_content_editor_window,
+    set_chat_prefill, set_main_ai_active, set_sticky_close_fallback, show_chat_window, show_content_editor_window,
     show_image_editor_window, show_main_window, show_pin_window, show_screenshot_overlay,
     show_sticky_manager_window, show_sticky_window, show_theme_debug_window, show_voice_overlay,
     show_welcome_window, signal_sticky_close_ack, start_watchdog, take_chat_prefill,

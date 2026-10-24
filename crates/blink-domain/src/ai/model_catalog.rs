@@ -15,6 +15,10 @@ struct CatalogEntry {
     prefix: String,
     /// 上下文窗口大小。
     context_window: u32,
+    /// 是否支持视觉输入（0.27.10；缺省 false——目录只对新建模型推荐预填
+    /// Vision 能力，不改已有配置，用户值优先）。
+    #[serde(default)]
+    supports_vision: bool,
 }
 
 /// 目录 JSON 的顶层结构。
@@ -68,6 +72,22 @@ pub fn lookup_context_window(model_id: &str) -> Option<u32> {
         .iter()
         .find(|entry| normalized.starts_with(&entry.prefix.to_ascii_lowercase()))
         .map(|entry| entry.context_window)
+}
+
+/// 按 model id 前缀匹配查找目录是否标注视觉能力（0.27.10）。
+///
+/// 只用于**新建模型**的能力推荐预填；已有配置条目（含显式关闭 Vision）
+/// 不被目录刷新开启——用户值优先（phase §3.4）。
+pub fn lookup_supports_vision(model_id: &str) -> bool {
+    let normalized = model_id
+        .rsplit('/')
+        .next()
+        .unwrap_or(model_id)
+        .to_ascii_lowercase();
+    parse_catalog()
+        .iter()
+        .find(|entry| normalized.starts_with(&entry.prefix.to_ascii_lowercase()))
+        .is_some_and(|entry| entry.supports_vision)
 }
 
 // ── 单测 ───────────────────────────────────────────────────────────────────────
@@ -146,6 +166,16 @@ mod tests {
     fn lookup_qwen_plus_matches() {
         let result = lookup_context_window("qwen-plus");
         assert_eq!(result, Some(131072));
+    }
+
+    #[test]
+    fn lookup_vision_flags() {
+        assert!(lookup_supports_vision("gpt-4o-mini-2024-07-18"), "gpt-4o-mini 支持 vision");
+        assert!(lookup_supports_vision("claude-sonnet-4-20250514"));
+        assert!(lookup_supports_vision("gemini-2.5-flash"));
+        assert!(!lookup_supports_vision("deepseek-chat"), "deepseek-chat 不支持");
+        assert!(!lookup_supports_vision("moonshot-v1-128k"));
+        assert!(!lookup_supports_vision("unknown-model"), "无匹配不推荐");
     }
 
     #[test]

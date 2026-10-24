@@ -253,6 +253,7 @@ test('文本预览复用单项菜单，选区只覆盖复制且不接管列表�
     // 0.26.16：文本项追加置顶四档（未置顶语境 → menu.pin_for）
     assert.deepEqual(menu.filter(item => !item.separator).map(item => item.label),
         ['menu.smart_loading', 'menu.copySelection', 'menu.edit', 'menu.sticky',
+            'menu.sendTextToChat',
             'menu.pin_for', 'menu.pin_for', 'menu.pin_for', 'menu.pin_for', 'menu.delete']);
     assert.equal(menu[0].disabled, true, 'loading 项不可点击');
     assert.equal(menu.find(item => item.label === 'menu.copySelection').shortcut, 'Ctrl+C');
@@ -291,7 +292,7 @@ test('图片预览复制、钉图、编辑与删除均使用原图单项身份',
         const menu = h.openPreview(imageRef, imageActions);
         // 0.26.16：图片项追加置顶四档（menu.editImage 与 menu.delete 之间）
         assert.deepEqual(menu.filter(item => !item.separator).map(item => item.label),
-            ['menu.copy', 'menu.pin', 'menu.editImage',
+            ['menu.copy', 'menu.pin', 'menu.askAiImage', 'menu.editImage',
                 'menu.pin_for', 'menu.pin_for', 'menu.pin_for', 'menu.pin_for', 'menu.delete']);
         choose(h, menu, label);
         if (label === 'menu.copy') assert.equal(h.calls.at(-1).data.actions[0].runArg, imageRef.id);

@@ -12,13 +12,14 @@ import {forceScrollToBottom} from "./components.js";
 import {escapeAttr, escapeText} from "./utils.js";
 // 0.12.7 §6.3：显式导入 renderSignal，多处场景接入
 import {
+    addAttachments,
+    clearAttachments,
     clearInput,
     clearSentAttachments,
     composerInputRevision,
     focusInput,
     hideVoiceIndicator,
     initComposer,
-    clearAudioAttachments,
     insertAtCursor,
     isVoiceRecording,
     setInputMode,
@@ -34,8 +35,9 @@ import {initSidebar, refreshSidebar, setActiveConversation, toggleSidebar} from 
 // 0.21.23：思考控件与模型选择器（含 flyout 定位）从本文件下沉为独立模块——
 // 软规则：main.js 不再吸收新的交互模块，只保留装配与全局事件分发
 import {effectiveThinkingEnabled, initThinkingSelector, syncThinkingControl} from "./thinking-selector.js";
-import {bindModelSelector, openModelDropdown, refreshModelSelector, updateProviderLabel} from "./model-selector.js";
+import {bindModelSelector, currentModelSupportsVision, openModelDropdown, refreshModelSelector, updateProviderLabel} from "./model-selector.js";
 import {initCommandPalette, invalidatePromptCache, invalidateSlashSnapshotCache, isPaletteOpen, closePalette, openPromptPalette} from "./command-palette.js";
+import {initAttachmentPalette} from "./attachment-palette.js";
 import {applyThemeFromConfig} from "../shared/theme.js";
 import {getCurrentWindow, invoke, listen} from "../shared/tauri.js";
 import {EVENTS} from "../shared/event-names.js";
@@ -117,26 +119,56 @@ async function init() {
     // appliedRevision 防止 take 和 event 同时命中时重复填充。
     let appliedRevision = 0;
 
-    function applyPrefill(text, revision) {
-        if (revision && revision === appliedRevision) return; // 已填充过同一 revision
-        if (typeof text === "string" && text) {
-            setInputValue(text);
-            focusInput();
-            appliedRevision = revision || 0;
+    /**
+     * 0.27.9：正文+附件草稿事务（§5.9.5/§8.2）——
+     * newConversation 先建新会话；正文追加当前草稿（不覆盖、不自动发送）；
+     * 附件进 composer 并 adopt 转移资源归属；资源转移失败不 ack
+     * （pending 留 TTL 兜底，前端不误删草稿）。
+     * @returns {Promise<boolean>} 是否应 ack 该 revision
+     */
+    async function applyPrefillPayload(payload, revision) {
+        if (revision && revision === appliedRevision) return true; // 已填充过同一 revision
+        const attachments = Array.isArray(payload?.attachments) ? payload.attachments : [];
+        const hasText = typeof payload?.text === "string" && payload.text.trim().length > 0;
+        if (!hasText && attachments.length === 0) return true; // 空载荷：直接 ack
+
+        if (payload?.newConversation) {
+            await handleNewConversation();
         }
+        if (hasText) {
+            // 追加当前草稿语义（§5.9.5「不覆盖草稿」）——光标处插入并滚动跟随
+            insertAtCursor(payload.text);
+            focusInput();
+        }
+        let adoptOk = true;
+        if (attachments.length > 0) {
+            addAttachments(attachments.map((a) => ({
+                kind: a.kind,
+                ref: a.ref,
+                display: a.display,
+            })));
+            try {
+                await ipc.adoptChatAttachments(attachments.map((a) => a.ref), state.conversationId);
+            } catch (error) {
+                adoptOk = false;
+                console.warn("[chat] 附件草稿采纳（归属转移）失败:", error);
+            }
+        }
+        appliedRevision = revision || 0;
+        return adoptOk;
     }
 
     // 先 await listen，确认 listener 注册成功后再 take
     await listen(EVENTS.CHAT_PREFILL, (event) => {
-        const payload = event?.payload;
-        const text = payload?.text;
+        const payload = event?.payload || {};
         const revision = payload?.revision || 0;
-        applyPrefill(text, revision);
-        // 热窗口路径：收到事件后 ack 清空 pending（revision 匹配才清）
-        if (revision) {
-            ipc.ackChatPrefill(revision).catch(() => {
-            });
-        }
+        applyPrefillPayload(payload, revision).then((shouldAck) => {
+            // 热窗口路径：转移失败不 ack（§5.9.5），成功/空载荷 ack 清 pending
+            if (revision && shouldAck) {
+                ipc.ackChatPrefill(revision).catch(() => {
+                });
+            }
+        });
     });
 
     // listener 已注册，现在 take 兜底冷启动路径
@@ -145,8 +177,12 @@ async function init() {
     //   take 返回 null → event 后到正常填充 + ack
     try {
         const pending = await ipc.takeChatPrefill();
-        if (pending && typeof pending.text === "string" && pending.text) {
-            applyPrefill(pending.text, pending.revision);
+        if (pending && (pending.text || (pending.attachments || []).length > 0)) {
+            const shouldAck = await applyPrefillPayload(pending, pending.revision);
+            if (pending.revision && shouldAck) {
+                ipc.ackChatPrefill(pending.revision).catch(() => {
+                });
+            }
         }
     } catch (e) {
         console.warn("[chat] take_chat_prefill 失败:", e);
@@ -245,6 +281,12 @@ async function init() {
         getInputRevision: composerInputRevision,
         insertTextAtCursor: insertAtCursor,
     });
+    // 0.27.9 @ 附件面板（与命令面板同一互斥仲裁；§九）
+    initAttachmentPalette({
+        getConversationId: () => state.conversationId,
+        getInputRevision: composerInputRevision,
+        addAttachments,
+    });
 
     // 0.27.8：提示词快捷条按钮（与 /prompt 同入口、同数据源）。
     // 打开后焦点回 composer——面板键盘路由依赖 textarea keydown（§九）。
@@ -306,12 +348,12 @@ async function init() {
  * - 无附件：正文即文本气泡。
  *
  * @param {string} text 持久化正文
- * @param {string[]} [attachmentNames] 附件展示文件名（仅文件名，无 ref）
+ * @param {Array<{kind?: string, name: string}>} [badges] 附件徽标（kind+name，无 ref）
  */
-function renderUserEntry(text, attachmentNames = []) {
-    if (attachmentNames.length > 0) {
-        components.renderUserAttachmentCards(attachmentNames);
-        if (text && text !== attachmentSummaryText(attachmentNames)) {
+function renderUserEntry(text, badges = []) {
+    if (badges.length > 0) {
+        components.renderUserAttachmentCards(badges);
+        if (text && text !== attachmentSummaryText(badges)) {
             components.renderUserMessage(text);
         }
         return;
@@ -328,7 +370,10 @@ function renderUserEntry(text, attachmentNames = []) {
  * 持久化正文（气泡、state、标题），attachments 是本轮附件元数据（只注入
  * 本轮模型输入，不进入气泡/标题/历史）。编辑重发/重试路径传纯字符串。
  *
- * @param {{text: string, attachments?: Array<{audioRef: string, displayName: string}>}|string} input
+ * 0.27.9：attachments 为 `{kind, ref, display}` 类型化元数据（§8.2）；
+ * 徽标（kind+name）进气泡渲染与 state，ref 只随请求给后端注入本轮模型输入。
+ *
+ * @param {{text: string, attachments?: Array<{kind: string, ref: string, display: string}>}|string} input
  * @param {boolean} [isEdit] 编辑重发/重试（跳过截断标题逻辑）
  */
 async function handleSend(input, isEdit = false) {
@@ -337,15 +382,23 @@ async function handleSend(input, isEdit = false) {
         : {text: input?.text ?? "", attachments: input?.attachments ?? []};
     if (!payload.text) return;
 
+    // 0.27.10 前端预检（§3.4 双校验）：图片附件 + 当前模型未启用视觉 →
+    // 阻止发送并提示（后端发送校验为最终防线）；草稿与附件保留。
+    const hasImage = payload.attachments.some((a) => a.kind === "image");
+    if (hasImage && !currentModelSupportsVision()) {
+        components.renderErrorMessage(t("chat.attach.vision_blocked"));
+        return;
+    }
+
     // 移除空状态
     components.removeEmptyState();
 
-    // 添加用户消息：附件卡片 + 正文气泡（徽标只含文件名，ref 不进 DOM/正文）
-    const attachmentNames = payload.attachments.map((a) => a.displayName);
-    renderUserEntry(payload.text, attachmentNames);
+    // 添加用户消息：附件卡片 + 正文气泡（徽标只含 kind+name，ref 不进 DOM/正文）
+    const badges = payload.attachments.map((a) => ({kind: a.kind, name: a.display}));
+    renderUserEntry(payload.text, badges);
     // 用户发消息 → 强制滚到底部（重置上滚标记）
     forceScrollToBottom();
-    state.addMessage({role: "user", content: payload.text, attachments: attachmentNames});
+    state.addMessage({role: "user", content: payload.text, attachments: badges});
 
     // 切换到流式模式
     setStreamingMode();
@@ -1030,7 +1083,7 @@ async function handleNewConversation(groupId = null) {
     ipc.revokeChatAudioAttachments(state.conversationId).catch((error) => {
         console.warn("revoke chat audio attachments failed:", error);
     });
-    clearAudioAttachments();
+    clearAttachments();
     state.resetConversation();
     state.setCurrentGroupId(groupId);
     components.clearMessages();
@@ -1059,7 +1112,7 @@ async function handleNewEphemeralConversation() {
     ipc.revokeChatAudioAttachments(state.conversationId).catch((error) => {
         console.warn("revoke chat audio attachments failed:", error);
     });
-    clearAudioAttachments();
+    clearAttachments();
     state.resetConversation();
     state.setEphemeralMode(true);
     components.clearMessages();
@@ -1116,7 +1169,7 @@ async function handleSwitchConversation(conversationId, groupId = null) {
         ipc.revokeChatAudioAttachments(previousId).catch((error) => {
             console.warn("revoke chat audio attachments failed:", error);
         });
-        clearAudioAttachments();
+        clearAttachments();
     }
 
     // 更新 state（0.12.4 §6.1：用 setter 替代直接赋值，避免 ES module 只读绑定 TypeError）
@@ -1150,7 +1203,7 @@ async function handleSwitchConversation(conversationId, groupId = null) {
                 }
 
                 if (msg.role === "user") {
-                    // 0.23.12：历史加载同样渲染独立附件卡片（DB attachments 元数据，仅文件名）
+                    // 0.27.9：历史加载渲染独立附件卡（DB 徽标 kind+name；兼容旧纯文件名=音频）
                     renderUserEntry(msg.text, msg.attachments ?? []);
                     state.addMessage({role: "user", content: msg.text});
                 } else if (msg.role === "assistant") {

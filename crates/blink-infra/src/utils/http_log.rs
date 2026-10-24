@@ -201,15 +201,72 @@ impl HttpClientExt for LoggingHttpClient {
     }
 }
 
-/// 打印请求体（trace）。
+/// 打印请求体（trace；0.27.10 起图片/base64 脱敏——只留长度元数据）。
 fn log_request(method: &Method, uri: &Uri, bytes: &Bytes) {
     tracing::trace!(
         target: TARGET,
         method = %method,
         uri = %uri,
-        body = %truncate_lossy(bytes),
+        body = redact_image_payload(&truncate_lossy(bytes)),
         "HTTP 请求体"
     );
+}
+
+/// 0.27.10：图片 payload 脱敏（phase §3.4——HTTP 正文日志对图片/base64
+/// 脱敏，只留必要诊断元数据）。
+///
+/// 策略（递归形状无关）：任何 ≥1024 字符的 base64 字符块替换为
+/// `<redacted-image:{len}ch>`。该阈值覆盖 OpenAI `image_url` data URL、
+/// Anthropic `source.base64`、Gemini `inline_data.data` 与裸 base64 正文；
+/// 常规文本/短字段不受影响。data URL 前缀保留以便识别格式。
+pub(crate) fn redact_image_payload(body: &str) -> String {
+    const MIN_REDACT_LEN: usize = 1024;
+    // 预扫描快速路径：无长 base64 块时零拷贝返回原串
+    let longest = longest_base64_run(body);
+    if longest < MIN_REDACT_LEN {
+        return body.to_string();
+    }
+
+    // base64 字符均为 ASCII——按切片复制非 run 段，多字节 UTF-8 不经过逐字节路径
+    let mut out = String::with_capacity(body.len() / 8);
+    let bytes = body.as_bytes();
+    let mut i = 0;
+    let mut last_copy = 0;
+    while i < bytes.len() {
+        if is_base64_char(bytes[i]) {
+            let start = i;
+            while i < bytes.len() && is_base64_char(bytes[i]) {
+                i += 1;
+            }
+            if i - start >= MIN_REDACT_LEN {
+                out.push_str(&body[last_copy..start]);
+                out.push_str(&format!("<redacted-image:{}ch>", i - start));
+                last_copy = i;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    out.push_str(&body[last_copy..]);
+    out
+}
+
+fn is_base64_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'='
+}
+
+fn longest_base64_run(body: &str) -> usize {
+    let mut longest = 0;
+    let mut current = 0;
+    for &b in body.as_bytes() {
+        if is_base64_char(b) {
+            current += 1;
+            longest = longest.max(current);
+        } else {
+            current = 0;
+        }
+    }
+    longest
 }
 
 /// 非 2xx 错误：读响应体文本拼进错误（0.43 起保留 status/headers/body 三元组，
@@ -234,4 +291,40 @@ fn truncate_lossy(bytes: &[u8]) -> String {
     let mut out: String = s.chars().take(LOG_BODY_MAX).collect();
     out.push('…');
     out
+}
+
+#[cfg(test)]
+mod redact_tests {
+    use super::redact_image_payload;
+
+    #[test]
+    fn redact_leaves_normal_bodies_untouched() {
+        let body = r#"{"model":"gpt-4o","messages":[{"role":"user","content":"你好世界"}]}"#;
+        assert_eq!(redact_image_payload(body), body);
+        // 短 base64 字段（如哈希）不触发
+        let with_short = r#"{"id":"QUJDREVG"}"#;
+        assert_eq!(redact_image_payload(with_short), with_short);
+    }
+
+    #[test]
+    fn redact_replaces_long_base64_runs() {
+        let b64 = "A".repeat(2048);
+        let body = format!(r#"{{"image_url":{{"url":"data:image/png;base64,{b64}"}}}}"#);
+        let out = redact_image_payload(&body);
+        assert!(!out.contains(&b64), "长 base64 被替换");
+        assert!(out.contains("<redacted-image:2048ch>"), "保留长度元数据");
+        assert!(out.contains("data:image/png;base64,"), "data URL 前缀保留");
+    }
+
+    #[test]
+    fn redact_handles_multiple_and_multibyte() {
+        let b64a = "B".repeat(1500);
+        let b64b = "C".repeat(1200);
+        let body = format!("中文前缀 {b64a} 中间文本 {b64b} 尾部");
+        let out = redact_image_payload(&body);
+        assert!(out.contains("中文前缀") && out.contains("中间文本") && out.contains("尾部"));
+        assert!(out.contains("<redacted-image:1500ch>"));
+        assert!(out.contains("<redacted-image:1200ch>"));
+        assert!(!out.contains(&b64a) && !out.contains(&b64b));
+    }
 }

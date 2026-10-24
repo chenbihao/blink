@@ -34,6 +34,35 @@ use rig_core::driver::DynModel;
 use rig_core::memory::ConversationMemory;
 use rig_core::operation::Completion;
 use rig_core::streaming::{Item as RigStreamItem, StreamEvent as RigStreamEvent, StreamedUserContent};
+
+
+/// 构造本轮 user 消息（0.27.10）：无图 = `Message::user(text)`（与既有行为
+/// 完全一致）；有图 = 非空正文 Text part 在前 + 逐图 `image_raw` part。
+/// 图片不落持久化历史——memory append 侧剥离（phase §3.4 单次注入语义）。
+fn build_prompt_message(user_msg: &str, image_parts: &[VisionImagePart]) -> rig_core::completion::Message {
+    use rig_core::completion::message::{ImageMediaType, UserContent};
+
+    if image_parts.is_empty() {
+        return rig_core::completion::Message::user(user_msg);
+    }
+    let mut content: Vec<UserContent> = Vec::with_capacity(image_parts.len() + 1);
+    if !user_msg.is_empty() {
+        content.push(UserContent::text(user_msg));
+    }
+    for part in image_parts {
+        let media_type = match part.mime.as_str() {
+            "image/jpeg" => Some(ImageMediaType::JPEG),
+            _ => Some(ImageMediaType::PNG),
+        };
+        content.push(UserContent::image_raw(
+            part.bytes.clone(),
+            media_type,
+            None,
+        ));
+    }
+    rig_core::completion::Message::User { content }
+}
+
 #[cfg(test)]
 use rig_core::memory::InMemoryConversationMemory;
 
@@ -106,6 +135,18 @@ pub enum ChatStreamChunk {
     MaxTurnsReached { max_turns: usize },
     /// 流错误。
     Error { message: String },
+}
+
+/// 本轮 user 消息的图片 part（0.27.10 Vision 输入）。
+///
+/// 内容为归一化后的最终编码字节（`ai::vision::normalize_image` 产物）；
+/// 进入 rig `UserContent::image_raw` 多模态 part，不进持久化历史
+///（memory append 侧剥离，phase §3.4）。
+#[derive(Debug, Clone)]
+pub struct VisionImagePart {
+    /// "image/png" | "image/jpeg"（归一化后只有两种 wire 路径）。
+    pub mime: String,
+    pub bytes: Vec<u8>,
 }
 
 /// 4 种 `ProviderKind` 的具体 `Agent<M>`(`CompletionModel` 非 object-safe,枚举包)。
@@ -295,6 +336,7 @@ impl AgentProvider {
         &self,
         conversation_id: &str,
         user_msg: &str,
+        image_parts: &[VisionImagePart],
         tx: mpsc::UnboundedSender<ChatStreamChunk>,
         thinking_enabled: bool,
         reasoning_effort: Option<String>,
@@ -327,6 +369,7 @@ impl AgentProvider {
                     a,
                     conversation_id,
                     user_msg,
+                    image_parts,
                     tx,
                     model_name,
                     thinking_patch.as_ref(),
@@ -439,6 +482,7 @@ impl AgentProvider {
         agent: &Agent,
         conversation_id: &str,
         user_msg: &str,
+        image_parts: &[VisionImagePart],
         tx: mpsc::UnboundedSender<ChatStreamChunk>,
         model_name: Option<String>,
         thinking_patch: Option<&serde_json::Value>,
@@ -450,8 +494,10 @@ impl AgentProvider {
         // merge_additional_params（各供应商 thinking 字段的标准注入路径）。
         // 阶段 2：首个 item（含 memory load + 建连 + 模型排队）受 consume_stream
         // 的 idle timeout 保护。
+        // 0.27.10：图片走 typed 多模态 part（image_raw）；无图保持纯文本路径。
+        let prompt_message = build_prompt_message(user_msg, image_parts);
         let mut runner = agent
-            .prompt(rig_core::completion::Message::user(user_msg))
+            .prompt(prompt_message)
             .conversation(conversation_id);
         if let Some(serde_json::Value::Object(map)) = thinking_patch {
             runner = runner.merge_additional_params(map.clone());
@@ -810,7 +856,7 @@ mod tests {
             .default_max_turns(5)
             .build();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        AgentProvider::run_stream(&agent, "c1", "hi", tx, None, None).await;
+        AgentProvider::run_stream(&agent, "c1", "hi", &[], tx, None, None).await;
 
         let mut chunks = Vec::new();
         while let Some(c) = rx.recv().await {
@@ -845,7 +891,7 @@ mod tests {
             .default_max_turns(5)
             .build();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        AgentProvider::run_stream(&agent, "c1", "hi", tx, None, None).await;
+        AgentProvider::run_stream(&agent, "c1", "hi", &[], tx, None, None).await;
 
         let mut chunks = Vec::new();
         while let Some(c) = rx.recv().await {
@@ -889,7 +935,7 @@ mod tests {
             .default_max_turns(5)
             .build();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        AgentProvider::run_stream(&agent, "c1", "hi", tx, None, None).await;
+        AgentProvider::run_stream(&agent, "c1", "hi", &[], tx, None, None).await;
 
         let mut chunks = Vec::new();
         while let Some(c) = rx.recv().await {
@@ -943,7 +989,7 @@ mod tests {
             .default_max_turns(5)
             .build();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        AgentProvider::run_stream(&agent, "c1", "hi", tx, None, None).await;
+        AgentProvider::run_stream(&agent, "c1", "hi", &[], tx, None, None).await;
 
         let mut chunks = Vec::new();
         while let Some(c) = rx.recv().await {
@@ -980,7 +1026,7 @@ mod tests {
             .default_max_turns(5)
             .build();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        AgentProvider::run_stream(&agent, "c1", "hi", tx, None, None).await;
+        AgentProvider::run_stream(&agent, "c1", "hi", &[], tx, None, None).await;
 
         let mut chunks = Vec::new();
         while let Some(c) = rx.recv().await {
@@ -1019,7 +1065,7 @@ mod tests {
             .default_max_turns(5)
             .build();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        AgentProvider::run_stream(&agent, "c1", "hi", tx, None, None).await;
+        AgentProvider::run_stream(&agent, "c1", "hi", &[], tx, None, None).await;
 
         let mut chunks = Vec::new();
         while let Some(c) = rx.recv().await {
@@ -1041,6 +1087,51 @@ mod tests {
     }
 
     /// 验证 `MaxTurnsReached` chunk 序列化（0.12.3 Phase C）。
+    /// 0.27.10：typed 多模态消息构造——无图保持纯文本；有图 Text 在前 + image_raw。
+    #[test]
+    fn build_prompt_message_with_and_without_images() {
+        use rig_core::completion::message::UserContent;
+
+        // 无图：与 Message::user 等价
+        let plain = build_prompt_message("你好", &[]);
+        match &plain {
+            rig_core::completion::Message::User { content } => {
+                assert_eq!(content.len(), 1);
+                assert!(matches!(content[0], UserContent::Text(_)));
+            }
+            other => panic!("应为 User 消息: {other:?}"),
+        }
+
+        // 有图：正文 Text part + PNG/JPEG image_raw parts
+        let parts = vec![
+            VisionImagePart { mime: "image/png".into(), bytes: vec![1, 2, 3] },
+            VisionImagePart { mime: "image/jpeg".into(), bytes: vec![4, 5] },
+        ];
+        let msg = build_prompt_message("看图", &parts);
+        match &msg {
+            rig_core::completion::Message::User { content } => {
+                assert_eq!(content.len(), 3, "Text + 2 Image");
+                assert!(matches!(content[0], UserContent::Text(_)));
+                assert!(matches!(content[1], UserContent::Image(_)));
+                assert!(matches!(content[2], UserContent::Image(_)));
+                // 序列化含 media type（wire 侧可识别格式），且含原始字节
+                let json = serde_json::to_string(&msg).unwrap();
+                assert!(json.contains("\"media_type\":\"png\""), "{json}");
+                assert!(json.contains("\"media_type\":\"jpeg\""), "{json}");
+            }
+            other => panic!("应为 User 消息: {other:?}"),
+        }
+
+        // 空正文纯图：只有 Image parts
+        let only = build_prompt_message("", &parts);
+        match &only {
+            rig_core::completion::Message::User { content } => {
+                assert_eq!(content.len(), 2, "空正文不产生空 Text part");
+            }
+            other => panic!("应为 User 消息: {other:?}"),
+        }
+    }
+
     #[test]
     fn chat_stream_chunk_max_turns_reached_serializes() {
         let chunk = ChatStreamChunk::MaxTurnsReached { max_turns: 50 };
@@ -1173,7 +1264,7 @@ mod tests {
             .default_max_turns(5)
             .build();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        AgentProvider::run_stream(&agent, "c1", "hi", tx, None, None).await;
+        AgentProvider::run_stream(&agent, "c1", "hi", &[], tx, None, None).await;
 
         let mut chunks = Vec::new();
         while let Some(c) = rx.recv().await {
@@ -1227,7 +1318,7 @@ mod tests {
             .default_max_turns(5)
             .build();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        AgentProvider::run_stream(&agent, "c1", "hello", tx, None, None).await;
+        AgentProvider::run_stream(&agent, "c1", "hello", &[], tx, None, None).await;
         while rx.recv().await.is_some() {}
 
         // 3. 检查模型实际收到的 chat_history：user 应恰好 1 次

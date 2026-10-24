@@ -150,6 +150,8 @@
                 <div class="chat-composer-input-wrap">
                     <!-- 0.27.7: 斜杠命令面板（触发/键盘路由见 command-palette.js） -->
                     <div class="chat-palette" hidden id="chat-command-palette"></div>
+                    <!-- 0.27.9: @ 附件面板（picker/最近复制文件/会话引用；见 attachment-palette.js） -->
+                    <div class="chat-palette" hidden id="chat-attachment-palette"></div>
                     <!-- 语音指示器（同主窗口风格：5 条波形 + 标签） -->
                     <div class="voice-indicator hidden" id="voice-indicator">
                         <div class="voice-wave">
@@ -161,7 +163,7 @@
                         </div>
                         <span class="voice-label">语音输入中</span>
                     </div>
-                    <!-- 0.23.12: 音频附件 chips（ref 注入对话上下文，供 transcribe_audio 消费） -->
+                    <!-- 0.23.12 音频 chips；0.27.9 泛化为类型化附件 chips（audio/text_file/image） -->
                     <div class="chat-audio-attachments hidden" id="chat-audio-attachments"></div>
                     <textarea autofocus id="chat-input" placeholder="输入消息..." rows="1"></textarea>
                     <div class="chat-composer-bar">
@@ -186,9 +188,9 @@
                                 </svg>
                                 <div class="chat-thinking-dropdown" hidden id="chat-thinking-dropdown"></div>
                             </button>
-                            <!-- 0.23.12: 音频附件（本地 WAV 经 ResourceStore 签发 ref，AI 用 transcribe_audio 转写） -->
-                            <button class="chat-attach-btn" id="chat-attach-btn" title="附加音频文件（转写）">
-                                <svg class="icon" aria-hidden="true"><use href="#icon-audio-lines"/></svg>
+                            <!-- 0.27.9: 附件按钮（打开 @ 附件面板；title 由 attachment-palette.js 按 i18n 设置） -->
+                            <button class="chat-attach-btn" id="chat-attach-btn">
+                                <svg class="icon" aria-hidden="true"><use href="#icon-paperclip"/></svg>
                             </button>
                             <!-- 0.27.8: 提示词快捷条（与 /prompt 同入口，光标处插入、不自动发送；title 由 main.js 按 i18n 设置） -->
                             <button class="chat-attach-btn" id="chat-prompt-btn">

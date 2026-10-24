@@ -52,5 +52,5 @@ pub use store::{DefaultResourceStore, LegQuota, ResourceStoreConfig, ResourceSto
 pub use types::{
     BACKING_KIND_LOCAL_FILE, BACKING_KIND_MEMORY, BACKING_KIND_REMOTE, FrozenLocalFile,
     OpenedResource, RemoteObjectKey, ResourceBacking, ResourceGrant, ResourceGrantSpec,
-    ResourceMetadata, ResourceRef, ResourceUse, ResourceUseSet, ReusePolicy,
+    ResourceMetadata, ResourceRef, ResourceUse, ResourceUseSet, ReusePolicy, VisibleResource,
 };

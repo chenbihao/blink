@@ -14,7 +14,7 @@ use std::sync::{Arc, Weak};
 
 use tokio::sync::mpsc;
 
-use crate::ai::agent_provider::{AgentProvider, ChatStreamChunk};
+use crate::ai::agent_provider::{AgentProvider, ChatStreamChunk, VisionImagePart};
 use crate::ai::registry::ResolvedProviderEntries;
 use crate::ai::thinking::{
     parse_supported_reasoning_efforts, pick_fallback_effort, thinking_supports_effort,
@@ -73,6 +73,7 @@ pub(super) async fn run_intercepted_stream(
     resolved: &ResolvedProviderEntries,
     conversation_id: &str,
     message: &str,
+    image_parts: Vec<VisionImagePart>,
     chunk_tx: mpsc::UnboundedSender<ChatStreamChunk>,
     thinking_enabled: bool,
     reasoning_effort: Option<String>,
@@ -233,6 +234,7 @@ pub(super) async fn run_intercepted_stream(
             .stream_prompt(
                 &conversation_id,
                 &message,
+                &image_parts,
                 intercept_tx.clone(),
                 thinking_enabled,
                 current_effort.clone(),

@@ -15,6 +15,7 @@
 //! `AgentBuilder / prompt / memory`——这些留 0.10 落 `agent_window/` 独立模块。
 
 pub mod agent_provider;
+pub mod attachment;
 pub mod chat_service;
 pub mod cli_recognizer;
 pub mod factory;
@@ -32,6 +33,7 @@ pub mod summary;
 pub mod thinking;
 pub mod token_budget;
 pub mod tool_adapter;
+pub mod vision;
 
 #[allow(unused_imports)] // 0.9.1 Phase 5 起被 AppContext 消费
 pub use factory::default_factory;

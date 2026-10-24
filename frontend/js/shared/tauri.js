@@ -119,6 +119,16 @@ export function getCurrentWindow() {
     return TAU?.window?.getCurrentWindow?.();
 }
 
+/**
+ * 获取当前 Tauri webview 对象（0.27.10 拖放事件用）。
+ * `onDragDropEvent` 消费 `tauri://drag-*` 事件——Tauri 默认接管 OS 文件拖放
+ * （DOM drop 不触发），事件监听经 core:default 的 core:event 权限，无新增 ACL。
+ */
+export function getCurrentWebview() {
+    const TAU = getTAU();
+    return TAU?.webview?.getCurrentWebview?.();
+}
+
 // ── 自定义弹窗（替代 Tauri dialog.ask / dialog.message）──────────────────────
 // 系统原生弹框样式与应用主题不搭，改为自绘 HTML 弹框，统一视觉风格。
 // 复用 .modal-overlay 基础样式 + .confirm-dialog 专属样式。

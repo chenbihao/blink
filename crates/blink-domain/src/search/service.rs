@@ -334,6 +334,25 @@ impl SearchService {
         true
     }
 
+    /// 读取当前文件选中项的文件路径（0.27.9——附件签发的「选中项确认」
+    /// 可信来源核验：只有出现在当前快照中的路径才允许签发附件 ref）。
+    ///
+    /// 只投影普通文件（目录不进——§3.2 目录仅参与本地动作）。
+    pub fn current_file_selection_paths(&self) -> Vec<std::path::PathBuf> {
+        let guard = self.snapshot.read().unwrap();
+        guard
+            .file_selection
+            .as_ref()
+            .map(|sel| {
+                sel.items
+                    .iter()
+                    .filter(|item| !item.is_dir)
+                    .map(|item| std::path::PathBuf::from(&item.path))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// 写回剪贴板文本（clipboard listener 检测到剪贴板变化时调用）。
     ///
     /// **动机**：`update_snapshot` 只在热键 invoke 时执行一次;主窗口保持打开时

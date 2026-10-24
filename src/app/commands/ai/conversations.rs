@@ -85,10 +85,26 @@ pub async fn get_chat_messages(
     for (role, content_json, created_at, attachments_json) in rows {
         let msg: Message =
             serde_json::from_str(&content_json).map_err(|e| format!("反序列化消息失败: {e}"))?;
-        // 0.23.12：附件展示元数据（JSON 字符串数组，仅文件名）——解析失败按无附件降级
-        let attachments: Option<Vec<String>> = attachments_json
-            .and_then(|json| serde_json::from_str(&json).ok())
-            .filter(|list: &Vec<String>| !list.is_empty());
+        // 0.27.9：附件徽标（kind+name）——解析失败按无附件降级；
+        // 兼容 0.23.12 旧纯音频文件名数组（字符串项一律按 audio 徽标解析）。
+        let attachments: Option<Vec<crate::domain::ai::attachment::AttachmentBadge>> =
+            attachments_json
+                .and_then(|json| serde_json::from_str::<Vec<serde_json::Value>>(&json).ok())
+                .map(|items| {
+                    items
+                        .into_iter()
+                        .filter_map(|item| match item {
+                            serde_json::Value::String(name) => {
+                                Some(crate::domain::ai::attachment::AttachmentBadge {
+                                    kind: crate::domain::ai::attachment::AttachmentKind::Audio,
+                                    name,
+                                })
+                            }
+                            other => serde_json::from_value(other).ok(),
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .filter(|list| !list.is_empty());
 
         match &msg {
             Message::User { content } => {

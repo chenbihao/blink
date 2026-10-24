@@ -146,6 +146,90 @@ export function revokeChatAudioAttachments(conversationId) {
     return invoke("revoke_chat_audio_attachments", {conversationId});
 }
 
+// ── 0.27.9 附件命令 ─────────────────────────────────────────────────────────
+
+/**
+ * @ 面板候选：当前会话有效引用 + 最近复制的文件（逐项预检）。
+ * @param {string} conversationId
+ * @returns {Promise<{sessionRefs: Array, recentFiles: Array}>}
+ */
+export function attachmentListCandidates(conversationId) {
+    return invoke("attachment_list_candidates", {conversationId});
+}
+
+/**
+ * 可信 picker 多选文本附件（签发 + 预检，逐项反馈）。
+ * @param {string} conversationId
+ * @returns {Promise<Array<{display: string, ok: object|null, reason: string|null}>>}
+ */
+export function attachmentPickFiles(conversationId) {
+    return invoke("attachment_pick_files", {conversationId});
+}
+
+/**
+ * 从剪贴板文件历史条目签发文本附件（路径由后端 DB 读取）。
+ * @param {string} entryId
+ * @param {string} conversationId
+ */
+export function attachmentAttachClipboardFiles(entryId, conversationId) {
+    return invoke("attachment_attach_clipboard_files", {entryId, conversationId});
+}
+
+/**
+ * 跨窗口草稿采纳：把 chat_prefill 临时 owner 的 ref 转移为会话 owner。
+ * @param {string[]} refs
+ * @param {string} conversationId
+ * @returns {Promise<number>} 成功转移数
+ */
+export function adoptChatAttachments(refs, conversationId) {
+    return invoke("adopt_chat_attachments", {refs, conversationId});
+}
+
+/**
+ * 移除单个附件 chip 时撤销其 ref（任意 kind 通用）。
+ * @param {string} attachmentRef
+ * @returns {Promise<boolean>}
+ */
+export function removeChatAttachment(attachmentRef) {
+    return invoke("remove_chat_attachment", {attachmentRef});
+}
+
+/**
+ * paste 入口：读取当前剪贴板图片并签发为会话内 VisionImage 引用（0.27.10）。
+ * @param {string} conversationId
+ * @returns {Promise<{kind: string, ref: string, display: string}>}
+ */
+export function attachmentAttachClipboardImage(conversationId) {
+    return invoke("attachment_attach_clipboard_image", {conversationId});
+}
+
+/**
+ * 剪贴板图片历史条目签发（@ 面板传 conversationId=会话内；问 AI 流转不传）。
+ * @param {string} imageId
+ * @param {string|null} [conversationId]
+ */
+export function attachmentSignClipboardHistoryImage(imageId, conversationId = null) {
+    return invoke("attachment_sign_clipboard_history_image", {imageId, conversationId});
+}
+
+/**
+ * 截图 overlay 选区 PNG 字节直接签发（跨窗口流转；pin_image 同通道先例）。
+ * @param {number[]} bytes PNG 字节
+ * @param {string|null} [display]
+ */
+export function attachmentSignPngBytes(bytes, display = null) {
+    return invoke("attachment_sign_png_bytes", {bytes, display});
+}
+
+/**
+ * 拖放文件按内容嗅探分类签发（图片 magic / UTF-8 文本）。
+ * @param {string[]} paths
+ * @param {string} conversationId
+ */
+export function attachmentSignDroppedFiles(paths, conversationId) {
+    return invoke("attachment_sign_dropped_files", {paths, conversationId});
+}
+
 /**
  * 隐藏 chat 窗口。
  */

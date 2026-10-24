@@ -19,6 +19,8 @@ import {
     screenshotPin,
     screenshotPinRegion,
     screenshotSave,
+    runBuiltinAction,
+    signPngBytesAttachment,
 } from '../shared/api.js';
 import {IMAGE_SOURCE} from './image-editor-session.js';
 // 0.23.19-fix：取消路由纯函数 + 整体取消时收起 tooltip
@@ -200,6 +202,39 @@ export function doPinSelection() {
                 if (ss.editorSession.epoch !== pinEpoch) return;
                 console.error('[screenshot] pin 失败', err);
                 showTransientHint(`钉图失败：${normalizeError(err).message}`, {isError: true, duration: 3000});
+                ss.sent = false;
+            });
+    });
+}
+
+/**
+ * 0.27.10「问 AI」（§8.5）：选区合成 PNG → 签发本会话新 VisionImage 引用 →
+ * open_chat 草稿事务预填（不自动发送）。overlay 侧在 Session 收尾完成签发
+ * 即结束——不延长截图 SESSION，引用不依赖 overlay 存活。
+ */
+export function doAskAiSelection() {
+    if (!ss.selCss || ss.sent || !ensureOutputReady()) return;
+    ss.sent = true;
+    const askEpoch = ss.editorSession.epoch;
+    compositeSelection((pngBytes) => {
+        if (ss.editorSession.epoch !== askEpoch) return;
+        cleanupCanvasVisuals();
+        signPngBytesAttachment(pngBytes, '截图-问AI.png')
+            .then((signed) => {
+                if (ss.editorSession.epoch !== askEpoch) return;
+                if (!signed?.ref) return;
+                return runBuiltinAction("open_chat", {
+                    prefill: "",
+                    attachments: [{kind: "image", ref: signed.ref, display: signed.display}],
+                });
+            })
+            .then(() => {
+                cleanupLongCapture();
+            })
+            .catch((err) => {
+                if (ss.editorSession.epoch !== askEpoch) return;
+                console.error('[screenshot] 问 AI 失败', err);
+                showTransientHint(`问 AI 失败：${normalizeError(err).message}`, {isError: true, duration: 3000});
                 ss.sent = false;
             });
     });

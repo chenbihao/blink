@@ -49,6 +49,38 @@ export function launchApp(lnkPath) {
 }
 
 /** 运行内置动作（0.8.0 §1.3）——id 为动作注册表 key，arg 为可选参数。 */
+/**
+ * 0.27.9：为主窗「发送到聊天」流转签发文本附件 ref——后端按 awareness
+ * 文件选中快照核验路径（前端传路径不是授权凭据），owner 为 chat_prefill
+ * 临时归属，chat 前端采纳草稿时经 adopt_chat_attachments 转移。
+ * @param {string[]} paths 建议携带的选中文件路径
+ * @returns {Promise<Array<{display: string, ok: object|null, reason: string|null}>>}
+ */
+/**
+ * 0.27.10：剪贴板图片历史条目签发 VisionImage 引用（跨窗口流转——
+ * chat 前端采纳草稿时经 adopt_chat_attachments 转移归属）。
+ * @param {string} imageId
+ * @returns {Promise<{kind: string, ref: string, display: string}>}
+ */
+/**
+ * 0.27.10：截图 overlay「问 AI」——选区 PNG 字节直接签发（跨窗口流转）。
+ * @param {number[]|Uint8Array} pngBytes
+ * @param {string|null} [display]
+ * @returns {Promise<{kind: string, ref: string, display: string}>}
+ */
+export function signPngBytesAttachment(pngBytes, display = null) {
+    const bytes = pngBytes instanceof Uint8Array ? Array.from(pngBytes) : pngBytes;
+    return invoke("attachment_sign_png_bytes", {bytes, display});
+}
+
+export function signClipboardHistoryImage(imageId) {
+    return invoke("attachment_sign_clipboard_history_image", {imageId, conversationId: null});
+}
+
+export function signSelectionFiles(paths) {
+    return invoke("attachment_sign_selection_files", {paths});
+}
+
 export function runBuiltinAction(id, arg) {
     return invoke("run_builtin_action", {id, arg: arg ?? null});
 }

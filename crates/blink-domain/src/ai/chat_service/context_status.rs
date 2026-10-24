@@ -191,6 +191,7 @@ impl ChatService {
         conversation_id: &str,
         pending_message: Option<&str>,
         preamble: Option<&str>,
+        pending_images_tokens: usize,
         provider: &AgentProvider,
         resolved: &ResolvedProviderEntries,
     ) -> ContextWindowStatus {
@@ -310,6 +311,7 @@ impl ChatService {
                 tools,
                 tool_call_count,
                 has_multimodal,
+                pending_images_tokens,
                 context_window,
                 tiered_fallback_limit: Some(tiered_fallback_limit),
                 request_max_tokens: None,
@@ -483,7 +485,7 @@ impl ChatService {
             return None;
         };
         let status = self
-            .compute_context_status(conversation_id, None, None, &provider, &resolved)
+            .compute_context_status(conversation_id, None, None, 0, &provider, &resolved)
             .await;
         let _ = self.emitter.emit_to(
             "chat",
@@ -542,7 +544,7 @@ impl ChatService {
             "get_or_compute_context_status: 缓存 miss，按需重算"
         );
         Some(
-            self.compute_context_status(conversation_id, None, None, &provider, &resolved)
+            self.compute_context_status(conversation_id, None, None, 0, &provider, &resolved)
                 .await,
         )
     }
@@ -787,6 +789,7 @@ mod tests {
                 tools: &[],
                 tool_call_count: 0,
                 has_multimodal: false,
+                pending_images_tokens: 0,
                 context_window: Some(131072),
                 tiered_fallback_limit: None,
                 request_max_tokens: None,
@@ -812,6 +815,7 @@ mod tests {
                 tools: &[],
                 tool_call_count: 0,
                 has_multimodal: false,
+                pending_images_tokens: 0,
                 context_window: None,
                 tiered_fallback_limit: None,
                 request_max_tokens: None,

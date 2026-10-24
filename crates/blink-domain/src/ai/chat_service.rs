@@ -26,6 +26,10 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use crate::ai::agent_provider::{AgentProvider, ChatStreamChunk};
+use crate::ai::attachment::{
+    AttachmentKind, ResolvedAttachment, TextInjection, TextProbeStatus, TEXT_FILE_MAX_BYTES,
+    TEXT_TOTAL_TOKEN_LIMIT, build_text_injection, classify_text_probe, text_total_overrun,
+};
 use crate::ai::prompt::{
     chat_system_prompt_with_skills, pure_chat_system_prompt_with_group,
 };
@@ -41,6 +45,7 @@ use crate::config::ai_config::{ChatAgentMode, ChatConfig, Tier};
 use crate::event::EventPort;
 use crate::event_names::EventNames;
 use crate::mcp::McpClientManager;
+use crate::resource::{DefaultResourceStore, ResourceRef, ResourceUse};
 
 // 0.21.23 结构收敛：内聚子模块（外部契约零变化，纯内部重组）
 // - context_status：上下文状态计算 + scoped 缓存 + 历史预算注入
@@ -227,88 +232,19 @@ pub struct ChatStreamEvent {
     pub chunk: ChatStreamChunk,
 }
 
-/// 单条对话音频附件元数据（`chat_prompt` 命令 wire schema，camelCase）。
-///
-/// **0.23.12 边界**：附件只以结构化元数据随本轮请求进入后端；`audio_ref`
-/// 是短期 bearer 句柄，仅注入**本轮模型输入**的附件上下文，不进入用户可见
-/// 正文、标题截断/生成输入或持久化历史。
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ChatAttachmentInput {
-    pub audio_ref: String,
-    pub display_name: String,
-}
-
-/// 单轮允许的最大附件数（防御性上限，与 composer chip 面板容量对齐）。
-const MAX_CHAT_ATTACHMENTS: usize = 8;
-
-/// 清洗 `chat_prompt` 收到的附件元数据——字段卫生 + 防御性上限。
-///
-/// 拒绝非 `rref_` 形态或超长的 ref；display_name 去控制字符并截断
-/// （对齐后端 `safe_audio_display_name` 的规则）。
-fn sanitize_attachments(attachments: Vec<ChatAttachmentInput>) -> Vec<ChatAttachmentInput> {
-    attachments
-        .into_iter()
-        .filter(|attachment| {
-            let r = attachment.audio_ref.trim();
-            r.starts_with("rref_") && r.len() <= 128
-        })
-        .take(MAX_CHAT_ATTACHMENTS)
-        .map(|mut attachment| {
-            attachment.audio_ref = attachment.audio_ref.trim().to_string();
-            attachment.display_name = attachment
-                .display_name
-                .chars()
-                .filter(|character| !character.is_control())
-                .take(160)
-                .collect();
-            attachment
-        })
-        .collect()
-}
-
-/// 附件上下文块——本轮模型输入的技术段（附件 ref + 使用提示）。
-///
-/// 仅供模型消费；用户可见正文/标题/历史不含此块。
-fn attachment_context_block(attachments: &[ChatAttachmentInput]) -> Option<String> {
-    if attachments.is_empty() {
-        return None;
-    }
-    let mut lines: Vec<String> = Vec::with_capacity(attachments.len() + 1);
-    for (index, attachment) in attachments.iter().enumerate() {
-        lines.push(format!(
-            "[音频附件 {}] file=\"{}\" audio_ref=\"{}\"",
-            index + 1,
-            attachment.display_name.replace('"', "'"),
-            attachment.audio_ref
-        ));
-    }
-    lines.push("（以上为本地音频附件，可用 transcribe_audio 能力转写后处理）".to_string());
-    Some(lines.join("\n"))
-}
-
-/// 组装本轮模型输入：附件上下文（仅本轮有效）+ 用户可见正文。
-///
-/// 无附件时模型输入 = 用户可见正文（与既有行为一致）；正文为空而仅有附件时，
-/// 模型输入 = 附件上下文块。
-fn compose_model_input(visible: &str, attachments: &[ChatAttachmentInput]) -> String {
-    match attachment_context_block(attachments) {
-        None => visible.to_string(),
-        Some(block) => {
-            if visible.is_empty() {
-                block
-            } else {
-                format!("{block}\n{visible}")
-            }
-        }
-    }
-}
+/// 0.27.9：附件 wire 载荷与校验/注入纯函数收敛在 `ai::attachment` 模块；
+/// 此处 re-export 维持 `chat_service::ChatAttachmentInput` 旧路径兼容
+/// （`chat_prompt` command 层引用）。
+pub use crate::ai::attachment::ChatAttachmentInput;
 
 /// ChatService 请求错误。
 #[derive(Debug, thiserror::Error)]
 pub enum ChatError {
     #[error("已有对话请求正在生成（request_id={}）", .0.request_id)]
     AlreadyActive(ActiveChatStatus),
+    /// 附件校验/解引用失败——逐项明细（§5.9.2 禁止静默丢项），前端保留草稿。
+    #[error("附件无法附加：{details}")]
+    Attachment { details: String },
     #[error(transparent)]
     Provider(#[from] AIError),
 }
@@ -317,6 +253,52 @@ pub enum ChatError {
 struct RequestTracker {
     next_request_id: AtomicU64,
     active: Mutex<Option<ActiveChatRequest>>,
+}
+
+/// 0.27.9：附件请求级绑定 guard——prompt 任务持有，随任务结束（正常/失败/
+/// abort drop）清除 `attachment_refs`，保证 `read_attachment_text` 只在
+/// 本轮请求生命周期内可用。
+struct AttachmentRefsGuard {
+    service: Weak<ChatService>,
+    /// 是否真的写入了绑定（无附件时不写也不清，避免误清上一轮残留）。
+    had_refs: bool,
+}
+
+impl AttachmentRefsGuard {
+    fn set_if_any(service: &Arc<ChatService>, resolved: &[ResolvedAttachment]) -> Self {
+        let had_refs = !resolved.is_empty();
+        *service
+            .attachment_refs
+            .write()
+            .expect("attachment_refs lock poisoned") = if had_refs {
+            Some(
+                resolved
+                    .iter()
+                    .map(|a| a.r#ref().to_string())
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            None
+        };
+        Self {
+            service: Arc::downgrade(service),
+            had_refs,
+        }
+    }
+}
+
+impl Drop for AttachmentRefsGuard {
+    fn drop(&mut self) {
+        if !self.had_refs {
+            return;
+        }
+        if let Some(service) = self.service.upgrade() {
+            *service
+                .attachment_refs
+                .write()
+                .expect("attachment_refs lock poisoned") = None;
+        }
+    }
 }
 
 impl RequestTracker {
@@ -443,6 +425,11 @@ pub struct ChatService {
     /// 0.21.19.1 F5: 摘要任务并发竞态防护——compare_exchange 抢占，
     /// 确保同一时间只有一个摘要任务在跑。
     summary_in_flight: std::sync::atomic::AtomicBool,
+    /// 0.27.9：当前活跃请求已明确附加的 resource_ref 集合——
+    /// `read_attachment_text` 的请求级绑定校验数据源（经
+    /// `CapabilityEnv::active_chat_attachment_refs` 暴露给 Capability）。
+    /// AI 请求全进程单活跃，至多一个集合。
+    attachment_refs: std::sync::RwLock<Option<Vec<String>>>,
 }
 
 impl ChatService {
@@ -496,6 +483,7 @@ impl ChatService {
             agent_mode: AtomicU8::new(encode_agent_mode(agent_mode)),
             ephemeral_model_policy: RwLock::new(ephemeral_model_policy),
             summary_in_flight: std::sync::atomic::AtomicBool::new(false),
+            attachment_refs: std::sync::RwLock::new(None),
             requests: RequestTracker::new(),
             start_gate: tokio::sync::Mutex::new(()),
             selected: RwLock::new(selected),
@@ -1074,35 +1062,72 @@ impl ChatService {
             (message.clone(), Vec::new())
         };
 
-        // 0.23.12：模型输入与用户可见正文分离——附件 ref 只注入**本轮模型输入**；
-        // 预写落库、标题截断与 LLM 命名全部使用用户可见正文（`message`/`visible_message`），
-        // 持久化历史中不出现 `rref_` 技术块。
-        let attachments = sanitize_attachments(attachments);
-        let model_input = compose_model_input(&visible_message, &attachments);
-        if !attachments.is_empty() {
+        // 0.27.9：模型输入与用户可见正文分离——附件先逐项校验（无效项不静默
+        // 丢弃，逐项报错），再解引用构建本轮快照；预写落库、标题截断与 LLM
+        // 命名全部使用用户可见正文（`message`/`visible_message`），持久化历史
+        // 中不出现 `rref_` 技术块（历史只落 kind+name 徽标）。
+        let (valid_inputs, invalid) = crate::ai::attachment::validate_inputs(attachments);
+        if !invalid.is_empty() {
+            let details = invalid
+                .iter()
+                .map(|item| {
+                    format!(
+                        "第{}项（{}）：{}",
+                        item.index + 1,
+                        if item.display.is_empty() { "未命名" } else { &item.display },
+                        item.reason.as_str()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("；");
+            return Err(ChatError::Attachment { details });
+        }
+        let (resolved_attachments, image_parts, pending_image_tokens_est) =
+            self.resolve_attachments(&valid_inputs).await?;
+
+        // 0.27.10 前后端双校验（§3.4）：带图片请求要求当前模型声明 Vision 能力；
+        // 失败保留草稿（前端不清输入），提示切换模型或移除图片。
+        if !image_parts.is_empty() {
+            let vision_ok = self
+                .resolve_current_entries(kind)
+                .map(|entries| {
+                    entries
+                        .model
+                        .capabilities
+                        .contains(&crate::config::ai_config::ModelCapability::Vision)
+                })
+                .unwrap_or(false);
+            if !vision_ok {
+                return Err(ChatError::Attachment {
+                    details: "当前模型未启用「视觉输入」能力，无法发送图片附件。                              请在设置中为该模型勾选视觉输入、切换到支持视觉的模型，或移除图片附件"
+                        .into(),
+                });
+            }
+        }
+
+        let model_input =
+            crate::ai::attachment::compose_model_input(&visible_message, &resolved_attachments);
+        if !resolved_attachments.is_empty() {
             tracing::debug!(
                 request_id,
-                attachments = attachments.len(),
+                attachments = resolved_attachments.len(),
                 "ChatService: 本轮模型输入已注入附件上下文（不进入持久化历史）"
             );
         }
+        // 绑定本轮已附加 ref（read_attachment_text 请求级校验数据源）；
+        // 任务结束（正常/失败/abort）由 guard 清除。
+        let attachment_guard = AttachmentRefsGuard::set_if_any(self, &resolved_attachments);
 
         // 0.21.16：发出即保存——Persistent 模式预写用户消息 + 建对话记录。
         // 与 `append` 的「跳过已预写 user」去重配合，正常完成后不产生重复行；
         // 中断/失败时用户消息已落库，侧边栏立即可见。
         // 失败不阻塞对话（warn-and-continue），与「持久化分组失败不影响对话」一致。
-        // 0.23.12：附件以**展示文件名**随预写行落库（徽标渲染用；ref 不落库）。
+        // 0.27.9：附件以 kind+name 徽标随预写行落库（ref 不落库，兼容旧纯音频名记录）。
+        let badges = crate::ai::attachment::to_badges(&resolved_attachments);
         if kind == ConversationKind::Persistent
             && let Err(e) = self
                 .persistent_memory()
-                .persist_user_message(
-                    &conversation_id,
-                    &visible_message,
-                    &attachments
-                        .iter()
-                        .map(|a| a.display_name.clone())
-                        .collect::<Vec<_>>(),
-                )
+                .persist_user_message(&conversation_id, &visible_message, &badges)
                 .await
         {
             tracing::warn!(
@@ -1188,7 +1213,12 @@ impl ChatService {
 
         let target_window_for_task = target_window.clone();
         let kind_for_task = kind;
+        // pending 图片 token 估算（预算用）+ 任务内多模态 parts（move）
+        let pending_image_tokens = pending_image_tokens_est;
+        let image_parts_for_task = image_parts;
         let task = tokio::spawn(async move {
+            // 附件绑定随任务生命周期——正常结束/失败/abort（drop）都清除
+            let _attachment_guard = attachment_guard;
             if start_rx.await.is_err() {
                 return;
             }
@@ -1229,6 +1259,7 @@ impl ChatService {
                             &conversation_for_task,
                             Some(&model_input),
                             Some(&preamble),
+                            pending_image_tokens,
                             &provider,
                             &resolved,
                         )
@@ -1259,6 +1290,7 @@ impl ChatService {
                         &resolved,
                         &conversation_for_task,
                         &model_input,
+                        image_parts_for_task,
                         chunk_tx,
                         thinking_enabled,
                         reasoning_effort.clone(),
@@ -1330,6 +1362,208 @@ impl ChatService {
             tracing::info!(request_id, "ChatService: 请求已中止");
         }
         aborted
+    }
+
+    // ── 0.27.9：附件解引用与请求级绑定 ───────────────────────────────────
+
+    /// 解引用并校验附件（§3.3：按 kind 分派；无效/超限逐项报错）。
+    ///
+    /// - audio：ref 不在本层解引用（由 `transcribe_audio` 工具消费）；
+    /// - text_file：`AttachmentText` 用途 open + 有界整读 + UTF-8 探测 +
+    ///   token 预算截断，文件身份变化由 store open 的 identity 复核拒绝；
+    /// - image：0.27.10 接入，本阶段明确拒绝。
+    async fn resolve_attachments(
+        &self,
+        inputs: &[ChatAttachmentInput],
+    ) -> Result<
+        (
+            Vec<ResolvedAttachment>,
+            Vec<crate::ai::agent_provider::VisionImagePart>,
+            usize,
+        ),
+        ChatError,
+    > {
+        if inputs.is_empty() {
+            return Ok((Vec::new(), Vec::new(), 0));
+        }
+        let store = self.cap_env.resource_store().cloned().ok_or_else(|| {
+            ChatError::Attachment {
+                details: "运行时未启用资源库，无法处理附件".into(),
+            }
+        })?;
+        let mut resolved: Vec<ResolvedAttachment> = Vec::with_capacity(inputs.len());
+        let mut errors: Vec<String> = Vec::new();
+        let mut text_injections: Vec<TextInjection> = Vec::new();
+        let mut image_parts: Vec<crate::ai::agent_provider::VisionImagePart> = Vec::new();
+        let mut normalized_images: Vec<crate::ai::vision::NormalizedImage> = Vec::new();
+        let mut pending_image_tokens: usize = 0;
+        for (index, input) in inputs.iter().enumerate() {
+            match input.kind {
+                AttachmentKind::Audio => {
+                    resolved.push(ResolvedAttachment::Audio {
+                        r#ref: input.r#ref.clone(),
+                        display: input.display.clone(),
+                    });
+                }
+                AttachmentKind::TextFile => {
+                    match Self::resolve_text_file(&store, input).await {
+                        Ok(injection) => {
+                            text_injections.push(injection.clone());
+                            resolved.push(ResolvedAttachment::TextFile {
+                                r#ref: input.r#ref.clone(),
+                                display: input.display.clone(),
+                                injection,
+                            });
+                        }
+                        Err(reason) => {
+                            errors.push(format!("第{}项（{}）：{}", index + 1, input.display, reason));
+                        }
+                    }
+                }
+                AttachmentKind::Image => {
+                    match Self::resolve_image(&store, input).await {
+                        Ok(normalized) => {
+                            image_parts.push(crate::ai::agent_provider::VisionImagePart {
+                                mime: normalized.mime().to_string(),
+                                bytes: normalized.bytes.clone(),
+                            });
+                            pending_image_tokens += normalized.estimated_tokens;
+                            normalized_images.push(normalized);
+                            resolved.push(ResolvedAttachment::Image {
+                                r#ref: input.r#ref.clone(),
+                                display: input.display.clone(),
+                            });
+                        }
+                        Err(reason) => {
+                            errors.push(format!("第{}项（{}）：{}", index + 1, input.display, reason.0));
+                        }
+                    }
+                }
+            }
+        }
+        if !errors.is_empty() {
+            return Err(ChatError::Attachment {
+                details: errors.join("；"),
+            });
+        }
+        let overrun = text_total_overrun(&text_injections);
+        if overrun > 0 {
+            return Err(ChatError::Attachment {
+                details: format!(
+                    "文本附件合计超出 {TEXT_TOTAL_TOKEN_LIMIT} tokens 上限（超出约 {overrun}），请移除部分附件或缩小内容"
+                ),
+            });
+        }
+        // 图片合计编码总量（base64 展开后 ≤16 MiB，§3.4）
+        let refs: Vec<&crate::ai::vision::NormalizedImage> =
+            normalized_images.iter().collect();
+        if let Err(e) = crate::ai::vision::check_total_encoded(&refs) {
+            return Err(ChatError::Attachment { details: e.0 });
+        }
+        Ok((resolved, image_parts, pending_image_tokens))
+    }
+
+    /// 单个图片附件解析：VisionImage 用途 open（身份复核在 store 内）→
+    /// 有界读取 → 归一化（CPU 密集，spawn_blocking；§3.4 限制先于大分配）。
+    async fn resolve_image(
+        store: &Arc<DefaultResourceStore>,
+        input: &ChatAttachmentInput,
+    ) -> Result<crate::ai::vision::NormalizedImage, crate::ai::vision::VisionError> {
+        let mut opened = store
+            .open(
+                &ResourceRef::from_token(&input.r#ref),
+                ResourceUse::VisionImage,
+            )
+            .map_err(|e| {
+                crate::ai::vision::VisionError(format!(
+                    "图片引用不可用（{}）——可能已过期或被撤销，请重新附加",
+                    e.kind.as_str()
+                ))
+            })?;
+        let bytes = tokio::task::spawn_blocking(move || {
+            opened.read_all_bounded(crate::ai::vision::MAX_ENCODED_BYTES_PER_IMAGE)
+        })
+        .await
+        .map_err(|e| crate::ai::vision::VisionError(format!("图片读取任务失败: {e}")))?
+        .map_err(|e| {
+            crate::ai::vision::VisionError(format!(
+                "图片读取失败（{}）——资源可能已变化，请重新附加",
+                e.kind.as_str()
+            ))
+        })?;
+        let display_len = input.display.chars().count();
+        tokio::task::spawn_blocking(move || {
+            let normalized = crate::ai::vision::normalize_image(bytes.to_vec())?;
+            tracing::debug!(
+                display_len,
+                width = normalized.width,
+                height = normalized.height,
+                bytes = normalized.bytes.len(),
+                "vision image normalized"
+            );
+            Ok(normalized)
+        })
+        .await
+        .map_err(|e| crate::ai::vision::VisionError(format!("图片归一化任务失败: {e}")))?
+    }
+
+    /// 单个文本附件解析——store open（身份复核）→ 有界整读 → 探测 → 注入切片。
+    async fn resolve_text_file(
+        store: &Arc<DefaultResourceStore>,
+        input: &ChatAttachmentInput,
+    ) -> Result<TextInjection, String> {
+        let mut opened = store
+            .open(
+                &ResourceRef::from_token(&input.r#ref),
+                ResourceUse::AttachmentText,
+            )
+            .map_err(|e| {
+                format!(
+                    "附件引用不可用（{}）——可能已过期或文件发生变化，请重新附加",
+                    e.kind.as_str()
+                )
+            })?;
+        let bytes = tokio::task::spawn_blocking(move || {
+            opened.read_all_bounded(TEXT_FILE_MAX_BYTES)
+        })
+        .await
+        .map_err(|e| format!("附件读取任务失败: {e}"))?
+        .map_err(|e| {
+            format!(
+                "附件读取失败（{}）——文件可能已变化，请重新附加",
+                e.kind.as_str()
+            )
+        })?;
+        match classify_text_probe(&bytes) {
+            TextProbeStatus::Utf8 => {}
+            TextProbeStatus::Empty => {
+                return Ok(TextInjection {
+                    text: String::new(),
+                    token_est: 0,
+                    truncated: false,
+                    original_token_est: 0,
+                });
+            }
+            TextProbeStatus::Binary => {
+                return Err("文件包含二进制内容（NUL 字节），不能按文本附加".into());
+            }
+            TextProbeStatus::NonUtf8 => {
+                return Err("文件不是 UTF-8 编码，请先转换为 UTF-8 再附加".into());
+            }
+        }
+        let body = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&bytes);
+        let text =
+            std::str::from_utf8(body).map_err(|_| "文件包含无效 UTF-8 序列".to_string())?;
+        Ok(build_text_injection(text))
+    }
+
+    /// 当前活跃请求的附件 ref 集合（`CapabilityEnv::active_chat_attachment_refs`
+    /// 的数据源；None = 无绑定）。
+    pub fn active_attachment_refs(&self) -> Option<Vec<String>> {
+        self.attachment_refs
+            .read()
+            .expect("attachment_refs lock poisoned")
+            .clone()
     }
 
     /// 中止当前 active request，供 X / Esc / hide 生命周期入口调用。
@@ -1706,67 +1940,8 @@ fn compute_allowlist_fingerprint(allowlist: &std::collections::HashSet<String>) 
 mod tests {
     use super::*;
 
-    // ── 0.23.12：模型输入与用户可见正文分离 ────────────────────────────────
-
-    fn attachment(r: &str, name: &str) -> ChatAttachmentInput {
-        ChatAttachmentInput {
-            audio_ref: r.to_string(),
-            display_name: name.to_string(),
-        }
-    }
-
-    #[test]
-    fn compose_model_input_without_attachments_is_identity() {
-        assert_eq!(compose_model_input("你好", &[]), "你好");
-    }
-
-    #[test]
-    fn compose_model_input_prepends_attachment_context() {
-        let attachments = vec![attachment("rref_aaaabbbbccccdddd", "录音.wav")];
-        let input = compose_model_input("转写这个附件", &attachments);
-        assert!(
-            input.contains("audio_ref=\"rref_aaaabbbbccccdddd\""),
-            "模型输入应含附件 ref: {input}"
-        );
-        assert!(input.contains("transcribe_audio"), "模型输入应含使用提示");
-        assert!(input.ends_with("转写这个附件"), "可见正文应在其后: {input}");
-        // 文件名中的引号被中和，不会破坏块结构
-        let quoted = vec![attachment("rref_aaaabbbbccccdddd", "a\"b.wav")];
-        let input2 = compose_model_input("x", &quoted);
-        assert!(!input2.contains("a\"b.wav"), "引号应被中和: {input2}");
-    }
-
-    #[test]
-    fn compose_model_input_attachment_only_when_visible_empty() {
-        let attachments = vec![attachment("rref_aaaabbbbccccdddd", "a.wav")];
-        let input = compose_model_input("", &attachments);
-        assert!(input.contains("audio_ref=\"rref_aaaabbbbccccdddd\""));
-        assert!(!input.ends_with("\n"));
-    }
-
-    #[test]
-    fn sanitize_attachments_drops_invalid_and_caps() {
-        let ok = attachment("rref_aaaabbbbccccdddd", "a.wav");
-        let bad_prefix = attachment("bearer-token", "b.wav");
-        let empty = attachment("  ", "c.wav");
-        let oversized = attachment(format!("rref_{}", "x".repeat(200)).as_str(), "d.wav");
-        // 10 条有效 + 3 条无效：无效被剔除后剩 10 条，再被上限截到 8
-        let mut inputs = std::iter::repeat_n(ok.clone(), 10).collect::<Vec<_>>();
-        inputs.insert(0, bad_prefix);
-        inputs.insert(1, empty);
-        inputs.push(oversized);
-        let sanitized = sanitize_attachments(inputs);
-        assert_eq!(sanitized.len(), MAX_CHAT_ATTACHMENTS);
-        assert!(sanitized.iter().all(|a| a.audio_ref.starts_with("rref_")));
-        assert_eq!(sanitized[0], ok, "有效条目应保留且顺序稳定");
-    }
-
-    #[test]
-    fn sanitize_attachments_strips_control_chars_in_display_name() {
-        let dirty = attachment("rref_aaaabbbbccccdddd", "a\nb\x07.wav");
-        let sanitized = sanitize_attachments(vec![dirty]);
-        assert_eq!(sanitized[0].display_name, "ab.wav");
-    }
+    // 0.27.9：附件校验/组装纯函数测试已随实现迁至 `ai::attachment` 模块
+    //（compose_model_input / validate_inputs / 探测与截断管道）。
 
     #[test]
     fn agent_mode_scopes_extensions_by_window() {

@@ -27,13 +27,30 @@ impl Capability for OpenChat {
     fn schema(&self) -> CapabilitySchema {
         CapabilitySchema {
             name: "open_chat".into(),
-            description: "Open the AI chat window. Optional 'prefill' text fills the chat input box without sending.".into(),
+            description: "Open the AI chat window. Optional 'prefill' text and 'attachments' fill the chat input box as a draft (not auto-sent); 'new_conversation' starts a fresh conversation first.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "prefill": {
                         "type": "string",
                         "description": "Optional text to prefill the chat input box (not auto-sent)"
+                    },
+                    "attachments": {
+                        "type": "array",
+                        "description": "Attachments signed by trusted entry points ({kind, ref, display}); appended to the chat draft, not auto-sent",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "kind": { "type": "string", "enum": ["audio", "text_file", "image"] },
+                                "ref": { "type": "string" },
+                                "display": { "type": "string" }
+                            },
+                            "required": ["kind", "ref", "display"]
+                        }
+                    },
+                    "new_conversation": {
+                        "type": "boolean",
+                        "description": "Start a new conversation before applying the draft (default false)"
                     }
                 }
             }),
@@ -66,16 +83,27 @@ impl Capability for OpenChat {
                 actual: ctx.runtime.as_requirement().to_string(),
             })?;
 
-        // 读取可选 prefill 参数
-        let prefill: Option<&str> = args
-            .get("prefill")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty());
+        // 0.27.9 §8.2：入口侧草稿事务——prefill + attachments + new_conversation。
+        // ref 必须已由可信签发入口签发（picker / 选中项确认 / 剪贴板历史链），
+        // 本 Capability 只做形态校验，不签发资源。
+        let draft: crate::ai::attachment::OpenChatDraft = if args.is_null() {
+            Default::default()
+        } else {
+            serde_json::from_value(args).map_err(|e| CapabilityError::InvalidArgs {
+                detail: format!("open_chat 参数无效: {e}"),
+            })?
+        };
+        // 防御上限：附件草稿最多 8 项（与 chat_prompt 同限）
+        if draft.attachments.len() > crate::ai::attachment::MAX_CHAT_ATTACHMENTS {
+            return Err(CapabilityError::InvalidArgs {
+                detail: "attachments 超过单轮上限 8 项".into(),
+            });
+        }
 
         // 先隐藏主窗再打开对话窗口（与旧 ChordAction 行为一致）
         surface.hide_main_window("open_chat");
         surface
-            .open_chat(prefill)
+            .open_chat(&draft)
             .map_err(|e| CapabilityError::Internal {
                 detail: e.to_string(),
             })?;

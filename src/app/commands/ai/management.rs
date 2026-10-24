@@ -1099,6 +1099,17 @@ pub(crate) fn cs_count_skills(
 
 /// 获取 AI Capability 出口授权配置。
 ///
+/// 0.27.10：内置模型目录查询——新建模型时的能力/窗口推荐预填。
+/// 只用于**新建**条目预填；已有配置不被目录刷新改写（用户值优先，phase §3.4）。
+#[tauri::command]
+pub fn model_catalog_lookup(model_id: String) -> serde_json::Value {
+    let normalized = model_id.rsplit('/').next().unwrap_or(&model_id).to_string();
+    serde_json::json!({
+        "context_window": crate::domain::ai::model_catalog::lookup_context_window(&normalized),
+        "supports_vision": crate::domain::ai::model_catalog::lookup_supports_vision(&normalized),
+    })
+}
+
 /// 返回 `AiCapabilityAccessConfig`（含 schema_version、profile、enabled_capabilities）。
 #[tauri::command]
 pub async fn get_ai_capability_access(

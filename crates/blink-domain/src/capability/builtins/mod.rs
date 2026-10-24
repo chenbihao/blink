@@ -49,6 +49,7 @@ pub mod open_system_entry;
 pub mod open_url;
 pub mod pin_image;
 pub mod pin_clipboard_entry;
+pub mod read_attachment_text;
 pub mod read_clipboard;
 pub mod read_clipboard_history_image;
 pub mod read_sticky;

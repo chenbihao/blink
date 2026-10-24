@@ -19,8 +19,17 @@
 
 import * as ipc from "./ipc.js";
 import {iconHTML} from "../shared/icon.js";
+import {getCurrentWebview} from "../shared/tauri.js";
 import {buildOutgoingMessage} from "./outgoing.js";
+import {t} from "../i18n/index.js";
 import {closePalette, handlePaletteKeydown, onComposerInput} from "./command-palette.js";
+import {
+    ATTACHMENT_ICONS,
+    closeAttachmentPalette,
+    handleAttachmentPaletteKeydown,
+    onComposerInputForAttachments,
+    openAttachmentPalette,
+} from "./attachment-palette.js";
 
 /** @type {HTMLTextAreaElement} */
 let textarea = null;
@@ -52,17 +61,20 @@ let voiceRecording = false;
 /** @type {string} 录音开始前的 textarea 文本（用作 base，识别结果追加其后） */
 let voiceBaseText = "";
 
-/** @type {HTMLElement} 音频附件 chips 容器（0.23.12） */
+/** @type {HTMLElement} 附件 chips 容器（0.23.12；0.27.9 泛化） */
 let attachmentsEl = null;
 
-/** @type {HTMLButtonElement|null} 音频附件按钮（0.23.12） */
+/** @type {HTMLButtonElement|null} 附件按钮（0.27.9：打开 @ 附件面板） */
 let attachBtn = null;
 
-/** @type {Array<{audioRef: string, displayName: string}>} 当前音频附件（0.23.12） */
-let audioAttachments = [];
+/**
+ * 当前附件（0.27.9 类型化：audio/text_file/image）。
+ * @type {Array<{kind: string, ref: string, display: string, truncated?: boolean, tokenEst?: number|null}>}
+ */
+let attachments = [];
 
-/** @type {boolean} attach picker 是否进行中（防重复打开，0.23.12） */
-let attaching = false;
+/** 单轮附件上限（与后端 MAX_CHAT_ATTACHMENTS 对齐）。 */
+const MAX_ATTACHMENTS = 8;
 
 /**
  * 0.27.7 composer 输入代次（§九）：用户输入、面板开/关、附件增删时 +1。
@@ -101,13 +113,16 @@ export function initComposer(callbacks) {
 
     if (!textarea || !sendBtn) return;
 
-    // textarea 自增高 + 更新发送按钮状态 + 0.27.7 斜杠命令面板触发
+    // textarea 自增高 + 更新发送按钮状态 + 0.27.7 斜杠命令面板 / 0.27.9 @ 附件面板触发
     // IME 组合中不触发面板（§8.3 组合输入不执行），compositionend 按终稿刷新
     textarea.addEventListener("input", () => {
         autoResize();
         updateSendButtonState();
         bumpInputRevision();
-        if (!composing) onComposerInput(textarea.value);
+        if (!composing) {
+            onComposerInput(textarea.value);
+            onComposerInputForAttachments(textarea.value);
+        }
     });
 
     // IME 组合 guard（§九）：组合期间不处理快捷采纳；结束后按终稿刷新面板
@@ -118,13 +133,15 @@ export function initComposer(callbacks) {
         composing = false;
         bumpInputRevision();
         onComposerInput(textarea.value);
+        onComposerInputForAttachments(textarea.value);
     });
 
-    // 命令面板快捷键优先（↑/↓/Tab/Enter/Esc，IME 组合中跳过）；
+    // 面板快捷键优先（命令面板 / 附件面板，IME 组合中跳过）；
     // Enter 发送 / Shift+Enter 换行——流式模式（stop 按钮）下 Enter 不发送，
     // 避免用户预输入时误触发
     textarea.addEventListener("keydown", (e) => {
         if (!composing && handlePaletteKeydown(e)) return;
+        if (!composing && handleAttachmentPaletteKeydown(e)) return;
         if (e.key === "Enter" && !e.shiftKey) {
             if (sendBtn.classList.contains("chat-stop-btn")) return;
             e.preventDefault();
@@ -141,11 +158,32 @@ export function initComposer(callbacks) {
         }
     });
 
-    // 0.23.12: 音频附件按钮 + chips 容器
+    // 0.27.9: 附件按钮打开 @ 附件面板（与 @ 触发共用，phase §5.9.4）
     attachBtn = document.getElementById("chat-attach-btn");
     attachmentsEl = document.getElementById("chat-audio-attachments");
-    if (attachBtn) attachBtn.addEventListener("click", handleAttachAudio);
-    renderAudioAttachments();
+    if (attachBtn) attachBtn.addEventListener("click", openAttachmentPalette);
+    renderAttachments();
+
+    // 0.27.10: 粘贴图片——剪贴板有文本时走默认文本粘贴（不覆盖已有文字）；
+    // 无文本时读 OS 剪贴板图片签发为会话内 VisionImage 附件
+    textarea.addEventListener("paste", (e) => {
+        handlePaste(e);
+    });
+
+    // 0.27.10: 拖放文件——Tauri 接管 OS 拖放（DOM drop 不触发），经
+    // onDragDropEvent 取路径，后端按内容嗅探分类签发（图片/文本）
+    try {
+        const webview = getCurrentWebview();
+        if (webview?.onDragDropEvent) {
+            webview.onDragDropEvent((event) => {
+                const payload = event?.payload;
+                if (payload?.type !== "drop") return;
+                handleDroppedPaths(payload.paths || []);
+            });
+        }
+    } catch (error) {
+        console.warn("[composer] 拖放事件注册失败:", error);
+    }
 
     // 初始状态
     updateSendButtonState();
@@ -188,6 +226,7 @@ export function clearInput() {
     updateSendButtonState();
     bumpInputRevision();
     closePalette();
+    closeAttachmentPalette();
 }
 
 /**
@@ -231,6 +270,7 @@ export function insertAtCursor(text) {
     updateSendButtonState();
     bumpInputRevision();
     closePalette();
+    closeAttachmentPalette();
     textarea.focus();
     // 程序化写入不假设浏览器跟随光标——显式滚到光标处
     requestAnimationFrame(() => {
@@ -377,117 +417,156 @@ export function isVoiceRecording() {
     return voiceRecording;
 }
 
-// ── 音频附件（0.23.12：对话窗口附件闭环 + 会话一致性 + 负载分离）──────
+// ── 附件（0.23.12 音频闭环；0.27.9 泛化为 audio/text_file/image）──────────
 
 /** 当前附件快照（只读副本）。 */
-export function getAudioAttachments() {
-    return [...audioAttachments];
+export function getAttachments() {
+    return [...attachments];
 }
 
 /** 是否有附件。 */
-export function hasAudioAttachments() {
-    return audioAttachments.length > 0;
+export function hasAttachments() {
+    return attachments.length > 0;
+}
+
+/**
+ * 批量添加附件（@ 面板采纳 / open_chat 草稿事务预填入口）。
+ *
+ * 按 ref 去重（同一 ref 重复附加不堆叠），超出单轮上限的尾部丢弃；
+ * 会话一致性由调用方保证（面板/预填流在会话切换时撤销或转移）。
+ * @param {Array<{kind: string, ref: string, display: string, truncated?: boolean, tokenEst?: number|null}>} list
+ */
+export function addAttachments(list) {
+    const incoming = (Array.isArray(list) ? list : [])
+        .filter((a) => a && typeof a.ref === "string" && a.ref.startsWith("rref_"));
+    for (const item of incoming) {
+        if (attachments.length >= MAX_ATTACHMENTS) break;
+        if (attachments.some((existing) => existing.ref === item.ref)) continue;
+        attachments.push({
+            kind: item.kind || "text_file",
+            ref: item.ref,
+            display: (item.display || "").trim() || item.kind || "附件",
+            truncated: item.truncated || false,
+            tokenEst: item.tokenEst ?? null,
+        });
+    }
+    renderAttachments();
+    updateSendButtonState();
 }
 
 /**
  * 仅清空 UI 附件状态（不触发后端 revoke——撤销由调用方按 owner 批量处理）。
  * 会话切换/新对话时由 main.js 调用。
  */
-export function clearAudioAttachments() {
-    audioAttachments = [];
-    renderAudioAttachments();
+export function clearAttachments() {
+    attachments = [];
+    renderAttachments();
     updateSendButtonState();
 }
 
 /**
  * 消息发出后把**本次已发送**的附件从输入框移除（0.23.12）。
  *
- * 不撤销后端 ref——本轮 agent 仍要消费它转写；生命周期由会话切换/
- * 新对话的按 owner 批量撤销统一回收。只过滤匹配的 ref，发送等待期间
+ * 不撤销后端 ref——本轮 agent 仍要消费它（转写/续读/编码）；生命周期由会话
+ * 切换/新对话的按 owner 批量撤销统一回收。只过滤匹配的 ref，发送等待期间
  * 用户新附的文件不受影响；ref 由 CSPRNG 签发不会撞号。
- * @param {Array<{audioRef: string}>} sent 随消息发出的附件
+ * @param {Array<{ref: string}>} sent 随消息发出的附件
  */
 export function clearSentAttachments(sent) {
-    const sentRefs = new Set((Array.isArray(sent) ? sent : []).map((a) => a.audioRef));
+    const sentRefs = new Set((Array.isArray(sent) ? sent : []).map((a) => a?.ref).filter(Boolean));
     if (sentRefs.size === 0) return;
-    audioAttachments = audioAttachments.filter((a) => !sentRefs.has(a.audioRef));
-    renderAudioAttachments();
+    attachments = attachments.filter((a) => !sentRefs.has(a.ref));
+    renderAttachments();
     updateSendButtonState();
 }
 
-async function handleAttachAudio() {
-    if (attaching) return;
-    attaching = true;
-    if (attachBtn) attachBtn.disabled = true;
-    // picker 打开前捕获目标会话——返回后必须校验会话仍一致（§5.1 异步竞态防护）
-    const requestedConversationId = getConversationId?.() ?? null;
-    try {
-        const picked = await ipc.pickChatAudioAttachment(requestedConversationId);
-        const currentConversationId = getConversationId?.() ?? null;
-        if (requestedConversationId !== currentConversationId) {
-            // 已切换/新建会话：立即撤销刚签发的 ref，旧会话附件不得落入新会话
-            if (picked?.audioRef) {
-                ipc.removeChatAudioAttachment(picked.audioRef).catch((error) => {
-                    console.warn("chat audio attachment revoke failed:", error);
-                });
-            }
-            return;
+/** 0.27.10：粘贴——有文本走默认；无文本尝试剪贴板图片附件（会话守卫）。 */
+function handlePaste(e) {
+    const dt = e.clipboardData;
+    const hasText = dt && (dt.getData("text/plain") || dt.getData("text") || "");
+    if (hasText) return; // 文本粘贴：默认行为（图片与文本并存不丢文字）
+    e.preventDefault();
+    const requested = getConversationId?.() ?? null;
+    ipc.attachmentAttachClipboardImage(requested).then((signed) => {
+        if (getConversationId?.() !== requested) return; // 会话已切换：丢弃
+        if (signed?.ref) {
+            addAttachments([{
+                kind: "image",
+                ref: signed.ref,
+                display: signed.display || t("chat.attach.clipboard_image"),
+            }]);
         }
-        if (picked?.audioRef) {
-            audioAttachments.push({
-                audioRef: picked.audioRef,
-                displayName: picked.displayName || "WAV 文件"
-            });
-            renderAudioAttachments();
-            updateSendButtonState();
-        }
-    } catch (error) {
-        console.warn("chat audio attach failed:", error);
-    } finally {
-        attaching = false;
-        if (attachBtn) attachBtn.disabled = false;
-    }
+    }).catch(() => {
+        // 剪贴板无图片——无文本无图粘贴为 no-op
+    });
 }
 
-function renderAudioAttachments() {
+/** 0.27.10：拖放文件路径 → 后端嗅探分类签发（逐项反馈）。 */
+function handleDroppedPaths(paths) {
+    if (!Array.isArray(paths) || paths.length === 0) return;
+    const requested = getConversationId?.() ?? null;
+    if (!requested) return;
+    ipc.attachmentSignDroppedFiles(paths, requested).then((outcomes) => {
+        if (getConversationId?.() !== requested) return;
+        const okList = (Array.isArray(outcomes) ? outcomes : [])
+            .filter((o) => o?.ok?.attachment?.ref || o?.ok?.ref)
+            .map((o) => {
+                const a = o.ok.attachment || o.ok;
+                return {kind: a.kind, ref: a.ref, display: a.display};
+            });
+        if (okList.length > 0) addAttachments(okList);
+    }).catch((error) => {
+        console.warn("[composer] 拖放签发失败:", error);
+    });
+}
+
+const CHIP_KIND_HINTS = {
+    audio: "chat.attach.chip_hint_audio",
+    text_file: "chat.attach.chip_hint_text",
+    image: "chat.attach.chip_hint_image",
+};
+
+function renderAttachments() {
     if (!attachmentsEl) return;
     bumpInputRevision(); // 附件增删推进输入代次（§九：弹层异步结果防过期）
     attachmentsEl.innerHTML = "";
-    for (const attachment of audioAttachments) {
+    for (const attachment of attachments) {
         const chip = document.createElement("span");
         chip.className = "chat-audio-chip";
-        chip.title = `${attachment.displayName}（AI 可用 transcribe_audio 转写）`;
+        const hint = t(CHIP_KIND_HINTS[attachment.kind] || "chat.attach.chip_hint_text");
+        const truncatedNote = attachment.truncated ? " · " + t("chat.attach.truncated") : "";
+        chip.title = `${attachment.display}${truncatedNote}（${hint}）`;
 
         const icon = document.createElement("span");
         icon.className = "chat-audio-chip-icon";
-        icon.innerHTML = iconHTML("audio-lines");
+        icon.innerHTML = iconHTML(ATTACHMENT_ICONS[attachment.kind] || "file-text");
 
         const name = document.createElement("span");
         name.className = "chat-audio-chip-name";
-        name.textContent = attachment.displayName;
+        name.textContent = attachment.display;
 
         const remove = document.createElement("button");
         remove.type = "button";
         remove.className = "chat-audio-chip-remove";
-        remove.title = "移除附件";
-        remove.setAttribute("aria-label", "移除附件");
+        remove.title = t("chat.attach.remove");
+        remove.setAttribute("aria-label", t("chat.attach.remove"));
         remove.innerHTML = iconHTML("x");
-        remove.addEventListener("click", () => removeAudioAttachment(attachment.audioRef));
+        remove.addEventListener("click", () => removeAttachment(attachment.ref));
 
         chip.append(icon, name, remove);
         attachmentsEl.appendChild(chip);
     }
-    attachmentsEl.classList.toggle("hidden", audioAttachments.length === 0);
+    attachmentsEl.classList.toggle("hidden", attachments.length === 0);
 }
 
-async function removeAudioAttachment(audioRef) {
-    audioAttachments = audioAttachments.filter((item) => item.audioRef !== audioRef);
-    renderAudioAttachments();
+async function removeAttachment(ref) {
+    attachments = attachments.filter((item) => item.ref !== ref);
+    renderAttachments();
     updateSendButtonState();
     try {
-        await ipc.removeChatAudioAttachment(audioRef);
+        await ipc.removeChatAttachment(ref);
     } catch (error) {
-        console.warn("chat audio attachment revoke failed:", error);
+        console.warn("chat attachment revoke failed:", error);
     }
 }
 
@@ -495,9 +574,9 @@ async function removeAudioAttachment(audioRef) {
 
 function handleSend() {
     const text = textarea?.value?.trim() ?? "";
-    // 0.23.12：负载 = {text（可见正文）, attachments（结构化元数据）}；
+    // 0.27.9：负载 = {text（可见正文）, attachments（{kind, ref, display} 结构化元数据）}；
     // 纯附件（空正文）时 text 为人类可读摘要，气泡/标题/历史保持无 rref_
-    const payload = buildOutgoingMessage(text, audioAttachments);
+    const payload = buildOutgoingMessage(text, attachments);
     if (!payload) return;
     if (onSend) onSend(payload);
 }
@@ -521,7 +600,7 @@ function updateSendButtonState() {
         return;
     }
     // 0.23.12：附件存在时也允许发送
-    const hasContent = textarea.value.trim().length > 0 || audioAttachments.length > 0;
+    const hasContent = textarea.value.trim().length > 0 || attachments.length > 0;
     sendBtn.disabled = !hasContent;
 }
 

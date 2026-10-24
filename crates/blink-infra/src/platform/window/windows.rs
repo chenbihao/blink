@@ -356,16 +356,45 @@ static IMAGE_EDITOR_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 // ── 0.19：chat prefill 暂存（infra 层，带 revision） ──────────────────────
 //
-// show_chat_window 先 set_chat_prefill(text) 拿到 revision R，再 emit {R, text}。
+// show_chat_window 先 set_chat_prefill(data) 拿到 revision R，再 emit {R, ...data}。
 // 前端两条路径：
-//   冷启动：await listen → take_chat_prefill() 拉取 {R, text}（take 清空 pending）
+//   冷启动：await listen → take_chat_prefill() 拉取 {R, data}（take 清空 pending）
 //   热窗口：listener 已在线 → 收到事件 → ack_chat_prefill(R) 清空 pending
 // revision 防止旧事件的 ack 误删较新的 pending。
 // build/show 失败时 clear_chat_prefill(R) 回滚。
+// 0.27.9：载荷从纯文本扩展为「正文 + 附件 + 新建会话」草稿事务（§8.2）。
+
+/// chat prefill 附件 wire 投影（0.27.9 §8.2——与 ChatAttachmentInput 同形；
+/// infra 不依赖 domain 类型，独立定义）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatPrefillAttachment {
+    /// audio | text_file | image（封闭值由签发方保证）。
+    pub kind: String,
+    pub r#ref: String,
+    pub display: String,
+}
+
+/// chat prefill 载荷（0.27.9：正文 + 附件 + 新建会话标志的事务化草稿）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatPrefillData {
+    pub text: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<ChatPrefillAttachment>,
+    pub new_conversation: bool,
+}
+
+impl ChatPrefillData {
+    /// 无可交付内容（正文与附件均空）——不写 pending、不 emit。
+    pub fn is_empty(&self) -> bool {
+        self.text.trim().is_empty() && self.attachments.is_empty()
+    }
+}
 
 struct ChatPrefill {
     revision: u64,
-    text: String,
+    data: ChatPrefillData,
 }
 
 static CHAT_PREFILL_STATE: OnceLock<Mutex<Option<ChatPrefill>>> = OnceLock::new();
@@ -376,25 +405,22 @@ fn chat_prefill_state() -> &'static Mutex<Option<ChatPrefill>> {
 }
 
 /// 写入 prefill，返回本次 revision（用于后续 ack/clear/rollback）。
-pub fn set_chat_prefill(text: &str) -> u64 {
+pub fn set_chat_prefill(data: ChatPrefillData) -> u64 {
     let revision = CHAT_PREFILL_REV.fetch_add(1, Ordering::SeqCst) + 1;
     let mut guard = chat_prefill_state()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    *guard = Some(ChatPrefill {
-        revision,
-        text: text.to_string(),
-    });
+    *guard = Some(ChatPrefill { revision, data });
     revision
 }
 
 /// 拉取并清空 pending（冷启动路径）。
-/// 返回 (revision, text) 或 None。
-pub fn take_chat_prefill() -> Option<(u64, String)> {
+/// 返回 (revision, data) 或 None。
+pub fn take_chat_prefill() -> Option<(u64, ChatPrefillData)> {
     let mut guard = chat_prefill_state()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    guard.take().map(|p| (p.revision, p.text))
+    guard.take().map(|p| (p.revision, p.data))
 }
 
 /// 按 revision 清除 pending（热窗口 event 路径）。
@@ -1649,14 +1675,18 @@ fn restore_foreground_impl(hwnd: isize, set_uia_focus: bool) {
 static CHAT_CLOSE_HANDLER_REGISTERED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-pub fn show_chat_window(app: &AppHandle, initial_text: Option<&str>) -> Result<(), String> {
+pub fn show_chat_window(
+    app: &AppHandle,
+    initial: Option<&ChatPrefillData>,
+) -> Result<(), String> {
     use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
     const LABEL: &str = "chat";
 
-    // 0.19：带初始文本时先写入 prefill（infra 层），拿到 revision 用于后续 ack/rollback。
-    let prefill_text: Option<&str> = initial_text.filter(|s| !s.is_empty());
-    let prefill_rev: Option<u64> = prefill_text.map(set_chat_prefill);
+    // 0.19：带初始载荷时先写入 prefill（infra 层），拿到 revision 用于后续 ack/rollback。
+    // 0.27.9：载荷为「正文+附件+新建会话」草稿事务；空载荷不写 pending。
+    let prefill_data: Option<&ChatPrefillData> = initial.filter(|d| !d.is_empty());
+    let prefill_rev: Option<u64> = prefill_data.map(|d| set_chat_prefill(d.clone()));
 
     // 0.19：经 get_or_create_window 串行化创建，消除预热与用户唤起的 duplicate label 竞态。
     // 统一创建配置：visible(false) + focused(false)，show/focus 在锁外统一执行。
@@ -1724,10 +1754,13 @@ pub fn show_chat_window(app: &AppHandle, initial_text: Option<&str>) -> Result<(
 
     // 0.19：交付 prefill（emit 加速 + pending 兜底）。
     // 顺序：show → unminimize → 交付 prefill → set_focus
-    // set_focus 失败不阻断 prefill 投递——窗口已可见，文本必须送达。
-    if let (Some(rev), Some(text)) = (prefill_rev, prefill_text) {
-        // emit {revision, text} —— 热窗口 listener 立即收到，冷窗口走 take 兜底
-        let payload = serde_json::json!({ "revision": rev, "text": text });
+    // set_focus 失败不阻断 prefill 投递——窗口已可见，载荷必须送达。
+    if let (Some(rev), Some(data)) = (prefill_rev, prefill_data) {
+        // emit {revision, ...data} —— 热窗口 listener 立即收到，冷窗口走 take 兜底
+        let mut payload = serde_json::to_value(data).unwrap_or_default();
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("revision".to_string(), serde_json::json!(rev));
+        }
         if let Err(e) = app.emit_to(LABEL, EventNames::CHAT_PREFILL, payload) {
             tracing::warn!(error = %e, "chat-prefill emit 失败");
         }
@@ -4676,15 +4709,23 @@ pub fn open_settings(app: &AppHandle) {
 mod tests_0_19_prefill {
     use super::*;
 
+    fn prefill_data(text: &str) -> ChatPrefillData {
+        ChatPrefillData {
+            text: text.to_string(),
+            attachments: Vec::new(),
+            new_conversation: false,
+        }
+    }
+
     /// take 后清空。
     #[test]
     fn test_take_clears_pending() {
         // 重置状态：先 take 清空任何残留
         let _ = take_chat_prefill();
 
-        let rev = set_chat_prefill("hello");
+        let rev = set_chat_prefill(prefill_data("hello"));
         let taken = take_chat_prefill();
-        assert_eq!(taken, Some((rev, "hello".to_string())));
+        assert_eq!(taken, Some((rev, prefill_data("hello"))));
 
         // 再次 take 返回 None
         assert_eq!(take_chat_prefill(), None);
@@ -4695,14 +4736,14 @@ mod tests_0_19_prefill {
     fn test_old_revision_ack_does_not_clear_new() {
         let _ = take_chat_prefill();
 
-        let rev1 = set_chat_prefill("first");
-        let rev2 = set_chat_prefill("second");
+        let rev1 = set_chat_prefill(prefill_data("first"));
+        let rev2 = set_chat_prefill(prefill_data("second"));
         assert_ne!(rev1, rev2);
 
         // ack 旧 revision → 不应清除当前 pending（rev2）
         ack_chat_prefill(rev1);
         let taken = take_chat_prefill();
-        assert_eq!(taken, Some((rev2, "second".to_string())));
+        assert_eq!(taken, Some((rev2, prefill_data("second"))));
     }
 
     /// 匹配 revision 的 ack 清除 pending。
@@ -4710,7 +4751,7 @@ mod tests_0_19_prefill {
     fn test_matching_revision_ack_clears() {
         let _ = take_chat_prefill();
 
-        let rev = set_chat_prefill("data");
+        let rev = set_chat_prefill(prefill_data("data"));
         ack_chat_prefill(rev);
         // ack 后 take 应返回 None
         assert_eq!(take_chat_prefill(), None);
@@ -4721,13 +4762,13 @@ mod tests_0_19_prefill {
     fn test_rollback_does_not_clear_newer_value() {
         let _ = take_chat_prefill();
 
-        let rev1 = set_chat_prefill("old");
-        let rev2 = set_chat_prefill("new");
+        let rev1 = set_chat_prefill(prefill_data("old"));
+        let rev2 = set_chat_prefill(prefill_data("new"));
 
         // 回滚 rev1（模拟 build 失败）→ 不应清除 rev2
         clear_chat_prefill(rev1);
         let taken = take_chat_prefill();
-        assert_eq!(taken, Some((rev2, "new".to_string())));
+        assert_eq!(taken, Some((rev2, prefill_data("new"))));
     }
 
     /// 失败回滚匹配 revision 时清除 pending。
@@ -4735,7 +4776,7 @@ mod tests_0_19_prefill {
     fn test_rollback_matching_revision_clears() {
         let _ = take_chat_prefill();
 
-        let rev = set_chat_prefill("temp");
+        let rev = set_chat_prefill(prefill_data("temp"));
         clear_chat_prefill(rev);
         assert_eq!(take_chat_prefill(), None);
     }
@@ -4745,9 +4786,9 @@ mod tests_0_19_prefill {
     fn test_revision_monotonic() {
         let _ = take_chat_prefill();
 
-        let r1 = set_chat_prefill("a");
-        let r2 = set_chat_prefill("b");
-        let r3 = set_chat_prefill("c");
+        let r1 = set_chat_prefill(prefill_data("a"));
+        let r2 = set_chat_prefill(prefill_data("b"));
+        let r3 = set_chat_prefill(prefill_data("c"));
         assert!(r1 < r2);
         assert!(r2 < r3);
 
@@ -4760,7 +4801,7 @@ mod tests_0_19_prefill {
     fn test_warm_event_ack_no_residue() {
         let _ = take_chat_prefill();
 
-        let rev = set_chat_prefill("warm-text");
+        let rev = set_chat_prefill(prefill_data("warm-text"));
         // 模拟热窗口：event 收到后 ack
         ack_chat_prefill(rev);
         // take 应返回 None（已被 ack 清空）
@@ -4772,10 +4813,10 @@ mod tests_0_19_prefill {
     fn test_cold_take_then_ack_same_revision_is_noop() {
         let _ = take_chat_prefill();
 
-        let rev = set_chat_prefill("cold-text");
+        let rev = set_chat_prefill(prefill_data("cold-text"));
         // 冷启动：take 拉取
         let taken = take_chat_prefill();
-        assert_eq!(taken, Some((rev, "cold-text".to_string())));
+        assert_eq!(taken, Some((rev, prefill_data("cold-text"))));
         // 后续 ack 同 revision → pending 已空，no-op（不 panic）
         ack_chat_prefill(rev);
         assert_eq!(take_chat_prefill(), None);

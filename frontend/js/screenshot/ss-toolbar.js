@@ -12,7 +12,7 @@ import {bindSizeControls, syncSizeControls} from './ss-brush-controls.js';
 import {applyFloatingUiScale, findDisplayCssAt} from './ss-display.js';
 import {drawFinalSelection, redrawAnnotFull} from './ss-draw.js';
 import {updateSelectionCursor} from './ss-interaction.js';
-import {doCancel, doCopySelection, doPinSelection, doSaveSelection} from './ss-output.js';
+import {doAskAiSelection, doCancel, doCopySelection, doPinSelection, doSaveSelection} from './ss-output.js';
 // 0.15.7：长截图
 import {enterScrollCapture} from './scroll/index.js';
 import {doOcrSelection, doTranslateAndPin, doTranslateSelection} from './ss-ocr.js';
@@ -1085,6 +1085,7 @@ export function bindToolbar() {
     bind('btn-translate', doTranslateSelection);
     bind('btn-translate-pin', doTranslateAndPin);
     bind('btn-save', doSaveSelection);
+    bind('btn-ask-ai', doAskAiSelection);
     bind('btn-copy', doCopySelection);
 
     // 拖动 handle

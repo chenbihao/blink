@@ -1,6 +1,6 @@
 {
   "lucideVersion": "1.25.0",
-  "generatedAt": "2026-10-21T13:37:49Z",
+  "generatedAt": "2026-10-23T11:44:41Z",
   "icons": [
     "aperture",
     "arrow-left",
@@ -13,6 +13,7 @@
     "check",
     "chevron-down",
     "circle",
+    "clipboard",
     "cloud-sun",
     "code",
     "command",
@@ -26,6 +27,7 @@
     "eye",
     "eye-off",
     "file-text",
+    "file-x",
     "folder",
     "folder-open",
     "folder-search",
@@ -36,6 +38,7 @@
     "globe",
     "grid-3x3",
     "hand-grab",
+    "image",
     "languages",
     "lightbulb",
     "list",

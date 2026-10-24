@@ -15,7 +15,7 @@
 //! ai-mode ↔ ghost 的加载期环在现有代码已存在且安全）。
 
 import {queryEl} from "./dom.js";
-import {dismissUpdateVersion, hideWindow, openSettingsTab, reportSuggestionAdoption, runBuiltinAction} from "../shared/api.js";
+import {dismissUpdateVersion, hideWindow, openSettingsTab, reportSuggestionAdoption, runBuiltinAction, signSelectionFiles} from "../shared/api.js";
 import {showActionError} from "./action-error.js";
 import * as aiMode from "./ai-mode.js";
 
@@ -59,6 +59,7 @@ export function acceptSuggestion(suggestion, slot, revision, hooks = {}) {
     if (
         !action?.routeQuery && !action?.enterAiMode
         && !action?.invokeCapability && !action?.openSettingsTab
+        && !action?.sendToChat
     ) {
         hooks.onStale?.(suggestion);
         return false;
@@ -80,6 +81,30 @@ export function acceptSuggestion(suggestion, slot, revision, hooks = {}) {
         const {capabilityId, args} = action.invokeCapability;
         runBuiltinAction(capabilityId, args ?? null).catch((e) => {
             showActionError("run_builtin_action", e);
+        });
+        return true;
+    }
+
+    if (action.sendToChat) {
+        // 0.27.9 §5.9.5/§8.6：显式接受 → 后端按 awareness 快照核验并签发文本
+        // 附件 ref → open_chat 草稿事务预填（追加草稿，不自动发送）。
+        // 资源签发失败不打开聊天，错误可见反馈（不静默吞错）。
+        const paths = action.sendToChat.paths || [];
+        signSelectionFiles(paths).then((outcomes) => {
+            const attachments = (Array.isArray(outcomes) ? outcomes : [])
+                .filter((o) => o?.ok)
+                .map((o) => ({
+                    kind: o.ok.kind,
+                    ref: o.ok.ref,
+                    display: o.ok.display,
+                }));
+            if (attachments.length === 0) {
+                showActionError("sign_selection_files", "所选文件无法附加为文本附件");
+                return;
+            }
+            return runBuiltinAction("open_chat", {attachments, prefill: ""});
+        }).catch((e) => {
+            showActionError("sign_selection_files", e);
         });
         return true;
     }

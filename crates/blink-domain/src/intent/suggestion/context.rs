@@ -39,6 +39,10 @@ const RANK_OPEN_PATH: f64 = 0.93;
 const RANK_REVEAL: f64 = 0.88;
 /// 文件选中「复制路径」rank（0.27.3 §5.3.5：高于 reveal，低于 OpenUrl）。
 const RANK_COPY_PATHS: f64 = 0.90;
+/// 发送选中文件到聊天（0.27.9 §5.9.5）：0.89——高于 reveal（0.88，可经结果区
+/// 右键到达）保证双槽可见性（copy 0.90 primary / sendToChat secondary），
+/// 低于 copy（复制仍是文件场景首意图，0.27.3 定案）。
+const RANK_SEND_TO_CHAT: f64 = 0.89;
 
 /// Translate 域 + 打开类的环境感知 Suggestion 生产者。
 pub struct ContextProducer {
@@ -113,12 +117,12 @@ impl ContextProducer {
         out
     }
 
-    /// 文件选中候选（0.27.3 §5.3.4/§5.3.5）：Explorer/桌面选中 N 项文件系统对象时
-    /// 产出「复制路径」（write_clipboard 一次写入全部路径）与「定位」
-    /// （reveal_in_explorer 多路径分组）两条本地动作建议。
+    /// 文件选中候选（0.27.3 §5.3.4/§5.3.5；0.27.9 增发聊天）：Explorer/桌面
+    /// 选中 N 项文件系统对象时产出「复制路径」（write_clipboard 一次写入全部
+    /// 路径）、「定位」（reveal_in_explorer 多路径分组）与「发送到聊天」
+    /// （0.27.9：签发附件 + open_chat 草稿事务预填，不自动发送）。
     ///
-    /// 只实现本地动作——「发送到聊天」待 0.27.9 附件协议，不提前提供会触发
-    /// 敏感读文件的假闭环。动作粒度禁用（disabled_builtin_actions）拦对应能力；
+    /// 动作粒度禁用（disabled_builtin_actions）拦对应能力；
     /// 复制路径是显式用户动作，不受环境 binding 约束。display 为首项显示名，
     /// 前端按 kind + args 数量组数量文案。
     pub(crate) fn produce_file_selection(&self, snapshot: &AwarenessSnapshot) -> Vec<Suggestion> {
@@ -163,6 +167,24 @@ impl ContextProducer {
                     args: serde_json::json!({ "paths": paths }),
                 },
                 rank_score: RANK_REVEAL,
+                display: first_display.clone(),
+                prefix_len: 0,
+                origin: Some(SuggestionOrigin::FileSelection),
+                fingerprint,
+                source: SuggestionSource::Context,
+                ranking_hint: None,
+            });
+        }
+        // 0.27.9 §5.9.5/§8.6：发送到聊天——显式接受后签发附件并经 open_chat
+        // 草稿事务预填（不自动发送）。open_chat 被动作禁用时不出此建议。
+        if !self.action_disabled("open_chat") {
+            out.push(Suggestion {
+                id: "send-selection-to-chat".into(),
+                kind: SuggestionKind::SendToChat,
+                action: SuggestionAction::SendToChat {
+                    paths: paths.iter().map(|p| p.to_string()).collect(),
+                },
+                rank_score: RANK_SEND_TO_CHAT,
                 display: first_display,
                 prefix_len: 0,
                 origin: Some(SuggestionOrigin::FileSelection),
@@ -496,7 +518,7 @@ mod tests {
         let p = producer(vec![], vec![]);
         let snap = snap_with_files(&["C:\\tmp\\a.md", "C:\\tmp\\b.md"]);
         let out = p.produce_file_selection(&snap);
-        assert_eq!(out.len(), 2);
+        assert_eq!(out.len(), 3, "0.27.9 起含 SendToChat（0.89）");
         assert_eq!(out[0].kind, SuggestionKind::CopyPaths);
         assert_eq!(out[0].rank_score, 0.90);
         assert_eq!(out[0].origin, Some(SuggestionOrigin::FileSelection));
@@ -517,6 +539,17 @@ mod tests {
             }
             other => panic!("Reveal 动作应为 InvokeCapability，实际 {other:?}"),
         }
+        assert_eq!(out[2].kind, SuggestionKind::SendToChat);
+        assert_eq!(out[2].rank_score, 0.89);
+        match &out[2].action {
+            SuggestionAction::SendToChat { paths } => {
+                assert_eq!(
+                    paths,
+                    &vec!["C:\\tmp\\a.md".to_string(), "C:\\tmp\\b.md".to_string()]
+                );
+            }
+            other => panic!("SendToChat 动作形态错误，实际 {other:?}"),
+        }
     }
 
     /// 无文件选中 → 零候选。
@@ -526,14 +559,25 @@ mod tests {
         assert!(p.produce_file_selection(&ContextSnapshot::default()).is_empty());
     }
 
-    /// 动作粒度禁用 write_clipboard → 只剩 reveal。
+    /// 动作粒度禁用 write_clipboard → 只剩 reveal + sendToChat（0.27.9）。
     #[test]
     fn disabled_write_clipboard_blocks_copy_only() {
         let p = producer(vec!["write_clipboard".to_string()], vec![]);
         let snap = snap_with_files(&["C:\\tmp\\a.md"]);
         let out = p.produce_file_selection(&snap);
-        assert_eq!(out.len(), 1);
+        assert_eq!(out.len(), 2, "禁用复制后剩 reveal + sendToChat");
         assert_eq!(out[0].kind, SuggestionKind::RevealInExplorer);
+        assert_eq!(out[1].kind, SuggestionKind::SendToChat);
+    }
+
+    /// 0.27.9：禁用 open_chat → 发送到聊天建议消失（本地动作不受影响）。
+    #[test]
+    fn disabled_open_chat_blocks_send_to_chat() {
+        let p = producer(vec!["open_chat".to_string()], vec![]);
+        let snap = snap_with_files(&["C:\\tmp\\a.md"]);
+        let out = p.produce_file_selection(&snap);
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().all(|s| s.kind != SuggestionKind::SendToChat));
     }
 
     /// display 为首项显示名（前端按 args 数量组文案）。

@@ -15,7 +15,7 @@ import {
     openContainingFolder,
     openImageEditorFromHistory,
     openLnkTarget,
-    pinClipboardImage,
+    getClipboardText, pinClipboardImage, signClipboardHistoryImage,
     resetItemHistory,
     runBuiltinAction,
     saveClipboardFileAsImage,
@@ -667,6 +667,21 @@ function itemMenu(li, {selectedText = ""} = {}) {
                 else pinClipboardImage(clipboardRef.id).then(closeAfterOpen).catch(e => showActionError('pin_clipboard_image', e));
             },
         });
+        // 0.27.10：历史图片右键「问 AI」——签发本会话新 VisionImage 引用后经
+        // open_chat 草稿事务预填（不自动发送，不延长截图 SESSION，§8.5）
+        items.push({
+            label: t("menu.askAiImage"),
+            icon: "sparkles",
+            run: () => {
+                signClipboardHistoryImage(clipboardRef.id).then((signed) => {
+                    if (!signed?.ref) return;
+                    return runBuiltinAction("open_chat", {
+                        prefill: "",
+                        attachments: [{kind: "image", ref: signed.ref, display: signed.display}],
+                    });
+                }).catch((e) => showActionError("attachment_sign_clipboard_history_image", e));
+            },
+        });
         // 0.20.4：历史图片右键"编辑"——直接进入图片编辑器，不先覆盖剪贴板
         items.push({
             label: t("menu.editImage"),
@@ -683,6 +698,23 @@ function itemMenu(li, {selectedText = ""} = {}) {
                             showActionError('open_image_editor_from_history', err);
                         }
                     });
+            },
+        });
+    }
+
+    // 0.27.10：文本条目「发送到 AI 聊天」——正文预填（追加草稿语义，
+    // 不自动发送；与图片「问 AI」共用 open_chat 草稿事务，§5.10.6）
+    if (clipboardRef?.kind === "text") {
+        items.push({separator: true});
+        items.push({
+            label: t("menu.sendTextToChat"),
+            icon: "message-square",
+            run: () => {
+                getClipboardText(clipboardRef.id).then((text) => {
+                    const value = String(text ?? "").trim();
+                    if (!value) return;
+                    return runBuiltinAction("open_chat", {prefill: value});
+                }).catch((e) => showActionError("get_clipboard_text", e));
             },
         });
     }

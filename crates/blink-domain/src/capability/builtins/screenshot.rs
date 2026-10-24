@@ -1026,7 +1026,7 @@ mod tests {
         }
         fn open_chat(
             &self,
-            _: Option<&str>,
+            _: &crate::ai::attachment::OpenChatDraft,
         ) -> Result<(), crate::capability::SurfaceError> {
             unreachable!()
         }

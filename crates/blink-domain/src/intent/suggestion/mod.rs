@@ -85,6 +85,10 @@ pub enum SuggestionKind {
     /// 全部路径。采纳动作 `InvokeCapability("write_clipboard", {text: paths 换行连接})`。
     /// rank 0.90（§5.3.5；高于打开类 reveal，低于 OpenUrl——复制是文件场景首意图）。
     CopyPaths,
+    /// 发送选中文件到 AI 聊天（0.27.9 §5.9.5/§8.6）：采纳 = 签发文本附件 ref
+    /// （awareness 快照核验）→ `open_chat` 正文+附件草稿事务预填，不自动发送。
+    /// rank 0.89（高于 reveal 0.88 保证双槽可见；低于 copy 0.90——复制仍是首意图）。
+    SendToChat,
 }
 
 /// 类型化采纳动作（0.24 §3.5）。
@@ -121,6 +125,12 @@ pub enum SuggestionAction {
     /// Capability）；前端经 `open_settings_tab` command 执行（含 tab 白名单校验）。
     #[serde(rename_all = "camelCase")]
     OpenSettingsTab { tab: String },
+    /// 发送选中文件到 AI 聊天（0.27.9 §5.9.5/§8.6）：前端先经
+    /// `attachment_sign_selection_files`（后端按 awareness 快照核验路径并签发
+    /// 文本附件 ref），再以 `open_chat` 草稿事务预填——不自动发送。路径不是
+    /// 授权凭据，签发侧二次核验。
+    #[serde(rename_all = "camelCase")]
+    SendToChat { paths: Vec<String> },
 }
 
 /// Context 类 Suggestion 的取值来源（0.8.3 §4.9 UX 加强）——

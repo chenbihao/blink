@@ -362,19 +362,20 @@ pub async fn pick_chat_audio_attachment(
     };
 
     let owner = format!("chat_attach:{conversation_id}");
+    let display_name = safe_audio_display_name(&path);
     let spec = ResourceGrantSpec::new(
         ResourceUseSet::single(ResourceUse::TranscribeAudio),
         ReusePolicy::Reusable,
         owner,
     )
-    .with_ttl(CHAT_ATTACHMENT_TTL);
+    .with_ttl(CHAT_ATTACHMENT_TTL)
+    .with_label(display_name.clone());
 
     match store.issue_local_file(&path, spec) {
         Ok(audio_ref) => {
             tracing::debug!("pick_chat_audio_attachment: audio_ref issued");
             // 附件签发时后台预热引擎（best-effort，不阻塞附件）
             spawn_stt_engine_prewarm(&app);
-            let display_name = safe_audio_display_name(&path);
             Ok(Some(ChatAudioAttachment {
                 audio_ref: audio_ref.as_str().to_string(),
                 display_name,

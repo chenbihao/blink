@@ -432,6 +432,9 @@ pub struct TokenBudgetInput<'a> {
     pub tool_call_count: usize,
     /// 历史消息中是否包含多模态内容（图片等）。
     pub has_multimodal: bool,
+    /// 本轮 pending 图片的估算输入 tokens（0.27.10——按数量/尺寸保守估算，
+    /// 不复用单一 256 布尔惩罚；phase §3.4）。
+    pub pending_images_tokens: usize,
     /// context window 大小。
     pub context_window: Option<u32>,
     /// 0.21.21: 按 base_url 归属分档的兜底窗口（context_window 为 None 时使用）。
@@ -515,12 +518,12 @@ pub fn estimate_request_budget(input: TokenBudgetInput) -> TokenBudget {
                 .saturating_mul(PER_TOOL_CALL_ID_OVERHEAD),
         );
 
-    // 多模态：保守固定成本
+    // 多模态：历史命中保守固定成本 + 本轮 pending 图片按尺寸估算（0.27.10）
     let multimodal_tokens = if input.has_multimodal {
         MULTIMODAL_PENALTY
     } else {
         0
-    };
+    } + input.pending_images_tokens;
 
     // 5. 校准系数应用到内容估算（history + system + pending）
     let calibration = input.calibration_ratio.unwrap_or(1.0);
@@ -554,7 +557,7 @@ pub fn estimate_request_budget(input: TokenBudgetInput) -> TokenBudget {
         .unwrap_or(100);
 
     // 7. confidence
-    let confidence = if input.has_multimodal {
+    let confidence = if input.has_multimodal || input.pending_images_tokens > 0 {
         EstimateConfidence::Low
     } else if !input.tools.is_empty() || input.tool_call_count > 0 {
         EstimateConfidence::Medium
@@ -884,6 +887,7 @@ mod tests {
             tools: &[],
             tool_call_count: 0,
             has_multimodal: false,
+            pending_images_tokens: 0,
             context_window: Some(8192),
             request_max_tokens: None,
             model_max_tokens: None,
@@ -909,6 +913,7 @@ mod tests {
             tools: &[],
             tool_call_count: 0,
             has_multimodal: false,
+            pending_images_tokens: 0,
             context_window: Some(8192),
             request_max_tokens: None,
             model_max_tokens: None,
@@ -923,6 +928,7 @@ mod tests {
             tools: &[],
             tool_call_count: 0,
             has_multimodal: false,
+            pending_images_tokens: 0,
             context_window: Some(8192),
             request_max_tokens: None,
             model_max_tokens: None,
@@ -942,6 +948,7 @@ mod tests {
             tools: &[],
             tool_call_count: 0,
             has_multimodal: false,
+            pending_images_tokens: 0,
             context_window: Some(8192),
             request_max_tokens: None,
             model_max_tokens: None,
@@ -960,6 +967,7 @@ mod tests {
             )],
             tool_call_count: 0,
             has_multimodal: false,
+            pending_images_tokens: 0,
             context_window: Some(8192),
             request_max_tokens: None,
             model_max_tokens: None,
@@ -996,6 +1004,7 @@ mod tests {
             tools: &[],
             tool_call_count: 0,
             has_multimodal: false,
+            pending_images_tokens: 0,
             context_window: Some(8192),
             request_max_tokens: Some(4096),
             model_max_tokens: None,
@@ -1019,6 +1028,7 @@ mod tests {
             tools: &[],
             tool_call_count: 0,
             has_multimodal: false,
+            pending_images_tokens: 0,
             context_window: Some(8192),
             request_max_tokens: None,
             model_max_tokens: None,
@@ -1040,6 +1050,7 @@ mod tests {
             tools: &[make_tool("tool", "description", json!({}))],
             tool_call_count: 2,
             has_multimodal: true,
+            pending_images_tokens: 0,
             context_window: Some(1),
             request_max_tokens: Some(100),
             model_max_tokens: None,
@@ -1063,6 +1074,7 @@ mod tests {
             tools: &[],
             tool_call_count: 0,
             has_multimodal: false,
+            pending_images_tokens: 0,
             context_window: Some(1),
             request_max_tokens: None,
             model_max_tokens: None,
@@ -1087,6 +1099,7 @@ mod tests {
             tools: &[],
             tool_call_count: 0,
             has_multimodal: false,
+            pending_images_tokens: 0,
             context_window: None,
             request_max_tokens: None,
             model_max_tokens: None,
@@ -1107,6 +1120,7 @@ mod tests {
             tools: &[],
             tool_call_count: 0,
             has_multimodal: true,
+            pending_images_tokens: 0,
             context_window: Some(8192),
             request_max_tokens: None,
             model_max_tokens: None,
@@ -1128,6 +1142,7 @@ mod tests {
             tools: &[],
             tool_call_count: 0,
             has_multimodal: false,
+            pending_images_tokens: 0,
             context_window: Some(100),
             request_max_tokens: None,
             model_max_tokens: None,
@@ -1148,6 +1163,7 @@ mod tests {
             tools: &[],
             tool_call_count: 0,
             has_multimodal: false,
+            pending_images_tokens: 0,
             context_window: Some(100),
             request_max_tokens: None,
             model_max_tokens: None,
@@ -1168,6 +1184,7 @@ mod tests {
             tools: &[],
             tool_call_count: 0,
             has_multimodal: false,
+            pending_images_tokens: 0,
             context_window: Some(1000),
             request_max_tokens: Some(100_000),
             model_max_tokens: None,
@@ -1193,6 +1210,7 @@ mod tests {
             tools: &tools,
             tool_call_count: 0,
             has_multimodal: false,
+            pending_images_tokens: 0,
             context_window: Some(8192),
             request_max_tokens: None,
             model_max_tokens: None,
@@ -1207,6 +1225,7 @@ mod tests {
             tools: &tools[..1], // 只留一个
             tool_call_count: 0,
             has_multimodal: false,
+            pending_images_tokens: 0,
             context_window: Some(8192),
             request_max_tokens: None,
             model_max_tokens: None,
@@ -1686,6 +1705,7 @@ mod tests {
             tools: std::slice::from_ref(&tool),
             tool_call_count: 0,
             has_multimodal: false,
+            pending_images_tokens: 0,
             context_window: Some(8192),
             request_max_tokens: None,
             model_max_tokens: None,
@@ -1706,6 +1726,7 @@ mod tests {
             tools: &[tool, extra_tool],
             tool_call_count: 0,
             has_multimodal: false,
+            pending_images_tokens: 0,
             context_window: Some(8192),
             request_max_tokens: None,
             model_max_tokens: None,
@@ -1756,6 +1777,7 @@ mod tests {
             tools: &tools,
             tool_call_count: 0,
             has_multimodal: false,
+            pending_images_tokens: 0,
             context_window: Some(8192),
             request_max_tokens: None,
             model_max_tokens: None,
@@ -1771,6 +1793,7 @@ mod tests {
             tools: &tools,
             tool_call_count: 0,
             has_multimodal: false,
+            pending_images_tokens: 0,
             context_window: Some(8192),
             request_max_tokens: Some(4096),
             model_max_tokens: None,
@@ -1973,6 +1996,7 @@ mod tests {
             tools: &[],
             tool_call_count: 0,
             has_multimodal: false,
+            pending_images_tokens: 0,
             context_window: None,
             tiered_fallback_limit: Some(131072),
             request_max_tokens: None,
@@ -1981,6 +2005,47 @@ mod tests {
         });
         assert_eq!(budget.context_limit, 131072);
         assert_eq!(budget.context_limit_source, ContextLimitSource::Tiered);
+    }
+
+    // ── 0.27.10：pending 图片预算计入 multimodal_tokens ──
+
+    #[test]
+    fn budget_pending_images_tokens_added_to_multimodal() {
+        let base = |pending: usize| estimate_request_budget(TokenBudgetInput {
+            history_texts: &[],
+            system_prompt: None,
+            pending_message: None,
+            tools: &[],
+            tool_call_count: 0,
+            has_multimodal: false,
+            pending_images_tokens: pending,
+            context_window: Some(100_000),
+            tiered_fallback_limit: None,
+            request_max_tokens: None,
+            model_max_tokens: None,
+            calibration_ratio: None,
+        });
+        let no_image = base(0);
+        let with_images = base(1500);
+        assert_eq!(no_image.breakdown.multimodal_tokens, 0);
+        assert_eq!(with_images.breakdown.multimodal_tokens, 1500, "pending 图片按尺寸估算计入");
+        assert!(with_images.estimated_input_tokens > no_image.estimated_input_tokens);
+        // 历史命中布尔惩罚与 pending 叠加
+        let both = estimate_request_budget(TokenBudgetInput {
+            history_texts: &["img history".to_string()],
+            system_prompt: None,
+            pending_message: None,
+            tools: &[],
+            tool_call_count: 0,
+            has_multimodal: true,
+            pending_images_tokens: 800,
+            context_window: Some(100_000),
+            tiered_fallback_limit: None,
+            request_max_tokens: None,
+            model_max_tokens: None,
+            calibration_ratio: None,
+        });
+        assert_eq!(both.breakdown.multimodal_tokens, MULTIMODAL_PENALTY + 800);
     }
 
     #[test]
@@ -1992,6 +2057,7 @@ mod tests {
             tools: &[],
             tool_call_count: 0,
             has_multimodal: false,
+            pending_images_tokens: 0,
             context_window: None,
             tiered_fallback_limit: None,
             request_max_tokens: None,

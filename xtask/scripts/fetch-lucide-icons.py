@@ -63,6 +63,9 @@ ICON_LIST = [
     "spotlight",        # context.js 环境感知（0.11.8：从 globe 换成 spotlight，语义更精准）
     "ghost",            # settings.html Ghost 触发规则（0.11.8：从 zap 换成 ghost，与"Ghost"命名呼应）
     "audio-lines",      # settings.html 语音输入 card（0.11.8）
+    "image",            # chat 附件图片 chip（0.27.10）
+    "clipboard",        # chat @ 面板最近复制文件（0.27.9）
+    "file-x",           # chat 附件签发失败行（0.27.9）
     "paperclip",        # chat 附件卡片通用附件符（0.23.12）
     "search",           # settings.html 应用搜索 🔍
     "calculator",       # settings.html 计算器 🧮

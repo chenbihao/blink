@@ -297,6 +297,16 @@ function rowText(sug) {
         const withText = t("suggestionbar.copyPaths_with", {text: preview});
         return withText === "suggestionbar.copyPaths_with" ? t("suggestionbar.copyPaths") : withText;
     }
+    if (sug.kind === "sendToChat") {
+        // 0.27.9：display 是首项显示名；数量从 action paths 派生
+        const count = (sug.action?.sendToChat?.paths || []).length;
+        if (count > 1) return t("suggestionbar.sendToChat_many", {count});
+        const target = sug.display || "";
+        const preview = target.length > OPEN_TARGET_PREVIEW_MAX
+            ? target.slice(0, OPEN_TARGET_PREVIEW_MAX) + "…" : target;
+        const withText = t("suggestionbar.sendToChat_with", {text: preview});
+        return withText === "suggestionbar.sendToChat_with" ? t("suggestionbar.sendToChat") : withText;
+    }
     if (sug.kind === "openUrl" || sug.kind === "openPath" || sug.kind === "revealInExplorer") {
         const bareKey = `suggestionbar.${sug.kind}`;
         const withKey = `${bareKey}_with`;
@@ -319,5 +329,6 @@ function iconFor(sug) {
     if (sug.kind === "openPath") return "folder-open";
     if (sug.kind === "revealInExplorer") return "folder-search";
     if (sug.kind === "copyPaths") return "copy";
+    if (sug.kind === "sendToChat") return "message-square";
     return "zap";
 }

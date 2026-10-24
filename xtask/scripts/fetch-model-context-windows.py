@@ -6,7 +6,7 @@ fetch-model-context-windows.py — 从 LiteLLM 仓库精选主流模型条目生
 输出：resources/model_context_windows.json
 
 精选范围：OpenAI / Anthropic / Gemini / DeepSeek / GLM / Qwen / Moonshot / Kimi
-每条只留 prefix → max_input_tokens。
+每条留 prefix → max_input_tokens（0.27.10 起含 supports_vision 透传，仅 true 写出）。
 
 用法：python xtask/scripts/fetch-model-context-windows.py [workspace_root]
 workspace_root 默认为脚本上溯两级。
@@ -80,6 +80,21 @@ SELECTED_MODELS = [
 ]
 
 
+# 0.27.10: LiteLLM 命名/分类与实际能力偶有出入的显式覆盖（True/False）。
+# 仅影响目录推荐（新建模型预填），不改用户已保存配置。
+VISION_OVERRIDE = {
+    "gpt-4-turbo": True,   # gpt-4-turbo 系列支持视觉输入
+    "o1": True, "o3": True,
+    "gpt-4": False, "gpt-3.5": False,
+    "o1-mini": False, "o3-mini": False,
+    "moonshot-v1-8k": False, "moonshot-v1-32k": False, "moonshot-v1-128k": False,
+    "kimi-latest": False, "kimi-k2": False,
+    "glm-4": False, "glm-4-plus": False, "glm-4-air": False, "glm-4-long": False,
+    "glm-3-turbo": False,
+    "qwen-max": False, "qwen-plus": False, "qwen-turbo": False,
+}
+
+
 def main():
     workspace_root = sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -121,8 +136,19 @@ def main():
             print(f"  WARN: No context window found for prefix '{prefix}', skipping")
             continue
 
-        models.append({"prefix": prefix, "context_window": context_window})
-        print(f"  {prefix}: {context_window}")
+        entry = {"prefix": prefix, "context_window": context_window}
+        # 0.27.10: supports_vision 透传（仅 true 写出；目录只影响新建模型推荐预填）
+        if prefix in VISION_OVERRIDE:
+            if VISION_OVERRIDE[prefix]:
+                entry["supports_vision"] = True
+        else:
+            for model_name, model_info in data.items():
+                if model_name.startswith(prefix) and isinstance(model_info, dict):
+                    if model_info.get("supports_vision") is True:
+                        entry["supports_vision"] = True
+                    break
+        models.append(entry)
+        print(f"  {prefix}: {context_window}{' +vision' if entry.get('supports_vision') else ''}")
 
     # 按前缀长度降序排列（确保更长的前缀先匹配）
     models.sort(key=lambda m: len(m["prefix"]), reverse=True)

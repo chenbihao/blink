@@ -9,6 +9,7 @@ import {escapeText} from "./utils.js";
 import {getMcpToolSource, isMcpTool} from "./state.js";
 import {copyToClipboard} from "../shared/api.js";
 import {iconHTML} from "../shared/icon.js";
+import {t} from "../i18n/index.js";
 
 /** @type {HTMLElement} 消息容器 */
 let messagesEl = null;
@@ -139,20 +140,34 @@ export function renderUserMessage(text) {
  * 类**——`startEditMessage` 用 `.chat-msg` 集合定位消息下标，附件卡片
  * 不参与编辑/重试索引；复制/编辑只作用于正文气泡。
  *
- * @param {string[]} names 附件展示文件名（仅文件名，ref 不进 DOM）
+ * 0.27.9：徽标类型化 `{kind, name}`（audio/text_file/image；兼容纯字符串
+ * 旧音频记录——一律按 audio 渲染）。
+ * @param {Array<{kind?: string, name: string}|string>} badges 附件徽标（仅名称与种类，ref 不进 DOM）
  */
-export function renderUserAttachmentCards(names) {
+export function renderUserAttachmentCards(badges) {
     if (!messagesEl) return;
-    for (const name of names) {
+    for (const badge of Array.isArray(badges) ? badges : []) {
+        const kind = typeof badge === "string" ? "audio" : (badge?.kind || "audio");
+        const name = typeof badge === "string" ? badge : (badge?.name || "");
+        if (!name) continue;
         const card = document.createElement("div");
         card.className = "chat-attachment-card";
-        card.title = `${name}（音频附件）`;
+        const kindLabel = {
+            audio: t("chat.attach.card_audio"),
+            text_file: t("chat.attach.card_text"),
+            image: t("chat.attach.card_image"),
+        }[kind] || t("chat.attach.card_text");
+        card.title = `${name}（${kindLabel}）`;
         const clip = document.createElement("span");
         clip.className = "chat-attachment-card-clip";
         clip.innerHTML = iconHTML("paperclip");
         const typeIcon = document.createElement("span");
         typeIcon.className = "chat-attachment-card-icon";
-        typeIcon.innerHTML = iconHTML("audio-lines");
+        typeIcon.innerHTML = iconHTML({
+            audio: "audio-lines",
+            text_file: "file-text",
+            image: "image",
+        }[kind] || "file-text");
         const label = document.createElement("span");
         label.className = "chat-attachment-card-name";
         label.textContent = middleEllipsis(name);
@@ -524,10 +539,7 @@ function startEditMessage(el, originalText) {
         el.classList.remove("editing");
         el.textContent = originalText;
         el.dataset.rawText = originalText;
-        // 0.23.12：恢复附件徽标行（置于正文之前）——编辑取消不应丢徽标
-        if (Array.isArray(el.__attachmentNames) && el.__attachmentNames.length > 0) {
-            el.insertBefore(renderAttachmentBadges(el.__attachmentNames), el.firstChild);
-        }
+        // 附件卡片是 messagesEl 内独立元素（非 el 子节点），编辑/取消不动它
         // 重新注入操作行
         const row = createActionsRow();
         row.appendChild(createCopyAction(() => el.dataset.rawText || ""));

@@ -590,7 +590,7 @@ dependencies = [
 
 [[package]]
 name = "blink"
-version = "0.27.8"
+version = "0.27.10"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -680,8 +680,10 @@ dependencies = [
  "http",
  "hyper",
  "hyper-util",
+ "image",
  "inventory",
  "jsonpath-rust",
+ "kamadak-exif",
  "keyring-core",
  "nucleo",
  "once_cell",
@@ -3493,6 +3495,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kamadak-exif"
+version = "0.5.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef4fc70d0ab7e5b6bafa30216a6b48705ea964cdfc29c050f2412295eba58077"
+dependencies = [
+ "mutate_once",
+]
+
+[[package]]
 name = "keyboard-types"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3926,6 +3937,12 @@ dependencies = [
  "syn 2.0.118",
  "target-features",
 ]
+
+[[package]]
+name = "mutate_once"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13d2233c9842d08cfe13f9eac96e207ca6a2ea10b80259ebe8ad0268be27d2af"
 
 [[package]]
 name = "nalgebra"

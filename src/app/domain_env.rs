@@ -219,6 +219,15 @@ impl CapabilityEnv for TauriDomainEnv {
         Some(&self.resource_store)
     }
 
+    // 0.27.9：read_attachment_text 的请求级绑定数据源——
+    // 读 ChatService 当前活跃请求的附件 ref 集合（None = 无绑定，拒绝续读）。
+    fn active_chat_attachment_refs(&self) -> Option<Vec<String>> {
+        self.chat_service
+            .get()
+            .map(|svc| svc.active_attachment_refs())
+            .flatten()
+    }
+
     // ── 便签窗口操作（0.19.3 从 DomainEnv 提升到 CapabilityEnv）─────────
 
     fn sticky_service(&self) -> Option<&Arc<StickyService>> {
@@ -520,8 +529,27 @@ impl SurfacePort for TauriDomainEnv {
             .map_err(|e| SurfaceError::CreateFailed { detail: e })
     }
 
-    fn open_chat(&self, prefill: Option<&str>) -> Result<(), SurfaceError> {
-        crate::infra::platform::window::show_chat_window(&self.app, prefill)
+    fn open_chat(
+        &self,
+        draft: &crate::domain::ai::attachment::OpenChatDraft,
+    ) -> Result<(), SurfaceError> {
+        // 0.27.9：domain 草稿事务 → infra prefill 载荷（正文+附件+新建会话）
+        use crate::infra::platform::window;
+        let attachments = draft
+            .attachments
+            .iter()
+            .map(|a| window::ChatPrefillAttachment {
+                kind: a.kind.as_str().to_string(),
+                r#ref: a.r#ref.clone(),
+                display: a.display.clone(),
+            })
+            .collect();
+        let data = window::ChatPrefillData {
+            text: draft.prefill.clone().unwrap_or_default(),
+            attachments,
+            new_conversation: draft.new_conversation,
+        };
+        window::show_chat_window(&self.app, Some(&data))
             .map_err(|e| SurfaceError::CreateFailed { detail: e })
     }
 

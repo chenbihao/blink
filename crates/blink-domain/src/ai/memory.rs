@@ -705,14 +705,14 @@ impl SqliteConversationMemory {
     /// 幂等去重：尾部已是相同 user 消息（重发/重试）则跳过，不产生重复行。
     /// rig 结束时的 `append` 会跳过这条已写的 user 消息，只补写 assistant。
     ///
-    /// 0.23.12：`attachment_names` 为本轮音频附件的**展示文件名**（不含 ref），
-    /// 随预写行存入 `messages.attachments`，供气泡徽标与历史渲染；
-    /// `audio_ref` bearer token 不落库。
+    /// 0.27.9：`badges` 为本轮附件的 kind+name 徽标（不含 ref），随预写行
+    /// 存入 `messages.attachments`，供气泡徽标与历史渲染；resource_ref
+    /// bearer token 不落库（旧版本为纯音频文件名数组，读侧兼容两种形态）。
     pub async fn persist_user_message(
         &self,
         conversation_id: &str,
         user_msg: &str,
-        attachment_names: &[String],
+        badges: &[crate::ai::attachment::AttachmentBadge],
     ) -> Result<(), String> {
         let pool = self.pool.clone();
 
@@ -745,10 +745,10 @@ impl SqliteConversationMemory {
             if title.is_empty() { None } else { Some(&title) },
         )
         .await?;
-        let attachments_json = if attachment_names.is_empty() {
+        let attachments_json = if badges.is_empty() {
             None
         } else {
-            Some(serde_json::to_string(&attachment_names).map_err(|e| e.to_string())?)
+            Some(serde_json::to_string(badges).map_err(|e| e.to_string())?)
         };
         blink_infra::data::conversations::append_message_with_attachments(
             &pool,
@@ -951,6 +951,22 @@ fn drop_leading_orphan_tool_results(messages: &mut Vec<Message>) {
     }
 }
 
+/// 0.27.10：图片内容不进历史（phase §3.4——原始/base64 不经历史持久化，
+/// 且下一轮不自动重放）。append 落库/入内存前把 User 消息中的 Image part
+/// 替换为文本占位（文本 part 保留；图片内容只随当轮请求发送一次）。
+fn strip_image_parts(messages: &mut [Message]) {
+    use rig_core::completion::message::UserContent;
+    for msg in messages.iter_mut() {
+        if let Message::User { content } = msg {
+            for part in content.iter_mut() {
+                if matches!(part, UserContent::Image(_)) {
+                    *part = UserContent::text("[图片附件（已随当轮请求发送，历史不保留图片内容）]");
+                }
+            }
+        }
+    }
+}
+
 impl ConversationMemory for SqliteConversationMemory {
     fn load<'a>(
         &'a self,
@@ -973,6 +989,11 @@ impl ConversationMemory for SqliteConversationMemory {
         let conversation_id = conversation_id.as_str();
 
         Box::pin(async move {
+            // 0.27.10：图片 part 不落库（含预写失败兜底路径——正常路径首条
+            // user 已被 pending 跳过，此处为防御性二次保障）
+            let mut messages = messages;
+            strip_image_parts(&mut messages);
+
             // 合并实况回合（0.21.16）：删除流式期间写出的部分 assistant 行，
             // 由本轮完整消息替换——正常完成后不残留部分回复 / 重复行。
             let mut live = live_turns.write().await;
@@ -1134,6 +1155,9 @@ impl ConversationMemory for EphemeralConversationMemory {
     ) -> rig_core::wasm_compat::WasmBoxedFuture<'a, Result<(), MemoryError>> {
         let conversation_id = conversation_id.as_str();
         Box::pin(async move {
+            // 0.27.10：图片 part 不进临时记忆（下轮不重放，promote 导出无图）
+            let mut messages = messages;
+            strip_image_parts(&mut messages);
             let mut convs = self.conversations.write().await;
             let vec = convs.entry(conversation_id.to_string()).or_default();
             vec.extend(messages);
@@ -1195,7 +1219,49 @@ mod tests {
 
     /// 预写 → load 丢弃预写 user（rig 会追加一次 prompt）→ append 清除标记 →
     /// 再次 load 恢复完整历史（预写 user 已是一轮普通历史）。
+    /// 0.27.10：append 前剥离图片 part——历史不落 base64/原始字节，也不重放。
     #[tokio::test]
+    async fn append_strips_image_parts_from_history() {
+        use rig_core::completion::message::UserContent;
+
+        let pool = setup_pool().await;
+        let mem = SqliteConversationMemory::new(pool.clone());
+
+        // 建会话（预写 assistant 轮绕过 pending-user 跳过路径，让 append 直写 user）
+        mem.append(&ConversationId::new("c1"), vec![assistant_msg("已就绪")])
+            .await
+            .unwrap();
+
+        let msg = Message::User {
+            content: vec![
+                UserContent::text("看这张图"),
+                UserContent::image_raw(vec![1, 2, 3], None, None),
+            ],
+        };
+        mem.append(&ConversationId::new("c1"), vec![msg]).await.unwrap();
+
+        let msgs = blink_infra::data::conversations::load_all_messages(&pool, "c1").await.unwrap();
+        assert_eq!(msgs.len(), 2, "建会话 assistant 轮 + 本轮 user");
+        let user_row = &msgs[1].1;
+        assert!(!user_row.contains("\"Image\""), "历史不落图片 part");
+        let stored: Message = serde_json::from_str(user_row).unwrap();
+        match stored {
+            Message::User { content } => {
+                assert!(content.iter().all(|c| matches!(c, UserContent::Text(_))), "图片被替换为文本占位");
+                let text: Vec<&str> = content
+                    .iter()
+                    .filter_map(|c| match c {
+                        UserContent::Text(t) => Some(t.text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                assert!(text.iter().any(|t| t.contains("图片附件")), "占位说明存在");
+                assert!(text.iter().any(|t| t.contains("看这张图")), "正文保留");
+            }
+            other => panic!("应仍是 User 消息: {other:?}"),
+        }
+    }
+
     async fn prewrite_user_skipped_in_load_then_restored_after_append() {
         let pool = setup_pool().await;
         let mem = SqliteConversationMemory::new(pool);
@@ -1312,17 +1378,26 @@ mod tests {
         );
     }
 
-    /// 0.23.12：预写时携带附件**展示文件名**——落库 `messages.attachments`
-    /// 供历史徽标渲染；`audio_ref` bearer token 不落库。
+    /// 0.27.9：预写时携带 kind+name 徽标——落库 `messages.attachments`
+    /// 供历史徽标渲染；resource_ref bearer token 不落库。
     #[tokio::test]
-    async fn persist_user_message_stores_attachment_names_without_refs() {
+    async fn persist_user_message_stores_attachment_badges_without_refs() {
         let pool = setup_pool().await;
         let mem = SqliteConversationMemory::new(pool.clone());
 
         mem.persist_user_message(
             "c1",
             "转写这个附件",
-            &["录音.wav".to_string(), "会议.wav".to_string()],
+            &[
+                crate::ai::attachment::AttachmentBadge {
+                    kind: crate::ai::attachment::AttachmentKind::Audio,
+                    name: "录音.wav".into(),
+                },
+                crate::ai::attachment::AttachmentBadge {
+                    kind: crate::ai::attachment::AttachmentKind::TextFile,
+                    name: "笔记.txt".into(),
+                },
+            ],
         )
         .await
         .unwrap();
@@ -1331,8 +1406,12 @@ mod tests {
             blink_infra::data::conversations::load_all_messages(&pool, "c1").await.unwrap();
         assert_eq!(msgs.len(), 1);
         let attachments_json = msgs[0].3.as_deref().expect("附件元数据应落库");
-        let names: Vec<String> = serde_json::from_str(attachments_json).unwrap();
-        assert_eq!(names, vec!["录音.wav".to_string(), "会议.wav".to_string()]);
+        let badges: Vec<crate::ai::attachment::AttachmentBadge> =
+            serde_json::from_str(attachments_json).unwrap();
+        assert_eq!(badges.len(), 2);
+        assert_eq!(badges[0].kind, crate::ai::attachment::AttachmentKind::Audio);
+        assert_eq!(badges[0].name, "录音.wav");
+        assert_eq!(badges[1].kind, crate::ai::attachment::AttachmentKind::TextFile);
         // 正文与元数据均不含 ref token
         assert!(!msgs[0].1.contains("rref_"));
         assert!(!attachments_json.contains("rref_"));
