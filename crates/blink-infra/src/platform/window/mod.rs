@@ -37,7 +37,7 @@ pub use windows::{
     ChatCloseCallback, ChatPrefillAttachment, ChatPrefillData, PinImage, StickySpareCloseCallback,
     VOICE_W, WelcomeCloseCallback,
     ack_chat_prefill, apply_cloak, center_of_active_monitor, clamp_context_menu, clamp_context_menu_at,
-    clamp_to_work_area, compute_cursor_titlebar_position, destroy_sticky_window,
+    clamp_to_work_area, compute_cursor_titlebar_position, create_main_window, destroy_sticky_window,
     enable_rounded_corners, flush_all_sticky_windows, force_topmost, get_foreground_hwnd,
     get_or_create_context_menu_window, get_pin_image_by_label, get_pin_image_png,
     get_pin_window_rect, get_pin_window_work_area, get_primary_monitor_center, hide, hide_chat_window_primitive,

@@ -1786,6 +1786,74 @@ pub fn hide_chat_window_primitive(app: &AppHandle) {
     }
 }
 
+/// 只对已确认需要隔离的输入窗口分配数据目录，避免扩大浏览器进程组数量。
+fn isolated_webview_data_directory(
+    app: &AppHandle,
+    label: &str,
+) -> Result<std::path::PathBuf, tauri::Error> {
+    let data_directory = app
+        .path()
+        .app_local_data_dir()?
+        .join("webview-profiles")
+        .join(label);
+    tracing::debug!(label, "window: 使用独立 WebView2 数据目录");
+    if std::env::var_os("WEBVIEW2_USER_DATA_FOLDER").is_some_and(|value| !value.is_empty()) {
+        tracing::warn!(
+            label,
+            "window: WEBVIEW2_USER_DATA_FOLDER 会覆盖独立数据目录，IME 隔离可能失效"
+        );
+    }
+    Ok(data_directory)
+}
+
+/// 主窗口保留 tauri.conf.json 的属性，在 setup 中显式指定独立浏览器环境。
+pub fn create_main_window(app: &AppHandle) -> Result<(), String> {
+    use tauri::WebviewWindowBuilder;
+
+    let config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|window| window.label == "main")
+        .ok_or_else(|| "主窗口配置 main 不存在".to_string())?;
+    get_or_create_window(app, "main", || {
+        WebviewWindowBuilder::from_config(app, config)?
+            .data_directory(isolated_webview_data_directory(app, "main")?)
+            .build()
+    })?;
+    Ok(())
+}
+
+/// 编辑器独占 WebView2 数据目录，避免与其他窗口共享浏览器环境时的 IME 定位异常。
+/// 预热与首次唤起共用构造函数；visible 只区分后台预热和用户主动打开。
+fn build_content_editor_window(
+    app: &AppHandle,
+    visible: bool,
+) -> Result<WebviewWindow, tauri::Error> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder, window::Color};
+
+    WebviewWindowBuilder::new(
+        app,
+        "content-editor",
+        WebviewUrl::App("content-editor.html".into()),
+    )
+    .data_directory(isolated_webview_data_directory(app, "content-editor")?)
+    .title("编辑内容")
+    .inner_size(EDITOR_W, EDITOR_H)
+    .min_inner_size(EDITOR_MIN_W, EDITOR_MIN_H)
+    .decorations(false)
+    .transparent(false)
+    .always_on_top(false)
+    .skip_taskbar(false)
+    .resizable(true)
+    .focused(visible)
+    .visible(visible)
+    .background_color(Color(30, 30, 46, 255))
+    .center()
+    .build()
+}
+
 /// 显示内容编辑器窗口（0.16.3；0.23.1 移除 eval 重载钩子）。
 ///
 /// 独立 Tauri 窗口，启动后预热并复用；用户唤起与预热共用 single-flight 创建入口。
@@ -1793,28 +1861,13 @@ pub fn hide_chat_window_primitive(app: &AppHandle) {
 /// 会话内容由 `EditorSessionService` 管理：绑定后发 `editor-session-changed`
 /// 事件 + 前端 init 主动拉取快照，双路径覆盖“监听器未就绪”与“已就绪”两种时序。
 pub fn show_content_editor_window(app: &AppHandle) -> Result<(), String> {
-    use tauri::{WebviewUrl, WebviewWindowBuilder, window::Color};
-
     const LABEL: &str = "content-editor";
     let (win, is_new) = get_or_create_window(app, LABEL, || {
         // 0.16.13 fix：改回 .visible(true) + background_color 消除白屏闪烁。
         // 之前的 .visible(false) + 前端 init 调 win.show() 方案在首次点击时
         // 因 WebView2 冷启动加载 JS 模块耗时，窗口长时间不可见，用户感知为「没反应」。
         // background_color 设为 dark 主题底色 #1e1e2e，CSS 加载前不闪白。
-        WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("content-editor.html".into()))
-            .title("编辑内容")
-            .inner_size(EDITOR_W, EDITOR_H)
-            .min_inner_size(EDITOR_MIN_W, EDITOR_MIN_H)
-            .decorations(false)
-            .transparent(false)
-            .always_on_top(false)
-            .skip_taskbar(false)
-            .resizable(true)
-            .focused(true)
-            .visible(true)
-            .background_color(Color(30, 30, 46, 255))
-            .center()
-            .build()
+        build_content_editor_window(app, true)
     })
     .map_err(|e| {
         tracing::warn!(error = %e, "content-editor window: 创建失败");
@@ -4472,25 +4525,7 @@ pub fn preheat_secondary_windows(app: AppHandle) {
         // --- content-editor（内容编辑器，0.17.2 加入预热） ---
         // 0.19：经 get_or_create_window 串行化创建。
         match get_or_create_window(&app, "content-editor", || {
-            use tauri::{WebviewUrl, WebviewWindowBuilder, window::Color};
-            WebviewWindowBuilder::new(
-                &app,
-                "content-editor",
-                WebviewUrl::App("content-editor.html".into()),
-            )
-            .title("编辑内容")
-            .inner_size(EDITOR_W, EDITOR_H)
-            .min_inner_size(EDITOR_MIN_W, EDITOR_MIN_H)
-            .decorations(false)
-            .transparent(false)
-            .always_on_top(false)
-            .skip_taskbar(false)
-            .resizable(true)
-            .focused(false)
-            .visible(false)
-            .background_color(Color(30, 30, 46, 255))
-            .center()
-            .build()
+            build_content_editor_window(&app, false)
         }) {
             Ok((_, created)) => {
                 if created {

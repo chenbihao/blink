@@ -41,6 +41,20 @@ fn main() {
     // 初始化日志（尽早，默认 error；setup 读配置后 reload 到用户级别）
     infra::utils::logging::init("error");
 
+    let context = tauri::generate_context!();
+    #[cfg(windows)]
+    let context = {
+        let mut context = context;
+        // 主窗在 setup 中通过 Rust builder 指定独立 WebView2 数据目录。
+        // 保留原窗口配置，只关闭自动创建，避免先产生共享环境的主窗。
+        for window in &mut context.config_mut().app.windows {
+            if window.label == "main" {
+                window.create = false;
+            }
+        }
+        context
+    };
+
     tauri::Builder::default()
         .on_page_load(|window, payload| match payload.event() {
             tauri::webview::PageLoadEvent::Started => {
@@ -356,7 +370,7 @@ fn main() {
         })
         .setup(setup_app)
         .invoke_handler(invoke_handler())
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building tauri application")
         .run(|_app, event| {
             if let tauri::RunEvent::Exit = event {
@@ -467,6 +481,9 @@ fn percent_decode(s: &str) -> String {
 fn setup_app(app: &mut tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error::Error>> {
     // 启动总耗时（setup 结束时手动记录，因为 setup 在同步上下文，没有 runtime 句柄）
     let startup_start = std::time::Instant::now();
+
+    #[cfg(windows)]
+    infra::platform::window::create_main_window(app.handle())?;
 
     // 初始化 DB 四层拆分（0.12.0 §2.2）——config/history/ai/cache 各独立 pool
     let pools = tauri::async_runtime::block_on(infra::data::pools::init_all())

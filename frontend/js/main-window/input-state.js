@@ -57,9 +57,9 @@ function projectUi() {
     } else if (!isChordStandby && wasChordStandby) {
         queryEl.readOnly = false;
         wasChordStandby = false;
-        // 恢复后重新 focus，防止 readOnly 切换导致光标丢失
-        // （AGENTS.md 核心指标：焦点成功率 >99.9%）
-        if (document.visibilityState !== "hidden") {
+        // native 隐藏后 WebView 仍可能报告 visible；用户也可能已切到同进程的
+        // 编辑器。只给仍在前台的可见主窗恢复焦点，迟到的 Alt 松开仅解除只读。
+        if (state.windowVisible && document.hasFocus() && document.visibilityState !== "hidden") {
             queryEl.focus();
         }
     }
