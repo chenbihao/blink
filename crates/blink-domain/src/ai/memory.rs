@@ -1,6 +1,7 @@
 //! SQLite 持久化对话记忆（0.12.3 Phase A → 0.13.1 token-aware 压缩）。
 //!
-//! 实现 rig `ConversationMemory` trait，将对话历史持久化到 `blink_ai.db`。
+//! 实现自有 `ChatMemory` trait（0.27.13：rig 0.45 移除 `ConversationMemory`
+//! 后由本仓自建，AgentProvider 显式驱动），将对话历史持久化到 `blink_ai.db`。
 //! 替代 0.12.1 的 `InMemoryConversationMemory`（进程内，重启丢）。
 //!
 //! ## 窗口策略（0.13.1）
@@ -28,7 +29,7 @@
 //!
 //! ## 自动创建对话
 //!
-//! `append()` 时若 conversation 记录不存在，自动创建（`INSERT OR IGNORE`）。
+//! `append_turn()` 时若 conversation 记录不存在，自动创建（`INSERT OR IGNORE`）。
 //! 标题从首条 User 消息提取（前 50 字符），无 User 消息时为空。
 //!
 //! ## content 序列化
@@ -387,9 +388,9 @@ pub fn compute_truncate_boundary(
 
 /// SQLite 持久化对话记忆。
 ///
-/// 持有 `SqlitePool`（AI 库）+ `MemoryConfig`（窗口策略），实现 rig
-/// `ConversationMemory` trait。Agent 构造时注入，rig 自动按 `conversation_id`
-/// load/append/clear。
+/// 持有 `SqlitePool`（AI 库）+ `MemoryConfig`（窗口策略），实现自有
+/// [`ChatMemory`] trait（0.27.13 起）。`AgentProvider` 构造时注入，每轮
+/// 开始前 `load` 注入 `runner.history(...)`、结束后 `append_turn` 回写。
 ///
 /// `config` 用 `Arc<RwLock<>>` 包裹，支持运行时更新（模型切换时注入
 /// `context_limit`）。`ChatService` 持有同一 `Arc` 的克隆，在 `ensure_provider`
@@ -467,10 +468,10 @@ impl SqliteConversationMemory {
 
     /// 0.13.6: 带统计的 load——返回消息 + 压缩/召回统计。
     ///
-    /// 与 `ConversationMemory::load()` 逻辑一致，额外返回 dropped_count / recall_count。
+    /// 与 `ChatMemory::load()` 逻辑一致，额外返回 dropped_count / recall_count。
     /// 供 `ChatService::compute_context_status()` 计算上下文窗口占用指示器。
     ///
-    /// **注意**：此方法与 rig Agent 内部调用的 `load()` 不会冲突——
+    /// **注意**：此方法与 AgentProvider 每轮注入的 `load()` 不会冲突——
     /// `load()` 的裁剪是 in-memory 的（DB 保留完整历史），FTS5 归档幂等（content hash 去重）。
     pub async fn load_with_stats(
         &self,
@@ -481,7 +482,7 @@ impl SqliteConversationMemory {
 
     /// load 核心逻辑——加载 + 裁剪 + 归档 + 召回，返回消息 + 统计（0.13.6）。
     ///
-    /// `ConversationMemory::load()` 和 `load_with_stats()` 的共用底层。
+    /// `ChatMemory::load()` 和 `load_with_stats()` 的共用底层。
     async fn load_inner(&self, conversation_id: &str) -> Result<MemoryLoadResult, ChatMemoryError> {
         let pool = self.pool.clone();
         let config = self.config.clone();

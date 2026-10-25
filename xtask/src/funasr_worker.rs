@@ -127,6 +127,54 @@ fn run_ctx(cmd: &str, args: &[&str], cwd: &Path, desc: &str) {
     }
 }
 
+/// 进程内解压 zip 到 `dest`（保留压缩包自身的顶层目录结构）。
+///
+/// 不用外部 `tar` 解 zip：Windows 自带的 bsdtar（libarchive）对带 UTF-8
+/// 标志的非 ASCII 文件名条目处理随系统版本漂移——FunASR 源码含中文文件名
+/// `热词列表`，windows-2022 runner 上的 tar 会报 "Archive entry has
+/// empty or unreadable filename" 跳过该条目并 exit 1，而本地新版 bsdtar
+/// 正常。进程内解压让本地与 CI 的源码树逐条目一致。
+///
+/// symlink 条目按普通文件落地（内容即链接目标字符串）：codeload zip 里有
+/// 指向上游开发者本地盘的绝对路径链接（/mnt/...），任何 Windows 环境都
+/// 无法还原，且构建只消费 runtime/llama.cpp 子树。条目名经
+/// `enclosed_name` 校验，拒绝绝对路径与 `..` 穿越（zip-slip 防护）。
+fn extract_zip(zip_path: &Path, dest: &Path) {
+    let file = std::fs::File::open(zip_path)
+        .unwrap_or_else(|e| panic!("解压 FunASR 源码: 打开 zip 失败: {e}"));
+    let mut archive = zip::ZipArchive::new(file)
+        .unwrap_or_else(|e| panic!("解压 FunASR 源码: 解析 zip 失败: {e}"));
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .unwrap_or_else(|e| panic!("解压 FunASR 源码: 读取条目 {index} 失败: {e}"));
+        let Some(rel) = entry.enclosed_name() else {
+            panic!(
+                "解压 FunASR 源码: 条目 {index} 名不安全（绝对路径或 ..），拒绝解出: {}",
+                String::from_utf8_lossy(entry.name_raw())
+            );
+        };
+        let out_path = dest.join(&rel);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&out_path).unwrap_or_else(|e| {
+                panic!("解压 FunASR 源码: 创建目录 {} 失败: {e}", out_path.display())
+            });
+        } else {
+            if let Some(parent) = out_path.parent() {
+                std::fs::create_dir_all(parent).unwrap_or_else(|e| {
+                    panic!("解压 FunASR 源码: 创建目录 {} 失败: {e}", parent.display())
+                });
+            }
+            let mut out_file = std::fs::File::create(&out_path).unwrap_or_else(|e| {
+                panic!("解压 FunASR 源码: 创建文件 {} 失败: {e}", out_path.display())
+            });
+            std::io::copy(&mut entry, &mut out_file).unwrap_or_else(|e| {
+                panic!("解压 FunASR 源码: 写入 {} 失败: {e}", out_path.display())
+            });
+        }
+    }
+}
+
 /// 定位 VS 安装根（vcvars64.bat 所在 VS 的 installationPath）。
 fn find_vs_install() -> Option<PathBuf> {
     // 优先 vswhere（VS 官方发现机制）
@@ -278,23 +326,16 @@ fn ensure_patched_source(work_root: &Path, patches_dir: &Path, header: &Path) ->
     );
     tracing::info!("✅ 源码 zip SHA-256 校验通过");
 
-    // 2. 解压（tar.exe 随 Windows 分发，支持 zip）
+    // 2. 解压（进程内，见 extract_zip 说明）
     if src_root.exists() {
         std::fs::remove_dir_all(&src_root).unwrap();
     }
     std::fs::create_dir_all(&src_root).unwrap();
     tracing::info!("📦 解压源码...");
-    run_ctx(
-        "tar",
-        &[
-            "-xf",
-            zip_path.to_str().unwrap(),
-            "-C",
-            src_root.to_str().unwrap(),
-        ],
-        work_root,
-        "解压 FunASR 源码",
-    );
+    {
+        let _timer = crate::build_log::BuildTimer::start("解压 FunASR 源码");
+        extract_zip(&zip_path, &src_root);
+    }
     // codeload zip 展开为 FunASR-<sha>/，归一到 src 根
     let mut inner: Option<PathBuf> = None;
     for entry in std::fs::read_dir(&src_root).unwrap().flatten() {
@@ -491,7 +532,109 @@ fn run_cmd_line(line: &str, cwd: &Path, desc: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{PATCH_INPUTS, patched_source_fingerprint};
+    use super::{extract_zip, patched_source_fingerprint, PATCH_INPUTS};
+
+    #[test]
+    fn extract_zip_keeps_non_ascii_entry_names() {
+        use std::io::Write as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = dir.path().join("synthetic.zip");
+        let mut writer = zip::ZipWriter::new(std::fs::File::create(&zip_path).unwrap());
+        let options = zip::write::SimpleFileOptions::default();
+        writer
+            .start_file("FunASR-test/examples/热词列表", options)
+            .unwrap();
+        writer.write_all(b"hotwords").unwrap();
+        writer
+            .start_file("FunASR-test/README.md", options)
+            .unwrap();
+        writer.write_all(b"readme").unwrap();
+        writer.finish().unwrap();
+
+        let dest = dir.path().join("out");
+        extract_zip(&zip_path, &dest);
+        let root = dest.join("FunASR-test");
+        assert_eq!(
+            std::fs::read(root.join("examples").join("热词列表")).unwrap(),
+            b"hotwords"
+        );
+        assert_eq!(std::fs::read(root.join("README.md")).unwrap(), b"readme");
+    }
+
+    /// 对真实 FunASR 源码 zip 的手动验证（CI 上无缓存，跳过）：
+    /// `cargo test -p xtask -- --ignored`
+    #[test]
+    #[ignore = "依赖本地缓存的真实 FunASR zip（跑过一次 funasr-worker 下载后存在）"]
+    fn extract_zip_real_funasr_source() {
+        let zip_path = super::workspace_root()
+            .join("target")
+            .join("funasr-worker")
+            .join("funasr-source.zip");
+        assert!(zip_path.exists(), "缺少 {}", zip_path.display());
+
+        let archive = zip::ZipArchive::new(std::fs::File::open(&zip_path).unwrap()).unwrap();
+        assert_eq!(archive.len(), 4640, "条目数应与 pin 定的 zip 一致");
+
+        let dest = tempfile::tempdir().unwrap();
+        extract_zip(&zip_path, dest.path());
+        // codeload zip 展开为 FunASR-<sha>/；真实流水线会先把它归一到 src 根，
+        // 这里等价地在内层目录执行补丁流程
+        let src_root = dest
+            .path()
+            .join("FunASR-55b662ccf9ea77237ba9253b3bddd953d4184f84");
+        // zip 内唯一非 ASCII 条目，正是 CI 上 bsdtar 跳过的那个
+        assert!(src_root
+            .join("examples")
+            .join("industrial_data_pretraining")
+            .join("fun_asr_nano")
+            .join("热词列表")
+            .is_file());
+        // symlink 条目按普通文件落地（内容即目标字符串），不还原链接
+        assert_eq!(
+            std::fs::read_to_string(src_root.join("MinMo_gitlab"))
+                .unwrap()
+                .trim_end(),
+            "../MinMo_gitlab"
+        );
+        assert!(src_root
+            .join("runtime")
+            .join("llama.cpp")
+            .join("CMakeLists.txt")
+            .is_file());
+
+        // 与 ensure_patched_source 相同的补丁流程在新解压的树上必须原样可用
+        let workspace = super::workspace_root();
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&src_root)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {} 失败", args.join(" "));
+        };
+        run(&["init", "-q", "."]);
+        run(&["config", "core.autocrlf", "false"]);
+        run(&["config", "core.eol", "lf"]);
+        let mut add_args = vec!["add".to_string(), "--".to_string()];
+        add_args.extend(PATCH_INPUTS.iter().map(|(_, target)| target.to_string()));
+        let add_refs: Vec<&str> = add_args.iter().map(String::as_str).collect();
+        run(&add_refs);
+        for (patch, _) in PATCH_INPUTS {
+            let patch_path = workspace
+                .join("xtask")
+                .join("funasr-worker")
+                .join("patches")
+                .join(patch);
+            let status = std::process::Command::new("git")
+                .args(["apply", "--whitespace=nowarn"])
+                .arg(&patch_path)
+                .current_dir(&src_root)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git apply {patch} 失败");
+        }
+    }
 
     #[test]
     fn patched_source_fingerprint_tracks_patches_and_header() {

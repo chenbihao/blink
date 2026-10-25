@@ -555,7 +555,9 @@ impl CapabilityTool {
         DynamicTool::new(
             tool_name,
             schema.description.clone(),
-            schema.to_rig_tool().parameters,
+            // 直接取 schema.parameters——经 to_rig_tool() 会二次跑 ToolName 解析，
+            // schema.name 为空时打出误导性告警（该名字实际被丢弃，只用参数）
+            schema.parameters.clone(),
             move |args_value| {
                 let cap_id = cap_id.clone();
                 let emitter = emitter.clone();

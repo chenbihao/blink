@@ -96,10 +96,13 @@ pub async fn get_chat_messages(
                     error = %e,
                     "get_chat_messages: 消息反序列化失败，降级为占位行"
                 );
+                // 0.27.15：思考冻结元数据只投影 user 行（与下方正常路径同口径）
+                let placeholder_thinking_state =
+                    if role == "user" { thinking_state } else { None };
                 snapshots.push(ChatMessageSnapshot {
                     message_id,
-                    role: role.clone(),
-                    text: format!("[无法解析的消息记录（可能为损坏数据）]"),
+                    role,
+                    text: "[无法解析的消息记录（可能为损坏数据）]".to_string(),
                     thinking: None,
                     tool_name: None,
                     tool_arguments: None,
@@ -108,7 +111,7 @@ pub async fn get_chat_messages(
                     attachments: None,
                     failed: None,
                     error_text: None,
-                    thinking_state,
+                    thinking_state: placeholder_thinking_state,
                 });
                 continue;
             }

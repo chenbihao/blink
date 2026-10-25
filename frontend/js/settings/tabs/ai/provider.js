@@ -880,8 +880,9 @@ export function openAIProviderModal(editProviderId) {
     setTimeout(() => $("ai-modal-display-name")?.focus(), 40);
 }
 
-/** 0.27.14：兼容方言行仅对 OpenAICompatible 协议显示——其余协议后端忽略该字段。 */
-function updateCompatDialectRowVisible() {
+/** 0.27.14：兼容方言行仅对 OpenAICompatible 协议显示——其余协议后端忽略该字段。
+ * （core.js 的 kind change 事件复用同一实现，防两处漂移。） */
+export function updateCompatDialectRowVisible() {
     const row = document.getElementById("ai-modal-compat-dialect-row");
     if (!row) return;
     const kind = document.getElementById("ai-modal-kind")?.value;

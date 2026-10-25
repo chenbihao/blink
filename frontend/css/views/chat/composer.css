@@ -589,9 +589,3 @@
 .flyout-key-active {
     background: var(--accent-bg);
 }
-
-/* 思考下拉能力已知时的禁用态（预留——当前由渲染层不输出不可用项） */
-.chat-thinking-option-disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-}

@@ -23,6 +23,7 @@ import {escapeAttr} from "./utils.js";
 import {EFFORT_LEVELS} from "../shared/effort-levels.js";
 import {openExclusive, registerPopup} from "./composer-popups.js";
 import {clearFlyoutKeyActive, registerFlyoutKeynav} from "./flyout-keynav.js";
+import {thinkingDropdownOptions} from "./thinking-options.js";
 
 /** 当前选中模型 id（"{provider}:{model}"），供持久化思考强度定位 */
 let currentThinkingModelId = null;
@@ -57,7 +58,7 @@ export function initThinkingSelector() {
         // 0.27.15：不支持思考的模型控件已隐藏（防御——正常路径 sync 已隐藏）
         if (cap?.shape === "unsupported") return;
         if (cap?.shape === "switch") {
-            if (cap.canDisable === false) return; // 始终开启——开关不可用
+            if (cap.can_disable === false) return; // 始终开启——开关不可用
             // 简单开关（Anthropic 预算型 / Ollama / DeepSeek 未知 / Moonshot k2.6）
             state.setThinkingEnabled(!state.thinkingEnabled);
             syncThinkingControl();
@@ -87,6 +88,18 @@ export function initThinkingSelector() {
         if (!thinkingDropdown.hidden && !thinkingTrigger.contains(e.target)) {
             hideThinkingDropdown();
         }
+    });
+
+    // 0.27.15 review：自定义档位输入框内 Enter 直接应用——keynav 对可编辑
+    // 目标已放行（不劫持光标/输入），此处补回 Enter 快捷提交
+    thinkingDropdown.addEventListener("keydown", (e) => {
+        if (e.target.id !== "chat-thinking-custom-input") return;
+        if (e.key !== "Enter" || e.isComposing || e.shiftKey) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const effort = e.target.value.trim();
+        hideThinkingDropdown();
+        applyThinkingEffort(effort);
     });
 }
 
@@ -134,7 +147,7 @@ export function syncThinkingControl() {
     if (!dropdownShape) {
         // 开关型：隐藏 caret，避免"像有下拉却只是开关"的误导
         thinkingTrigger.classList.add("no-effort");
-        if (cap && cap.canDisable === false) {
+        if (cap && cap.can_disable === false) {
             // 始终开启——诚实呈现，不可交互关闭
             setThinkingState({enabled: true, label: "思考 · 始终开启"});
             return;
@@ -149,58 +162,38 @@ export function syncThinkingControl() {
     });
 }
 
-/** 渲染思考等级下拉（0.27.15 按能力分组渲染）。 */
+/** 渲染思考等级下拉（0.27.15 按能力分组渲染；选项决策在 thinking-options.js）。 */
 function renderThinkingDropdown() {
     if (!thinkingDropdown) return;
     const cap = state.thinkingCapability;
     const current = state.thinkingEffort ?? ""; // null 与 "" 都视为默认档
-    let html = "";
+    const {rows, showCustomInput} = thinkingDropdownOptions(cap, current);
 
-    const option = (effort, title, sub, {selected = false} = {}) => {
+    let html = "";
+    for (const row of rows) {
+        if (row.type === "group") {
+            html += `<div class="chat-thinking-group">${row.title}</div>`;
+            continue;
+        }
         const cls =
             "chat-thinking-option flyout-nav-item" +
-            (selected ? " chat-thinking-option-selected" : "");
-        const subHtml = sub ? `<span class="chat-thinking-option-sub">${sub}</span>` : "";
-        return `<div class="${cls}" data-effort="${escapeAttr(effort)}">
+            (row.selected ? " chat-thinking-option-selected" : "");
+        const subHtml = row.sub ? `<span class="chat-thinking-option-sub">${row.sub}</span>` : "";
+        html += `<div class="${cls}" data-effort="${escapeAttr(row.effort)}">
 <div class="chat-thinking-option-text">
-<span class="chat-thinking-option-title">${title}</span>
+<span class="chat-thinking-option-title">${row.title}</span>
 ${subHtml}
 </div></div>`;
-    };
-
-    if (!cap || cap.shape === "unknown") {
-        // 能力未知：现状全量下拉（默认/关/预设档/自定义）+ 提示
-        html += '<div class="chat-thinking-group">思考</div>';
-        html += option("", "默认", "不主动给模型打 patch", {selected: current === ""});
-        html += option("none", "思考关", null, {selected: current === "none"});
-        html += '<div class="chat-thinking-group">思考级别</div>';
-        for (const level of EFFORT_LEVELS) {
-            html += option(level, level, null, {selected: current === level});
-        }
+    }
+    if (showCustomInput) {
+        const isCustom =
+            current !== "" && current !== "none" && current !== "default_on" && !EFFORT_LEVELS.includes(current);
         html += '<div class="chat-thinking-group">自定义</div>';
-        const isCustom = current !== "" && current !== "none" && current !== "default_on" && !EFFORT_LEVELS.includes(current);
         html += '<div class="chat-thinking-custom-row">';
         html += `<input type="text" id="chat-thinking-custom-input" placeholder="留空 = 不发送（模型默认档）" value="${isCustom ? escapeAttr(current) : ""}">`;
         html += '<button class="chat-thinking-custom-apply" id="chat-thinking-custom-apply">应用</button>';
         html += "</div>";
         html += '<div class="chat-thinking-hint">该模型支持档位未知：若请求报错，请在此选择或输入一个支持的档位。</div>';
-    } else {
-        // 能力已知（levels）：目录声明档位 + 默认/关/开·默认
-        html += '<div class="chat-thinking-group">思考</div>';
-        html += option("", "默认", "跟随服务默认（不发送思考参数）", {selected: current === ""});
-        if (cap.canDisable) {
-            html += option("none", "关", null, {selected: current === "none"});
-        }
-        if (cap.canEnableDefault) {
-            html += option("default_on", "开", "默认强度 / 默认预算", {selected: current === "default_on"});
-        }
-        if (cap.levels && cap.levels.length > 0) {
-            html += '<div class="chat-thinking-group">思考级别</div>';
-            for (const level of cap.levels) {
-                const isDefault = cap.defaultEffort === level;
-                html += option(level, level, isDefault ? "目录默认档" : null, {selected: current === level});
-            }
-        }
     }
 
     thinkingDropdown.innerHTML = html;

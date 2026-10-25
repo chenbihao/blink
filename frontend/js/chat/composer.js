@@ -30,6 +30,7 @@ import {
     onComposerInputForAttachments,
     openAttachmentPalette,
 } from "./attachment-palette.js";
+import {handleFlyoutKeynav} from "./flyout-keynav.js";
 
 /** @type {HTMLTextAreaElement} */
 let textarea = null;
@@ -139,12 +140,15 @@ export function initComposer(callbacks) {
         onComposerInputForAttachments(textarea.value);
     });
 
-    // 面板快捷键优先（命令面板 / 附件面板，IME 组合中跳过）；
+    // 面板快捷键优先（命令面板 / 附件面板 / 模型与思考下拉，IME 组合中跳过）；
     // Enter 发送 / Shift+Enter 换行——流式模式（stop 按钮）下 Enter 不发送，
     // 避免用户预输入时误触发
     textarea.addEventListener("keydown", (e) => {
         if (!composing && handlePaletteKeydown(e)) return;
         if (!composing && handleAttachmentPaletteKeydown(e)) return;
+        // 0.27.15 review：flyout 打开时导航键（↑/↓/Enter/Tab/Esc）先给面板
+        // 消费——与命令面板同构，避免"Enter 发送 + 采纳条目"双动作
+        if (!composing && handleFlyoutKeynav(e)) return;
         if (e.key === "Enter" && !e.shiftKey) {
             if (sendBtn.classList.contains("chat-stop-btn")) return;
             e.preventDefault();

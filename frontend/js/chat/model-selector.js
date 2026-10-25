@@ -49,19 +49,25 @@ export function currentModelSupportsVision() {
 }
 
 /** 拉取模型列表 + 状态，刷新下拉和标签 */
+/** 刷新代次——并发刷新交错时丢弃过期响应（防陈旧快照污染 currentThinkingModelId）。 */
+let refreshGeneration = 0;
+
 export async function refreshModelSelector() {
+    const generation = ++refreshGeneration;
     try {
         const [models, status] = await Promise.all([
             ipc.getChatModels(),
             ipc.getChatStatus(),
         ]);
+        // 0.27.15 review：两个刷新交错（配置变更/切模型/窗口初始化）时，先发后至
+        // 的旧响应不得覆盖新状态——否则污染 currentThinkingModelId，思考档位
+        // 会持久化到错误模型（spec §5.1 异步回流必校验版本）
+        if (generation !== refreshGeneration) return;
         state.setProviderConfigured(status.provider_configured);
-        // 0.21.17：从 status 恢复当前生效模型的思考能力（selected 优先，Main 回落）
-        state.setThinkingCapability({
-            effort: status.reasoning_effort ?? null,
-            supportsEffort: status.supports_effort_levels ?? false,
-        });
-        // 0.27.15：能力快照（形态/档位/可关/可开·默认）——控件按能力诚实渲染
+        // 0.21.17：从 status 恢复当前生效模型的思考强度（selected 优先，Main 回落）
+        state.setThinkingEffort(status.reasoning_effort ?? null);
+        // 0.27.15：能力快照（形态/档位/可关/可开·默认）——控件按能力诚实渲染，
+        // 并派生旧 supportsEffort（levels/unknown = 下拉型）
         state.setThinkingCapabilityInfo(status.thinking_capability ?? null);
         // 记录当前模型 id（"{provider}:{model}"），供思考强度持久化定位
         setThinkingModelId(models.find((m) => m.is_selected)?.id ?? null);
@@ -229,7 +235,9 @@ function renderModelOption(id, label, providerName, selected, badge) {
     const providerHtml = providerName
         ? `<span class="chat-model-option-provider">${escapeText(providerName)}</span>`
         : '';
-    return `<div class="chat-model-option flyout-nav-item${selected ? " chat-model-option-selected" : ""}" data-model-id="${escapeAttr(id ?? "")}" title="${escapeAttr(providerName ? providerName + ' · ' + label : label)}">
+    // 主档未配置占位（id=null）不进键盘导航——键盘误触不应触发"回落主档"选择
+    const navClass = id == null ? "flyout-nav-item-disabled" : "flyout-nav-item";
+    return `<div class="chat-model-option ${navClass}${selected ? " chat-model-option-selected" : ""}" data-model-id="${escapeAttr(id ?? "")}" title="${escapeAttr(providerName ? providerName + ' · ' + label : label)}">
     ${badgeHtml}
     <div class="chat-model-option-text">
       <span class="chat-model-option-name">${escapeText(label)}</span>

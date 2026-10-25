@@ -42,8 +42,9 @@ export let thinkingEffort = null;
 export let supportsEffort = false;
 
 /**
- * 0.27.15：当前模型思考能力快照（status.thinking_capability 投影）。
- * @type {{shape: string, levels: string[], canDisable: boolean, canEnableDefault: boolean, budget: [number, number]|null, defaultEffort: string|null, unknown: boolean}|null}
+ * 0.27.15：当前模型思考能力快照（status.thinking_capability 投影，
+ * 后端 serde 字段为 snake_case——can_disable / can_enable_default / default_effort）。
+ * @type {{shape: string, levels: string[], can_disable: boolean, can_enable_default: boolean, budget: [number, number]|null, default_effort: string|null, unknown: boolean}|null}
  */
 export let thinkingCapability = null;
 
@@ -120,12 +121,6 @@ export function setThinkingEnabled(value) {
 /** 0.21.17: 设置当前模型思考强度（reasoning_effort 线值，null = auto）。 */
 export function setThinkingEffort(value) {
     thinkingEffort = value ?? null;
-}
-
-/** 0.21.17: 一次更新思考控件所需全部状态（等级 + 是否支持）。 */
-export function setThinkingCapability({effort, supportsEffort: supports}) {
-    thinkingEffort = effort ?? null;
-    supportsEffort = Boolean(supports);
 }
 
 /** 0.27.15: 更新思考能力快照（并同步旧 supportsEffort 派生值）。 */

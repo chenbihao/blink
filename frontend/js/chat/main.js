@@ -36,6 +36,7 @@ import {initSidebar, refreshSidebar, setActiveConversation, toggleSidebar} from 
 // 软规则：main.js 不再吸收新的交互模块，只保留装配与全局事件分发
 import {effectiveThinkingEnabled, initThinkingSelector, syncThinkingControl} from "./thinking-selector.js";
 import {bindModelSelector, currentModelSupportsVision, openModelDropdown, refreshModelSelector, updateProviderLabel} from "./model-selector.js";
+import {wasConsumedByKeynav} from "./flyout-keynav.js";
 import {initCommandPalette, invalidatePromptCache, invalidateSlashSnapshotCache, isPaletteOpen, closePalette, openPromptPalette} from "./command-palette.js";
 import {initAttachmentPalette, splitAtQuery} from "./attachment-palette.js";
 import {applyThemeFromConfig} from "../shared/theme.js";
@@ -1063,6 +1064,9 @@ function handleEsc(e) {
         focusInput();
         return;
     }
+    // 0.27.15 review：模型/思考下拉打开时 Esc 已被 flyout 键盘导航消费（仅关
+    // 面板）——不得再隐藏窗口/中止生成（stopPropagation 不拦同节点监听）。
+    if (wasConsumedByKeynav(e)) return;
     e.preventDefault();
     if (state.isStreaming) {
         handleStop();

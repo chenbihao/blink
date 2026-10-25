@@ -24,8 +24,8 @@
 
 use rmcp::model::ClientConfig;
 use rmcp::service::RunningService;
-// 0.45：collect_tools 返回 rig-rmcp McpTool（持连接保活），由 AgentProvider 注册。
-// collect_tools 返回原始 (Tool, ServerSink) 对供 build_agent 使用。
+// 0.45：collect_tools 返回 rig-rmcp McpTool（持连接克隆保活，缓存 Agent 在途
+// 调用不受重连/停用影响），由 AgentProvider 经 DynamicTool 注册。
 use rmcp::ServiceExt;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -768,7 +768,10 @@ impl McpClientManager {
         }
         let mut connected = self.connected.write().await;
         if let Some(server) = connected.remove(name) {
-            // Drop service 会触发子进程清理（TokioChildProcess 的 Drop impl 会 kill）
+            // 0.45：连接被 McpTool 克隆保活（缓存 Agent 持有），drop 不再立即杀
+            // stdio 子进程——显式 close 取消 transport（kill-on-drop 生效），
+            // 在途旧 Agent 的工具调用会失败，这是「停止 server」的应有语义
+            server.conn.close().await;
             drop(server);
             tracing::info!(server = %name, "MCP: server 已停止");
             // 仅当实际 remove 了才 bump——没移除则池子没变，bump 会无谓触发重建

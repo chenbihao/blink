@@ -17,7 +17,8 @@ import {
     renderAIProviders,
     renderProviderModelTags,
     saveNewProviderFromModal,
-    triggerProviderModelFetch
+    triggerProviderModelFetch,
+    updateCompatDialectRowVisible
 } from "./provider.js";
 import {bindAIModelEditModalEvents} from "./model-edit.js";
 import {initSkillImportHandlers, loadSkillList, showSkillImportPanel} from "./skill.js";
@@ -511,9 +512,8 @@ function bindAIEvents() {
     $("ai-modal-save")?.addEventListener("click", saveNewProviderFromModal);
     $("ai-modal-kind")?.addEventListener("change", () => {
         $("ai-modal-preset").value = "custom";
-        // 0.27.14：兼容方言行仅 OpenAICompatible 显示
-        const row = $("ai-modal-compat-dialect-row");
-        if (row) row.classList.toggle("hidden", $("ai-modal-kind").value !== "openai_compatible");
+        // 0.27.14：兼容方言行仅 OpenAICompatible 显示（与 provider.js 共用实现）
+        updateCompatDialectRowVisible();
     });
     $("ai-modal-base-url")?.addEventListener("input", () => {
         const bu = $("ai-modal-base-url").value.trim();

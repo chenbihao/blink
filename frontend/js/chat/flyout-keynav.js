@@ -3,8 +3,14 @@
  *
  * 仲裁约定（§6.5）：面板打开时 ↑/↓ 移动高亮、Enter/Tab 采纳、Esc 仅关面板；
  * IME 组合中（isComposing）不处理——中文输入法选字回车/方向键不误采纳。
- * 文档级监听（面板可能经按钮点击或 /model 命令打开，焦点位置不固定）；
- * 面板关闭时零开销短路。
+ *
+ * 两层路由（0.27.15 review 修正）：
+ * - **composer target 阶段优先**（`handleFlyoutKeynav`）：焦点在输入框时，
+ *   Enter/Tab 先给面板采纳（与命令面板同构），不再"发送消息 + 采纳条目"双动作。
+ * - **document 级兜底**：焦点在按钮/body 时导航；可编辑目标（输入框/面板内嵌
+ *   输入框）的非 Esc 键在此层放行——保持原生键行为（光标移动/换行），
+ *   Esc 仍关面板。已消费按键 `stopImmediatePropagation`，防止同节点的
+ *   后续监听（如 main.js handleEsc 关窗口）双重消费。
  */
 
 /** @type {Map<string, {container: () => HTMLElement|null, isActive: () => boolean, adopt: (el: HTMLElement) => void, close: () => void}>} */
@@ -12,15 +18,55 @@ const handlers = new Map();
 
 let bound = false;
 
+/** 最近一次被本模块消费的 keydown 事件（供 handleEsc 等同节点监听仲裁）。 */
+let lastConsumed = null;
+
+function dispatchKeynav(e) {
+    for (const h of handlers.values()) {
+        if (h.isActive() && handleOne(e, h)) return true;
+    }
+    return false;
+}
+
+function isEditableTarget(target) {
+    if (!target || typeof target.closest !== "function") return false;
+    return Boolean(target.closest('input, textarea, [contenteditable="true"]'));
+}
+
 function ensureBound() {
     if (bound) return;
     bound = true;
     document.addEventListener("keydown", (e) => {
         if (e.isComposing) return; // IME 组合中不抢键盘
-        for (const h of handlers.values()) {
-            if (h.isActive() && handleOne(e, h)) return;
-        }
+        // 可编辑目标的非 Esc 键不在 document 层处理：composer 已在 target 阶段
+        // 优先路由；面板内嵌输入框（如自定义档位）保持原生键行为
+        if (e.key !== "Escape" && isEditableTarget(e.target)) return;
+        if (dispatchKeynav(e)) lastConsumed = e;
     });
+}
+
+/**
+ * composer target 阶段路由入口——面板打开时先于 Enter 发送/换行消费导航键。
+ * @param {KeyboardEvent} e
+ * @returns {boolean} true 表示已被面板消费，composer 不应再处理
+ */
+export function handleFlyoutKeynav(e) {
+    if (e.isComposing) return false;
+    if (dispatchKeynav(e)) {
+        lastConsumed = e;
+        return true;
+    }
+    return false;
+}
+
+/**
+ * 该事件是否已被 flyout 键盘导航消费（Esc 仲裁——main.js handleEsc 据此
+ * 只关面板，不隐藏窗口/中止生成；与监听注册顺序无关）。
+ * @param {KeyboardEvent} e
+ * @returns {boolean}
+ */
+export function wasConsumedByKeynav(e) {
+    return e === lastConsumed;
 }
 
 /**
@@ -44,7 +90,7 @@ function handleOne(e, h) {
         case "ArrowUp":
         case "ArrowDown": {
             e.preventDefault();
-            e.stopPropagation();
+            e.stopImmediatePropagation();
             const delta = e.key === "ArrowDown" ? 1 : -1;
             const next =
                 activeIndex === -1
@@ -59,14 +105,14 @@ function handleOne(e, h) {
             const active =
                 activeIndex === -1 ? null : items[activeIndex];
             e.preventDefault();
-            e.stopPropagation();
+            e.stopImmediatePropagation();
             if (active) h.adopt(active);
             else h.close();
             return true;
         }
         case "Escape": {
             e.preventDefault();
-            e.stopPropagation();
+            e.stopImmediatePropagation();
             h.close();
             return true;
         }

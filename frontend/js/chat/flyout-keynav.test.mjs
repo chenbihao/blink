@@ -40,7 +40,8 @@ globalThis.document = {
 };
 globalThis.window = {__TAURI__: {core: {invoke: () => Promise.resolve(true)}}};
 
-const {registerFlyoutKeynav, clearFlyoutKeyActive} = await import("./flyout-keynav.js");
+const {registerFlyoutKeynav, clearFlyoutKeyActive, handleFlyoutKeynav, wasConsumedByKeynav} =
+    await import("./flyout-keynav.js");
 
 function makePanel(items) {
     const panel = new FakeElement("div");
@@ -48,14 +49,21 @@ function makePanel(items) {
     return panel;
 }
 
-function keyEvent(key, {isComposing = false} = {}) {
+function keyEvent(key, {isComposing = false, target = null} = {}) {
     return {
         key,
         isComposing,
         shiftKey: false,
+        target,
         preventDefault() { this.prevented = true; },
         stopPropagation() { this.stopped = true; },
+        stopImmediatePropagation() { this.immediateStopped = true; },
     };
+}
+
+/** 可编辑目标桩（textarea / 面板内嵌 input）——closest 命中可编辑选择器。 */
+function editableTarget() {
+    return {closest: (sel) => (sel.includes("textarea") ? {} : null)};
 }
 
 test("arrow keys move highlight, Enter adopts, Escape closes", () => {
@@ -160,4 +168,72 @@ test("disabled items are skipped during navigation", () => {
         c.classList.contains("flyout-key-active"),
         "禁用项被跳过，直接到第三项"
     );
+    panel.hidden = true;
+});
+
+// ── 0.27.15 review 修正：可编辑目标仲裁 + 消费标记 ─────────────────────────
+
+test("editable target: non-Escape keys pass through at document level, Escape still closes", () => {
+    const a = new FakeElement(); a.dataset.effort = ""; a.classList.add("flyout-nav-item");
+    const panel = makePanel([a]);
+    const adopted = [];
+    let closed = 0;
+    registerFlyoutKeynav("t5", {
+        container: () => panel,
+        isActive: () => !panel.hidden,
+        adopt: (el) => adopted.push(el),
+        close: () => { closed++; },
+    });
+    // composer textarea / 面板内嵌 input：↑/↓/Enter 原生放行（不劫持光标/输入）
+    for (const key of ["ArrowUp", "ArrowDown", "Enter", "Tab"]) {
+        const e = keyEvent(key, {target: editableTarget()});
+        keydownListeners.at(-1)(e);
+        assert.ok(!e.prevented, `可编辑目标的 ${key} 不应在 document 层被拦截`);
+    }
+    assert.equal(adopted.length, 0);
+    assert.equal(closed, 0);
+    // Esc 仍关面板（即使焦点在输入框内）
+    const esc = keyEvent("Escape", {target: editableTarget()});
+    keydownListeners.at(-1)(esc);
+    assert.equal(closed, 1, "可编辑目标的 Esc 仍关面板");
+    panel.hidden = true;
+});
+
+test("consumed keys are marked for same-node arbitration (wasConsumedByKeynav)", () => {
+    const a = new FakeElement(); a.dataset.effort = ""; a.classList.add("flyout-nav-item");
+    const panel = makePanel([a]);
+    registerFlyoutKeynav("t6", {
+        container: () => panel,
+        isActive: () => !panel.hidden,
+        adopt: () => {},
+        close: () => {},
+    });
+    const esc = keyEvent("Escape");
+    keydownListeners.at(-1)(esc);
+    assert.ok(wasConsumedByKeynav(esc), "被消费的 Esc 应可被 handleEsc 仲裁识别");
+    assert.ok(esc.immediateStopped, "消费按键应 stopImmediatePropagation");
+    const other = keyEvent("Escape");
+    assert.ok(!wasConsumedByKeynav(other), "未消费的事件不误报");
+    panel.hidden = true;
+});
+
+test("handleFlyoutKeynav routes at target phase regardless of editable target", () => {
+    const a = new FakeElement(); a.dataset.effort = "high"; a.classList.add("flyout-nav-item");
+    const panel = makePanel([a]);
+    const adopted = [];
+    registerFlyoutKeynav("t7", {
+        container: () => panel,
+        isActive: () => !panel.hidden,
+        adopt: (el) => adopted.push(el),
+        close: () => {},
+    });
+    // composer 在 target 阶段调用（焦点在 textarea）：面板打开时 Enter 采纳而非发送
+    assert.equal(handleFlyoutKeynav(keyEvent("ArrowDown", {target: editableTarget()})), true);
+    const enter = keyEvent("Enter", {target: editableTarget()});
+    assert.equal(handleFlyoutKeynav(enter), true, "面板打开时 Enter 应被面板消费");
+    assert.equal(adopted.length, 1);
+    // 面板关闭时不拦截——composer 正常 Enter 发送
+    panel.hidden = true;
+    const enter2 = keyEvent("Enter", {target: editableTarget()});
+    assert.equal(handleFlyoutKeynav(enter2), false, "面板关闭时 Enter 归还 composer");
 });
