@@ -83,7 +83,7 @@ pub async fn get_chat_messages(
             .await?;
 
     let mut snapshots: Vec<ChatMessageSnapshot> = Vec::with_capacity(rows.len());
-    for (message_id, role, content_json, created_at, attachments_json, status, error_text) in rows {
+    for (message_id, role, content_json, created_at, attachments_json, status, error_text, thinking_state) in rows {
         // 0.27.13：走兼容解析（0.45 原生 + 0.43 legacy 升级）；两格式都失败的单行
         // 不再炸掉整个会话加载（旧行为一条坏行 → 前端整会话不可见），降级为
         // 占位行并打 warn——数据仍留在 DB，修复后可恢复。
@@ -108,6 +108,7 @@ pub async fn get_chat_messages(
                     attachments: None,
                     failed: None,
                     error_text: None,
+                    thinking_state,
                 });
                 continue;
             }
@@ -181,6 +182,8 @@ pub async fn get_chat_messages(
                 } else {
                     text
                 };
+                // 0.27.15：思考冻结元数据只投影 user 行（预写行携带）
+                let thinking_state = if role == "user" { thinking_state } else { None };
                 snapshots.push(ChatMessageSnapshot {
                     message_id,
                     role,
@@ -199,6 +202,7 @@ pub async fn get_chat_messages(
                     } else {
                         None
                     },
+                    thinking_state,
                 });
             }
             Message::Assistant(turn) => {
@@ -234,6 +238,7 @@ pub async fn get_chat_messages(
                     attachments: None,
                     failed: None,
                     error_text: None,
+                    thinking_state: None,
                 });
             }
             Message::System { content } => {
@@ -249,6 +254,7 @@ pub async fn get_chat_messages(
                     attachments: None,
                     failed: None,
                     error_text: None,
+                    thinking_state: None,
                 });
             }
         }

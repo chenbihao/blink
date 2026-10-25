@@ -152,6 +152,7 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
     // 0.27.12 迁移：messages 表加 status/error_text 列（发送失败持久化，
     // 若不存在）——只进前端历史投影，不参与模型上下文加载
     migrate_add_message_status_columns(pool).await?;
+    migrate_add_thinking_state_column(pool).await?;
 
     // 0.21.19: conversation_summaries 表（摘要压缩）
     sqlx::query(
@@ -519,7 +520,7 @@ pub async fn append_message(
     role: &str,
     content: &str,
 ) -> Result<i64, String> {
-    append_message_with_attachments(pool, conversation_id, role, content, None).await
+    append_message_with_attachments(pool, conversation_id, role, content, None, None).await
 }
 
 /// 插入一条消息并携带附件展示元数据（0.23.12）。
@@ -532,21 +533,47 @@ pub async fn append_message_with_attachments(
     role: &str,
     content: &str,
     attachments_json: Option<&str>,
+    thinking_state_json: Option<&str>,
 ) -> Result<i64, String> {
     let now = chrono::Utc::now().timestamp();
     let result = sqlx::query(
-        "INSERT INTO messages (conversation_id, role, content, created_at, attachments) \
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO messages (conversation_id, role, content, created_at, attachments, thinking_state) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
     )
     .bind(conversation_id)
     .bind(role)
     .bind(content)
     .bind(now)
     .bind(attachments_json)
+    .bind(thinking_state_json)
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
     Ok(result.last_insert_rowid())
+}
+
+/// 0.27.15：`messages` 表加 `thinking_state` 列（若不存在）。
+///
+/// 发送时冻结的当轮思考意图（JSON：`{"intent":..,"effort":..,"enabled":..}`），
+/// 随预写 user 行落库——历史/导出按当轮状态呈现，旧消息缺元数据时前端标
+/// 「未知」不猜测。与 `status`/`error_text` 同理，**不参与**模型上下文加载。
+async fn migrate_add_thinking_state_column(pool: &SqlitePool) -> Result<(), String> {
+    let columns: Vec<(String,)> =
+        sqlx::query_as("SELECT name FROM pragma_table_info('messages')")
+            .fetch_all(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    let has_thinking_state = columns.iter().any(|(name,)| name == "thinking_state");
+    if !has_thinking_state {
+        sqlx::query(sqlx::AssertSqlSafe(
+            "ALTER TABLE messages ADD COLUMN thinking_state TEXT".to_string(),
+        ))
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        tracing::info!("messages 表已迁移：新增 thinking_state 列");
+    }
+    Ok(())
 }
 
 /// 实况回复按冻结的历史代次更新；截断/清空后到达的 flush 不重新插入。
@@ -577,10 +604,10 @@ pub async fn upsert_live_message_at_revision(
 }
 
 /// 加载对话的最后一条消息（role, content）。无消息时返回 None。
-/// 同文失败轮复用时刷新展示徽标，授权引用仍不落库。
-pub async fn update_last_user_attachments(pool: &SqlitePool, conversation_id: &str, attachments: Option<&str>) -> Result<(), String> {
-    sqlx::query("UPDATE messages SET attachments = ?1 WHERE id = (SELECT id FROM messages WHERE conversation_id = ?2 ORDER BY id DESC LIMIT 1) AND role = 'user'")
-        .bind(attachments).bind(conversation_id).execute(pool).await.map_err(|e| e.to_string())?;
+/// 同文失败轮复用时刷新展示徽标与当轮思考状态，授权引用仍不落库。
+pub async fn update_last_user_attachments(pool: &SqlitePool, conversation_id: &str, attachments: Option<&str>, thinking_state: Option<&str>) -> Result<(), String> {
+    sqlx::query("UPDATE messages SET attachments = ?1, thinking_state = ?3 WHERE id = (SELECT id FROM messages WHERE conversation_id = ?2 ORDER BY id DESC LIMIT 1) AND role = 'user'")
+        .bind(attachments).bind(conversation_id).bind(thinking_state).execute(pool).await.map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -937,10 +964,11 @@ pub async fn load_message_snapshots(
         Option<String>,
         Option<String>,
         Option<String>,
+        Option<String>,
     )>,
     String,
 > {
-    sqlx::query_as("SELECT id, role, content, created_at, attachments, status, error_text FROM messages WHERE conversation_id = ?1 ORDER BY id")
+    sqlx::query_as("SELECT id, role, content, created_at, attachments, status, error_text, thinking_state FROM messages WHERE conversation_id = ?1 ORDER BY id")
         .bind(conversation_id).fetch_all(pool).await.map_err(|e| e.to_string())
 }
 
@@ -2137,6 +2165,7 @@ mod tests {
             "user",
             r#"{"role":"user"}"#,
             Some(&serde_json::to_string(&names).unwrap()),
+            None,
         )
         .await
         .unwrap();
@@ -3582,6 +3611,33 @@ mod tests {
         }
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memory_fts").fetch_one(&pool).await.unwrap();
         assert_eq!(count, 1);
+    }
+
+    /// 0.27.15：thinking_state 列随迁移存在；预写 user 行携带冻结思考元数据，
+    /// 同文失败轮复用（update_last_user_attachments）刷新为当轮状态；
+    /// load_message_snapshots 投影第 8 位。
+    #[tokio::test]
+    async fn thinking_state_persists_and_projects() {
+        let pool = setup_pool().await;
+        create_conversation(&pool, "c1", None).await.unwrap();
+        append_message_with_attachments(
+            &pool,
+            "c1",
+            "user",
+            "{}",
+            None,
+            Some(r#"{"intent":"high","enabled":true,"effort":"high"}"#),
+        )
+        .await
+        .unwrap();
+        update_last_user_attachments(&pool, "c1", None, Some(r#"{"intent":"off"}"#))
+            .await
+            .unwrap();
+        let rows = load_message_snapshots(&pool, "c1").await.unwrap();
+        assert_eq!(rows.len(), 1);
+        let (_, role, _, _, _, _, _, thinking_state) = &rows[0];
+        assert_eq!(role, "user");
+        assert_eq!(thinking_state.as_deref(), Some(r#"{"intent":"off"}"#));
     }
 
 }

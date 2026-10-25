@@ -12,6 +12,7 @@ import * as ipc from "./ipc.js";
 import {escapeAttr, escapeText} from "./utils.js";
 import {hideThinkingDropdown, setThinkingModelId, syncThinkingControl} from "./thinking-selector.js";
 import {openExclusive, registerPopup} from "./composer-popups.js";
+import {clearFlyoutKeyActive, registerFlyoutKeynav} from "./flyout-keynav.js";
 
 /** @type {HTMLElement} 模型触发器按钮 */
 let modelTrigger = null;
@@ -60,6 +61,8 @@ export async function refreshModelSelector() {
             effort: status.reasoning_effort ?? null,
             supportsEffort: status.supports_effort_levels ?? false,
         });
+        // 0.27.15：能力快照（形态/档位/可关/可开·默认）——控件按能力诚实渲染
+        state.setThinkingCapabilityInfo(status.thinking_capability ?? null);
         // 记录当前模型 id（"{provider}:{model}"），供思考强度持久化定位
         setThinkingModelId(models.find((m) => m.is_selected)?.id ?? null);
         // 0.27.10：当前生效模型 Vision 能力（selected 优先，回落 Main 档）
@@ -200,7 +203,10 @@ function cancelCloseModelFlyout() {
 /** 隐藏 flyout 并清理供应商行高亮。 */
 function hideModelFlyout() {
     cancelCloseModelFlyout();
-    if (modelFlyout) modelFlyout.hidden = true;
+    if (modelFlyout) {
+        modelFlyout.hidden = true;
+        clearFlyoutKeyActive(modelFlyout);
+    }
     if (flyoutOwnerRow) {
         flyoutOwnerRow.classList.remove("flyout-open");
         flyoutOwnerRow = null;
@@ -223,7 +229,7 @@ function renderModelOption(id, label, providerName, selected, badge) {
     const providerHtml = providerName
         ? `<span class="chat-model-option-provider">${escapeText(providerName)}</span>`
         : '';
-    return `<div class="chat-model-option${selected ? " chat-model-option-selected" : ""}" data-model-id="${escapeAttr(id ?? "")}" title="${escapeAttr(providerName ? providerName + ' · ' + label : label)}">
+    return `<div class="chat-model-option flyout-nav-item${selected ? " chat-model-option-selected" : ""}" data-model-id="${escapeAttr(id ?? "")}" title="${escapeAttr(providerName ? providerName + ' · ' + label : label)}">
     ${badgeHtml}
     <div class="chat-model-option-text">
       <span class="chat-model-option-name">${escapeText(label)}</span>
@@ -241,6 +247,14 @@ export function bindModelSelector() {
     if (!modelTrigger || !modelDropdown) return;
     // 0.27.7 接入弹层互斥仲裁（§九）：注册关闭函数，打开前由 openExclusive 收掉其余弹层
     registerPopup("model", hideModelDropdown);
+    // 0.27.15：键盘导航——下拉与供应商 flyout 各自注册（IME 组合中不抢键盘）
+    registerFlyoutKeynav("model", {
+        container: () => (modelFlyout && !modelFlyout.hidden ? modelFlyout : modelDropdown),
+        isActive: () =>
+            (modelDropdown && !modelDropdown.hidden) || (modelFlyout && !modelFlyout.hidden),
+        adopt: (el) => selectChatModel(el.dataset.modelId || null),
+        close: hideModelDropdown,
+    });
 
     // 触发器点击 toggle 下拉（0.21.18：先收掉思考下拉，两下拉互斥不同时展开；
     // 0.27.7 起互斥统一走 composer-popups 仲裁）
@@ -312,6 +326,7 @@ export function openModelDropdown() {
 export function hideModelDropdown() {
     if (!modelDropdown) return;
     modelDropdown.hidden = true;
+    clearFlyoutKeyActive(modelDropdown);
     if (modelTrigger) modelTrigger.classList.remove("active");
     hideModelFlyout();
 }

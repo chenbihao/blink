@@ -181,11 +181,12 @@ function setupThinkingStyleRow(style, providerKind) {
  */
 function ensureReasoningEffortPresetOptions(select) {
     const current = [...select.options].map((o) => o.value);
-    const expected = ["", "none", ...EFFORT_LEVELS, "custom"];
+    // 0.27.15：default_on（开·默认强度）与预设档位一起动态插入
+    const expected = ["", "none", "default_on", ...EFFORT_LEVELS, "custom"];
     if (current.length === expected.length && current.every((v, i) => v === expected[i])) return;
 
     const customOption = select.querySelector('option[value="custom"]');
-    for (const level of EFFORT_LEVELS) {
+    for (const level of ["default_on", ...EFFORT_LEVELS]) {
         const opt = document.createElement("option");
         opt.value = level;
         opt.dataset.i18n = `ai.model_modal.reasoning_effort.${level}`;
@@ -209,7 +210,7 @@ function setupReasoningEffortRow(effort) {
     body.classList.toggle("hidden", !enabled);
     if (!enabled) return;
 
-    const presets = ["none", ...EFFORT_LEVELS];
+    const presets = ["none", "default_on", ...EFFORT_LEVELS];
     if (effort === "" || presets.includes(effort)) {
         select.value = effort; // "" = 默认（不发送，用模型默认档）
         custom.value = "";

@@ -337,6 +337,24 @@ export async function exportConversation(conversationId, title) {
 }
 
 /**
+ * 0.27.15：把 thinking_state JSON 投影为人类可读标签；解析失败返回 null（不猜测）。
+ * @param {string} json
+ * @returns {string|null}
+ */
+function thinkingStateLabel(json) {
+    try {
+        const state = JSON.parse(json);
+        if (typeof state.intent !== "string") return null;
+        if (state.intent === "default") return "跟随默认";
+        if (state.intent === "off") return "关闭";
+        if (state.intent === "on") return "开（默认强度）";
+        return `档位 ${state.intent}`;
+    } catch {
+        return null;
+    }
+}
+
+/**
  * 将对话消息列表格式化为 Markdown 字符串。
  * 0.23.12：user 消息的音频附件以引用行列出（仅文件名）。
  * @param {string} title 对话标题
@@ -350,6 +368,11 @@ function formatConversationMarkdown(title, messages) {
             md += `## 用户\n\n`;
             for (const name of msg.attachments ?? []) {
                 md += `> [音频附件] ${name}\n\n`;
+            }
+            // 0.27.15：当轮思考冻结状态（仅新消息携带；缺省不猜测）
+            if (msg.thinking_state) {
+                const intent = thinkingStateLabel(msg.thinking_state);
+                if (intent) md += `> [思考] ${intent}\n\n`;
             }
             md += `${msg.text}\n\n---\n\n`;
         } else if (msg.role === "assistant") {

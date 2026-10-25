@@ -752,6 +752,7 @@ impl SqliteConversationMemory {
         conversation_id: &str,
         user_msg: &str,
         badges: &[crate::ai::attachment::AttachmentBadge],
+        thinking_state: Option<&str>,
     ) -> Result<(), String> {
         let pool = self.pool.clone();
 
@@ -768,7 +769,7 @@ impl SqliteConversationMemory {
             let attachments = if badges.is_empty() { None } else {
                 Some(serde_json::to_string(badges).map_err(|e| e.to_string())?)
             };
-            blink_infra::data::conversations::update_last_user_attachments(&pool, conversation_id, attachments.as_deref()).await?;
+            blink_infra::data::conversations::update_last_user_attachments(&pool, conversation_id, attachments.as_deref(), thinking_state).await?;
             // 已预写过（如上一轮中断残留）：同样标记为 pending，让 load 丢弃
             // 这条将被 rig 追加的 user，避免请求上下文重复。
             self.pending_users
@@ -799,6 +800,7 @@ impl SqliteConversationMemory {
             "user",
             &serde_json::to_string(&msg).map_err(|e| e.to_string())?,
             attachments_json.as_deref(),
+            thinking_state,
         )
         .await?;
         blink_infra::data::conversations::touch_conversation(&pool, conversation_id).await?;
@@ -1355,7 +1357,7 @@ mod tests {
         let mem = SqliteConversationMemory::new(pool);
 
         // 1. 发出即保存：预写当前 user → pending 标记 + DB 写入
-        mem.persist_user_message("c1", "hello", &[]).await.unwrap();
+        mem.persist_user_message("c1", "hello", &[], None).await.unwrap();
         // 2. load：应丢弃预写 user（rig 会把 prompt 追加一次）
         let loaded = mem.load("c1").await.unwrap();
         assert!(
@@ -1377,7 +1379,7 @@ mod tests {
         );
 
         // 5. 第二轮：预写 world → load 只丢 world，hello/hi 仍在历史
-        mem.persist_user_message("c1", "world", &[]).await.unwrap();
+        mem.persist_user_message("c1", "world", &[], None).await.unwrap();
         let loaded = mem.load("c1").await.unwrap();
         let texts: Vec<String> = loaded.iter().map(extract_message_text).collect();
         assert_eq!(
@@ -1416,7 +1418,7 @@ mod tests {
 
         // 1. 预写用户可见正文（不含附件块）
         let visible = "转写这个附件";
-        mem.persist_user_message("c1", visible, &[]).await.unwrap();
+        mem.persist_user_message("c1", visible, &[], None).await.unwrap();
 
         // 2. rig 实际收到的模型输入（附件上下文 + 可见正文），回合结束时原样 append
         let model_input = "[音频附件 1] file=\"a.wav\" audio_ref=\"rref_abc123\"\n\
@@ -1445,7 +1447,7 @@ mod tests {
         );
 
         // 4. 下一轮无附件：行为与既有语义一致（文本匹配路径已由位置语义覆盖）
-        mem.persist_user_message("c1", "总结一下", &[]).await.unwrap();
+        mem.persist_user_message("c1", "总结一下", &[], None).await.unwrap();
         mem.append_turn(
             "c1",
             vec![user_msg("总结一下"), assistant_msg("总结完成")],
@@ -1486,6 +1488,7 @@ mod tests {
                     name: "笔记.txt".into(),
                 },
             ],
+            None,
         )
         .await
         .unwrap();
@@ -2648,14 +2651,14 @@ mod tests {
         let mem = SqliteConversationMemory::new(pool);
 
         // 第一轮：预写 user → 流式部分回复 → 中断（不调 append）
-        mem.persist_user_message("c", "q1", &[]).await.unwrap();
+        mem.persist_user_message("c", "q1", &[], None).await.unwrap();
         mem.persist_assistant_delta("c", "partial1", "", 0)
             .await
             .unwrap();
         // 模拟中断：不调 append，live_turns 残留 "c" -> 旧行 id
 
         // 第二轮：persist_user_message 应清掉残留的 live_turns 标记
-        mem.persist_user_message("c", "q2", &[]).await.unwrap();
+        mem.persist_user_message("c", "q2", &[], None).await.unwrap();
         // 第二轮的流式部分回复——不应 UPDATE 第一轮的断点行
         mem.persist_assistant_delta("c", "partial2", "", 0)
             .await
@@ -3133,12 +3136,12 @@ mod tests {
         let pool = setup_pool().await;
         let mem = SqliteConversationMemory::new(pool.clone());
         let badge = crate::ai::attachment::AttachmentBadge {kind: crate::ai::attachment::AttachmentKind::Image, name: "replacement.png".into()};
-        mem.persist_user_message("c1", "retry", &[]).await.unwrap();
-        mem.persist_user_message("c1", "retry", &[badge]).await.unwrap();
+        mem.persist_user_message("c1", "retry", &[], None).await.unwrap();
+        mem.persist_user_message("c1", "retry", &[badge], None).await.unwrap();
         let rows = blink_infra::data::conversations::load_all_messages(&pool, "c1").await.unwrap();
         assert_eq!(rows.len(), 1);
         assert!(rows[0].3.as_ref().unwrap().contains("replacement.png"));
-        mem.persist_user_message("c1", "retry", &[]).await.unwrap();
+        mem.persist_user_message("c1", "retry", &[], None).await.unwrap();
         assert!(blink_infra::data::conversations::load_all_messages(&pool, "c1").await.unwrap()[0].3.is_none());
     }
 

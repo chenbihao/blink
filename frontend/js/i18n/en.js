@@ -1283,6 +1283,7 @@ export const en = {
     "ai.model_modal.reasoning_effort.hint": "Maps to the provider's reasoning_effort parameter. Higher levels may reason more thoroughly but respond slower and use more tokens. Not every model supports it; leave off if unsure.",
     "ai.model_modal.reasoning_effort.default": "Default (omit)",
     "ai.model_modal.reasoning_effort.none": "Disable thinking (none)",
+    "ai.model_modal.reasoning_effort.default_on": "On · default strength (default_on)",
     "ai.model_modal.reasoning_effort.minimal": "Minimal",
     "ai.model_modal.reasoning_effort.low": "Low",
     "ai.model_modal.reasoning_effort.medium": "Medium",

@@ -35,8 +35,8 @@ use crate::ai::prompt::{
 };
 use crate::ai::provider::AIError;
 use crate::ai::registry::{AIProviderRegistry, ResolvedProviderEntries};
+use crate::ai::thinking::{ThinkingCapability, ThinkingIntent};
 use crate::ai::skill::{SkillRegistry, SkillSummary, parse_skill_command};
-use crate::ai::thinking::thinking_supports_effort;
 use crate::ai::tool_adapter::{
     PendingConfirms, build_agent_tools, count_allowlisted_capabilities,
 };
@@ -188,6 +188,8 @@ pub struct SkillActivationInfo {
 ///
 /// 0.21.17 扩展：`supports_effort_levels` / `reasoning_effort` 供前端思考控件
 /// 决定显示"强度下拉"还是"简单开关"，并恢复当前模型的思考强度配置。
+/// 0.27.15 扩展：`thinking_capability`——能力快照（形态/档位/可关/可开·默认/
+/// 预算范围/未知标记），前端按能力诚实渲染；旧字段保留兼容。
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct ChatStatus {
     pub active: Option<ActiveChatStatus>,
@@ -196,6 +198,7 @@ pub struct ChatStatus {
     pub model_name: Option<String>,
     pub supports_effort_levels: bool,
     pub reasoning_effort: Option<String>,
+    pub thinking_capability: Option<crate::ai::thinking::ThinkingCapability>,
 }
 
 /// chat 窗口运行时选中的模型（0.12.2 §4.4）。
@@ -1089,12 +1092,13 @@ impl ChatService {
         // 失败保留草稿（前端不清输入），提示切换模型或移除图片。检查放在
         // resolve_attachments（逐图解码/归一化，最重的一步）之前——非 Vision
         // 模型不白付解码开销。
+        let current_entries = self.resolve_current_entries(kind);
         if valid_inputs
             .iter()
             .any(|a| a.kind == crate::ai::attachment::AttachmentKind::Image)
         {
-            let vision_ok = self
-                .resolve_current_entries(kind)
+            let vision_ok = current_entries
+                .as_ref()
                 .map(|entries| {
                     entries
                         .model
@@ -1109,6 +1113,21 @@ impl ChatService {
                 });
             }
         }
+        // 0.27.15：本轮思考能力快照——发送时冻结（与 AgentProvider 构造期解析
+        // 同一真源），消息级元数据与请求编码共享同一结论。
+        let thinking_cap = current_entries
+            .as_ref()
+            .ok()
+            .map(|entries| {
+                crate::ai::thinking::resolve_thinking_capability(
+                    entries.provider.kind,
+                    crate::ai::compat_dialect::resolve_for_entry(&entries.provider),
+                    entries.provider.base_url.as_deref(),
+                    &entries.model.id,
+                    entries.model.thinking_style,
+                )
+            })
+            .unwrap_or_else(ThinkingCapability::unknown);
         let (resolved_attachments, image_parts, pending_image_tokens_est) =
             self.resolve_attachments(&valid_inputs).await?;
 
@@ -1130,11 +1149,35 @@ impl ChatService {
         // 中断/失败时用户消息已落库，侧边栏立即可见。
         // 失败不阻塞对话（warn-and-continue），与「持久化分组失败不影响对话」一致。
         // 0.27.9：附件以 kind+name 徽标随预写行落库（ref 不落库，兼容旧纯音频名记录）。
+        // 0.27.15：当轮思考意图冻结为消息级元数据（`messages.thinking_state`）——
+        // 历史/导出按当轮状态呈现，旧消息缺元数据时前端标「未知」不猜测。
         let badges = crate::ai::attachment::to_badges(&resolved_attachments);
+        let thinking_state_json = {
+            let state = serde_json::json!({
+                "intent": match ThinkingIntent::from_request(
+                    thinking_cap.supports_effort(),
+                    reasoning_effort.as_deref(),
+                    thinking_enabled,
+                ) {
+                    ThinkingIntent::FollowDefault => "default",
+                    ThinkingIntent::Disable => "off",
+                    ThinkingIntent::EnableDefault => "on",
+                    ThinkingIntent::Effort(ref level) => level,
+                },
+                "enabled": thinking_enabled,
+                "effort": reasoning_effort,
+            });
+            serde_json::to_string(&state).ok()
+        };
         if kind == ConversationKind::Persistent
             && let Err(e) = self
                 .persistent_memory()
-                .persist_user_message(&conversation_id, &visible_message, &badges)
+                .persist_user_message(
+                    &conversation_id,
+                    &visible_message,
+                    &badges,
+                    thinking_state_json.as_deref(),
+                )
                 .await
         {
             tracing::warn!(
@@ -1718,35 +1761,40 @@ impl ChatService {
         let resolved = self
             .resolve_current_entries(ConversationKind::Persistent)
             .ok();
-        let (provider_name, model_name, supports_effort_levels, reasoning_effort) = match &resolved
-        {
+        let (provider_name, model_name, thinking_capability, reasoning_effort) = match &resolved {
             Some(r) => {
                 let model_display = if r.model.display_name.is_empty() {
                     r.model.id.clone()
                 } else {
                     r.model.display_name.clone()
                 };
+                // 0.27.15：能力快照单一解析——旧 supports_effort 字段由其投影
+                let cap = crate::ai::thinking::resolve_thinking_capability(
+                    r.provider.kind,
+                    crate::ai::compat_dialect::resolve_for_entry(&r.provider),
+                    r.provider.base_url.as_deref(),
+                    &r.model.id,
+                    r.model.thinking_style,
+                );
                 (
                     Some(r.provider.display_name.clone()),
                     Some(model_display),
-                    thinking_supports_effort(
-                        r.provider.kind,
-                        crate::ai::compat_dialect::resolve_for_entry(&r.provider),
-                        &r.model.id,
-                        r.model.thinking_style,
-                    ),
+                    Some(cap),
                     r.model.reasoning_effort.clone(),
                 )
             }
-            None => (None, None, false, None),
+            None => (None, None, None, None),
         };
         ChatStatus {
             active: self.requests.status(),
             provider_configured: resolved.is_some(),
             provider_name,
             model_name,
-            supports_effort_levels,
+            supports_effort_levels: thinking_capability
+                .as_ref()
+                .is_some_and(|c| c.supports_effort()),
             reasoning_effort,
+            thinking_capability,
         }
     }
 

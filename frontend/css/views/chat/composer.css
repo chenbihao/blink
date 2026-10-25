@@ -584,3 +584,14 @@
 .chat-audio-chip-remove:hover {
     color: var(--text);
 }
+
+/* ── 0.27.15：flyout 键盘导航高亮（思考/模型下拉共用，对齐 cp-row-highlight）── */
+.flyout-key-active {
+    background: var(--accent-bg);
+}
+
+/* 思考下拉能力已知时的禁用态（预留——当前由渲染层不输出不可用项） */
+.chat-thinking-option-disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}

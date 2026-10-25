@@ -1276,6 +1276,7 @@ export const zh = {
     "ai.model_modal.reasoning_effort.hint": "映射供应商的 reasoning_effort 参数。更高档通常推理更充分，但响应更慢、消耗更多；并非所有模型都支持，不确定时保持关闭。",
     "ai.model_modal.reasoning_effort.default": "默认（不发送）",
     "ai.model_modal.reasoning_effort.none": "关闭思考（none）",
+    "ai.model_modal.reasoning_effort.default_on": "开·默认强度（default_on）",
     "ai.model_modal.reasoning_effort.minimal": "极低（minimal）",
     "ai.model_modal.reasoning_effort.low": "低（low）",
     "ai.model_modal.reasoning_effort.medium": "中（medium）",

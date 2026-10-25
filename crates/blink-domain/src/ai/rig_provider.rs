@@ -60,11 +60,10 @@ use crate::ai::message::{
     CompletionRequest, CompletionResponse, FinishReasonKind, Role, ToolCall, Usage,
 };
 use crate::ai::provider::{AIError, AIProvider, StreamChunk};
-use crate::ai::compat_dialect::ResolvedCompatDialect;
-use crate::ai::thinking::thinking_request_patch;
-use crate::config::ai_config::{
-    CustomParam, DEFAULT_AI_HARD_TIMEOUT_MS, ProviderKind, ThinkingStyle,
+use crate::ai::thinking::{
+    thinking_request_patch, ThinkingCapability, ThinkingIntent,
 };
+use crate::config::ai_config::{CustomParam, DEFAULT_AI_HARD_TIMEOUT_MS, ProviderKind};
 use blink_infra::platform::secret::SecretString;
 
 /// rig-core 承载的 `AIProvider` 实体（0.43 起持擦除后的 `DynModel<Completion>`，不再泛型）。
@@ -86,10 +85,15 @@ pub(crate) struct RigProvider {
     /// 自定义参数——透传到 rig `additional_params`。构造时把 `Vec<CustomParam>`
     /// 折叠成一个 `serde_json::Value::Object`,请求时若非空就直接塞给 rig。
     custom_params_json: Option<serde_json::Value>,
-    /// 主窗口默认"关闭思考"补丁（0.21.16）——构造时按 provider 敲定（见
-    /// `thinking_request_patch` 的 `thinking_enabled=false` 分支）。与
-    /// `custom_params_json` 合并进 `additional_params`；用户显式配了同 key 时以用户为准。
+    /// 主窗口默认"关闭思考"补丁（0.21.16）——0.27.15 起按能力快照 + per-model
+    /// effort 翻译「默认关」意图（等级型协议 omit、开关型协议显式关；能力拒绝
+    /// 时降级 FollowDefault，主链路不因思考策略硬失败）。与 `custom_params_json`
+    /// 合并进 `additional_params`；显式意图剔除冲突私参。
     thinking_off_patch: Option<serde_json::Value>,
+    /// 思考补丁是否来自 per-model 显式配置（reasoning_effort 非空）——
+    /// 显式时剔除冲突私参（UI 控件值优先），默认策略时保持 or_insert
+    /// （用户刻意配置的同名私参优先于产品默认策略）。
+    thinking_patch_explicit: bool,
 }
 
 impl RigProvider {
@@ -97,10 +101,10 @@ impl RigProvider {
     ///
     /// `default_timeout_ms` 从 `AIConfig::slo_hard_timeout_ms` 或统一 20 秒默认值来。
     /// `default_temperature / default_max_tokens / custom_parameters` 从 `ModelEntry` 来。
-    /// `compat` 已解析的兼容方言（0.27.14）——用于按供应商判定 thinking 关闭补丁
-    /// （DeepSeek vs OpenAI 兼容），与 factory 方言接线同一解析真源。
-    /// `reasoning_effort` 透传 `ModelEntry.reasoning_effort`——0.21.22.1 前主窗口
-    /// 硬编码 None，per-model 的思考强度配置对主窗口不生效。
+    /// `thinking_cap` 已解析的思考能力快照（0.27.15 单一真源
+    /// `resolve_thinking_capability`，factory 侧解析——两条调用链共享）。
+    /// `reasoning_effort` 透传 `ModelEntry.reasoning_effort`——0.21.22.1 起主窗口
+    /// 尊重 per-model 思考强度配置。
     #[allow(dead_code, clippy::too_many_arguments)] // 0.9.2 Phase 5b 由 factory 消费
     pub(crate) fn new(
         kind: ProviderKind,
@@ -110,24 +114,29 @@ impl RigProvider {
         default_temperature: Option<f32>,
         default_max_tokens: Option<u32>,
         custom_parameters: &[CustomParam],
-        compat: ResolvedCompatDialect,
+        thinking_cap: ThinkingCapability,
         reasoning_effort: Option<&str>,
-        thinking_style: Option<ThinkingStyle>,
     ) -> Self {
         let model_id = model_id.into();
-        // 主窗口默认关闭思考（0.21.16）——开/关补丁同一函数，这里取 false 分支。
-        // EffortLevels 分支只看 reasoning_effort（thinking_enabled 不参与）：
-        // - None（未配置）→ omit，模型用默认档——gpt-5.x 等默认开推理的模型
-        //   会继续思考，须 per-model 配 "none" 才真正关闭（thinking.rs 单一真源，
-        //   与对话窗口 agent_provider 同一份语义）。
-        let thinking_off_patch = thinking_request_patch(
-            kind,
-            compat,
-            &model_id,
-            false,
-            reasoning_effort,
-            thinking_style,
-        );
+        // 主窗口默认关闭思考（0.21.16）——等级型协议（OpenAI 风格）默认档 omit，
+        // 须 per-model 配 "none" 才真正关闭（不向未知网关发可能 400 的字段）；
+        // 开关型协议（DeepSeek/Anthropic/Ollama/Gemini）显式关；能力已知且
+        // 「关」被拒绝（始终开启模型）降级 omit——诚实跟随服务默认而非报错。
+        let intent = ThinkingIntent::main_window(reasoning_effort, &thinking_cap);
+        // 显式 = per-model reasoning_effort 已配置（UI 控件值）；策略性 Disable
+        // （未配置时的默认关）不算——后者是产品默认值，or_insert 语义保留用户私参
+        let thinking_patch_explicit = reasoning_effort.is_some_and(|e| !e.is_empty());
+        let thinking_off_patch = match thinking_request_patch(&thinking_cap, &intent) {
+            Ok(patch) => patch,
+            Err(error) => {
+                tracing::debug!(
+                    model = %model_id,
+                    error = %error,
+                    "RigProvider: 主窗口思考关闭意图被能力拒绝，降级跟随默认"
+                );
+                None
+            }
+        };
         Self {
             kind,
             model_id,
@@ -137,6 +146,7 @@ impl RigProvider {
             default_max_tokens,
             custom_params_json: build_custom_params_json(custom_parameters),
             thinking_off_patch,
+            thinking_patch_explicit,
         }
     }
 }
@@ -184,6 +194,7 @@ impl AIProvider for RigProvider {
             self.default_max_tokens,
             self.custom_params_json.as_ref(),
             self.thinking_off_patch.as_ref(),
+            self.thinking_patch_explicit,
         )?;
 
         let start = Instant::now();
@@ -223,6 +234,7 @@ impl AIProvider for RigProvider {
             self.default_max_tokens,
             self.custom_params_json.as_ref(),
             self.thinking_off_patch.as_ref(),
+            self.thinking_patch_explicit,
         )?;
 
         let start = Instant::now();
@@ -320,6 +332,7 @@ fn build_rig_request(
     default_max_tokens: Option<u32>,
     custom_params: Option<&serde_json::Value>,
     thinking_off_patch: Option<&serde_json::Value>,
+    thinking_patch_explicit: bool,
 ) -> Result<RigCompletionRequest, AIError> {
     // 抽 system → 请求头 System 消息;user 消息进 chat_history
     // (0.43: CompletionRequest 无 preamble 字段,system 以 Message::System 置于 chat_history 首)
@@ -440,7 +453,19 @@ fn build_rig_request(
         );
     }
 
-    let mut additional_params = merge_thinking_off_patch(custom_params, thinking_off_patch);
+    // 0.27.15：per-model 显式思考配置（reasoning_effort 非空）剔除冲突私参——
+    // UI 控件值优先于 raw additional_params（防"私参反超按钮意图"）；默认策略
+    // 保持 or_insert（用户刻意配置的同名私参优先于产品默认关策略）。
+    let mut stripped_custom: Option<serde_json::Value> = None;
+    if thinking_patch_explicit && custom_params.is_some() {
+        let mut params = custom_params.cloned();
+        if let Some(value) = params.as_mut() {
+            super::thinking::strip_conflicting_thinking_params_for_kind(kind, value);
+        }
+        stripped_custom = params;
+    }
+    let effective_custom = stripped_custom.as_ref().or(custom_params);
+    let mut additional_params = merge_thinking_off_patch(effective_custom, thinking_off_patch);
     super::thinking::validate_thinking_budget(kind, &mut additional_params, effective_max_tokens)?;
     // 0.45：CompletionRequest 标记 non_exhaustive，不能结构体字面量构造；
     // prompt = chat_history 末位（.messages 会保持其在最后），preamble 走
@@ -851,9 +876,14 @@ mod tests {
             None,
             None,
             &[],
-            crate::ai::compat_dialect::ResolvedCompatDialect::Generic,
+            crate::ai::thinking::resolve_thinking_capability(
+                ProviderKind::OpenAICompatible,
+                crate::ai::compat_dialect::ResolvedCompatDialect::Generic,
+                Some(base_url),
+                model_id,
+                None,
+            ),
             reasoning_effort,
-            None,
         )
         .thinking_off_patch
     }
@@ -909,7 +939,7 @@ mod tests {
             temperature: None,
             timeout_ms: None,
         };
-        let rig = build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None)
+        let rig = build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None, false)
             .unwrap();
         assert_eq!(rig.system_instructions(), Some("You are helpful."));
         // 0.43: system 以 Message::System 进 chat_history 首（原 preamble 字段已删）
@@ -930,7 +960,7 @@ mod tests {
             temperature: None,
             timeout_ms: None,
         };
-        let rig = build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None)
+        let rig = build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None, false)
             .unwrap();
         assert_eq!(rig.system_instructions(), Some("a
 b"));
@@ -948,7 +978,7 @@ b"));
             temperature: Some(0.2),
             timeout_ms: None,
         };
-        let rig = build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None)
+        let rig = build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None, false)
             .unwrap();
         assert_eq!(rig.tools.len(), 2);
         assert_eq!(rig.tools[0].name, "open_settings");
@@ -970,7 +1000,7 @@ b"));
             timeout_ms: None,
         };
         assert!(matches!(
-            build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None),
+            build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None, false),
             Err(AIError::Serialization(_))
         ));
     }
@@ -986,7 +1016,7 @@ b"));
             timeout_ms: None,
         };
         assert!(matches!(
-            build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None),
+            build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None, false),
             Err(AIError::Serialization(_))
         ));
     }
@@ -1012,7 +1042,7 @@ b"));
             temperature: None,
             timeout_ms: None,
         };
-        let rig = build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None)
+        let rig = build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None, false)
             .unwrap();
         assert_eq!(rig.system_instructions(), Some("feedback prompt"));
         // system 进 chat_history;4 条消息中 1 条 system → chat_history 4 条（0.43 语义）
@@ -1031,7 +1061,7 @@ b"));
             temperature: None,
             timeout_ms: None,
         };
-        let rig = build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None)
+        let rig = build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None, false)
             .unwrap();
         assert_eq!(rig.chat_history.len(), 2);
     }
@@ -1060,7 +1090,7 @@ b"));
             temperature: None,
             timeout_ms: None,
         };
-        let rig = build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None)
+        let rig = build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None, false)
             .unwrap();
         // 应成功构建（不返回 Serialization 错误）
         assert_eq!(rig.chat_history.len(), 3);
@@ -1080,7 +1110,7 @@ b"));
             temperature: None,
             timeout_ms: None,
         };
-        let rig = build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None)
+        let rig = build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None, false)
             .unwrap();
         assert_eq!(rig.chat_history.len(), 2);
     }
@@ -1101,7 +1131,7 @@ b"));
             timeout_ms: None,
         };
         let result =
-            build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None);
+            build_rig_request(ProviderKind::OpenAICompatible, &req, None, None, None, None, false);
         assert!(
             matches!(result, Err(AIError::Serialization(ref msg)) if msg.contains("tool_name")),
             "缺少 tool_name 时应返回 Serialization 错误，实际: {result:?}"
@@ -1127,6 +1157,7 @@ b"));
             Some(4096),
             None,
             None,
+            false,
         )
         .unwrap();
         // f32 → f64 有精度损失,允许 1e-6 误差
@@ -1151,6 +1182,7 @@ b"));
             Some(4096),
             None,
             None,
+            false,
         )
         .unwrap();
         assert_eq!(rig.temperature, Some(0.0));
@@ -1175,6 +1207,7 @@ b"));
             None,
             Some(&extra),
             None,
+            false,
         )
         .unwrap();
         assert_eq!(rig.additional_params.as_ref(), Some(&extra));

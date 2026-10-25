@@ -197,15 +197,19 @@ pub(crate) fn build_anthropic_client(
 }
 
 /// 构造 Google Gemini 协议的 rig client（0.12.1 抽出）。
-/// rig 0.42+ gemini 不支持 base_url（端点固定 googleapis.com），用户填的忽略。
+/// 0.27.15：rig 0.45 起 GeminiConfig 支持 with_base_url（0.42 曾固定
+/// googleapis.com）——用户填的 base_url 现在生效（自建网关/代理可达）。
 pub(crate) fn build_gemini_client(
     key: &str,
-    _base_url: Option<&str>,
+    base_url: Option<&str>,
 ) -> Result<rig_core::providers::gemini::Gemini, AIError> {
     use rig_core::providers::gemini;
+    let mut config = gemini::GeminiConfig::new(key);
+    if let Some(url) = base_url.filter(|s| !s.is_empty()) {
+        config = config.with_base_url(url);
+    }
     // 0.21.16/0.43: 注入 LoggingHttpClient——与其他协议一致的请求/响应体日志开关。
-    Ok(gemini::GeminiConfig::new(key)
-        .connect(blink_infra::utils::http_log::LoggingHttpClient::from_net()))
+    Ok(config.connect(blink_infra::utils::http_log::LoggingHttpClient::from_net()))
 }
 
 /// 构造 ollama 本地推理的 rig client（0.12.1 抽出）。
@@ -254,9 +258,14 @@ fn build_openai_compatible(
         model.temperature,
         model.max_tokens,
         &model.custom_parameters,
-        compat,
+        crate::ai::thinking::resolve_thinking_capability(
+            ProviderKind::OpenAICompatible,
+            compat,
+            base_url,
+            &model.id,
+            model.thinking_style,
+        ),
         model.reasoning_effort.as_deref(),
-        model.thinking_style,
     )))
 }
 
@@ -276,9 +285,14 @@ fn build_anthropic(
         model.temperature,
         model.max_tokens,
         &model.custom_parameters,
-        ResolvedCompatDialect::Generic,
+        crate::ai::thinking::resolve_thinking_capability(
+            ProviderKind::AnthropicMessages,
+            ResolvedCompatDialect::Generic,
+            base_url,
+            &model.id,
+            model.thinking_style,
+        ),
         model.reasoning_effort.as_deref(),
-        model.thinking_style,
     )))
 }
 
@@ -302,9 +316,14 @@ fn build_gemini(
         model.temperature,
         model.max_tokens,
         &model.custom_parameters,
-        ResolvedCompatDialect::Generic,
+        crate::ai::thinking::resolve_thinking_capability(
+            ProviderKind::GeminiGenerateContent,
+            ResolvedCompatDialect::Generic,
+            base_url,
+            &model.id,
+            model.thinking_style,
+        ),
         model.reasoning_effort.as_deref(),
-        model.thinking_style,
     )))
 }
 
@@ -349,9 +368,14 @@ fn build_ollama(
         model.temperature,
         model.max_tokens,
         &model.custom_parameters,
-        ResolvedCompatDialect::Generic,
+        crate::ai::thinking::resolve_thinking_capability(
+            ProviderKind::OllamaHttp,
+            ResolvedCompatDialect::Generic,
+            base_url,
+            &model.id,
+            model.thinking_style,
+        ),
         model.reasoning_effort.as_deref(),
-        model.thinking_style,
     )))
 }
 
@@ -1045,5 +1069,251 @@ pub(super) mod wire_tests {
         let reqs = captured.lock().unwrap();
         assert_eq!(reqs.len(), 1);
     }
-}
+    // ── 0.27.15 跨 Provider 思考 wire 测试（主窗口 RigProvider 链）──────────
+    //
+    // 钉住「能力 → 意图 → wire」链路：主窗口默认关策略按能力分派
+    // （等级型 omit / 开关型显式关），显式意图剔除冲突私参、保留无关嵌套。
 
+    /// 构造带自定义参数与 per-model effort 的 wire provider（0.27.15 测试辅助）。
+    fn build_thinking_provider(
+        base_url: &str,
+        compat: ResolvedCompatDialect,
+        model_id: &str,
+        custom_parameters: &[crate::config::ai_config::CustomParam],
+        reasoning_effort: Option<&str>,
+    ) -> Arc<dyn AIProvider> {
+        let model = ModelEntry {
+            id: model_id.into(),
+            display_name: "T".into(),
+            enabled: true,
+            context_window: None,
+            input_price_per_million: None,
+            output_price_per_million: None,
+            temperature: None,
+            max_tokens: None,
+            custom_parameters: custom_parameters.to_vec(),
+            reasoning_effort: reasoning_effort.map(Into::into),
+            thinking_style: None,
+            capabilities: vec![],
+        };
+        build_openai_compatible("sk-wire-test", Some(base_url), &model, compat)
+            .expect("构造 thinking wire provider")
+    }
+
+    /// DeepSeek 主窗口默认关：发 thinking.type=disabled（含等级档模型）；
+    /// per-model 显式等级叠加 reasoning_effort。
+    #[tokio::test]
+    async fn main_window_deepseek_thinking_off_and_effort_wire() {
+        // 默认（未配 effort）→ 显式关
+        let (addr, captured) = spawn_capture_server(vec![chat_completion_response("\"ok\"")]);
+        let provider = build_thinking_provider(
+            &format!("http://{addr}/v1"),
+            ResolvedCompatDialect::DeepSeek,
+            "deepseek-v4-flash",
+            &[],
+            None,
+        );
+        provider.complete(sample_wire_request()).await.expect("complete 应成功");
+        let reqs = captured.lock().unwrap();
+        let body: serde_json::Value = serde_json::from_str(&reqs[0].body).unwrap();
+        assert_eq!(body["thinking"]["type"], "disabled", "主窗口默认关策略：DeepSeek 显式关");
+
+        // per-model effort=high → 开 + reasoning_effort=high（等级叠加）
+        let (addr, captured) = spawn_capture_server(vec![chat_completion_response("\"ok\"")]);
+        let provider = build_thinking_provider(
+            &format!("http://{addr}/v1"),
+            ResolvedCompatDialect::DeepSeek,
+            "deepseek-v4-flash",
+            &[],
+            Some("high"),
+        );
+        provider.complete(sample_wire_request()).await.expect("complete 应成功");
+        let reqs = captured.lock().unwrap();
+        let body: serde_json::Value = serde_json::from_str(&reqs[0].body).unwrap();
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["reasoning_effort"], "high");
+    }
+
+    /// 未知网关（Generic + 非 OpenAI 官方 host）：默认 omit（不发 reasoning_effort），
+    /// 私参 reasoning_effort 透传保留；显式等级剔除冲突私参、保留无关字段。
+    #[tokio::test]
+    async fn main_window_generic_gateway_effort_passthrough_and_strip() {
+        use crate::config::ai_config::CustomParam;
+        // 默认 + 私参 reasoning_effort=low → FollowDefault：私参原样透传（现状语义）
+        let custom = vec![
+            CustomParam { key: "reasoning_effort".into(), value: serde_json::json!("low") },
+            CustomParam { key: "top_p".into(), value: serde_json::json!(0.9) },
+        ];
+        let (addr, captured) = spawn_capture_server(vec![chat_completion_response("\"ok\"")]);
+        let provider = build_thinking_provider(
+            &format!("http://{addr}/v1"),
+            ResolvedCompatDialect::Generic,
+            "some-model",
+            &custom,
+            None,
+        );
+        provider.complete(sample_wire_request()).await.expect("complete 应成功");
+        let reqs = captured.lock().unwrap();
+        let body: serde_json::Value = serde_json::from_str(&reqs[0].body).unwrap();
+        assert_eq!(body["reasoning_effort"], "low", "默认档不 patch——私参透传");
+        assert_eq!(body["top_p"], 0.9);
+
+        // 显式 effort=high → 剔除私参 reasoning_effort，high 胜出，top_p 保留
+        let (addr, captured) = spawn_capture_server(vec![chat_completion_response("\"ok\"")]);
+        let provider = build_thinking_provider(
+            &format!("http://{addr}/v1"),
+            ResolvedCompatDialect::Generic,
+            "some-model",
+            &custom,
+            Some("high"),
+        );
+        provider.complete(sample_wire_request()).await.expect("complete 应成功");
+        let reqs = captured.lock().unwrap();
+        let body: serde_json::Value = serde_json::from_str(&reqs[0].body).unwrap();
+        assert_eq!(body["reasoning_effort"], "high", "显式意图剔除并覆盖冲突私参");
+        assert_eq!(body["top_p"], 0.9, "无关私参保留");
+    }
+
+    /// Ollama 主窗口默认关：think=false 仍随 wire 下发。
+    #[tokio::test]
+    async fn main_window_ollama_thinking_off_wire() {
+        let (addr, captured) = spawn_capture_server(vec![ollama_chat_response("\"ok\"")]);
+        let model = super::tests::sample_model();
+        let provider =
+            build_ollama(Some(&format!("http://{addr}")), &model).expect("构造 ollama provider");
+        provider.complete(sample_wire_request()).await.expect("complete 应成功");
+        let reqs = captured.lock().unwrap();
+        let body: serde_json::Value = serde_json::from_str(&reqs[0].body).unwrap();
+        assert_eq!(body["think"], false, "主窗口默认关策略：Ollama think=false");
+    }
+
+    /// Gemini 主窗口默认关 + 能力分派：2.5-flash（可关）→ thinkingBudget=0；
+    /// 2.5-pro（不可关）→ 不发思考字段（诚实跟随默认，不报错不出 400）。
+    /// 自定义参数 generationConfig.thinkingConfig 在显式关时剔除、其余键保留。
+    #[tokio::test]
+    async fn main_window_gemini_thinking_wire() {
+        use crate::config::ai_config::CustomParam;
+        let gemini_response = |text: &str| {
+            let body = format!(
+                r#"{{"candidates":[{{"content":{{"parts":[{{"text":"{text}"}}],"role":"model"}},"finishReason":"STOP"}}],"usageMetadata":{{"promptTokenCount":1,"candidatesTokenCount":1}}}}"#
+            );
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .into_bytes()
+        };
+        let build = |model_id: &str, custom: Vec<CustomParam>| {
+            ModelEntry {
+                id: model_id.into(),
+                display_name: "G".into(),
+                enabled: true,
+                context_window: None,
+                input_price_per_million: None,
+                output_price_per_million: None,
+                temperature: None,
+                max_tokens: None,
+                custom_parameters: custom,
+                reasoning_effort: None,
+                thinking_style: None,
+                capabilities: vec![],
+            }
+        };
+
+        // 2.5-flash（可关）默认策略：无私参 → thinkingBudget=0
+        let (addr, captured) = spawn_capture_server(vec![gemini_response("ok")]);
+        let model = build("gemini-2.5-flash", vec![]);
+        let provider = build_gemini("g-key", Some(&format!("http://{addr}")), &model)
+            .expect("构造 gemini provider");
+        let resp = provider.complete(sample_wire_request()).await.expect("gemini complete 应成功");
+        assert_eq!(resp.text.as_deref(), Some("ok"), "Gemini 响应解析");
+        let reqs = captured.lock().unwrap();
+        let body: serde_json::Value = serde_json::from_str(&reqs[0].body).unwrap();
+        assert_eq!(
+            body["generationConfig"]["thinkingConfig"]["thinkingBudget"], 0,
+            "可关模型主窗口默认关：thinkingBudget=0"
+        );
+
+        // 2.5-flash + 用户私参 thinkingBudget=512：默认策略是产品默认值而非本轮
+        // 意图——or_insert 语义保留用户刻意配置（512），temperature 等无关键同存
+        let custom = vec![
+            CustomParam {
+                key: "generationConfig".into(),
+                value: serde_json::json!({"thinkingConfig": {"thinkingBudget": 512}, "temperature": 0.5}),
+            },
+        ];
+        let (addr, captured) = spawn_capture_server(vec![gemini_response("ok")]);
+        let model = build("gemini-2.5-flash", custom);
+        let provider = build_gemini("g-key", Some(&format!("http://{addr}")), &model)
+            .expect("构造 gemini provider");
+        provider.complete(sample_wire_request()).await.expect("complete 应成功");
+        let reqs = captured.lock().unwrap();
+        let body: serde_json::Value = serde_json::from_str(&reqs[0].body).unwrap();
+        assert_eq!(
+            body["generationConfig"]["thinkingConfig"]["thinkingBudget"], 512,
+            "默认关策略是产品默认值——用户刻意私参优先（or_insert 语义保留）"
+        );
+        assert_eq!(
+            body["generationConfig"]["temperature"], 0.5,
+            "generationConfig 无关键保留"
+        );
+
+        // 2.5-pro：不可关 → 不发思考字段（跟随服务默认），私参原样透传
+        let custom = vec![
+            CustomParam {
+                key: "generationConfig".into(),
+                value: serde_json::json!({"thinkingConfig": {"thinkingBudget": 512}}),
+            },
+        ];
+        let (addr, captured) = spawn_capture_server(vec![gemini_response("ok2")]);
+        let model = build("gemini-2.5-pro", custom);
+        let provider = build_gemini("g-key", Some(&format!("http://{addr}")), &model)
+            .expect("构造 gemini provider");
+        provider.complete(sample_wire_request()).await.expect("complete 应成功");
+        let reqs = captured.lock().unwrap();
+        let body: serde_json::Value = serde_json::from_str(&reqs[0].body).unwrap();
+        assert_eq!(
+            body["generationConfig"]["thinkingConfig"]["thinkingBudget"], 512,
+            "不可关模型主窗口不 patch——私参透传（FollowDefault）"
+        );
+    }
+
+    /// Anthropic 主窗口默认关：thinking.type=disabled 随 wire 下发。
+    #[tokio::test]
+    async fn main_window_anthropic_thinking_off_wire() {
+        let body = r#"{"id":"wire-an","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"model":"claude-sonnet-4-5","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .into_bytes();
+        let (addr, captured) = spawn_capture_server(vec![response]);
+        let model = ModelEntry {
+            id: "claude-sonnet-4-5".into(),
+            display_name: "C".into(),
+            enabled: true,
+            context_window: None,
+            input_price_per_million: None,
+            output_price_per_million: None,
+            temperature: None,
+            max_tokens: Some(4096),
+            custom_parameters: vec![],
+            reasoning_effort: None,
+            thinking_style: None,
+            capabilities: vec![],
+        };
+        let provider =
+            build_anthropic("sk-wire", Some(&format!("http://{addr}/v1")), &model)
+                .expect("构造 anthropic provider");
+        let resp = provider.complete(sample_wire_request()).await.expect("complete 应成功");
+        assert_eq!(resp.text.as_deref(), Some("ok"));
+        let reqs = captured.lock().unwrap();
+        let req_body: serde_json::Value = serde_json::from_str(&reqs[0].body).unwrap();
+        assert_eq!(
+            req_body["thinking"]["type"], "disabled",
+            "主窗口默认关策略：Anthropic 显式关"
+        );
+    }
+}

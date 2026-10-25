@@ -245,6 +245,24 @@ Summon: `Alt+Q` (text in the main window's input is carried over automatically �
 | Voice input | Hold `Alt+Space` while the chat window is visible | The transcript goes into the chat input |
 | Audio transcription | Audio attachment button at the input's left | AI automatically calls the transcription tool |
 
+### Thinking control (0.27.15)
+
+The "Thinking" button next to the input renders according to the **current model's real capability**, in four shapes:
+
+| Model capability | Control | Choices |
+|---|---|---|
+| Known effort levels (e.g. GPT-5.4 / Claude Opus 4.6 / Gemini 3 / DeepSeek V3.2+) | Dropdown | Default (follow the service) / Off / On · default strength / levels (low·high·max etc.) |
+| Toggle-only (e.g. Claude Sonnet 4.5 budget type / Kimi k2.6 / local Ollama) | Toggle | On (default strength or budget) / Off |
+| Thinking cannot be turned off (e.g. Gemini 2.5 Pro / OpenAI o-series) | "Thinking · always on" label | Shows the real limitation, not interactive |
+| No thinking parameter (e.g. gpt-4o) | Control hidden | — |
+
+- **"Default" is not "off"**: choosing Default sends no thinking parameter at all and lets the service decide; to fully disable it, explicitly pick Off.
+- **Capability source**: the built-in verified model catalog (shipped with rig 0.45) plus the per-model "thinking control style" override in Settings (auto / force dropdown / force toggle). Self-hosted gateways (vLLM etc.) show a "capability unknown" dropdown — levels pass through verbatim; if a request errors, pick another level or switch to the force-toggle override.
+- **Out-of-range levels are rejected locally**: picking a level outside the catalog for a known model fails with a readable local error and nothing is sent; arbitrary values can still be passed through the model's custom parameters in Settings.
+- **Budget-type models** (Claude budget tiers / Gemini 2.5): the toggle's "on" uses the default budget (2048, clamped to the output limit); to change it, configure `thinking.budget_tokens` / `generationConfig.thinkingConfig.thinkingBudget` in the model's custom parameters.
+- **Keyboard**: with a dropdown open, `↑`/`↓` move the highlight, `Enter`/`Tab` adopt, `Esc` closes; IME composition never triggers adoption.
+- The thinking state of each turn is stored with the message; Markdown export annotates user messages with "[Thinking] level / on / off / default".
+
 ### Silky tricks
 
 - You can keep typing while generating, but `Enter` won't send — stop first, then send.

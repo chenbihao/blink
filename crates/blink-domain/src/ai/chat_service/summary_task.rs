@@ -193,8 +193,6 @@ impl ChatService {
                     &conv_id_for_task,
                     &prompt,
                     tx,
-                    false,
-                    None,
                     crate::ai::summary::SUMMARY_MAX_TOKENS as u64,
                 )
                 .await;

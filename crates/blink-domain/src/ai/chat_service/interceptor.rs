@@ -107,6 +107,7 @@ pub(super) async fn run_intercepted_stream(
         && thinking_supports_effort(
             resolved.provider.kind,
             crate::ai::compat_dialect::resolve_for_entry(&resolved.provider),
+            resolved.provider.base_url.as_deref(),
             &resolved.model.id,
             resolved.model.thinking_style,
         );

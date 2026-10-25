@@ -735,6 +735,7 @@ pub fn get_chat_status(app: tauri::AppHandle) -> crate::domain::ai::chat_service
             model_name: None,
             supports_effort_levels: false,
             reasoning_effort: None,
+            thinking_capability: None,
         }
     }
 }
@@ -805,6 +806,7 @@ pub fn get_chat_models(app: tauri::AppHandle) -> Vec<ChatModelOption> {
                 supports_effort_levels: crate::domain::ai::thinking::thinking_supports_effort(
                     provider.kind,
                     crate::domain::ai::compat_dialect::resolve_for_entry(provider),
+                    provider.base_url.as_deref(),
                     &model.id,
                     model.thinking_style,
                 ),
@@ -1024,6 +1026,7 @@ pub fn get_ephemeral_models(app: tauri::AppHandle) -> Vec<ChatModelOption> {
                 supports_effort_levels: crate::domain::ai::thinking::thinking_supports_effort(
                     provider.kind,
                     crate::domain::ai::compat_dialect::resolve_for_entry(provider),
+                    provider.base_url.as_deref(),
                     &model.id,
                     model.thinking_style,
                 ),
@@ -1161,6 +1164,11 @@ pub struct ChatMessageSnapshot {
     /// 0.27.12：失败原因摘要（有界，随 status 一起写入）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_text: Option<String>,
+    /// 0.27.15：当轮思考意图冻结元数据（JSON 字符串，user 预写行携带）——
+    /// 历史/导出按当轮状态呈现；旧消息缺元数据时前端标「未知」不猜测。
+    /// 不参与模型上下文（load_all_messages 不读此列）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_state: Option<String>,
 }
 
 mod conversations;

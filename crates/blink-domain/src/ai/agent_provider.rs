@@ -83,15 +83,14 @@ use crate::config::ai_config::{ModelEntry, ProviderEntry, ProviderKind};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::ai::compat_dialect::{resolve_compat_dialect, ResolvedCompatDialect};
+use crate::ai::compat_dialect::resolve_compat_dialect;
 use crate::ai::factory::{
     build_anthropic_client, build_gemini_client, build_ollama_client, build_openai_client,
 };
 // 0.17.6: memory 改为 trait object，不再需要具体类型 import
 use crate::ai::provider::AIError;
 use crate::ai::rig_provider::expose_for_rig;
-use crate::ai::thinking::thinking_request_patch;
-use crate::config::ai_config::ThinkingStyle;
+use crate::ai::thinking::{thinking_request_patch, ThinkingCapability, ThinkingIntent};
 use blink_infra::platform::secret;
 use blink_infra::utils::text::single_line;
 
@@ -191,10 +190,9 @@ pub struct AgentProvider {
     kind: ProviderKind,
     /// 0.27.14：构造时解析的兼容方言（单一真源 `resolve_compat_dialect`）——
     /// thinking 判定与 wire 方言接线共享同一结论（原 base_url 子串启发式由其取代）。
-    compat: ResolvedCompatDialect,
-    model_id: String,
-    /// 0.21.22: per-model 思考控件形态逃生口——构造时从 `ModelEntry.thinking_style` 固化
-    thinking_style: Option<ThinkingStyle>,
+    /// 0.27.15：思考能力快照——构造时按协议+方言+模型 id 解析（rig 内置目录 +
+    /// per-model style 逃生口），发送时冻结使用；请求级思考开关改变不重建 Agent。
+    thinking_cap: ThinkingCapability,
     custom_params: Option<serde_json::Value>,
     default_max_tokens: Option<u64>,
     /// 0.21.17: 工具定义快照——构造时从 `DynamicTool` + MCP tools 提取，
@@ -270,14 +268,20 @@ impl AgentProvider {
         let default_temperature = model.temperature.map(|f| f as f64);
         let default_max_tokens = model.max_tokens.map(|n| n as u64);
 
-        // 供应商身份固化，供请求时计算 thinking 补丁（各供应商格式见 thinking_request_patch）
+        // 供应商身份固化，供请求时校验 thinking 预算（Anthropic）
         let kind = entry.kind;
-        let model_id = model.id.clone();
         // 0.27.14：方言在构造期解析一次——wire 构造与请求期 thinking 判定共享。
         let compat =
             resolve_compat_dialect(entry.kind, entry.compat_dialect, entry.base_url.as_deref());
-        // 0.21.22: per-model thinking_style 逃生口
-        let thinking_style = model.thinking_style;
+        // 0.27.15：思考能力快照（目录 + style 逃生口）——请求级开关不重建 Agent，
+        // 能力/静态配置变化经 fingerprint 重建（既有缓存铁则）。
+        let thinking_cap = crate::ai::thinking::resolve_thinking_capability(
+            entry.kind,
+            compat,
+            entry.base_url.as_deref(),
+            &model.id,
+            model.thinking_style,
+        );
 
         let agent = match entry.kind {
             ProviderKind::OpenAICompatible => {
@@ -347,9 +351,7 @@ impl AgentProvider {
             memory,
             model_name: model_display_name(entry, model),
             kind,
-            compat,
-            model_id,
-            thinking_style,
+            thinking_cap,
             custom_params: super::rig_provider::build_custom_params_json(&model.custom_parameters),
             default_max_tokens: default_max_tokens.or_else(|| {
                 (kind == ProviderKind::AnthropicMessages).then_some(ANTHROPIC_DEFAULT_MAX_TOKENS)
@@ -386,17 +388,33 @@ impl AgentProvider {
         } else {
             Some(self.model_name.clone())
         };
-        // 按 provider + 开关状态 + 显式等级 + per-model style 计算 thinking 补丁
-        let thinking_patch = thinking_request_patch(
-            self.kind,
-            self.compat,
-            &self.model_id,
-            thinking_enabled,
+        // 0.27.15：按能力 + 本轮显式意图计算 thinking 补丁——能力已知且意图
+        // 越界时本地可读拒绝（请求不发出，不白付 400 往返）。
+        let intent = ThinkingIntent::from_request(
+            self.thinking_cap.supports_effort(),
             reasoning_effort.as_deref(),
-            self.thinking_style,
+            thinking_enabled,
         );
-        let mut thinking_patch =
-            super::thinking::merge_chat_parameters(self.custom_params.as_ref(), thinking_patch);
+        let thinking_patch = match thinking_request_patch(&self.thinking_cap, &intent) {
+            Ok(patch) => patch,
+            Err(error) => {
+                tracing::warn!(
+                    conversation_id = %conversation_id,
+                    error = %error,
+                    "stream_prompt: 思考意图被能力拒绝"
+                );
+                let _ = tx.send(ChatStreamChunk::Error {
+                    message: error.to_string(),
+                });
+                return;
+            }
+        };
+        let mut thinking_patch = super::thinking::merge_chat_parameters(
+            self.thinking_cap.encoding,
+            self.custom_params.as_ref(),
+            thinking_patch,
+            intent.is_explicit(),
+        );
         if let Err(error) = super::thinking::validate_thinking_budget(
             self.kind,
             &mut thinking_patch,
@@ -412,6 +430,7 @@ impl AgentProvider {
             conversation_id = %conversation_id,
             thinking_enabled,
             reasoning_effort = ?reasoning_effort,
+            intent = ?intent,
             has_custom_params = self.custom_params.is_some(),
             "stream_prompt: 思考开关/强度状态"
         );
@@ -458,8 +477,6 @@ impl AgentProvider {
         conversation_id: &str,
         user_msg: &str,
         tx: mpsc::UnboundedSender<ChatStreamChunk>,
-        thinking_enabled: bool,
-        reasoning_effort: Option<String>,
         max_tokens: u64,
     ) {
         let model_name = if self.model_name.is_empty() {
@@ -467,18 +484,20 @@ impl AgentProvider {
         } else {
             Some(self.model_name.clone())
         };
-        // 思考强制关：reasoning_effort = None
-        let thinking_patch = thinking_request_patch(
-            self.kind,
-            self.compat,
-            &self.model_id,
-            thinking_enabled,
-            reasoning_effort.as_deref(),
-            self.thinking_style,
-        );
+        // 0.27.15：摘要任务固定「思考关」意图（原 reasoning_effort=None 语义）。
+        // 能力拒绝（如不可关模型）降级 FollowDefault——摘要不应因思考策略失败。
+        let (intent, thinking_patch) =
+            match thinking_request_patch(&self.thinking_cap, &ThinkingIntent::Disable) {
+                Ok(patch) => (ThinkingIntent::Disable, patch),
+                Err(_) => (ThinkingIntent::FollowDefault, None),
+            };
 
-        let mut thinking_patch =
-            super::thinking::merge_chat_parameters(self.custom_params.as_ref(), thinking_patch);
+        let mut thinking_patch = super::thinking::merge_chat_parameters(
+            self.thinking_cap.encoding,
+            self.custom_params.as_ref(),
+            thinking_patch,
+            intent.is_explicit(),
+        );
         // 显式输出上限走 rig 一等字段，不能被模型的同名额外参数覆盖。
         if let Some(params) = thinking_patch.as_mut().and_then(|p| p.as_object_mut()) {
             params.remove("max_tokens");
@@ -1404,7 +1423,7 @@ mod tests {
         ));
 
         // 1. 发出即保存：预写当前 user（与 ChatService::prompt 一致）
-        mem.persist_user_message("c1", "hello", &[]).await.unwrap();
+        mem.persist_user_message("c1", "hello", &[], None).await.unwrap();
 
         // 2. 走 rig agent 流式路径（与 stream_prompt 一致），mock 记录收到的请求
         let model = MockCompletionModel::from_stream_turns(vec![vec![
@@ -1543,8 +1562,77 @@ mod tests {
         assert_eq!(infos[0].name, "test_tool");
         assert_eq!(infos[0].description, "测试工具");
     }
+
+    /// 0.27.15：能力已知的越界等级在本地拒绝——Error chunk 直达前端，
+    /// 捕获桩零请求（不白付 400 往返）。官方 OpenAI 端点 + gpt-5.4 目录档位。
     #[tokio::test]
-    async fn agent_custom_parameters_and_request_effort_reach_the_wire() {
+    async fn agent_invalid_effort_for_known_capability_rejected_locally() {
+        use crate::ai::factory::wire_tests::spawn_capture_server;
+        let (addr, captured) =
+            spawn_capture_server(vec![crate::ai::factory::wire_tests::sse_stream_response()]);
+        let entry = ProviderEntry {
+            id: "oai-official".into(),
+            display_name: "OpenAI".into(),
+            kind: ProviderKind::OpenAICompatible,
+            compat_dialect: Default::default(),
+            base_url: Some(format!("https://api.openai.com/v1")),
+            secret_ref: String::new(),
+            models: vec![],
+            enabled: true,
+            created_at: 0,
+        };
+        let model = ModelEntry {
+            id: "gpt-5.4-mini".into(),
+            display_name: "GPT".into(),
+            enabled: true,
+            context_window: None,
+            input_price_per_million: None,
+            output_price_per_million: None,
+            temperature: None,
+            max_tokens: None,
+            capabilities: vec![],
+            reasoning_effort: None,
+            thinking_style: None,
+            custom_parameters: vec![],
+        };
+        let provider = AgentProvider::with_key(
+            &entry,
+            &model,
+            vec![],
+            vec![],
+            "",
+            Arc::new(EphemeralConversationMemory::new()),
+            "wire-key",
+        )
+        .unwrap();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            // gpt-5.4 目录档位（minimal/low/medium/high/xhigh）不含 "ultra"
+            provider.stream_prompt("c1", "hi", &[], tx, true, Some("ultra".into())),
+        )
+        .await
+        .expect("bounded local rejection");
+
+        let mut saw_error = false;
+        while let Some(chunk) = rx.recv().await {
+            if let ChatStreamChunk::Error { message } = &chunk {
+                saw_error = true;
+                assert!(
+                    message.contains("思考档位") || message.contains("不支持"),
+                    "错误信息应可读且指明档位: {message}"
+                );
+            }
+        }
+        assert!(saw_error, "越界等级应产生本地 Error chunk");
+        assert!(
+            captured.lock().unwrap().is_empty(),
+            "本地拒绝不得发出任何请求"
+        );
+    }
+
+        async fn agent_custom_parameters_and_request_effort_reach_the_wire() {
         use crate::ai::factory::wire_tests::{spawn_capture_server, sse_stream_response};
         use crate::config::ai_config::CustomParam;
         let (addr, captured) =
@@ -1617,7 +1705,7 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         tokio::time::timeout(
             Duration::from_secs(5),
-            provider.stream_prompt_with_max_tokens("wire2", "summary", tx, false, None, 600),
+            provider.stream_prompt_with_max_tokens("wire2", "summary", tx, 600),
         )
         .await
         .expect("bounded summary request");
@@ -1724,7 +1812,9 @@ Content-Length: {}
         let (tx, mut rx) = mpsc::unbounded_channel();
         tokio::time::timeout(
             Duration::from_secs(10),
-            provider.stream_prompt("ds1", "hi", &[], tx, true, None),
+            // 0.27.15：deepseek-v4-flash 目录能力 = 等级型（toggle+effort），
+            // 下拉约定只认 effort 线值——「开·默认强度」经 "default_on" 表达
+            provider.stream_prompt("ds1", "hi", &[], tx, true, Some("default_on".into())),
         )
         .await
         .expect("bounded agent loop");

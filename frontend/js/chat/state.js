@@ -41,6 +41,12 @@ export let thinkingEffort = null;
 /** @type {boolean} 当前模型是否支持 reasoning_effort 等级（0.21.17）。 */
 export let supportsEffort = false;
 
+/**
+ * 0.27.15：当前模型思考能力快照（status.thinking_capability 投影）。
+ * @type {{shape: string, levels: string[], canDisable: boolean, canEnableDefault: boolean, budget: [number, number]|null, defaultEffort: string|null, unknown: boolean}|null}
+ */
+export let thinkingCapability = null;
+
 /** @type {boolean} Provider 是否已配置 */
 export let providerConfigured = true;
 
@@ -120,6 +126,14 @@ export function setThinkingEffort(value) {
 export function setThinkingCapability({effort, supportsEffort: supports}) {
     thinkingEffort = effort ?? null;
     supportsEffort = Boolean(supports);
+}
+
+/** 0.27.15: 更新思考能力快照（并同步旧 supportsEffort 派生值）。 */
+export function setThinkingCapabilityInfo(capability) {
+    thinkingCapability = capability ?? null;
+    supportsEffort =
+        capability != null &&
+        (capability.shape === "levels" || capability.shape === "unknown");
 }
 
 export function setProviderConfigured(value) {

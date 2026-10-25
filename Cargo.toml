@@ -1,6 +1,6 @@
 [package]
 name = "blink"
-version = "0.27.14"
+version = "0.27.15"
 edition = "2024"
 description = "Blink — Windows Universal Action Layer"
 license = "MIT"
