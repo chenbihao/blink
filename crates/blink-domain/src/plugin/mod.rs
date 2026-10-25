@@ -5,6 +5,7 @@
 
 mod capability;
 mod contract;
+mod direction;
 mod engine;
 mod install;
 mod manifest;
@@ -22,6 +23,7 @@ pub use contract::{
     PluginContract, BUILTIN_NAMESPACE, validate_contract_set, validate_namespace,
     validate_plugin_id,
 };
+pub use direction::{SUPPORTED_TARGETS, lang_display_name, resolve_display_target};
 pub use engine::PluginEngine;
 pub use install::{
     InstallError, PluginInstaller, UninstallOutcome, compare_versions, current_platform_tag,

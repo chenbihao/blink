@@ -1074,10 +1074,9 @@ impl RuleRouter {
         let plugin_target = resolver
             .as_ref()
             .and_then(|r| r.get_string(&plugin_id, "target_lang"));
-        let target = match plugin_target.as_deref() {
-            Some("auto") | None => app_lang,
-            Some(other) => other.to_string(),
-        };
+        // 0.28.3：目标折叠收敛到统一方向策略（单次 > 保存设置；auto → 应用语言）
+        let target =
+            crate::plugin::resolve_display_target(None, plugin_target.as_deref(), &app_lang);
         Some((plugin_id, target))
     }
 
@@ -1125,16 +1124,16 @@ impl RuleRouter {
                 continue;
             }
 
-            // 3. 解析 target
+            // 3. 解析 target（0.28.3 起走统一方向策略：auto/缺省 → 应用语言）
             let target = if matches!(rule.when, ContextTrigger::TextIsNonTargetLang { .. }) {
                 let plugin_target = resolver
                     .as_ref()
                     .and_then(|r| r.get_string(&rule.plugin_id, "target_lang"));
-                match plugin_target.as_deref() {
-                    // "auto" 或未配置 → 回退 app_language
-                    Some("auto") | None => Some(app_lang.clone()),
-                    Some(other) => Some(other.to_string()),
-                }
+                Some(crate::plugin::resolve_display_target(
+                    None,
+                    plugin_target.as_deref(),
+                    &app_lang,
+                ))
             } else {
                 None
             };

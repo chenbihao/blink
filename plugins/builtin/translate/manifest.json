@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "builtin.translate",
   "name": { "zh": "翻译", "en": "Translate" },
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": { "zh": "多引擎文本翻译：腾讯翻译/阿里翻译/百度翻译/有道智云/DeepL", "en": "Multi-engine translation: Tencent / Alibaba / Baidu / Youdao / DeepL" },
   "builtin": true,
   "default_enabled": false,
@@ -36,8 +36,13 @@
           "target_lang": {
             "type": "string",
             "description": "目标语言代码",
-            "enum": ["zh", "en", "ja", "ko"],
+            "enum": ["zh", "en", "ja", "ko", "auto"],
             "default": "zh"
+          },
+          "engine": {
+            "type": "string",
+            "description": "本次调用使用的引擎（缺省用默认引擎设置；非法值回退默认）",
+            "enum": ["ali", "baidu", "tencent", "youdao", "deepl"]
           }
         },
         "required": ["text"]
@@ -218,6 +223,12 @@
         "description": "申请地址: https://www.deepl.com/pro-api"
       },
       "secret": true
+    }
+  ],
+  "pages": [
+    {
+      "id": "main",
+      "entry": "web/index.html"
     }
   ]
 }

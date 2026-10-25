@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>翻译</title>
+  <link rel="stylesheet" href="page.css" />
+</head>
+<body>
+  <main class="wrap">
+    <div class="toolbar">
+      <select id="target" class="sel" title="目标语言（仅本次会话，不改默认设置）"></select>
+      <button id="swap" class="btn-icon" title="中英互换" aria-label="swap">⇄</button>
+      <select id="engine" class="sel" title="引擎（仅本次会话，不改默认设置）"></select>
+    </div>
+    <textarea id="input" class="io" rows="5" spellcheck="false"
+      placeholder="输入要翻译的文本（Ctrl+Enter 立即翻译）"></textarea>
+    <div class="meta">
+      <span id="status" class="status"></span>
+      <span id="desc" class="desc"></span>
+    </div>
+    <div class="output-wrap">
+      <textarea id="output" class="io" rows="6" readonly spellcheck="false"
+        placeholder="译文"></textarea>
+      <button id="copy" class="btn-copy" title="复制译文">复制</button>
+    </div>
+  </main>
+  <script src="/@host/sdk.js"></script>
+  <script src="page.js"></script>
+</body>
+</html>

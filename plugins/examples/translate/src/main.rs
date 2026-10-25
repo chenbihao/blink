@@ -69,6 +69,21 @@ fn engine_desc(engine_id: &str, fell_back: bool) -> String {
     }
 }
 
+/// 结果元信息（0.28.3）：方向 + 引擎。批量（source_lang 空）不伪造单一方向，
+/// 只报引擎。desc 进 `CapabilityResult.desc`——AI 出口不读，展示/页面出口可读。
+fn direction_desc(source_lang: &str, target_lang: &str, engine_id: &str, fell_back: bool) -> String {
+    if source_lang.is_empty() {
+        engine_desc(engine_id, fell_back)
+    } else {
+        format!(
+            "{}→{} · {}",
+            lang_code_display(source_lang),
+            lang_code_display(target_lang),
+            engine_desc(engine_id, fell_back)
+        )
+    }
+}
+
 /// 是否允许降级到其他引擎（settings.allow_fallback，默认 false——主引擎失败直接报错，
 /// 用户显式开启后才按 fallback_order 降级）。
 fn allow_fallback(settings: &Value) -> bool {
@@ -128,24 +143,85 @@ fn preprocess_code_identifiers(text: &str) -> String {
     out.trim().to_string()
 }
 
-/// 简单检测文本语言：中文为主返回 'zh'，否则返回 'en'。
+/// 简单检测文本语言（0.28.3 诚实化）：
+/// - 中文占比 > 30% → `zh`；含假名 → `ja`；
+/// - 含拉丁字母 → `en`；既无汉字/假名也无字母（纯数字/符号）→ `unknown`。
+///
+/// **不伪造**：日文假名此前被归入 `en`、纯符号被归入 `en`——方向展示据此
+/// 改为如实报告 unknown；auto 互换对 unknown 按"译中文"处理（与旧行为一致）。
 fn detect_lang(text: &str) -> &'static str {
     let total = text.chars().count();
     if total == 0 {
-        return "en";
+        return "unknown";
     }
     let chinese = text
         .chars()
         .filter(|&c| ('\u{4e00}'..='\u{9fff}').contains(&c))
         .count();
-    if (chinese as f64) > total as f64 * 0.3 {
+    let kana = text
+        .chars()
+        .filter(|&c| ('\u{3040}'..='\u{30ff}').contains(&c))
+        .count();
+    let latin = text.chars().filter(|c| c.is_ascii_alphabetic()).count();
+    if kana > 0 {
+        "ja"
+    } else if (chinese as f64) > total as f64 * 0.3 {
         "zh"
-    } else {
+    } else if latin > 0 {
         "en"
+    } else {
+        "unknown"
     }
 }
 
-/// 自动交换目标语言：中文输入→译英文，英文输入→译中文。
+/// 语言代码的方向展示名（desc/subtitle 用；unknown 显示 ?）。
+fn lang_code_display(lang: &str) -> &str {
+    match lang {
+        "zh" => "zh",
+        "en" => "en",
+        "ja" => "ja",
+        "ko" => "ko",
+        _ => "?",
+    }
+}
+
+/// 尾部方向 token 解析（0.28.3 单次覆盖通路——主窗免进设置改方向）。
+///
+/// 语法（与宿主 `domain/plugin/direction.rs` 的策略文档同源）：
+/// - 箭头 `->` 或 `→`，后接可选空格 + 目标代码，直到串尾；
+/// - 目标 ∈ {zh, en, ja, ko, auto}（大小写不敏感）或中文单字 {中, 英, 日, 韩}；
+/// - 只取**最后一个**合法 token；token 后无正文、token 前正文为空 → 不视为 token
+///   （整串按普通文本处理，避免把 "-> en" 本身当译文输入）。
+///
+/// 返回 (剥离 token 的正文, Some(目标代码))；无 token 返回 (原文, None)。
+fn parse_direction_token(arg: &str) -> (String, Option<String>) {
+    let trimmed = arg.trim();
+    for marker in ["->", "→", "=>"] {
+        if let Some(pos) = trimmed.rfind(marker) {
+            let tail = trimmed[pos + marker.len()..].trim();
+            let code = match tail.to_ascii_lowercase().as_str() {
+                "zh" | "中" => Some("zh"),
+                "en" | "英" => Some("en"),
+                "ja" | "日" => Some("ja"),
+                "ko" | "韩" => Some("ko"),
+                "auto" | "自动" => Some("auto"),
+                _ => None,
+            };
+            if let Some(code) = code {
+                let head = trimmed[..pos].trim_end();
+                if head.is_empty() {
+                    // 正文为空：token 不是覆盖语义，按普通文本返回
+                    return (trimmed.to_string(), None);
+                }
+                return (head.to_string(), Some(code.to_string()));
+            }
+        }
+    }
+    (trimmed.to_string(), None)
+}
+
+/// 自动交换目标语言：中文输入→译英文，其他（含 unknown）→译中文。
+/// 显式目标（含单次 token 给出的非 auto 值）原样返回。
 fn auto_swap_lang(text: &str, target_lang: &str) -> String {
     if target_lang != "auto" {
         return target_lang.to_string();
@@ -291,6 +367,8 @@ struct PendingTranslate {
     is_tool_call: bool,
     text: String,          // 预处理后的文本
     original_text: String, // 原始输入
+    /// 检测出的源语言（desc/方向展示用；检测不出为 "unknown"，如实展示）
+    source_lang: String,
     target_lang: String,
     engine_id: String,
     fallback_order: Vec<String>,
@@ -392,13 +470,17 @@ fn handle_query<W: Write>(
         .and_then(Value::as_str)
         .unwrap_or("ali")
         .to_string();
-    let target_lang = settings
-        .get("target_lang")
-        .and_then(Value::as_str)
-        .unwrap_or("zh")
-        .to_string();
+    // 0.28.3：尾部方向 token = 人工单次目标（优先于已保存设置，不回写配置）
+    let (clean_query, one_shot) = parse_direction_token(&query);
+    let target_lang = one_shot.unwrap_or_else(|| {
+        settings
+            .get("target_lang")
+            .and_then(Value::as_str)
+            .unwrap_or("zh")
+            .to_string()
+    });
 
-    let text = strip_private_use_chars(query.trim());
+    let text = strip_private_use_chars(clean_query.trim());
     if text.is_empty() {
         let resp = PluginToCore::Response(PluginResponse {
             id,
@@ -411,10 +493,15 @@ fn handle_query<W: Write>(
 
     let original_text = text.clone();
     let processed = preprocess_code_identifiers(&text);
+    let source_lang = detect_lang(&processed);
     let target_lang = auto_swap_lang(&processed, &target_lang);
     let fallback_order = parse_fallback_order(&settings);
 
-    eprintln!("[translate] query: id={id}, engine={engine}, target={target_lang}");
+    // 日志不回显正文（0.28.3 验收：正文不入默认日志）
+    eprintln!(
+        "[translate] query: id={id}, engine={engine}, source={source_lang}, target={target_lang}, chars={}",
+        processed.chars().count()
+    );
 
     try_translate(
         writer,
@@ -423,6 +510,7 @@ fn handle_query<W: Write>(
         false,
         processed,
         original_text,
+        source_lang.to_string(),
         target_lang,
         engine,
         fallback_order,
@@ -430,7 +518,7 @@ fn handle_query<W: Write>(
     );
 }
 
-/// 处理 AI tool-call 请求。
+/// 处理 AI tool-call / 插件页面请求。
 fn handle_tool_call<W: Write>(
     writer: &mut W,
     pending: &mut HashMap<String, PendingTranslate>,
@@ -440,11 +528,18 @@ fn handle_tool_call<W: Write>(
     settings: Option<Value>,
 ) {
     let settings = settings.unwrap_or(Value::Null);
-    let engine = settings
+    // 0.28.3：单次引擎覆盖（页面引擎切换/AI 显式指定）；非法值回退默认引擎
+    let default_engine = settings
         .get("default_engine")
         .and_then(Value::as_str)
         .unwrap_or("youdao")
         .to_string();
+    let engine = arguments
+        .get("engine")
+        .and_then(Value::as_str)
+        .filter(|e| valid_engines().contains(e))
+        .map(str::to_string)
+        .unwrap_or(default_engine);
 
     if tool_name != "translate" && tool_name != "translate_batch" {
         let resp = PluginToCore::RawResult(RawToolResult {
@@ -460,12 +555,13 @@ fn handle_tool_call<W: Write>(
         return;
     }
 
+    // 优先级：调用参数（AI/页面的单次目标）> 已保存设置；均不回写配置
     let mut target_lang = arguments
         .get("target_lang")
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    if target_lang.is_empty() || target_lang == "auto" {
+    if target_lang.is_empty() {
         target_lang = settings
             .get("target_lang")
             .and_then(Value::as_str)
@@ -549,9 +645,14 @@ fn handle_tool_call<W: Write>(
         return;
     }
 
+    let source_lang = detect_lang(&text);
     let target_lang = auto_swap_lang(&text, &target_lang);
 
-    eprintln!("[translate] tool_call: id={id}, text={text:?}, target={target_lang}");
+    // 日志不回显正文（0.28.3 验收：正文不入默认日志）
+    eprintln!(
+        "[translate] tool_call: id={id}, engine={engine}, source={source_lang}, target={target_lang}, chars={}",
+        text.chars().count()
+    );
 
     try_translate(
         writer,
@@ -560,6 +661,7 @@ fn handle_tool_call<W: Write>(
         true,
         text.clone(),
         text,
+        source_lang.to_string(),
         target_lang,
         engine,
         fallback_order,
@@ -605,6 +707,7 @@ fn parse_fallback_order(settings: &Value) -> Vec<String> {
 }
 
 /// 尝试翻译：主引擎失败则按 fallback_order 降级（allow_fallback=false 时不降级）。
+#[allow(clippy::too_many_arguments)]
 fn try_translate<W: Write>(
     writer: &mut W,
     pending: &mut HashMap<String, PendingTranslate>,
@@ -612,6 +715,7 @@ fn try_translate<W: Write>(
     is_tool_call: bool,
     text: String,
     original_text: String,
+    source_lang: String,
     target_lang: String,
     engine_id: String,
     fallback_order: Vec<String>,
@@ -626,6 +730,7 @@ fn try_translate<W: Write>(
             is_tool_call,
             text,
             original_text,
+            source_lang,
             target_lang,
             engine_id,
             fallback_order,
@@ -640,6 +745,7 @@ fn try_translate<W: Write>(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn try_translate_batch<W: Write>(
     writer: &mut W,
     pending: &mut HashMap<String, PendingTranslate>,
@@ -656,6 +762,8 @@ fn try_translate_batch<W: Write>(
         is_tool_call: true,
         text: String::new(),
         original_text: String::new(),
+        // 批量源语言混合，不伪造单一方向——desc 只报引擎
+        source_lang: String::new(),
         target_lang,
         engine_id,
         fallback_order,
@@ -973,7 +1081,7 @@ fn handle_http_response<W: Write>(
                     id: ctx.query_id,
                     data,
                     error: None,
-                    desc: Some(engine_desc(&ctx.engine_id, fell_back)),
+                    desc: Some(direction_desc("", &ctx.target_lang, &ctx.engine_id, fell_back)),
                 });
                 send_message(writer, &resp);
                 return;
@@ -1033,8 +1141,13 @@ fn handle_http_response<W: Write>(
             id: ctx.query_id,
             data,
             error: None,
-            // desc 带实际引擎（降级发生过则标记）,供 UI 显示供应商
-            desc: Some(engine_desc(&ctx.engine_id, ctx.tried_engines.len() > 1)),
+            // desc 带方向 + 实际引擎（降级发生过则标记）,供页面/展示出口显示
+            desc: Some(direction_desc(
+                &ctx.source_lang,
+                &ctx.target_lang,
+                &ctx.engine_id,
+                ctx.tried_engines.len() > 1,
+            )),
         });
         send_message(writer, &resp);
     } else {
@@ -1058,7 +1171,14 @@ fn handle_http_response<W: Write>(
                 ..Default::default()
             }]
         } else {
-            build_result_items(&result, &ctx.text, &ctx.original_text, &ctx.target_lang)
+            build_result_items(
+                &result,
+                &ctx.text,
+                &ctx.original_text,
+                &ctx.source_lang,
+                &ctx.target_lang,
+                &ctx.engine_id,
+            )
         };
         let resp = PluginToCore::Response(PluginResponse {
             id: ctx.query_id,
@@ -1077,14 +1197,23 @@ fn build_result_items(
     result: &str,
     text: &str,
     original_text: &str,
-    _target_lang: &str,
+    source_lang: &str,
+    target_lang: &str,
+    engine_id: &str,
 ) -> Vec<PluginItem> {
+    // 方向 + 引擎前缀（0.28.3：结果显示方向/引擎；unknown 如实展示）
+    let direction = format!(
+        "{}→{} · {}",
+        lang_code_display(source_lang),
+        lang_code_display(target_lang),
+        engine_display_name(engine_id)
+    );
     let mut items = vec![PluginItem {
         // title 不加 emoji 前缀（spec-frontend §4.2 图标用包禁 emoji；插件条目
         // 前端本就不渲染图标位，区分信息在 subtitle）
         title: result.to_string(),
         subtitle: Some(format!(
-            "按 Enter 复制译文 | 原文: {}{}",
+            "{direction} | 按 Enter 复制译文 | 原文: {}{}",
             &original_text[..original_text.chars().take(50).map(char::len_utf8).sum()],
             if original_text.chars().count() > 50 {
                 "..."
@@ -1317,13 +1446,88 @@ mod tests {
 
     #[test]
     fn detect_lang_empty() {
-        assert_eq!(detect_lang(""), "en");
+        // 0.28.3：空文本/纯符号不伪造 en——如实 unknown
+        assert_eq!(detect_lang(""), "unknown");
+        assert_eq!(detect_lang("123 456"), "unknown");
+        assert_eq!(detect_lang("!!! ???"), "unknown");
     }
 
     #[test]
-    fn detect_lang_japanese_not_chinese() {
-        // 日文假名不在 CJK 统一汉字范围 → en
-        assert_eq!(detect_lang("こんにちは"), "en");
+    fn detect_lang_japanese_kana_honest() {
+        // 0.28.3：假名如实报 ja（此前被并入 en）
+        assert_eq!(detect_lang("こんにちは"), "ja");
+        assert_eq!(detect_lang("ツール"), "ja");
+    }
+
+    // ── parse_direction_token（0.28.3 单次方向覆盖）───────────────────────
+
+    #[test]
+    fn direction_token_ascii_arrow() {
+        assert_eq!(
+            parse_direction_token("hello -> en"),
+            ("hello".to_string(), Some("en".to_string()))
+        );
+        assert_eq!(
+            parse_direction_token("hello->EN"),
+            ("hello".to_string(), Some("en".to_string()))
+        );
+    }
+
+    #[test]
+    fn direction_token_unicode_arrow_and_cjk() {
+        assert_eq!(
+            parse_direction_token("你好 →英"),
+            ("你好".to_string(), Some("en".to_string()))
+        );
+        assert_eq!(
+            parse_direction_token("hello => 日"),
+            ("hello".to_string(), Some("ja".to_string()))
+        );
+        assert_eq!(
+            parse_direction_token("hello -> ko"),
+            ("hello".to_string(), Some("ko".to_string()))
+        );
+        assert_eq!(
+            parse_direction_token("hello -> auto"),
+            ("hello".to_string(), Some("auto".to_string()))
+        );
+    }
+
+    #[test]
+    fn direction_token_last_wins_and_text_arrow_preserved() {
+        // 多个 token 取最后一个；正文中的箭头保留在正文里
+        assert_eq!(
+            parse_direction_token("a -> b -> zh"),
+            ("a -> b".to_string(), Some("zh".to_string()))
+        );
+    }
+
+    #[test]
+    fn direction_token_invalid_tail_is_plain_text() {
+        // 尾部不是合法语言 → 整串按普通文本
+        assert_eq!(
+            parse_direction_token("价格->100"),
+            ("价格->100".to_string(), None)
+        );
+        assert_eq!(
+            parse_direction_token("go to -> somewhere"),
+            ("go to -> somewhere".to_string(), None)
+        );
+    }
+
+    #[test]
+    fn direction_token_empty_head_is_plain_text() {
+        // 正文为空：不是覆盖语义
+        assert_eq!(parse_direction_token("-> en"), ("-> en".to_string(), None));
+        assert_eq!(parse_direction_token("->zh"), ("->zh".to_string(), None));
+    }
+
+    #[test]
+    fn direction_token_trims_spaces() {
+        assert_eq!(
+            parse_direction_token("  hello   ->   ja  "),
+            ("hello".to_string(), Some("ja".to_string()))
+        );
     }
 
     // ── auto_swap_lang ───────────────────────────────────────────────────────
@@ -1420,21 +1624,42 @@ mod tests {
 
     #[test]
     fn build_result_items_no_preprocess() {
-        let items = build_result_items("你好", "hello", "hello", "zh");
+        let items = build_result_items("你好", "hello", "hello", "en", "zh", "ali");
         // 译文项 + 原文项（无拆分版，因为 text == original_text）
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].title, "你好");
         assert_eq!(items[1].title, "hello");
         assert_eq!(items[0].score, 1.0);
+        // subtitle 带方向 + 引擎前缀（0.28.3）
+        let subtitle = items[0].subtitle.as_deref().unwrap();
+        assert!(subtitle.starts_with("en→zh · 阿里翻译 |"), "{subtitle}");
     }
 
     #[test]
     fn build_result_items_with_preprocess() {
         // text != original_text → 多一个拆分版
-        let items = build_result_items("获取用户", "get user", "getUserName", "zh");
+        let items =
+            build_result_items("获取用户", "get user", "getUserName", "en", "zh", "ali");
         assert_eq!(items.len(), 3);
         assert_eq!(items[0].title, "获取用户");
         assert_eq!(items[1].title, "get user");
         assert_eq!(items[2].title, "getUserName");
+    }
+
+    #[test]
+    fn build_result_items_unknown_source_honest() {
+        let items = build_result_items("…", "…", "…", "unknown", "zh", "ali");
+        let subtitle = items[0].subtitle.as_deref().unwrap();
+        assert!(subtitle.starts_with("?→zh ·"), "{subtitle}");
+    }
+
+    #[test]
+    fn direction_desc_composes_direction_and_engine() {
+        assert_eq!(
+            direction_desc("en", "zh", "ali", false),
+            "en→zh · 阿里翻译 (ali)"
+        );
+        // 批量（source 空）只报引擎
+        assert_eq!(direction_desc("", "zh", "baidu", true), "已降级: 百度翻译 (baidu)");
     }
 }
