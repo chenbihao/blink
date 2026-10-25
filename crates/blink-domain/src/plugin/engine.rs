@@ -226,6 +226,75 @@ impl PluginEngine {
             .collect()
     }
 
+    /// 插件就绪状态（0.28.2 管理页）：能否直接使用，缺什么给修复入口线索。
+    ///
+    /// 判定项（有意保守，宁可漏报不误报）：
+    /// - `disabled`：`plugin:{id}` 配置关闭；
+    /// - `missing_secret`：manifest 声明了 `secret:true` 字段且**一个都没配置**
+    ///   （settings 占位空串 + CM 无值）。部分配置即视为就绪——选错引擎等
+    ///   运行期错误由查询链路的错误项反馈，不在此预判；
+    /// - `missing_dataset`：manifest 声明数据包且宿主已注入 datasets 目录，
+    ///   但对应数据包目录不存在（词库实际挂载在 0.28.4；builtin v1 句柄无
+    ///   datasets 目录时跳过本项，不误报）。
+    ///
+    /// 托管解释器（python/node）可用性不在此判定——设置页已有运行时引导
+    /// （runtime_type + script_interpreters_status），保持单一真源。
+    pub fn readiness(&self, id: &str, lang: &str) -> Option<serde_json::Value> {
+        let handle = self
+            .plugin_set()
+            .plugins
+            .iter()
+            .find(|p| p.id() == id)?
+            .clone();
+        let manifest = handle.manifest();
+        let mut blockers: Vec<serde_json::Value> = Vec::new();
+
+        if !self.is_enabled(id) {
+            blockers.push(blocker("disabled", None, lang));
+        }
+
+        let secret_fields: Vec<&super::manifest::SettingField> = manifest
+            .settings_schema
+            .iter()
+            .filter(|f| f.secret)
+            .collect();
+        if !secret_fields.is_empty() {
+            let settings = self.get_settings(id);
+            let any_configured = secret_fields.iter().any(|f| {
+                // 旧明文（迁移前）或 CM 值（secret_hint 只对声明字段放行）
+                settings
+                    .as_ref()
+                    .and_then(|s| s.get(&f.key))
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|v| !v.trim().is_empty())
+                    || self.secret_hint(id, &f.key).is_some()
+            });
+            if !any_configured {
+                blockers.push(blocker("missing_secret", Some(&secret_fields[0].key), lang));
+            }
+        }
+
+        if !manifest.datasets.is_empty()
+            && let Some(base) = handle.dirs().map(|d| std::path::PathBuf::from(d.datasets))
+        {
+            let missing: Vec<&super::manifest::DatasetDef> = manifest
+                .datasets
+                .iter()
+                .filter(|d| !base.join(&d.id).is_dir())
+                .collect();
+            if !missing.is_empty() {
+                blockers.push(blocker("missing_dataset", Some(&missing[0].id), lang));
+            }
+        }
+
+        Some(serde_json::json!({
+            "plugin_id": id,
+            "enabled": self.is_enabled(id),
+            "ready": blockers.is_empty(),
+            "blockers": blockers,
+        }))
+    }
+
     /// 按给定候选列表查询插件。每个候选 = (plugin_id, arg)。
     /// 多插件并发,各自内部有 timeout 兜底。结果顺序无关——融合层按 score 重排。
     ///
@@ -855,6 +924,27 @@ impl super::PluginSettingResolver for PluginEngine {
     }
 }
 
+/// readiness 的单个 blocker（本地化提示文案随 lang 解析）。
+fn blocker(kind: &str, field: Option<&str>, lang: &str) -> serde_json::Value {
+    const ZH_HINTS: &[(&str, &str)] = &[
+        ("disabled", "插件已禁用，启用后可用"),
+        ("missing_secret", "缺少 API 密钥，请在下方配置后再使用"),
+        ("missing_dataset", "缺少数据包，安装后可用"),
+    ];
+    const EN_HINTS: &[(&str, &str)] = &[
+        ("disabled", "Plugin is disabled; enable it to use"),
+        ("missing_secret", "API keys missing; configure below before use"),
+        ("missing_dataset", "Dataset missing; install it to use"),
+    ];
+    let table = if lang.starts_with("zh") { ZH_HINTS } else { EN_HINTS };
+    let hint = table
+        .iter()
+        .find(|(k, _)| *k == kind)
+        .map(|(_, v)| *v)
+        .unwrap_or(kind);
+    serde_json::json!({ "kind": kind, "field": field, "hint": hint })
+}
+
 /// 插件结果项 → 内部 SearchItem。
 /// 特殊处理：score < 0 表示插件返回的错误信息，保留原 score 让排序到最后。
 fn to_search_item(plugin_id: &str, item: PluginItem) -> SearchItem {
@@ -973,6 +1063,114 @@ mod tests {
         let moved = engine.sanitize_config_secrets("no.such.plugin", &mut config);
         assert_eq!(moved, 0);
         assert_eq!(config.settings, serde_json::json!({"target_lang": "en"}));
+    }
+
+    // ── readiness（0.28.2）───────────────────────────────────────────────────
+    //
+    // secret 分支的 CM 探测用测试专属 plugin id（readiness.test.*）——
+    // secret_hint 只读 load 且条目不存在，不写真实 CM（spec-backend §二）。
+
+    fn readiness_manifest(id: &str, secret: bool) -> std::sync::Arc<crate::plugin::manifest::PluginManifest> {
+        use crate::plugin::manifest::{SettingField, SettingType};
+        let schema = if secret {
+            vec![SettingField {
+                key: "api_key".into(),
+                kind: SettingType::String,
+                title: crate::plugin::LocalizableText::Plain("key".into()),
+                description: None,
+                default: None,
+                options: vec![],
+                min: None,
+                max: None,
+                group: None,
+                no_space: false,
+                secret: true,
+                visible_when: None,
+            }]
+        } else {
+            vec![]
+        };
+        std::sync::Arc::new(crate::plugin::manifest::PluginManifest {
+            schema_version: 1,
+            id: id.into(),
+            name: crate::plugin::LocalizableText::Plain(id.into()),
+            version: "1.0.0".into(),
+            host: None,
+            protocol_version: 1,
+            platforms: vec![],
+            description: crate::plugin::LocalizableText::default(),
+            builtin: false,
+            default_enabled: true,
+            runtime: Default::default(),
+            triggers: vec![],
+            capabilities: vec![],
+            settings_schema: schema,
+            tools: vec![],
+            pages: vec![],
+            datasets: vec![],
+            args: None,
+        })
+    }
+
+    async fn engine_with(id: &str, secret: bool) -> PluginEngine {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let handle = std::sync::Arc::new(super::PluginHandle::new(
+            readiness_manifest(id, secret),
+            std::env::temp_dir(),
+            None,
+        ));
+        PluginEngine::new(vec![handle], pool, None)
+    }
+
+    #[tokio::test]
+    async fn readiness_unknown_plugin_is_none() {
+        let engine = test_engine().await;
+        assert!(engine.readiness("no.such.plugin", "zh").is_none());
+    }
+
+    #[tokio::test]
+    async fn readiness_plain_plugin_ready_and_disabled_blocker() {
+        let engine = engine_with("readiness.test.plain", false).await;
+        let report = engine.readiness("readiness.test.plain", "zh").unwrap();
+        assert_eq!(report["ready"], serde_json::json!(true));
+        assert_eq!(report["blockers"], serde_json::json!([]));
+
+        // 禁用 → disabled blocker（初始化默认配置后关闭）
+        engine.ensure_config_for(&engine.all_plugins()[0]).await;
+        let mut cfg = engine.get_config("readiness.test.plain").unwrap();
+        cfg.enabled = false;
+        engine.configs.write().unwrap().insert(
+            "readiness.test.plain".into(),
+            cfg,
+        );
+        let report = engine.readiness("readiness.test.plain", "zh").unwrap();
+        assert_eq!(report["ready"], serde_json::json!(false));
+        assert_eq!(report["blockers"][0]["kind"], serde_json::json!("disabled"));
+        // 英文提示按 lang 解析
+        let report_en = engine.readiness("readiness.test.plain", "en").unwrap();
+        assert_ne!(report_en["blockers"][0]["hint"], report["blockers"][0]["hint"]);
+    }
+
+    #[tokio::test]
+    async fn readiness_secret_plugin_missing_and_legacy_plain_configured() {
+        let id = "readiness.test.secret";
+        let engine = engine_with(id, true).await;
+        engine.ensure_config_for(&engine.all_plugins()[0]).await;
+
+        // 全空（占位空串 + CM 无值）→ missing_secret
+        let report = engine.readiness(id, "zh").unwrap();
+        assert_eq!(report["ready"], serde_json::json!(false));
+        assert_eq!(
+            report["blockers"][0]["kind"],
+            serde_json::json!("missing_secret")
+        );
+
+        // 任一字段有非空值（旧明文路径，短路不触 CM）→ 就绪
+        let mut cfg = engine.get_config(id).unwrap();
+        cfg.settings["api_key"] = serde_json::json!("sk-test");
+        engine.configs.write().unwrap().insert(id.into(), cfg);
+        let report = engine.readiness(id, "zh").unwrap();
+        assert_eq!(report["ready"], serde_json::json!(true));
     }
 }
 

@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IP</title>
+  <style>
+    /* 插件自带基础样式；主题色变量由宿主注入的 /@host/theme.css 提供 */
+    :root { font-style: normal; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+      background: var(--bg, #1e1e2e);
+      color: var(--text, #cdd6f4);
+      font-size: 14px;
+    }
+    .wrap { padding: 16px 18px 20px; display: flex; flex-direction: column; gap: 12px; }
+    header { display: flex; align-items: center; gap: 8px; }
+    header h1 { font-size: 15px; font-weight: 600; margin: 0; flex: 1; }
+    button {
+      font: inherit; color: var(--text, #cdd6f4);
+      background: var(--surface, #313244);
+      border: 1px solid var(--surface, #313244);
+      border-radius: var(--radius-md, 6px);
+      padding: 4px 12px; cursor: pointer;
+      transition: opacity 0.1s;
+    }
+    button:hover { opacity: 0.85; }
+    button:disabled { opacity: 0.5; cursor: default; }
+    .status { font-size: 12px; color: var(--text-dim, #a6adc8); min-height: 16px; }
+    .rows { display: flex; flex-direction: column; gap: 6px; }
+    .row {
+      display: flex; align-items: baseline; gap: 10px;
+      padding: 8px 10px;
+      background: var(--surface, #313244);
+      border-radius: var(--radius-md, 6px);
+      cursor: pointer;
+    }
+    .row:hover { outline: 1px solid var(--accent, #89b4fa); }
+    .row .ip { font-family: Consolas, monospace; font-size: 14px; word-break: break-all; }
+    .row .type { font-size: 12px; color: var(--text-dim, #a6adc8); margin-left: auto; white-space: nowrap; }
+    .copied { color: var(--accent, #89b4fa); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1 data-i18n="title">IP 地址</h1>
+      <button id="refresh" data-i18n="refresh">刷新</button>
+    </header>
+    <div class="status" id="status"></div>
+    <div class="rows" id="rows"></div>
+  </div>
+  <script src="/@host/sdk.js"></script>
+  <script>
+    (function () {
+      "use strict";
+      var zh = { title: "IP 地址", refresh: "刷新", loading: "查询中…", copied: "已复制", retry: "查询失败，点击重试", empty: "无结果" };
+      var en = { title: "IP Addresses", refresh: "Refresh", loading: "Querying…", copied: "Copied", retry: "Query failed, click to retry", empty: "No results" };
+      var i18n = zh;
+      var busy = false;
+
+      function text(key) { return i18n[key] || zh[key]; }
+      function applyI18n() {
+        document.querySelector("[data-i18n='title']").textContent = text("title");
+        document.getElementById("refresh").textContent = text("refresh");
+      }
+
+      var statusEl = document.getElementById("status");
+      var rowsEl = document.getElementById("rows");
+      var refreshBtn = document.getElementById("refresh");
+
+      function setStatus(msg) { statusEl.textContent = msg || ""; }
+
+      function render(items) {
+        rowsEl.innerHTML = "";
+        if (!items.length) {
+          setStatus(text("empty"));
+          return;
+        }
+        setStatus("");
+        items.forEach(function (item) {
+          var data = item && item.data;
+          if (!data || !data.ip) return;
+          var row = document.createElement("div");
+          row.className = "row";
+          var ip = document.createElement("span");
+          ip.className = "ip";
+          ip.textContent = String(data.ip);
+          var type = document.createElement("span");
+          type.className = "type";
+          type.textContent = String(data.type || item.desc || "");
+          row.appendChild(ip);
+          row.appendChild(type);
+          row.addEventListener("click", function () {
+            window.Blink.copy(String(data.ip)).then(function () {
+              setStatus(text("copied") + " · " + data.ip);
+            });
+          });
+          rowsEl.appendChild(row);
+        });
+      }
+
+      function query() {
+        if (busy || !window.Blink || window.Blink.unavailable) return;
+        busy = true;
+        refreshBtn.disabled = true;
+        setStatus(text("loading"));
+        window.Blink.invoke("get_ip", { refresh: false }).then(function (res) {
+          if (!res || res.ok !== true) throw new Error((res && res.error) || "failed");
+          var items = (res.items || []).map(function (it) {
+            return { data: it.data, desc: it.desc };
+          });
+          render(items);
+        }).catch(function () {
+          rowsEl.innerHTML = "";
+          setStatus(text("retry"));
+        }).finally(function () {
+          busy = false;
+          refreshBtn.disabled = false;
+        });
+      }
+
+      window.Blink.init("builtin.ip").then(function (ctx) {
+        if (ctx && ctx.context && String(ctx.context.language).indexOf("zh") !== 0) i18n = en;
+        applyI18n();
+        query();
+      }).catch(function (e) {
+        setStatus(String(e && e.message ? e.message : e));
+      });
+
+      refreshBtn.addEventListener("click", function () { query(); });
+      statusEl.addEventListener("click", query);
+      document.addEventListener("keydown", function (e) {
+        if (e.key === "Escape") window.Blink && window.Blink.close();
+      });
+    })();
+  </script>
+</body>
+</html>

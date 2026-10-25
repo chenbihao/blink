@@ -1363,6 +1363,11 @@ export const en = {
     "plugin.secret_cleared": "Secret cleared",
     "plugin.load_failed": "Failed to load plugins",
     "plugin.empty": "No plugins loaded",
+    // Plugin windows (0.28.2: standalone window entry + readiness)
+    "plugin.surface_section": "Plugin window",
+    "plugin.surface_open": "Open",
+    "plugin.surface_ready": "Ready",
+    "plugin.surface_not_ready": "Not ready",
     // Trigger keyword config
     "plugin.trigger_section": "Trigger Keywords",
     "plugin.trigger_default": "Default",

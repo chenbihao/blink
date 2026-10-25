@@ -55,6 +55,20 @@ pub async fn get_config(app: tauri::AppHandle) -> Result<serde_json::Value, Stri
 #[tauri::command]
 pub async fn set_config(
     app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    key: String,
+    value: serde_json::Value,
+    expected: Option<serde_json::Value>,
+) -> Result<(), crate::app::command_error::CommandError> {
+    // 0.28.2：宿主配置写入是敏感面——插件页面（plugin-* 窗口）不得调用。
+    // 宿主内部直调走 set_config_internal（无窗口上下文，不受门禁）。
+    super::plugin_ui::reject_plugin_window(&window)?;
+    set_config_internal(app, key, value, expected).await
+}
+
+/// `set_config` 的宿主内部直调入口（无调用窗口，绕过插件窗口门禁）。
+pub async fn set_config_internal(
+    app: tauri::AppHandle,
     key: String,
     value: serde_json::Value,
     expected: Option<serde_json::Value>,
@@ -621,6 +635,9 @@ async fn set_config_value(
                     }
                     // 0.17.8: 插件禁用时清理该插件的权限记忆行
                     if !v.enabled {
+                        // 0.28.2：禁用同时撤销该插件的页面窗口（phase §3.3 生命周期 3
+                        // ——禁用先阻止新调用、撤销所有出口，含页面）
+                        crate::app::plugin_surface::close_plugin_windows(&app, &v.plugin_id);
                         if let Some(pc) = app.try_state::<std::sync::Arc<crate::domain::ai::tool_adapter::PendingConfirms>>() {
                             let prefix = format!("plugin_{}", v.plugin_id);
                             pc.clear_plugin_trusted_db(&prefix).await;

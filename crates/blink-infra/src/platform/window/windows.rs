@@ -340,6 +340,11 @@ static LAST_EXTERNAL_HWND: AtomicIsize = AtomicIsize::new(0);
 /// 只隐藏窗口，保证下次启动按原 visible 状态恢复。
 static IS_APP_EXITING: AtomicBool = AtomicBool::new(false);
 
+/// 应用是否正在退出（0.28.2 起供插件窗口等 app 层关闭拦截读取）。
+pub fn is_app_exiting() -> bool {
+    IS_APP_EXITING.load(Ordering::SeqCst)
+}
+
 /// 0.17.6: 主窗口 AI 活跃标志。
 ///
 /// 主窗口 AI（AiMode）激活时设为 true，watchdog 据此跳过失焦隐藏，
@@ -684,7 +689,10 @@ pub fn take_context_menu_payload() -> Option<(String, String)> {
 /// 避免持有全局锁做 IO 密集操作。
 ///
 /// 日志：等待耗时 + created 标记，便于排查热键被冷建窗堵住的场景。
-fn get_or_create_window<F>(
+///
+/// 0.28.2 起开放给 app 层（插件独立窗口等动态 label 窗口复用同一 single-flight
+/// 入口，spec-frontend §1.4）；静态 label 窗口的既有调用不变。
+pub fn get_or_create_window<F>(
     app: &AppHandle,
     label: &str,
     build: F,

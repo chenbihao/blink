@@ -2989,3 +2989,50 @@ input.has-secret-hint::placeholder {
 /* Search behavior and runtime lifecycle are separate pages. */
 #weblinks, #managed-everything-card { scroll-margin-top: var(--space-lg); }
 #weblinks { margin-top: var(--space-lg); }
+
+/* ===== 插件窗口行（0.28.2：独立窗口入口 + 就绪状态，插件卡片 body 顶部） ===== */
+
+.plugin-surface-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-sm, 8px);
+    padding: 6px 0 10px;
+    border-bottom: 1px solid var(--surface);
+    margin-bottom: var(--space-sm, 8px);
+}
+
+.plugin-surface-status {
+    font-size: var(--text-xs);
+    padding: 1px 8px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--surface);
+}
+
+.plugin-surface-ready {
+    color: var(--green);
+}
+
+/* 未就绪是可点击徽标（title 显示缺失原因，点击展开配置区修复） */
+.plugin-surface-blocked {
+    background: none;
+    cursor: pointer;
+    color: var(--text-dim);
+}
+
+.plugin-surface-blocked:hover {
+    color: var(--text);
+    border-color: var(--text-dim);
+}
+
+.plugin-surface-buttons {
+    display: inline-flex;
+    gap: 6px;
+    margin-left: auto;
+}
+
+.plugin-surface-buttons .icon {
+    width: 0.85em;
+    height: 0.85em;
+    vertical-align: -0.08em;
+}

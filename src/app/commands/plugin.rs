@@ -6,6 +6,7 @@
 //! 0.28.5 接入；当前通道为 dev 本地包（zip 或解包目录）。
 
 use super::ai::cs_count_skills;
+use super::plugin_ui::reject_plugin_window;
 use super::stt::copy_dir_recursive;
 use tauri::Manager;
 
@@ -52,11 +53,15 @@ fn handle_from_record(
 ///
 /// 流程：installer 暂存/校验/提交（spawn_blocking，归档 IO）→ 构造新句柄 →
 /// 发布器发布目标集合（同 id 替换 = 更新）→ 撤销的旧 tool 取消待确认。
+/// 0.28.2：更新/安装后关闭该插件旧窗口（撤销旧页面会话——旧代次窗口不继承
+/// 新实现）；插件窗口自身不得调用本命令（生态敏感命令门禁）。
 #[tauri::command]
 pub async fn install_plugin_package(
     app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
     path: String,
 ) -> Result<blink_infra::plugin_storage::InstallRecord, CommandError> {
+    reject_plugin_window(&window)?;
     let installer = app
         .state::<std::sync::Arc<crate::domain::plugin::PluginInstaller>>()
         .inner()
@@ -112,6 +117,8 @@ pub async fn install_plugin_package(
     if let Some(pc) = app.try_state::<std::sync::Arc<crate::domain::ai::tool_adapter::PendingConfirms>>() {
         pc.cancel_for_tools(&report.revoked_tool_ids).await;
     }
+    // 0.28.2：撤销旧页面会话（更新语义下旧代次窗口关闭，重开走新包）
+    crate::app::plugin_surface::close_plugin_windows(&app, &record.plugin_id);
     tracing::info!(
         plugin = %record.plugin_id,
         version = %record.version,
@@ -125,9 +132,13 @@ pub async fn install_plugin_package(
 #[tauri::command]
 pub async fn uninstall_plugin(
     app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
     plugin_id: String,
     keep_data: bool,
 ) -> Result<serde_json::Value, CommandError> {
+    reject_plugin_window(&window)?;
+    // 0.28.2：先关窗口（撤销页面会话），再走运行时撤销
+    crate::app::plugin_surface::close_plugin_windows(&app, &plugin_id);
     let installer = app
         .state::<std::sync::Arc<crate::domain::plugin::PluginInstaller>>()
         .inner()

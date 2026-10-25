@@ -15,6 +15,7 @@ pub mod local_engine; // 0.22.3：本地引擎生命周期编排服务（EngineM
 pub mod mcp_server_runtime; // 0.19.13：主进程 Streamable HTTP MCP Server 生命周期管理
 #[cfg(test)]
 mod skill_help_e2e; // 0.25.4：CLI help → skill e2e（测试对象是 bin 的 clap Cli）
+pub mod plugin_surface; // 0.28.2：插件独立窗口面（会话表/复用/预算/生命周期关闭）
 pub mod service;
 pub mod setting_service;
 pub mod stt_config;

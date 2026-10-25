@@ -1356,6 +1356,11 @@ export const zh = {
     "plugin.secret_cleared": "密钥已清除",
     "plugin.load_failed": "加载插件列表失败",
     "plugin.empty": "暂无已加载插件",
+    // 插件窗口（0.28.2：独立窗口入口 + 就绪状态）
+    "plugin.surface_section": "插件窗口",
+    "plugin.surface_open": "打开",
+    "plugin.surface_ready": "就绪",
+    "plugin.surface_not_ready": "未就绪",
     // 触发关键字配置
     "plugin.trigger_section": "触发关键字",
     "plugin.trigger_default": "默认",

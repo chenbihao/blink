@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "plugin-windows",
+  "description": "插件独立窗口（plugin-*，0.28.2 按需创建/复用，不预热）的 capability。只授予 core:default（事件监听 + invoke）——插件页面与宿主的全部对话走 plugin_page_* 受限桥接命令（窗口 label + 会话 + capability owner 三重复核），不授予任何窗口操作权限：关闭/隐藏由宿主侧命令（plugin_page_close / CloseRequested 拦截）执行。",
+  "windows": ["plugin-*"],
+  "permissions": ["core:default"]
+}

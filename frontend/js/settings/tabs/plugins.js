@@ -20,6 +20,9 @@ const weatherEditors = new Map();
 let pluginConfigListener = false;
 let pendingPluginReload = false;
 const renderedPlugins = new Map();
+// 0.28.2：插件窗口面状态（get_plugin_surface_status → pages/readiness/install），
+// 与 get_plugins 同轮拉取；拉取失败静默降级（无窗口行的旧展示）。
+const surfaceStatus = new Map();
 
 /** 插件图标映射（0.10.8：emoji → Lucide 图标名） */
 const PLUGIN_ICONS = {
@@ -74,7 +77,16 @@ async function loadPlugins(force = false) {
     if (!container) return;
     let plugins;
     try {
-        plugins = await invoke("get_plugins");
+        // 0.28.2：窗口面状态并行拉取；独立容错——失败只少渲染窗口行，不阻断列表
+        const [list, surface] = await Promise.all([
+            invoke("get_plugins"),
+            invoke("get_plugin_surface_status").catch(() => null),
+        ]);
+        plugins = list;
+        surfaceStatus.clear();
+        if (Array.isArray(surface)) {
+            for (const row of surface) surfaceStatus.set(row.plugin_id, row);
+        }
     } catch (error) {
         if (revision !== pluginsLoadRevision) return;
         console.error("loadPlugins failed:", error);
@@ -150,6 +162,8 @@ function renderPluginCard(plugin) {
 
     const triggersTags = renderTriggersTags(plugin);
 
+    const surfaceSection = renderSurfaceSection(plugin);
+
     const configSection = hasFields
         ? renderConfigSection(t("plugin.section"), schema, settings, {collapsible: true, collapsed: true, extraHtml: plugin.id === "builtin.weather" ? renderWeatherSettings(plugin) : "", saveLabel: ""})
         : `<div class="plugin-no-config">${t("plugin.no_config")}</div>`;
@@ -168,8 +182,34 @@ function renderPluginCard(plugin) {
         headerRight,
         attrs: `data-plugin-id="${plugin.id}"`,
         classes: enabled ? "" : "is-disabled",
-        body: configSection,
+        body: `${surfaceSection}${configSection}`,
     });
+}
+
+/**
+ * 插件窗口行（0.28.2）：声明了 pages 的插件渲染「打开窗口」按钮 + 就绪状态。
+ *
+ * 就绪状态只做提示不做硬门禁——未就绪仍可打开（如翻译缺密钥时页面能显示
+ * 修复引导）；缺失原因（blocker.hint）由后端按当前语言本地化。点击未就绪
+ * 徽标展开配置区，形成「缺什么 → 去哪补」的修复入口。
+ */
+function renderSurfaceSection(plugin) {
+    const surface = surfaceStatus.get(plugin.id);
+    const pages = surface?.pages || [];
+    if (!pages.length) return "";
+    const readiness = surface?.readiness || {};
+    const ready = readiness.ready !== false;
+    const blocker = (readiness.blockers || [])[0];
+    const statusHtml = ready
+        ? `<span class="plugin-surface-status plugin-surface-ready">${t("plugin.surface_ready")}</span>`
+        : `<button class="plugin-surface-status plugin-surface-blocked" title="${escapeHtml(blocker?.hint || "")}">${t("plugin.surface_not_ready")}</button>`;
+    const buttons = pages.map(page =>
+        `<button class="btn-small plugin-open-window" data-page="${escapeAttr(page.id)}">${iconHTML("app-window")} ${t("plugin.surface_open")}</button>`).join("");
+    return `<div class="plugin-surface-row">
+      <span class="trigger-label">${t("plugin.surface_section")}</span>
+      ${statusHtml}
+      <span class="plugin-surface-buttons">${buttons}</span>
+    </div>`;
 }
 
 /**
@@ -669,6 +709,20 @@ export function bindPluginCardEvents(plugin) {
             if (enabled) guideScriptRuntimeInstall(plugin.runtime_type);
         }
     });
+    // 0.28.2：打开插件独立窗口（宿主入口；重复唤起后端复用同一窗口）
+    card.querySelectorAll(".plugin-open-window").forEach(button => button.addEventListener("click", async () => {
+        try {
+            await invoke("open_plugin_page", {pluginId: id, pageId: button.dataset.page || null});
+        } catch (error) {
+            flash(card, error?.message || String(error), true, 4000);
+        }
+    }));
+    // 未就绪徽标 → 展开配置区（修复入口：缺密钥等在配置区补齐）
+    card.querySelectorAll(".plugin-surface-blocked").forEach(badge => badge.addEventListener("click", () => {
+        const section = card.querySelector("details.plugin-config-section");
+        if (section) section.open = true;
+        section?.querySelector("input, select")?.focus?.();
+    }));
     card.querySelectorAll(".plugin-field").forEach(input => {
         input.addEventListener("change", async () => {
             applyFieldVisibility(card, schema);

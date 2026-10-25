@@ -123,6 +123,26 @@ fn main() {
                 responder.respond(response);
             });
         })
+        // 自定义协议：http://blink-plugin.localhost/{plugin_id}/{rel}（0.28.2）——
+        // 插件独立窗口的静态页面资源 + /@host/{sdk.js,theme.css} 宿主注入面。
+        //
+        // 边界（phase §3.2）：
+        // - 只服务当前运行时快照中活跃插件的包内文件（plugin_storage::pages
+        //   校验穿越/绝对路径/保留设备名；canonicalize 复核防符号链接逃逸）；
+        // - html 响应带插件页面专属 CSP 头——全局 csp 保持 null，既有窗口零影响；
+        // - theme.css?name=X 按主题名（字符集白名单）从应用资产解析；
+        // - 响应一律 no-store：插件更新后同 URL 不吃浏览器缓存旧资产。
+        .register_asynchronous_uri_scheme_protocol("blink-plugin", |ctx, request, responder| {
+            let app = ctx.app_handle().clone();
+            let uri = request.uri().clone();
+            let raw = uri.path().trim_start_matches('/').to_string();
+            let query = uri.query().map(str::to_string);
+            let decoded = percent_decode(&raw);
+            tauri::async_runtime::spawn(async move {
+                let response = serve_plugin_page_asset(&app, &decoded, query.as_deref());
+                responder.respond(response);
+            });
+        })
         // 自定义协议：http://blink-clipimg.localhost/<image-id>（0.16.4）——
         // 列表缩略图；/preview/<id> 为校验后直出的原始 PNG；
         // /file-preview/<条目id> 为单文件 PNG/JPEG/GIF/WebP 原格式预览。
@@ -474,6 +494,146 @@ fn percent_decode(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+// ── 插件页面资源协议（0.28.2）──────────────────────────────────────────────
+
+/// 插件页面专属 CSP：脚本/样式/图片只允许同源（blink-plugin origin），
+/// IPC 走 Tauri 的 ipc 通道。页面不能外联脚本或被外 frame 嵌入。
+const PLUGIN_PAGE_CSP: &str = "default-src 'self'; script-src 'self'; \
+     style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; \
+     font-src 'self' data:; connect-src ipc: http://ipc.localhost; \
+     frame-ancestors 'none'; object-src 'none'; base-uri 'none'";
+
+/// `blink-plugin` 协议响应体：`{plugin_id}/{rel...}` 或 `@host/{sdk.js,theme.css}`。
+fn serve_plugin_page_asset(
+    app: &tauri::AppHandle,
+    decoded_path: &str,
+    query: Option<&str>,
+) -> tauri::http::Response<Vec<u8>> {
+    use tauri::Manager;
+
+    let not_found = |reason: &str| {
+        tracing::debug!(path = %decoded_path, reason, "blink-plugin: 资源不可用");
+        tauri::http::Response::builder()
+            .status(404)
+            .header("Cache-Control", "no-store")
+            .body(Vec::new())
+            .unwrap()
+    };
+
+    let (first, rest) = match decoded_path.split_once('/') {
+        Some(split) => split,
+        None => return not_found("缺少插件 id 段"),
+    };
+
+    // 宿主注入面：@host/sdk.js（内嵌 SDK）与 @host/theme.css?name=X（主题资产）
+    if first == "@host" {
+        return match rest {
+            "sdk.js" => tauri::http::Response::builder()
+                .status(200)
+                .header("Content-Type", "text/javascript; charset=utf-8")
+                .header("Cache-Control", "no-store")
+                .body(app::commands::PLUGIN_HOST_SDK.as_bytes().to_vec())
+                .unwrap(),
+            "theme.css" => {
+                let Some(name) = query.and_then(|q| q.split("name=").nth(1)) else {
+                    return not_found("theme.css 缺少 name");
+                };
+                // 主题名白名单：字母数字/-/_（防路径拼接穿越）
+                let name = name.split('&').next().unwrap_or("");
+                if name.is_empty()
+                    || name.len() > 64
+                    || !name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                {
+                    return not_found("theme 名非法");
+                }
+                match app
+                    .asset_resolver()
+                    .get(format!("css/themes/{name}.css"))
+                {
+                    Some(asset) => tauri::http::Response::builder()
+                        .status(200)
+                        .header("Content-Type", "text/css; charset=utf-8")
+                        .header("Cache-Control", "no-store")
+                        .body(asset.bytes().to_vec())
+                        .unwrap(),
+                    None => not_found("主题资产不存在"),
+                }
+            }
+            _ => not_found("未知 @host 资源"),
+        };
+    }
+
+    // 插件资源：只服务当前运行时快照中活跃句柄的包内文件
+    let engine = match app.try_state::<std::sync::Arc<domain::plugin::PluginEngine>>() {
+        Some(engine) => engine.inner().clone(),
+        None => return not_found("插件引擎未就绪"),
+    };
+    let Some(handle) = engine
+        .plugin_set()
+        .plugins
+        .iter()
+        .find(|p| p.id() == first)
+        .cloned()
+    else {
+        return not_found("插件不在当前运行时快照");
+    };
+    let Ok(path) = blink_infra::plugin_storage::pages::resolve_page_resource(
+        handle.package_dir(),
+        rest,
+    ) else {
+        return not_found("资源路径非法");
+    };
+    // 有界读入：页面静态资源远小于此限；超限（误指二进制/数据包）拒绝
+    const MAX_ASSET_BYTES: u64 = 10 << 20;
+    if let Ok(meta) = std::fs::metadata(&path)
+        && (meta.len() > MAX_ASSET_BYTES || meta.is_dir())
+    {
+        return not_found("资源过大或不是文件");
+    }
+    // 符号链接逃逸复核：canonicalize 后必须仍在包根内（与 validate_entry 同口径）
+    if let (Ok(root), Ok(candidate)) = (handle.package_dir().canonicalize(), path.canonicalize())
+        && !candidate.starts_with(&root)
+    {
+        return not_found("资源越界");
+    }
+    let Ok(bytes) = std::fs::read(&path) else {
+        return not_found("文件不存在");
+    };
+    let mime = asset_mime(rest);
+    let mut builder = tauri::http::Response::builder()
+        .status(200)
+        .header("Content-Type", mime)
+        .header("Cache-Control", "no-store");
+    if mime.starts_with("text/html") {
+        builder = builder.header("Content-Security-Policy", PLUGIN_PAGE_CSP);
+    }
+    builder.body(bytes).unwrap()
+}
+
+/// 插件页面静态资源的 Content-Type（按扩展名；未知扩展回 text/plain）。
+fn asset_mime(rel: &str) -> &'static str {
+    let ext = rel.rsplit('.').next().unwrap_or("");
+    match ext {
+        "html" | "htm" => "text/html; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "json" | "map" => "application/json; charset=utf-8",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "webp" => "image/webp",
+        "ico" => "image/x-icon",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "ttf" => "font/ttf",
+        "txt" => "text/plain; charset=utf-8",
+        _ => "text/plain; charset=utf-8",
+    }
 }
 
 // 保持独立的增量检查边界，避免 Builder / IPC 注册改动重算完整初始化函数。
@@ -1062,6 +1222,8 @@ fn setup_app(app: &mut tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error:
     }
     app.manage(plugin_publisher.clone());
     app.manage(plugin_installer.clone());
+    // 0.28.2：插件独立窗口面（会话表 + 窗口编排入口；必须在任何插件窗口打开前管理）
+    app.manage(std::sync::Arc::new(app::plugin_surface::PluginSurface::new()));
 
     // 0.17.11: CM→keyring 密钥迁移（一次性,幂等）
     // 必须在 AIConfig 读取前执行——AIConfig 加载会触发密钥读取,需先迁到 keyring 新命名。
@@ -1896,6 +2058,14 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
         app::commands::install_plugin_package,
         app::commands::uninstall_plugin,
         app::commands::list_plugin_installations,
+        // 0.28.2：插件页面受限桥接（plugin-* 窗口）+ 窗口面状态
+        app::commands::open_plugin_page,
+        app::commands::plugin_page_ready,
+        app::commands::plugin_page_invoke,
+        app::commands::plugin_page_get_settings,
+        app::commands::plugin_page_clipboard,
+        app::commands::plugin_page_close,
+        app::commands::get_plugin_surface_status,
         app::commands::prompt_library_list,
         app::commands::prompt_library_upsert,
         app::commands::prompt_library_delete,

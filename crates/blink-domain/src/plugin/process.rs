@@ -610,6 +610,16 @@ impl PluginHandle {
         &self.manifest
     }
 
+    /// 插件包根目录（manifest 所在目录；0.28.2 页面资源协议按此服务静态页面）。
+    pub fn package_dir(&self) -> &std::path::Path {
+        &self.dir
+    }
+
+    /// 宿主分配目录快照（v2 握手注入；v1 句柄为 None）。
+    pub fn dirs(&self) -> Option<super::protocol::PluginDirs> {
+        self.dirs.lock().unwrap().clone()
+    }
+
     /// 更新代理配置(保存全局代理后调用)。下次 query spawn 时会用新值。
     pub fn update_proxy(&self, proxy: Option<(String, String)>) {
         // 注意:只能更新到内存字段，已启动的进程 env 无法修改，必须杀掉重启

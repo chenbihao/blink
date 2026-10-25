@@ -1,8 +1,9 @@
 {
   "lucideVersion": "1.25.0",
-  "generatedAt": "2026-10-23T11:44:41Z",
+  "generatedAt": "2026-10-25T18:46:40Z",
   "icons": [
     "aperture",
+    "app-window",
     "arrow-left",
     "audio-lines",
     "bookmark",

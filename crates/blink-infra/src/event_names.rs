@@ -282,4 +282,9 @@ impl EventNames {
     /// 发送方是 `install_update` command 的后台任务；应用退出后本事件
     /// 不再产生，前端以「应用自动重启」作为成功终点。
     pub const UPDATE_INSTALL_PROGRESS: &str = "blink://update-install-progress";
+
+    // ── 插件独立窗口（0.28.2）──
+    /// 复用插件窗口再次唤起时的新载荷推送（定向 emit 到该窗口）。
+    /// 初始 payload 不走事件——由 `plugin_page_ready` 握手返回（ready/pull）。
+    pub const PLUGIN_PAGE_PAYLOAD: &str = "blink://plugin-page-payload";
 }

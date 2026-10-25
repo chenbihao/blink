@@ -51,6 +51,7 @@ ICON_LIST = [
     "bookmark",         # 浏览器书签条目（0.26.13 BookmarkEngine，列表占位 + 设置页 card）
     "folder",           # open_path 📁 / 文件搜索 (settings.html)
     "folder-search",    # reveal_in_explorer 🔍
+    "app-window",       # 插件独立窗口入口（0.28.2 plugins tab 打开插件窗口按钮）
 
     # 插件（PLUGIN_ICONS 映射）
     "globe",            # builtin.ip / context 语言 🌐 / 🌍

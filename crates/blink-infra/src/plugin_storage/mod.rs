@@ -21,6 +21,7 @@
 //! 本模块只管布局、IO 与恢复原语。
 
 pub mod archive;
+pub mod pages;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

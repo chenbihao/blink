@@ -947,7 +947,7 @@ pub async fn set_model_reasoning_effort(
     model.reasoning_effort = reasoning_effort.map(|e| e.trim().to_string());
 
     let value = serde_json::to_value(&config).map_err(|e| e.to_string())?;
-    crate::app::commands::config::set_config(app, "ai_config".to_string(), value, None)
+    crate::app::commands::config::set_config_internal(app, "ai_config".to_string(), value, None)
         .await
         .map_err(|e| e.to_string())?;
     Ok(true)
