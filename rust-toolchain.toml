@@ -1,0 +1,6 @@
+# 0.27.13：工作区固定工具链。rig 0.45 的 rust-version（MSRV）为 1.97.1，
+# 以 rig 官方 CI 验证过的最低版本钉住，保证开发/CI/release 三方一致且可复现；
+# 升级 rig 或放宽 MSRV 时同步更新此处与 .github/workflows/release.yml。
+[toolchain]
+channel = "1.97.1"
+profile = "minimal"

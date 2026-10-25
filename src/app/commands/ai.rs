@@ -685,14 +685,12 @@ pub async fn promote_ephemeral_conversation(
     }
 
     // 3. write to persistent memory (SqliteConversationMemory)
-    //    ConversationMemory::append 内部自动 create_conversation (INSERT OR IGNORE) + 逐条 append
-    //    0.43: ConversationMemory 的 id 类型为 &ConversationId
+    //    ChatMemory::append_turn 内部自动 create_conversation (INSERT OR IGNORE) + 逐条 append
+    //    0.27.13: rig 0.45 移除 ConversationMemory——改用本仓 ChatMemory（id 为 &str）
     let persistent = chat.persistent_memory().clone();
-    use rig_core::id::ConversationId;
-    use rig_core::memory::ConversationMemory;
-    let conv_id = ConversationId::new(conversation_id.as_str());
+    use blink_domain::ai::memory::ChatMemory;
     persistent
-        .append(&conv_id, messages)
+        .append_turn(conversation_id.as_str(), messages)
         .await
         .map_err(|e| format!("写入持久对话失败: {e}"))?;
 

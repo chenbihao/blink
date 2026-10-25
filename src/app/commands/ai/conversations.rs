@@ -84,8 +84,34 @@ pub async fn get_chat_messages(
 
     let mut snapshots: Vec<ChatMessageSnapshot> = Vec::with_capacity(rows.len());
     for (message_id, role, content_json, created_at, attachments_json, status, error_text) in rows {
-        let msg: Message =
-            serde_json::from_str(&content_json).map_err(|e| format!("反序列化消息失败: {e}"))?;
+        // 0.27.13：走兼容解析（0.45 原生 + 0.43 legacy 升级）；两格式都失败的单行
+        // 不再炸掉整个会话加载（旧行为一条坏行 → 前端整会话不可见），降级为
+        // 占位行并打 warn——数据仍留在 DB，修复后可恢复。
+        let msg: Message = match crate::domain::ai::message_compat::parse_message(&content_json) {
+            Ok(msg) => msg,
+            Err(e) => {
+                tracing::warn!(
+                    conversation_id,
+                    message_id,
+                    error = %e,
+                    "get_chat_messages: 消息反序列化失败，降级为占位行"
+                );
+                snapshots.push(ChatMessageSnapshot {
+                    message_id,
+                    role: role.clone(),
+                    text: format!("[无法解析的消息记录（可能为损坏数据）]"),
+                    thinking: None,
+                    tool_name: None,
+                    tool_arguments: None,
+                    tool_result: None,
+                    created_at: Some(created_at),
+                    attachments: None,
+                    failed: None,
+                    error_text: None,
+                });
+                continue;
+            }
+        };
         // 0.27.9：附件徽标（kind+name）——解析失败按无附件降级；
         // 兼容 0.23.12 旧纯音频文件名数组（字符串项一律按 audio 徽标解析）。
         let attachments: Option<Vec<crate::domain::ai::attachment::AttachmentBadge>> =
@@ -175,23 +201,19 @@ pub async fn get_chat_messages(
                     },
                 });
             }
-            Message::Assistant { content, .. } => {
+            Message::Assistant(turn) => {
                 let mut text = String::new();
                 let mut thinking = String::new();
                 let mut tool = None;
                 let mut tool_args = None;
-                for c in content.iter() {
+                for c in turn.content.iter() {
                     match c {
                         AssistantContent::Text(t) => text.push_str(&t.text),
-                        AssistantContent::Reasoning(r) => {
-                            // 0.43: Reasoning 被 Sealed 包裹——用签发方身份打开读取展示文本
-                            if let Some(reasoning) = r.open(r.issuer()) {
-                                thinking.push_str(&reasoning.display_text());
-                            }
-                        }
+                        // 0.45: Reasoning 为普通结构体——直接读展示文本
+                        AssistantContent::Reasoning(r) => thinking.push_str(&r.text),
                         AssistantContent::ToolCall(tc) => {
                             tool = Some(tc.function.name.to_string());
-                            tool_args = Some(tc.function.arguments.to_string());
+                            tool_args = Some(tc.function.arguments_value().to_string());
                         }
                         _ => {}
                     }

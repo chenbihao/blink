@@ -281,8 +281,8 @@ impl ChatService {
             .messages
             .iter()
             .filter_map(|m| match m {
-                rig_core::completion::Message::Assistant { content, .. } => Some(
-                    content
+                rig_core::completion::Message::Assistant(turn) => Some(
+                    turn.content
                         .iter()
                         .filter(|c| {
                             matches!(

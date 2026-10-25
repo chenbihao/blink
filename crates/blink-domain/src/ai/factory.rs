@@ -308,7 +308,10 @@ fn build_ollama(
         );
     }
 
-    let rig_model: DynModel<Completion> = client.completion(&model.id).into();
+    // 0.45：completion() 走 Ollama 的 OpenAI 兼容 /v1/chat/completions（不发
+    // 模型 options）；native_completion() 保持原生 /api/chat——主窗口的
+    // additional_params 合并进 options、think 布尔等既有语义依赖原生路径。
+    let rig_model: DynModel<Completion> = client.native_completion(&model.id).into();
     Ok(Arc::new(RigProvider::new(
         ProviderKind::OllamaHttp,
         model.id.clone(),
@@ -652,5 +655,53 @@ pub(super) mod wire_tests {
 
         let reqs = captured.lock().unwrap();
         assert_eq!(reqs[0].path, "/chat/completions");
+    }
+
+    /// Ollama 非流式原生响应（/api/chat 的 message/done 形状）。
+    fn ollama_chat_response(content: &str) -> Vec<u8> {
+        let body = format!(
+            r#"{{"model":"wire-ollama","created_at":"2026-10-25T00:00:00Z","message":{{"role":"assistant","content":{content}}},"done":true,"done_reason":"stop"}}"#
+        );
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .into_bytes()
+    }
+
+    /// 0.27.13：rig 0.45 起 `completion()` 改走 Ollama 的 OpenAI 兼容
+    /// `/v1/chat/completions`，`native_completion()` 才是原生 `/api/chat`。
+    /// Blink 刻意保持原生语义（additional_params → options、max_tokens →
+    /// num_predict、think 布尔），本测试钉住 native 路由不回退。
+    #[tokio::test]
+    async fn ollama_native_completion_posts_to_api_chat_with_options() {
+        let (addr, captured) = spawn_capture_server(vec![ollama_chat_response("\"hello native\"")]);
+        let model = super::tests::sample_model();
+        let provider =
+            build_ollama(Some(&format!("http://{addr}")), &model).expect("构造 ollama provider");
+
+        let resp = provider
+            .complete(sample_wire_request())
+            .await
+            .expect("ollama complete 应成功");
+        assert_eq!(resp.text.as_deref(), Some("hello native"));
+
+        let reqs = captured.lock().unwrap();
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0].method, "POST");
+        assert_eq!(
+            reqs[0].path, "/api/chat",
+            "0.45 必须走 native_completion（/api/chat），不得回退 /v1/chat/completions"
+        );
+        let body: serde_json::Value = serde_json::from_str(&reqs[0].body).expect("请求体是 JSON");
+        assert!(
+            body["messages"].as_array().is_some_and(|m| !m.is_empty()),
+            "原生请求携带 messages"
+        );
+        assert_eq!(
+            body["options"]["num_predict"], 64,
+            "max_tokens 经 rig 一等参数映射为 options.num_predict（sample 请求 max_tokens=64）"
+        );
     }
 }

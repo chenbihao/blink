@@ -347,10 +347,12 @@ impl McpServerRuntime {
 
         // rmcp Streamable HTTP server 配置
         // StreamableHttpServerConfig 是 #[non_exhaustive]，必须用 Default + builder 方法
+        // 0.27.13：rmcp 3 把 with_stateful_mode 更名 with_legacy_session_mode
+        // （会话式 mcp-session-id 协议；rmcp 3 默认开启，这里显式声明防漂移）
         let config = rmcp::transport::streamable_http_server::StreamableHttpServerConfig::default()
             .with_sse_keep_alive(Some(Duration::from_secs(15)))
             .with_sse_retry(Some(Duration::from_secs(3)))
-            .with_stateful_mode(true)
+            .with_legacy_session_mode(true)
             .with_cancellation_token(server_cancel.child_token())
             // 只允许 loopback host，防 DNS rebinding
             .with_allowed_hosts(["127.0.0.1", "localhost"])

@@ -1,6 +1,6 @@
 [package]
 name = "blink"
-version = "0.27.15"
+version = "0.27.13"
 edition = "2024"
 description = "Blink — Windows Universal Action Layer"
 license = "MIT"
@@ -80,22 +80,24 @@ png = "0.17"
 open = "5.3.5"
 pinyin = "0.11.0"
 regex = "1.11"
-# rig-core 0.43:portable provider/message/tool contracts。0.42 起 Agent runtime 拆到 rig-agent，
+# rig-core 0.45:portable provider/message/tool contracts。0.42 起 Agent runtime 拆到 rig-agent，
 # 0.43 起默认 HTTP transport 拆到 rig-reqwest（rig-core 不再自带 reqwest/tokio）。
+# 0.45 起 ConversationMemory trait 移除（记忆经 runner.history 显式注入），
+# completion::Message 的 Reasoning/CallId serde 形状变化——旧库读取走 legacy 兼容层。
 # default features 已含 derive;test-utils 供单测 mock 模型。
-rig-core = { version = "0.43", features = ["test-utils"] }
-# rig-agent 0.43:Agent runtime（builder/stream/hook/tool registry）。0.43 起 MCP 集成拆到 rig-rmcp。
+rig-core = { version = "0.45", features = ["test-utils"] }
+# rig-agent 0.45:Agent runtime（builder/stream/hook/tool registry）。MCP 集成在 rig-rmcp。
 # test-utils: mock 模型/工具供单测。
-rig-agent = { version = "0.43", features = ["test-utils"] }
-# rig-rmcp 0.43:MCP tool 适配（McpTool/McpClientHandler/tools_from_server + AgentBuilder 扩展注册），
-# 依赖 rmcp 2——0.43 起 rig-agent 不再有 rmcp feature，rmcp_tools 注册路径由本 crate 提供。
-rig-rmcp = { version = "0.43" }
-# rmcp 2.x: MCP 协议 Rust 实现（rig-rmcp 0.43 依赖 rmcp 2；MCP client/server 双向共用）。
+rig-agent = { version = "0.45", features = ["test-utils"] }
+# rig-rmcp 0.45:MCP tool 适配（McpConnection/McpTool/McpClientHandler），非 wasm 下依赖
+# rmcp 3 并 re-export，保证本仓与 rig 用同一份 rmcp 类型。
+rig-rmcp = { version = "0.45" }
+# rmcp 3.x: MCP 协议 Rust 实现（rig-rmcp 0.45 依赖 rmcp 3；MCP client/server 双向共用）。
 # - client + transport-child-process: MCP client 拉起外部 server 子进程走 stdio JSON-RPC
 # - server + transport-io: MCP server 暴露 Blink 能力给外部 client（stdio 传输）
 # - transport-streamable-http-client-reqwest: MCP client 支持 Streamable HTTP 远程 server
 # - transport-streamable-http-server: MCP server Streamable HTTP transport（主进程托管）
-rmcp = { version = "2", features = ["client", "server", "transport-child-process", "transport-io", "transport-streamable-http-client-reqwest", "transport-streamable-http-server"] }
+rmcp = { version = "3", features = ["client", "server", "transport-child-process", "transport-io", "transport-streamable-http-client-reqwest", "transport-streamable-http-server"] }
 # hyper + hyper-util: HTTP 服务器（0.19.13 MCP Streamable HTTP transport 需要）
 # hyper 已作为 reqwest 传递依赖在树中；这里显式启用 server + http1 feature 供主进程 HTTP listener 使用
 hyper = { version = "1", features = ["server", "http1"] }

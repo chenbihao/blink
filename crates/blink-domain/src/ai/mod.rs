@@ -22,6 +22,7 @@ pub mod factory;
 pub mod gating;
 pub mod memory;
 pub mod message;
+pub mod message_compat;
 pub mod model_catalog;
 pub mod prompt;
 pub mod provider;

@@ -541,8 +541,19 @@ impl CapabilityTool {
         let requires_confirmation = self.requires_confirmation();
         let rememberable = cap.ai_confirmation_rememberable();
 
+        // 0.45：DynamicTool::new 首参为 ToolName（Capability id 非空由注册表保证，
+        // 防御性兜底到 "unnamed_tool" 并告警，不因名字字段破坏整个工具池）
+        let tool_name = match rig_core::message::ToolName::try_from(cap_id.as_str()) {
+            Ok(name) => name,
+            Err(_) => {
+                tracing::warn!(capability = %cap_id, "to_dynamic_tool: 空 capability id，兜底 unnamed_tool");
+                rig_core::message::ToolName::try_from("unnamed_tool")
+                    .expect("静态非空名称必然合法")
+            }
+        };
+
         DynamicTool::new(
-            cap_id.clone(),
+            tool_name,
             schema.description.clone(),
             schema.to_rig_tool().parameters,
             move |args_value| {
@@ -672,17 +683,14 @@ fn capability_error_to_string(e: CapabilityError) -> String {
 #[allow(clippy::too_many_arguments)]
 pub fn build_agent_tools(
     cap_registry: Arc<CapabilityRegistry>,
-    external_tools: Vec<(rmcp::model::Tool, rmcp::service::ServerSink)>,
+    external_tools: Vec<rig_rmcp::McpTool>,
     emitter: Arc<dyn EventPort>,
     chat_service: Option<std::sync::Arc<crate::ai::chat_service::ChatService>>,
     cap_env: std::sync::Arc<dyn crate::event::CapabilityEnv>,
     pending: Arc<PendingConfirms>,
     surface: Option<std::sync::Arc<dyn crate::capability::SurfacePort>>,
     ai_allowlist: Option<&std::collections::HashSet<String>>,
-) -> (
-    Vec<DynamicTool>,
-    Vec<(rmcp::model::Tool, rmcp::service::ServerSink)>,
-) {
+) -> (Vec<DynamicTool>, Vec<rig_rmcp::McpTool>) {
     let mut tools: Vec<DynamicTool> = Vec::new();
 
     // 1. 包装所有 Capability（0.21.5: 仅包装 allowlist 中的）
@@ -711,7 +719,8 @@ pub fn build_agent_tools(
         cap_count += 1;
     }
 
-    // 2. MCP tools 原样返回（0.42: AgentBuilder::rmcp_tools 直接消费）
+    // 2. MCP tools 原样返回（0.45: 由 AgentProvider::build_agent 经
+    // DynamicTool::try_from 注册，McpTool 持有连接保活）
     let external_count = external_tools.len();
 
     tracing::info!(

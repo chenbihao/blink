@@ -51,12 +51,20 @@ impl ToolSchema {
     ///
     /// 本方法是**全项目唯一**触碰 rig 类型的地方；rig 若破坏 `ToolDefinition` 结构，
     /// 只需要改这里，`CapabilitySchema` 及全体实现零波及。
+    ///
+    /// 0.45：`name` 为 `ToolName`、新增 `annotations`（本仓不声明，恒空）；
+    /// 空 name（防御路径）兜底 "unnamed_tool"，与 tool_adapter 的兜底一致。
     pub fn to_rig_tool(&self) -> rig_core::completion::ToolDefinition {
-        rig_core::completion::ToolDefinition {
-            name: self.name.clone(),
-            description: self.description.clone(),
-            parameters: self.parameters.clone(),
-        }
+        let name = rig_core::message::ToolName::try_from(self.name.as_str())
+            .unwrap_or_else(|_| {
+                tracing::warn!(schema = %self.name, "to_rig_tool: 空 schema name，兜底 unnamed_tool");
+                rig_core::message::ToolName::try_from("unnamed_tool").expect("静态非空名称必然合法")
+            });
+        rig_core::completion::ToolDefinition::new(
+            name,
+            self.description.clone(),
+            self.parameters.clone(),
+        )
     }
 }
 

@@ -30,8 +30,10 @@ jobs:
           # 手动触发时 checkout 指定 tag；tag push 时默认即该 tag
           ref: ${{ inputs.tag || github.ref_name }}
 
-      - name: Setup Rust (stable)
-        uses: dtolnay/rust-toolchain@stable
+      # 0.27.13：与 rust-toolchain.toml 一致钉住 1.97.1（rig 0.45 MSRV），
+      # 避免 @stable 漂移 + 再下载一份钉住工具链。
+      - name: Setup Rust (1.97.1)
+        uses: dtolnay/rust-toolchain@1.97.1
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2

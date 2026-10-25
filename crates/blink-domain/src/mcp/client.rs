@@ -22,11 +22,9 @@
 //!
 //! `collect_tools()` 时过滤 `config.disabled_tools` 中的 tool，只把用户启用的喂给 AI。
 
-use rmcp::model::ClientInfo;
-use rmcp::model::Tool as RmcpTool;
+use rmcp::model::ClientConfig;
 use rmcp::service::RunningService;
-use rmcp::service::ServerSink;
-// 0.42: ToolDyn 移除。MCP tools 由 AgentBuilder::rmcp_tools 直接消费，
+// 0.45：collect_tools 返回 rig-rmcp McpTool（持连接保活），由 AgentProvider 注册。
 // collect_tools 返回原始 (Tool, ServerSink) 对供 build_agent 使用。
 use rmcp::ServiceExt;
 use std::collections::HashMap;
@@ -62,9 +60,10 @@ pub struct McpToolInfo {
 
 /// 单个已连接 server 的运行时状态。
 struct ConnectedServer {
-    /// rmcp 运行时服务（持有子进程 + 连接）。
-    /// 类型为 `RunningService<RoleClient, ClientInfo>`——`ClientInfo` 是 rmcp 提供的默认 handler。
-    service: RunningService<rmcp::service::RoleClient, ClientInfo>,
+    /// 0.45：连接持有 rig-rmcp 的 `McpConnection`（包装 `RunningService`，
+    /// Arc 共享——`McpTool::new` 的克隆会保活连接，旧 Agent 在途调用不受
+    /// 重连/停用影响；最后一个持有者 drop 才真正关闭 transport/子进程）。
+    conn: rig_rmcp::McpConnection,
     /// 该 server 提供的原始 rmcp tool 列表（用于构造 `McpTool`，避免每次 collect 重新拉取）。
     rmcp_tools: Vec<rmcp::model::Tool>,
     /// 该 server 提供的 tool 信息（含描述 + disabled 标记，供前端预览）。
@@ -78,7 +77,7 @@ struct ConnectedServer {
 /// transport 只有在 `commit_connection` 通过代际校验后才进入 `connected`；
 /// 旧任务的候选值会直接 drop，从而关闭旧 stdio/HTTP/SSE transport。
 struct PendingConnection {
-    service: RunningService<rmcp::service::RoleClient, ClientInfo>,
+    conn: rig_rmcp::McpConnection,
     rmcp_tools: Vec<rmcp::model::Tool>,
     tools: Vec<McpToolInfo>,
     config: McpServerConfig,
@@ -463,9 +462,12 @@ impl McpClientManager {
                 self.build_http_service(config, url, headers).await?
             }
         };
-        let (rmcp_tools, tools) = Self::pull_tools_from_service(&service, config).await?;
+        // 0.45：service 进 McpConnection（Arc 共享保活；peer/is_closed/close
+        // 的生命周期语义见 ConnectedServer.conn 注释）
+        let conn = rig_rmcp::McpConnection::new(service);
+        let (rmcp_tools, tools) = Self::pull_tools_from_connection(&conn, config).await?;
         Ok(PendingConnection {
-            service,
+            conn,
             rmcp_tools,
             tools,
             config: config.clone(),
@@ -510,7 +512,7 @@ impl McpClientManager {
             self.connected.write().await.insert(
                 config.name.clone(),
                 ConnectedServer {
-                    service: candidate.service,
+                    conn: candidate.conn,
                     rmcp_tools: candidate.rmcp_tools,
                     tools: candidate.tools,
                     config: candidate.config,
@@ -602,7 +604,7 @@ impl McpClientManager {
     async fn build_stdio_service(
         &self,
         config: &McpServerConfig,
-    ) -> Result<RunningService<rmcp::service::RoleClient, ClientInfo>, String> {
+    ) -> Result<RunningService<rmcp::service::RoleClient, ClientConfig>, String> {
         // 前置校验——空 command 是确定性错误，不重试
         if config.command.is_empty() {
             return Err(format!(
@@ -626,8 +628,8 @@ impl McpClientManager {
         let transport = rmcp::transport::TokioChildProcess::new(cmd)
             .map_err(|e| format!("子进程启动失败: {e}"))?;
 
-        // 用 rmcp 默认 ClientInfo 建立 client 连接
-        let client_info = ClientInfo::default();
+        // 用 rmcp 默认 ClientConfig 建立 client 连接
+        let client_info = ClientConfig::default();
         client_info
             .serve(transport)
             .await
@@ -640,7 +642,7 @@ impl McpClientManager {
         config: &McpServerConfig,
         url: &str,
         headers: &std::collections::HashMap<String, String>,
-    ) -> Result<RunningService<rmcp::service::RoleClient, ClientInfo>, String> {
+    ) -> Result<RunningService<rmcp::service::RoleClient, ClientConfig>, String> {
         // 前置校验——空 URL 是确定性错误
         if url.is_empty() {
             return Err(format!("HTTP 模式 URL 不能为空（server: {}）", config.name));
@@ -690,7 +692,7 @@ impl McpClientManager {
                 cfg,
             );
 
-        let client_info = ClientInfo::default();
+        let client_info = ClientConfig::default();
         client_info
             .serve(transport)
             .await
@@ -703,7 +705,7 @@ impl McpClientManager {
         config: &McpServerConfig,
         url: &str,
         headers: &std::collections::HashMap<String, String>,
-    ) -> Result<RunningService<rmcp::service::RoleClient, ClientInfo>, String> {
+    ) -> Result<RunningService<rmcp::service::RoleClient, ClientConfig>, String> {
         if url.is_empty() {
             return Err(format!("SSE 模式 URL 不能为空（server: {}）", config.name));
         }
@@ -718,20 +720,20 @@ impl McpClientManager {
             .await
             .map_err(|e| format!("SSE 连接失败: {e}"))?;
 
-        let client_info = ClientInfo::default();
+        let client_info = ClientConfig::default();
         client_info
             .serve(transport)
             .await
             .map_err(|e| format!("SSE MCP 握手失败: {e}"))
     }
 
-    /// 0.13.8: 从已建立的 service 拉 tool 列表 + 转换为 McpToolInfo（不含存储逻辑）。
-    async fn pull_tools_from_service(
-        service: &RunningService<rmcp::service::RoleClient, ClientInfo>,
+    /// 0.13.8: 从已建立的连接拉 tool 列表 + 转换为 McpToolInfo（不含存储逻辑）。
+    async fn pull_tools_from_connection(
+        conn: &rig_rmcp::McpConnection,
         config: &McpServerConfig,
     ) -> Result<(Vec<rmcp::model::Tool>, Vec<McpToolInfo>), String> {
         // 拉 tool 列表
-        let rmcp_tools = service
+        let rmcp_tools = conn
             .peer()
             .list_all_tools()
             .await
@@ -863,20 +865,18 @@ impl McpClientManager {
         }
     }
 
-    /// 收集所有已连接 server 的 tool，返回原始 (Tool, ServerSink) 对。
+    /// 收集所有已连接 server 的 tool，返回 rig-rmcp 的 `McpTool`。
     ///
-    /// 0.42: McpTool 成为 pub(crate)，外部不能直接构造。
-    /// 改为返回原始 (rmcp::model::Tool, ServerSink) 对，由 AgentBuilder::rmcp_tools 消费。
+    /// 0.45：`McpTool::new(tool, &McpConnection)` 构造（工具持有连接克隆保活），
+    /// 由 `AgentProvider::build_agent` 经 `DynamicTool::try_from` 注册。
     ///
     /// 过滤 `disabled_tools` 中的 tool——只把用户启用的喂给 AI。
     /// 使用 `ConnectedServer.rmcp_tools` 缓存（握手时已拉取），不重新调 `list_all_tools`。
-    pub async fn collect_tools(&self) -> Vec<(RmcpTool, ServerSink)> {
+    pub async fn collect_tools(&self) -> Vec<rig_rmcp::McpTool> {
         let connected = self.connected.read().await;
-        let mut tools: Vec<(RmcpTool, ServerSink)> = Vec::new();
+        let mut tools: Vec<rig_rmcp::McpTool> = Vec::new();
 
         for (name, server) in connected.iter() {
-            // 获取 peer（ServerSink = Peer<RoleClient>），用于构造 McpTool
-            let peer = server.service.peer().clone();
             // 0.21.22: 给 description 加 [MCP:{server名}] 前缀，让 LLM 区分工具来源
             let source_prefix = format!("[MCP:{name}] ");
             // 从缓存的 rmcp tool 列表过滤 disabled
@@ -893,7 +893,7 @@ impl McpClientManager {
                     )
                     .into(),
                 );
-                tools.push((tool, peer.clone()));
+                tools.push(rig_rmcp::McpTool::new(tool, &server.conn));
             }
         }
 

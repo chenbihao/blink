@@ -193,11 +193,10 @@ pub fn compute_manual_compact_boundary(rows: &[(i64, bool)], keep_turns: usize) 
 /// 与损坏行都不算。参数用 (role, content JSON) 原始行形态，供
 /// `load_window_messages_with_ids_after_watermark` 结果直接消费。
 pub fn is_user_prompt_row(role: &str, content: &str) -> bool {
-    use rig_core::completion::Message;
     if role != "user" {
         return false;
     }
-    match serde_json::from_str::<Message>(content) {
+    match crate::ai::message_compat::parse_message(content) {
         Ok(msg) => !crate::ai::memory::extract_message_text(&msg).is_empty(),
         Err(_) => false,
     }
@@ -331,14 +330,12 @@ mod tests {
                     "hello",
                 ))],
             },
-            Message::Assistant {
-                id: None,
-                content: vec![AssistantContent::Text(Text::new(""))], // 空 text 应跳过
-            },
-            Message::Assistant {
-                id: None,
-                content: vec![AssistantContent::Text(Text::new("world"))],
-            },
+            Message::Assistant(rig_core::completion::message::AssistantMessage::new(
+                vec![AssistantContent::Text(Text::new(""))], // 空 text 应跳过
+            )),
+            Message::Assistant(rig_core::completion::message::AssistantMessage::new(
+                vec![AssistantContent::Text(Text::new("world"))],
+            )),
         ];
         let formatted = format_messages_for_summary(&msgs);
         assert!(formatted.contains("[用户] hello"));

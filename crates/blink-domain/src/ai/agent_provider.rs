@@ -26,14 +26,16 @@
 use futures::StreamExt;
 use tokio::sync::mpsc;
 
-// 0.42: Agent runtime 迁移到 rig-agent crate；0.43: 流式事件模型改为
-// rig-core `StreamEvent`/`Item`，model 句柄为 `DynModel<Completion>`
+// 0.45: Agent runtime 仍在 rig-agent；流式事件模型为 rig-core `StreamEvent`/`Item`，
+// model 句柄为 `DynModel<Completion>`。0.27.13：`ConversationMemory` trait 已移除，
+// 记忆改由本仓 `ChatMemory` 显式驱动（load → runner.history，FinalResponse → append_turn）。
 use rig_agent::agent::{Agent, AgentBuilder, MultiTurnStreamItem, StreamingResult};
 use rig_agent::tool::DynamicTool;
 use rig_core::driver::DynModel;
-use rig_core::memory::ConversationMemory;
 use rig_core::operation::Completion;
-use rig_core::streaming::{Item as RigStreamItem, StreamEvent as RigStreamEvent, StreamedUserContent};
+use rig_core::streaming::{Item as RigStreamItem, StreamEvent as RigStreamEvent};
+
+use crate::ai::memory::ChatMemory;
 
 
 /// 构造本轮 user 消息（0.27.10）：无图 = `Message::user(text)`（与既有行为
@@ -75,7 +77,7 @@ fn base64_encode(bytes: &[u8]) -> String {
 }
 
 #[cfg(test)]
-use rig_core::memory::InMemoryConversationMemory;
+use crate::ai::memory::EphemeralConversationMemory;
 
 use crate::config::ai_config::{ModelEntry, ProviderEntry, ProviderKind};
 use std::sync::Arc;
@@ -173,10 +175,14 @@ enum ChatAgent {
 
 /// 对话窗口 Agent 封装--持有按当前 `ProviderEntry`+`ModelEntry` 构造的 rig `Agent`。
 ///
-/// 构造时挂载 tool 池 + `InMemoryConversationMemory` + preamble,`stream_prompt` 驱动
-/// agent loop 并把流式 chunk 经 channel emit 前端。
+/// 构造时挂载 tool 池 + preamble,`stream_prompt` 驱动 agent loop 并把流式 chunk
+/// 经 channel emit 前端。0.27.13：memory 不再挂进 rig AgentBuilder（0.45 已移除
+/// 该接缝），由本结构持有，每轮 load → `runner.history(...)` 注入、FinalResponse
+/// 到达时 `append_turn` 回写。
 pub struct AgentProvider {
     agent: ChatAgent,
+    /// 0.27.13：Blink 自有记忆服务（Sqlite / Ephemeral），显式驱动 load/回写。
+    memory: Arc<dyn ChatMemory>,
     /// 当前模型显示名（供 Done chunk 携带，前端在气泡左下角显示）
     model_name: String,
     /// 供应商身份——请求时按 `kind` + `base_url` + `model_id` 计算 thinking 补丁
@@ -211,9 +217,9 @@ impl AgentProvider {
         entry: &ProviderEntry,
         model: &ModelEntry,
         tools: Vec<DynamicTool>,
-        mcp_tools: Vec<(rmcp::model::Tool, rmcp::service::ServerSink)>,
+        mcp_tools: Vec<rig_rmcp::McpTool>,
         preamble: &str,
-        memory: Arc<dyn ConversationMemory>,
+        memory: Arc<dyn ChatMemory>,
     ) -> Result<Self, AIError> {
         // 0.13.1: context_limit 注入已移至 ChatService::ensure_provider（0.17.6：
         // memory 现在是 trait object，SqliteConversationMemory 的 update_context_limit
@@ -245,17 +251,14 @@ impl AgentProvider {
         entry: &ProviderEntry,
         model: &ModelEntry,
         tools: Vec<DynamicTool>,
-        mcp_tools: Vec<(rmcp::model::Tool, rmcp::service::ServerSink)>,
+        mcp_tools: Vec<rig_rmcp::McpTool>,
         preamble: &str,
-        memory: Arc<dyn ConversationMemory>,
+        memory: Arc<dyn ChatMemory>,
         key_str: &str,
     ) -> Result<Self, AIError> {
-        // memory 已是 Arc<dyn ConversationMemory>，直接用于 rig AgentBuilder
-        let memory_dyn = memory;
-
         // 0.21.17: 在 tools 被 move 进 build_agent 之前，提取工具定义快照供 token 预算使用。
         // DynamicTool::definition() 返回 ToolDefinition（name + description + parameters），
-        // rmcp::model::Tool 暴露 name + description + input_schema。
+        // rig_rmcp::McpTool 经 definition() 暴露原始 rmcp Tool（name + description + input_schema）。
         let tool_prompt_infos = build_tool_prompt_infos(&tools, &mcp_tools);
 
         // 0.13.x: 将 model 层的 temperature / max_tokens 传入 build_agent，
@@ -280,7 +283,6 @@ impl AgentProvider {
                     preamble,
                     tools,
                     mcp_tools,
-                    memory_dyn,
                     default_temperature,
                     default_max_tokens,
                 ))
@@ -302,7 +304,6 @@ impl AgentProvider {
                     preamble,
                     tools,
                     mcp_tools,
-                    memory_dyn,
                     default_temperature,
                     Some(anthropic_max_tokens),
                 ))
@@ -315,20 +316,22 @@ impl AgentProvider {
                     preamble,
                     tools,
                     mcp_tools,
-                    memory_dyn,
                     default_temperature,
                     default_max_tokens,
                 ))
             }
             ProviderKind::OllamaHttp => {
                 let client = build_ollama_client(entry.base_url.as_deref())?;
-                let m = client.completion(&model.id);
+                // 0.45：completion() 走 Ollama 的 OpenAI 兼容 /v1/chat/completions，
+                // 不再发送模型 options（num_ctx/num_predict 等）；native_completion()
+                // 才是原生 /api/chat——保留既有 additional_params → options、
+                // max_tokens → num_predict、think 布尔的语义。
+                let m = client.native_completion(&model.id);
                 ChatAgent::Agent(build_agent(
                     m,
                     preamble,
                     tools,
                     mcp_tools,
-                    memory_dyn,
                     default_temperature,
                     default_max_tokens,
                 ))
@@ -336,6 +339,7 @@ impl AgentProvider {
         };
         Ok(Self {
             agent,
+            memory,
             model_name: model_display_name(entry, model),
             kind,
             base_url,
@@ -410,6 +414,7 @@ impl AgentProvider {
             ChatAgent::Agent(a) => {
                 Self::run_stream(
                     a,
+                    self.memory.clone(),
                     conversation_id,
                     user_msg,
                     image_parts,
@@ -487,6 +492,7 @@ impl AgentProvider {
             ChatAgent::Agent(a) => {
                 Self::run_stream_with_max_tokens(
                     a,
+                    self.memory.clone(),
                     conversation_id,
                     user_msg,
                     tx,
@@ -505,6 +511,7 @@ impl AgentProvider {
     /// `max_tokens` 走 runner 的 `.max_tokens(u64)` 一等参数（rig 原生映射各协议字段）。
     async fn run_stream_with_max_tokens(
         agent: &Agent,
+        memory: Arc<dyn ChatMemory>,
         conversation_id: &str,
         user_msg: &str,
         tx: mpsc::UnboundedSender<ChatStreamChunk>,
@@ -515,20 +522,33 @@ impl AgentProvider {
         let timeout_ms =
             crate::config::ai_config::get_ai_config().effective_hard_timeout_ms();
         let idle_timeout = Duration::from_millis(timeout_ms as u64);
-        // 0.43: agent.prompt() → AgentRunner 同步构造（memory load 等发生在首次 poll）；
         // max_tokens 走 rig 一等参数——rig 对各协议原生映射：
         // Gemini → generationConfig.maxOutputTokens、Ollama → options.num_predict、
         // OpenAI/Anthropic → max_tokens
+        let history = match memory.load(conversation_id).await {
+            Ok(history) => history,
+            Err(e) => {
+                tracing::error!(
+                    conversation_id,
+                    error = %e,
+                    "run_stream_with_max_tokens: 加载对话历史失败"
+                );
+                let _ = tx.send(ChatStreamChunk::Error {
+                    message: format!("加载对话历史失败: {e}"),
+                });
+                return;
+            }
+        };
         let mut runner = agent
             .prompt(rig_core::completion::Message::user(user_msg))
-            .conversation(conversation_id)
+            .history(history)
             .max_tokens(max_tokens);
         if let Some(serde_json::Value::Object(map)) = thinking_patch {
             runner = runner.merge_additional_params(map.clone());
         }
         let stream = runner.stream();
         // 复用 run_stream 的消费循环——传入已构造的 stream
-        Self::consume_stream(stream, conversation_id, tx, model_name, idle_timeout).await;
+        Self::consume_stream(stream, memory, conversation_id, tx, model_name, idle_timeout).await;
     }
 
     /// 泛型 stream 消费--4 个 `ChatAgent` arm 共用,每个 arm 具体化 M。
@@ -539,6 +559,7 @@ impl AgentProvider {
     /// reqwest task 自动 abort(与主窗口 `RigProvider::stream` 一致)。
     async fn run_stream(
         agent: &Agent,
+        memory: Arc<dyn ChatMemory>,
         conversation_id: &str,
         user_msg: &str,
         image_parts: &[VisionImagePart],
@@ -549,37 +570,52 @@ impl AgentProvider {
         let timeout_ms =
             crate::config::ai_config::get_ai_config().effective_hard_timeout_ms();
         let idle_timeout = Duration::from_millis(timeout_ms as u64);
-        // 0.43: agent.prompt() → AgentRunner 同步构造；thinking 补丁注入
+        // 0.27.13：0.45 移除了 rig 侧记忆挂载——这里显式 load 后经
+        // `runner.history(...)` 注入（不读写 rig store）；thinking 补丁注入
         // merge_additional_params（各供应商 thinking 字段的标准注入路径）。
-        // 阶段 2：首个 item（含 memory load + 建连 + 模型排队）受 consume_stream
-        // 的 idle timeout 保护。
-        // 0.27.10：图片走 typed 多模态 part（image_raw）；无图保持纯文本路径。
+        // 0.27.10：图片走 typed 多模态 part（image_base64）；无图保持纯文本路径。
+        let history = match memory.load(conversation_id).await {
+            Ok(history) => history,
+            Err(e) => {
+                tracing::error!(
+                    conversation_id,
+                    error = %e,
+                    "run_stream: 加载对话历史失败"
+                );
+                let _ = tx.send(ChatStreamChunk::Error {
+                    message: format!("加载对话历史失败: {e}"),
+                });
+                return;
+            }
+        };
         let prompt_message = build_prompt_message(user_msg, image_parts);
-        let mut runner = agent
-            .prompt(prompt_message)
-            .conversation(conversation_id);
+        let mut runner = agent.prompt(prompt_message).history(history);
         if let Some(serde_json::Value::Object(map)) = thinking_patch {
             runner = runner.merge_additional_params(map.clone());
         }
         let stream = runner.stream();
-        Self::consume_stream(stream, conversation_id, tx, model_name, idle_timeout).await;
+        Self::consume_stream(stream, memory, conversation_id, tx, model_name, idle_timeout).await;
     }
 
     /// 消费已构造的 `MultiTurnStream`——`run_stream` 与 `run_stream_with_max_tokens` 共用。
     ///
-    /// 消费 `MultiTurnStreamItem`（0.43 事件模型，未知变体兜底 continue）：
+    /// 消费 `MultiTurnStreamItem`（0.45 事件模型，未知变体兜底 continue）：
     /// - `StreamAssistantItem(Event(Text))` -> `ChatStreamChunk::Text`
     /// - `StreamAssistantItem(Event(Reasoning))` -> `ChatStreamChunk::Thinking`
     /// - `ToolCall`（turn 提交时报告，rig 定型的完整调用）-> `ChatStreamChunk::ToolCall`
-    ///   （0.43 起 tool call 从专用变体取，不再从流式 delta 拼装）
-    /// - `StreamUserItem(ToolResult)` -> `ChatStreamChunk::ToolResult { call_id, summary }`
-    /// - `FinalResponse(resp)` -> `ChatStreamChunk::Done`（0.43: usage 为整轮聚合，计数 Option 化）
-    /// - `Err` -> `ChatStreamChunk::Error`
+    /// - `ToolResult { tool_result }`（提交历史的工具结果投影）->
+    ///   `ChatStreamChunk::ToolResult { call_id, summary }`（0.45 起从专用变体取，
+    ///   不再经 `StreamUserItem` 包装）
+    /// - `FinalResponse(resp)` -> 先 `memory.append_turn`（`resp.messages` 为本轮
+    ///   transcript，不含输入历史——与旧 rig 自动 append 语义一致），再 emit
+    ///   `ChatStreamChunk::Done`（usage 为整轮聚合，计数 Option 化）
+    /// - `Err(PromptError)` -> `ChatStreamChunk::Error`（`MaxTurns` 变体精确映射）
     ///
     /// **中断**：调用方 drop `tx`（或 task 被 abort）即中断，stream 被 drop 后 rig 内部
     /// reqwest task 自动 abort（与主窗口 `RigProvider::stream` 一致）。
     async fn consume_stream(
         mut stream: StreamingResult,
+        memory: Arc<dyn ChatMemory>,
         conversation_id: &str,
         tx: mpsc::UnboundedSender<ChatStreamChunk>,
         model_name: Option<String>,
@@ -630,11 +666,11 @@ impl AgentProvider {
                     // End 中定型的 Reasoning 整块（部分 provider/mock 走整块而非增量）
                     // 转为一条完整 Thinking，ToolCall 的定型由专用 ToolCall 变体携带
                     RigStreamItem::Event(RigStreamEvent::End { content, .. }) => {
-                        if let rig_core::completion::AssistantContent::Reasoning(sealed) = &content
-                            && let Some(reasoning) = sealed.open(sealed.issuer())
+                        if let rig_core::completion::AssistantContent::Reasoning(reasoning) =
+                            &content
                         {
                             has_content = true;
-                            let text = reasoning.display_text();
+                            let text = reasoning.text.clone();
                             ChatStreamChunk::Thinking { text }
                         } else {
                             continue;
@@ -646,7 +682,7 @@ impl AgentProvider {
                     has_content = true;
                     let tool = tool_call.function.name.to_string();
                     let call_id = tool_call.id.to_string();
-                    let arguments = tool_call.function.arguments.to_string();
+                    let arguments = tool_call.function.arguments_value().to_string();
                     tracing::debug!(
                         conversation = %conversation_id,
                         tool = %tool,
@@ -661,9 +697,7 @@ impl AgentProvider {
                     }
                 }
                 Ok(MultiTurnStreamItem::ToolExecutionCommitted { .. }) => continue,
-                Ok(MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
-                    tool_result,
-                })) => {
+                Ok(MultiTurnStreamItem::ToolResult { tool_result }) => {
                     has_content = true;
                     let call_id = tool_result.call.to_string();
                     let summary = summarize_tool_result(&tool_result);
@@ -692,7 +726,19 @@ impl AgentProvider {
                 }
                 Ok(MultiTurnStreamItem::FinalResponse(resp)) => {
                     done_sent = true;
-                    // 0.43: usage 为整轮聚合，计数 Option<u64>（None = 未报告，视同 0）
+                    // 0.27.13：回写本轮 transcript。resp.messages 含本轮 prompt user +
+                    // assistant 轮 + 工具结果、不含输入历史——与 0.43 rig 自动 append
+                    // 收到的消息一致（预写 user 跳过/图片剥离/实况合并都在 append_turn 内）。
+                    // 回写失败不打断已完成的回复：Done 照发，错误落日志（下一轮 load
+                    // 读到的是缺本轮的历史，属可接受的降级，与旧版 append 失败同界）。
+                    if let Err(e) = memory.append_turn(conversation_id, resp.messages).await {
+                        tracing::error!(
+                            conversation = %conversation_id,
+                            error = %e,
+                            "consume_stream: 本轮消息回写失败（回复已送达，历史缺本轮）"
+                        );
+                    }
+                    // 0.45: usage 为整轮聚合，计数 Option<u64>（None = 未报告，视同 0）
                     let usage = resp.usage;
                     if !has_content
                         && usage.input_tokens.unwrap_or(0) == 0
@@ -714,21 +760,27 @@ impl AgentProvider {
                         }
                     }
                 }
+                // 0.45 起 MultiTurnStreamItem 标记 non_exhaustive——未知变体
+                // （未来新增的生命周期标记等）静默跳过，不误报错误
+                Ok(_) => continue,
                 Err(e) => {
-                    let msg = format!("{e}");
-                    if msg.contains("MaxTurnsError") || msg.contains("max turns") {
-                        ChatStreamChunk::MaxTurnsReached {
-                            max_turns: MAX_TURNS,
+                    match &e {
+                        rig_agent::run::PromptError::MaxTurns { max_turns, .. } => {
+                            ChatStreamChunk::MaxTurnsReached {
+                                max_turns: *max_turns,
+                            }
                         }
-                    } else {
-                        tracing::warn!(
-                            target: blink_infra::utils::perf::ai_slo::TARGET,
-                            conversation = %conversation_id,
-                            error = %msg,
-                            error_debug = ?e,
-                            "consume_stream: 流式生成错误"
-                        );
-                        ChatStreamChunk::Error { message: msg }
+                        _ => {
+                            let msg = format!("{e}");
+                            tracing::warn!(
+                                target: blink_infra::utils::perf::ai_slo::TARGET,
+                                conversation = %conversation_id,
+                                error = %msg,
+                                error_debug = ?e,
+                                "consume_stream: 流式生成错误"
+                            );
+                            ChatStreamChunk::Error { message: msg }
+                        }
                     }
                 }
             };
@@ -760,15 +812,15 @@ fn model_display_name(_entry: &ProviderEntry, model: &ModelEntry) -> String {
 
 /// 0.21.17: 从 `DynamicTool` + MCP tools 提取 `ToolPromptInfo` 快照。
 ///
-/// 在 `AgentProvider::new` 中 `tools` 被 move 进 `build_agent` 之前调用。
+/// 在 `AgentProvider::new` 中 `tools` 被 move 进 build_agent 之前调用。
 /// - `DynamicTool::definition()` 返回 rig `ToolDefinition`（name + description + parameters）
-/// - `rmcp::model::Tool` 暴露 `name` + `description` + `input_schema`（JsonObject）
+/// - `rig_rmcp::McpTool::definition()` 暴露原始 rmcp Tool（name + description + input_schema）
 ///
 /// MCP tool 的 `input_schema` 是 `Map<String, Value>`，转为 `serde_json::Value::Object`
 /// 以统一到 `ToolPromptInfo.parameters` 的 `Value` 类型。MCP tool 无 `hint` 字段。
 fn build_tool_prompt_infos(
     tools: &[DynamicTool],
-    mcp_tools: &[(rmcp::model::Tool, rmcp::service::ServerSink)],
+    mcp_tools: &[rig_rmcp::McpTool],
 ) -> Vec<crate::ai::prompt::ToolPromptInfo> {
     let mut infos = Vec::with_capacity(tools.len() + mcp_tools.len());
 
@@ -776,7 +828,8 @@ fn build_tool_prompt_infos(
     for dt in tools {
         let def = dt.definition();
         infos.push(crate::ai::prompt::ToolPromptInfo {
-            name: def.name,
+            // 0.45: ToolDefinition.name 为 ToolName
+            name: def.name.to_string(),
             description: def.description,
             parameters: def.parameters,
             hint: None, // DynamicTool 不携带 hint；hint 在 system prompt 中已拼接
@@ -784,11 +837,12 @@ fn build_tool_prompt_infos(
     }
 
     // 2. MCP tool
-    for (tool, _) in mcp_tools {
-        let params = serde_json::Value::Object(tool.input_schema.as_ref().clone());
+    for tool in mcp_tools {
+        let def = tool.definition();
+        let params = serde_json::Value::Object(def.input_schema.as_ref().clone());
         infos.push(crate::ai::prompt::ToolPromptInfo {
-            name: tool.name.to_string(),
-            description: tool.description.as_deref().unwrap_or("").to_string(),
+            name: def.name.to_string(),
+            description: def.description.as_deref().unwrap_or("").to_string(),
             parameters: params,
             hint: None,
         });
@@ -834,57 +888,39 @@ pub fn summarize_tool_result( // 0.25.4 crate 化：pub(crate) → pub（bin 侧
     }
 }
 
-/// 构造 `Agent`（0.42: Agent 不再是泛型；0.43: model 句柄为 `DynModel<Completion>`）。
+/// 构造 `Agent`（0.45: Agent 非泛型、Builder 非 typestate；记忆不在此挂载——
+/// 0.27.13 起由 AgentProvider 每轮 `runner.history` 显式注入）。
 ///
 /// `default_temperature` / `default_max_tokens` 从 `ModelEntry` 来，
 /// 构造时固化到 `AgentBuilder`，rig Agent 内部生成 `CompletionRequest` 时使用。
 /// `None` 表示不覆盖（rig 让 provider 自己决定），但 Anthropic 的 `max_tokens` 是
 /// 必填字段，调用方需确保传入 `Some`（见 `AgentProvider::new` 中的兜底逻辑）。
-fn build_agent<M>(
-    model: M,
+fn build_agent(
+    model: impl Into<DynModel<Completion>>,
     preamble: &str,
     tools: Vec<DynamicTool>,
-    mcp_tools: Vec<(rmcp::model::Tool, rmcp::service::ServerSink)>,
-    memory: Arc<dyn ConversationMemory>,
+    mcp_tools: Vec<rig_rmcp::McpTool>,
     default_temperature: Option<f64>,
     default_max_tokens: Option<u64>,
-) -> Agent
-where
-    M: Into<DynModel<Completion>>,
-{
-    // 0.42: AgentBuilder 使用 typestate 模式（NoToolConfig → WithBuilderTools → Agent）。
-    // typestate 不能在 if 中条件性改变类型，所以分两条路径构建：
-    // - 有 tools → 先 dynamic_tools 进入 WithBuilderTools，再逐个 rmcp_tool
-    // - 无 tools → 直接在 NoToolConfig 上 build
+) -> Agent {
     let has_tools = !tools.is_empty() || !mcp_tools.is_empty();
 
-    if !has_tools {
-        // 无 tool：直接在 NoToolConfig 上配置 temperature/max_tokens 然后 build
-        let mut builder = AgentBuilder::new(model)
-            .preamble(preamble)
-            .memory(memory)
-            .default_max_turns(MAX_TURNS);
-        if let Some(temp) = default_temperature {
-            builder = builder.temperature(temp);
-        }
-        if let Some(max_tok) = default_max_tokens {
-            builder = builder.max_tokens(max_tok);
-        }
-        return builder.build();
-    }
-
-    // 有 tool：先 dynamic_tools 进入 WithBuilderTools 状态
     let mut builder = AgentBuilder::new(model)
         .preamble(preamble)
-        .memory(memory)
-        .default_max_turns(MAX_TURNS)
-        .dynamic_tools(tools);
-
-    // 0.43: MCP 集成拆到 rig-rmcp——`McpTool::from_mcp_server` 包装后经 `From` 转为
-    // DynamicTool 逐个注册（每个 server 独立 ServerSink，须分开转换）；
-    // 默认带 rig-rmcp 的 DEFAULT_MCP_TOOL_TIMEOUT（300s）单次调用上限。
-    for (tool, client) in mcp_tools {
-        builder = builder.dynamic_tool(rig_rmcp::McpTool::from_mcp_server(tool, client).into());
+        .default_max_turns(MAX_TURNS);
+    if has_tools {
+        builder = builder.dynamic_tools(tools);
+        // 0.45：MCP 工具经 rig-rmcp 的 `McpTool`（持有 McpConnection 保活）注册，
+        // `DynamicTool::try_from` 转换（名称校验可失败——失败的跳过并告警，
+        // 不阻断其余工具）；默认带 rig-rmcp 的 DEFAULT_MCP_TOOL_TIMEOUT（300s）。
+        for tool in mcp_tools {
+            match DynamicTool::try_from(tool) {
+                Ok(dynamic) => builder = builder.dynamic_tool(dynamic),
+                Err(e) => {
+                    tracing::warn!(error = %e, "build_agent: MCP tool 注册失败，已跳过");
+                }
+            }
+        }
     }
 
     if let Some(temp) = default_temperature {
@@ -911,11 +947,10 @@ mod tests {
             MockStreamEvent::final_response_with_default_usage(),
         ]]);
         let agent = AgentBuilder::new(model)
-            .memory(InMemoryConversationMemory::new())
             .default_max_turns(5)
             .build();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        AgentProvider::run_stream(&agent, "c1", "hi", &[], tx, None, None).await;
+        AgentProvider::run_stream(&agent, Arc::new(EphemeralConversationMemory::new()), "c1", "hi", &[], tx, None, None).await;
 
         let mut chunks = Vec::new();
         while let Some(c) = rx.recv().await {
@@ -946,11 +981,10 @@ mod tests {
         // 挂 MockAddTool(name="add")--agent 接受 model 的 tool_call,否则 UnknownToolCall
         let agent = AgentBuilder::new(model)
             .tool(MockAddTool)
-            .memory(InMemoryConversationMemory::new())
             .default_max_turns(5)
             .build();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        AgentProvider::run_stream(&agent, "c1", "hi", &[], tx, None, None).await;
+        AgentProvider::run_stream(&agent, Arc::new(EphemeralConversationMemory::new()), "c1", "hi", &[], tx, None, None).await;
 
         let mut chunks = Vec::new();
         while let Some(c) = rx.recv().await {
@@ -990,11 +1024,10 @@ mod tests {
         ]);
         let agent = AgentBuilder::new(model)
             .tool(MockAddTool)
-            .memory(InMemoryConversationMemory::new())
             .default_max_turns(5)
             .build();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        AgentProvider::run_stream(&agent, "c1", "hi", &[], tx, None, None).await;
+        AgentProvider::run_stream(&agent, Arc::new(EphemeralConversationMemory::new()), "c1", "hi", &[], tx, None, None).await;
 
         let mut chunks = Vec::new();
         while let Some(c) = rx.recv().await {
@@ -1033,22 +1066,20 @@ mod tests {
     #[tokio::test]
     async fn run_stream_done_carries_usage() {
         use rig_core::completion::Usage as RigUsage;
-        let usage = RigUsage {
-            input_tokens: Some(150),
-            output_tokens: Some(80),
-            total_tokens: Some(230),
-            ..Default::default()
-        };
+        // 0.45: Usage 标记 non_exhaustive——经 new() + pub 字段构造
+        let mut usage = RigUsage::new();
+        usage.input_tokens = Some(150);
+        usage.output_tokens = Some(80);
+        usage.total_tokens = Some(230);
         let model = MockCompletionModel::from_stream_turns(vec![vec![
             MockStreamEvent::text("hello"),
             MockStreamEvent::final_response(usage),
         ]]);
         let agent = AgentBuilder::new(model)
-            .memory(InMemoryConversationMemory::new())
             .default_max_turns(5)
             .build();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        AgentProvider::run_stream(&agent, "c1", "hi", &[], tx, None, None).await;
+        AgentProvider::run_stream(&agent, Arc::new(EphemeralConversationMemory::new()), "c1", "hi", &[], tx, None, None).await;
 
         let mut chunks = Vec::new();
         while let Some(c) = rx.recv().await {
@@ -1070,22 +1101,19 @@ mod tests {
     #[tokio::test]
     async fn run_stream_done_truncates_oversized_usage() {
         use rig_core::completion::Usage as RigUsage;
-        let usage = RigUsage {
-            input_tokens: Some(u64::from(u32::MAX) + 1000), // 超 u32 范围
-            output_tokens: Some(50),
-            total_tokens: Some(0),
-            ..Default::default()
-        };
+        let mut usage = RigUsage::new();
+        usage.input_tokens = Some(u64::from(u32::MAX) + 1000); // 超 u32 范围
+        usage.output_tokens = Some(50);
+        usage.total_tokens = Some(0);
         let model = MockCompletionModel::from_stream_turns(vec![vec![
             MockStreamEvent::text("hi"),
             MockStreamEvent::final_response(usage),
         ]]);
         let agent = AgentBuilder::new(model)
-            .memory(InMemoryConversationMemory::new())
             .default_max_turns(5)
             .build();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        AgentProvider::run_stream(&agent, "c1", "hi", &[], tx, None, None).await;
+        AgentProvider::run_stream(&agent, Arc::new(EphemeralConversationMemory::new()), "c1", "hi", &[], tx, None, None).await;
 
         let mut chunks = Vec::new();
         while let Some(c) = rx.recv().await {
@@ -1120,11 +1148,10 @@ mod tests {
                 zero_usage,
             )]]);
         let agent = AgentBuilder::new(model)
-            .memory(InMemoryConversationMemory::new())
             .default_max_turns(5)
             .build();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        AgentProvider::run_stream(&agent, "c1", "hi", &[], tx, None, None).await;
+        AgentProvider::run_stream(&agent, Arc::new(EphemeralConversationMemory::new()), "c1", "hi", &[], tx, None, None).await;
 
         let mut chunks = Vec::new();
         while let Some(c) = rx.recv().await {
@@ -1218,6 +1245,7 @@ mod tests {
             call: CallId::from_wire("1"),
             name: ToolName::try_from("test").unwrap(),
             content: vec![ToolResultContent::Text(Text::new("ok"))],
+            is_error: false,
         };
         assert_eq!(summarize_tool_result(&short), "ok");
 
@@ -1227,6 +1255,7 @@ mod tests {
             call: CallId::from_wire("2"),
             name: ToolName::try_from("test").unwrap(),
             content: vec![ToolResultContent::Text(Text::new(long_text))],
+            is_error: false,
         };
         let summary = summarize_tool_result(&long);
         assert_eq!(summary.chars().count(), 50001, "50000 字符 + 1 省略号");
@@ -1240,8 +1269,9 @@ mod tests {
                 data: DocumentSourceKind::Url("http://example.com/x.png".into()),
                 media_type: None,
                 detail: None,
-                additional_params: None,
+                native: None,
             })],
+            is_error: false,
         };
         assert_eq!(summarize_tool_result(&img), "[image]");
     }
@@ -1325,11 +1355,10 @@ mod tests {
             MockStreamEvent::final_response_with_default_usage(),
         ]]);
         let agent = AgentBuilder::new(model)
-            .memory(InMemoryConversationMemory::new())
             .default_max_turns(5)
             .build();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        AgentProvider::run_stream(&agent, "c1", "hi", &[], tx, None, None).await;
+        AgentProvider::run_stream(&agent, Arc::new(EphemeralConversationMemory::new()), "c1", "hi", &[], tx, None, None).await;
 
         let mut chunks = Vec::new();
         while let Some(c) = rx.recv().await {
@@ -1378,12 +1407,11 @@ mod tests {
             MockStreamEvent::final_response_with_default_usage(),
         ]]);
         let recorded = model.clone();
-        let agent = AgentBuilder::new(model)
-            .memory(mem.clone())
-            .default_max_turns(5)
-            .build();
+        // 0.27.13：记忆不再挂 builder——run_stream 显式 load 注入；传 SQLite
+        // memory 与 ChatService::prompt 的真实路径一致（预写 user 不进上下文）。
+        let agent = AgentBuilder::new(model).default_max_turns(5).build();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        AgentProvider::run_stream(&agent, "c1", "hello", &[], tx, None, None).await;
+        AgentProvider::run_stream(&agent, mem.clone(), "c1", "hello", &[], tx, None, None).await;
         while rx.recv().await.is_some() {}
 
         // 3. 检查模型实际收到的 chat_history：user 应恰好 1 次
@@ -1392,7 +1420,7 @@ mod tests {
         let history = &requests[0].chat_history;
         let user_texts: Vec<String> = history
             .iter()
-            .filter_map(|m| match m {
+            .filter_map(|m| match m.as_ref() {
                 rig_core::completion::message::Message::User { content } => Some(
                     content
                         .iter()
@@ -1421,14 +1449,15 @@ mod tests {
     #[test]
     fn build_tool_prompt_infos_extracts_dynamic_tools() {
         use rig_agent::tool::ToolOutput;
+        use rig_core::message::ToolName;
         let tool1 = DynamicTool::new(
-            "search_apps",
+            ToolName::try_from("search_apps").unwrap(),
             "搜索应用",
             serde_json::json!({"type":"object","properties":{"query":{"type":"string"}}}),
             |_args| Box::pin(async { Ok(ToolOutput::text("ok")) }),
         );
         let tool2 = DynamicTool::new(
-            "open_url",
+            ToolName::try_from("open_url").unwrap(),
             "打开网址",
             serde_json::json!({"type":"object","properties":{"url":{"type":"string"}}}),
             |_args| Box::pin(async { Ok(ToolOutput::text("ok")) }),
@@ -1461,7 +1490,7 @@ mod tests {
         use rig_agent::tool::ToolOutput;
 
         let tool = DynamicTool::new(
-            "test_tool",
+            rig_core::message::ToolName::try_from("test_tool").unwrap(),
             "测试工具",
             serde_json::json!({"type":"object"}),
             |_args| Box::pin(async { Ok(ToolOutput::text("ok")) }),
@@ -1498,7 +1527,7 @@ mod tests {
             vec![tool],
             Vec::new(),
             "",
-            Arc::new(InMemoryConversationMemory::new()),
+            Arc::new(EphemeralConversationMemory::new()),
         )
         .await
         .expect("AgentProvider 构造成功");
@@ -1561,7 +1590,7 @@ mod tests {
             vec![],
             vec![],
             "",
-            Arc::new(InMemoryConversationMemory::new()),
+            Arc::new(EphemeralConversationMemory::new()),
             "wire-test-key",
         )
         .unwrap();

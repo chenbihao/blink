@@ -148,7 +148,7 @@ impl ChatService {
             }
         };
         // 摘要任务不需要工具——传空 vec 杜绝 ToolCall 副作用
-        let memory: Arc<dyn rig_core::memory::ConversationMemory> = self.persistent_memory.clone();
+        let memory: Arc<dyn crate::ai::memory::ChatMemory> = self.persistent_memory.clone();
         match AgentProvider::new(
             &resolved.provider,
             &resolved.model,
@@ -409,8 +409,7 @@ impl ChatService {
                     let per_message_tokens: Vec<usize> = window_rows
                         .iter()
                         .map(|(_id, _role, content)| {
-                            use rig_core::completion::Message;
-                            match serde_json::from_str::<Message>(content) {
+                            match crate::ai::message_compat::parse_message(content) {
                                 Ok(msg) => crate::ai::memory::estimate_tokens(
                                     &crate::ai::memory::extract_message_text(&msg),
                                 ),
@@ -494,7 +493,7 @@ impl ChatService {
             use rig_core::completion::Message;
             let mut messages: Vec<Message> = Vec::with_capacity(rows.len());
             for (_role, content) in &rows {
-                match serde_json::from_str::<Message>(content) {
+                match crate::ai::message_compat::parse_message(content) {
                     Ok(msg) => messages.push(msg),
                     Err(e) => {
                         tracing::warn!(
@@ -745,7 +744,7 @@ impl ChatService {
             use rig_core::completion::Message;
             let mut messages: Vec<Message> = Vec::with_capacity(target_rows.len());
             for (_, _, content) in &target_rows {
-                match serde_json::from_str::<Message>(content) {
+                match crate::ai::message_compat::parse_message(content) {
                     Ok(msg) => messages.push(msg),
                     Err(e) => {
                         tracing::warn!(conversation_id, error = %e, "手动压缩: 消息反序列化失败，跳过该条");

@@ -814,7 +814,7 @@ impl ChatService {
             // 0.42: build_agent_tools 返回 (DynamicTools, McpToolBatch)
             let (dynamic_tools, mcp_tools): (
                 Vec<rig_agent::tool::DynamicTool>,
-                Vec<(rmcp::model::Tool, rmcp::service::ServerSink)>,
+                Vec<rig_rmcp::McpTool>,
             ) = if plan.includes_extensions() {
                 let external_tools = self.mcp_client.collect_tools().await;
                 build_agent_tools(
@@ -833,7 +833,8 @@ impl ChatService {
             };
             // 0.17.6: 按 kind 选撞 memory——Persistent 用 SQLite，Ephemeral 用进程内。
             // 0.21.21: context_limit 注入已挪到缓存命中之前（上方），此处不再重复。
-            let memory: Arc<dyn rig_core::memory::ConversationMemory> = match kind {
+            // 0.27.13: 记忆抽象换为本仓 ChatMemory（rig 0.45 已移除 ConversationMemory）。
+            let memory: Arc<dyn crate::ai::memory::ChatMemory> = match kind {
                 ConversationKind::Persistent => self.persistent_memory.clone(),
                 ConversationKind::Ephemeral => self.ephemeral_memory.clone(),
             };

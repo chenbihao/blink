@@ -1835,7 +1835,7 @@ mod generation_tests {
     //! 带冻结代次，`update_snapshot`（新一次 invoke）后旧结果必须被丢弃。
 
     use super::*;
-    use crate::search::engine::SearchAction;
+
 
     async fn minimal_service() -> SearchService {
         struct Events;

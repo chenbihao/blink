@@ -21,8 +21,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, ContentBlock, Implementation, InitializeResult,
-    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
+    InitializeResult, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig,
+    Tool,
 };
 use rmcp::service::{NotificationContext, RequestContext, RoleServer};
 use serde_json::Value;
@@ -275,7 +276,7 @@ impl BlinkMcpServer {
 
 #[allow(unused_variables)]
 impl rmcp::handler::server::ServerHandler for BlinkMcpServer {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         let mut caps = ServerCapabilities::default();
         // 0.19.13: 声明 tools.listChanged = true，让 client 知道我们支持热刷新
         // rmcp 2.x: ToolsCapability 是 #[non_exhaustive]，只能用 Default + 字段赋值
@@ -312,7 +313,9 @@ impl rmcp::handler::server::ServerHandler for BlinkMcpServer {
         &self,
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
-    ) -> impl Future<Output = Result<CallToolResult, rmcp::ErrorData>> + Send + '_ {
+    ) -> impl Future<Output = Result<CallToolResponse, rmcp::ErrorData>> + Send + '_ {
+        // rmcp 3: call_tool 返回 CallToolResponse（Complete/InputRequired/Task 三态）；
+        // Blink 能力均为同步完成语义，恒走 Complete。
         let tool_name = request.name.to_string();
         let args = request.arguments.map(Value::Object).unwrap_or(Value::Null);
 
@@ -339,7 +342,7 @@ impl rmcp::handler::server::ServerHandler for BlinkMcpServer {
                 let result = BlinkMcpServer::error_to_call_tool_result(&format!(
                     "Tool '{tool_name}' is not exposed. Available tools: {available}"
                 ));
-                return Ok(result);
+                return Ok(CallToolResponse::Complete(result));
             }
 
             // 0.21.5: call-time policy 二次检查
@@ -360,7 +363,7 @@ impl rmcp::handler::server::ServerHandler for BlinkMcpServer {
                     let result = BlinkMcpServer::error_to_call_tool_result(&format!(
                         "Tool '{tool_name}' is not available for MCP (policy denied)"
                     ));
-                    return Ok(result);
+                    return Ok(CallToolResponse::Complete(result));
                 }
             }
 
@@ -441,7 +444,7 @@ impl rmcp::handler::server::ServerHandler for BlinkMcpServer {
                 "MCP server: tool 调用完成"
             );
 
-            Ok(call_tool_result)
+            Ok(CallToolResponse::Complete(call_tool_result))
         }
     }
 

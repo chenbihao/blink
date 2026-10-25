@@ -255,7 +255,7 @@ impl AIProvider for RigProvider {
                             tool_calls.push(ToolCall {
                                 id: tc.id.to_string(),
                                 name: tc.function.name.to_string(),
-                                arguments: tc.function.arguments.clone(),
+                                arguments: tc.function.arguments_value(),
                             });
                         }
                     }
@@ -359,10 +359,11 @@ fn build_rig_request(
                             tc_id.clone(),
                             RigToolFunc::new(tool_name, arguments.clone()),
                         );
-                        user_msgs.push(RigMessage::Assistant {
-                            id: None,
-                            content: vec![AssistantContent::ToolCall(tool_call)],
-                        });
+                        user_msgs.push(RigMessage::Assistant(
+                            rig_core::completion::message::AssistantMessage::new(vec![
+                                AssistantContent::ToolCall(tool_call),
+                            ]),
+                        ));
                         continue;
                     }
                     tracing::warn!(
@@ -411,14 +412,17 @@ fn build_rig_request(
             "CompletionRequest.messages 至少需一条 user 消息".into(),
         ));
     }
-    let mut chat_history = user_msgs;
-    // 0.43: system 作为 Message::System 置于 chat_history 首（原 preamble 字段已删）
-    if let Some(preamble) = preamble {
-        chat_history.insert(0, RigMessage::system(preamble));
-    }
+    let chat_history = user_msgs;
+    // 0.45: preamble 不再手动 insert——构造器 `.preamble()` 会把 System 置于
+    // chat_history 首（含既有 system 消息之前）
 
     // ToolSchema → rig::ToolDefinition(唯一 tool 类型投影)
-    let tools = req.tools.iter().map(|s| s.to_rig_tool()).collect();
+    // 0.45: tools 字段为 Vec<Arc<ToolDefinition>>
+    let tools: Vec<std::sync::Arc<rig_core::completion::ToolDefinition>> = req
+        .tools
+        .iter()
+        .map(|s| std::sync::Arc::new(s.to_rig_tool()))
+        .collect();
 
     // 参数 fallback:req 显式值 > model 层默认值 > None(rig 让 provider 自己决定)
     let effective_temperature = req.temperature.or(default_temperature).map(|f| f as f64);
@@ -436,20 +440,30 @@ fn build_rig_request(
 
     let mut additional_params = merge_thinking_off_patch(custom_params, thinking_off_patch);
     super::thinking::validate_thinking_budget(kind, &mut additional_params, effective_max_tokens)?;
-    Ok(RigCompletionRequest {
-        model: None,
-        chat_history,
-        documents: Vec::new(),
-        tools,
-        temperature: effective_temperature,
-        max_tokens: effective_max_tokens,
-        tool_choice: None,
-        // 0.21.16: 主窗口默认关闭思考——与用户 custom_params 合并（用户显式 key 优先）
-        additional_params,
-        output_schema: None,
-        // 0.42: 新增字段
-        record_telemetry_content: false,
-    })
+    // 0.45：CompletionRequest 标记 non_exhaustive，不能结构体字面量构造；
+    // prompt = chat_history 末位（.messages 会保持其在最后），preamble 走
+    // builder 的 System 置首；其余字段 pub，直接赋值。
+    let (prompt, history) = match chat_history.split_last() {
+        Some((prompt, history)) => (prompt.clone(), history.to_vec()),
+        None => {
+            // 上游 ChatRequest 恒含 user 消息；空历史是契约破坏，显式报错
+            // 而非发空请求（0.43 行为下 provider 侧也会拒绝）。
+            return Err(AIError::Serialization(
+                "CompletionRequest 需要至少一条消息（chat_history 为空）".into(),
+            ));
+        }
+    };
+    let mut request = RigCompletionRequest::new(prompt);
+    if let Some(preamble) = preamble {
+        request = request.preamble(preamble);
+    }
+    request = request.messages(history);
+    request.tools = tools;
+    request.temperature = effective_temperature;
+    request.max_tokens = effective_max_tokens;
+    // 0.21.16: 主窗口默认关闭思考——与用户 custom_params 合并（用户显式 key 优先）
+    request.additional_params = additional_params;
+    Ok(request)
 }
 
 /// 把「主窗口默认关闭思考」补丁与用户 `custom_params` 合并进 `additional_params`。
@@ -499,10 +513,13 @@ pub(crate) fn map_rig_response(
             AssistantContent::ToolCall(tc) => tool_calls.push(ToolCall {
                 id: tc.id.to_string(),
                 name: tc.function.name.to_string(),
-                arguments: tc.function.arguments.clone(),
+                arguments: tc.function.arguments_value(),
             }),
-            // 0.9.2 主窗口不消费 reasoning / image
-            AssistantContent::Reasoning(_) | AssistantContent::Image(_) => {}
+            // 0.9.2 主窗口不消费 reasoning / image；0.45 新增 Opaque（provider
+            // 原生无语义项）同样不消费
+            AssistantContent::Reasoning(_) | AssistantContent::Image(_)
+            | AssistantContent::Opaque(_) => {}
+            _ => {}
         }
     }
 
@@ -525,6 +542,8 @@ pub(crate) fn map_rig_response(
         RigFinishReason::ToolCalls => FinishReasonKind::ToolCalls,
         RigFinishReason::ContentFilter => FinishReasonKind::ContentFilter,
         RigFinishReason::Other(_) => FinishReasonKind::Other,
+        // 0.45 起 non_exhaustive——未来新增原因统一按 Other 呈现（不丢回复）
+        _ => FinishReasonKind::Other,
     });
 
     CompletionResponse {
@@ -646,6 +665,8 @@ fn map_http_error(e: &rig_core::http_client::Error) -> AIError {
             let clean = sanitize_message(&body);
             AIError::Provider(diagnose_status(status.as_u16(), &clean))
         }
+        // 0.45 起 http_client::Error 标记 non_exhaustive——未知变体归网络通用提示
+        _ => AIError::Network(format!("传输失败: {}", truncate_chars(&format!("{e}"), 160))),
     }
 }
 
@@ -1202,17 +1223,16 @@ b"));
 
     // ── map_rig_response ────────────────────────────────────────────────
 
-    /// 构造一个仅含 text 的 rig response（0.43: raw 载荷 + Option 计数）
+    /// 构造一个仅含 text 的 rig response（0.45: Origin 类型 + Usage::new 构造）
     fn rig_text_resp(text: &str) -> RigResp {
+        let mut usage = RigUsage::new();
+        usage.input_tokens = Some(10);
+        usage.output_tokens = Some(5);
+        usage.total_tokens = Some(15);
         RigResp::new(
             vec![AssistantContent::Text(RigText::new(text))],
-            RigUsage {
-                input_tokens: Some(10),
-                output_tokens: Some(5),
-                total_tokens: Some(15),
-                ..Default::default()
-            },
-            "test",
+            usage,
+            rig_core::message::Origin::new("test-api", "test", "test-model"),
             serde_json::json!({}),
         )
     }
@@ -1224,7 +1244,7 @@ b"));
                 RigToolFunc::new(RigToolName::try_from(name).unwrap(), args),
             ))],
             RigUsage::default(),
-            "test",
+            rig_core::message::Origin::new("test-api", "test", "test-model"),
             serde_json::json!({}),
         )
     }
@@ -1269,7 +1289,12 @@ b"));
             )),
             AssistantContent::Text(RigText::new("outro")),
         ];
-        let rig = RigResp::new(items, RigUsage::default(), "test", serde_json::json!({}));
+        let rig = RigResp::new(
+            items,
+            RigUsage::default(),
+            rig_core::message::Origin::new("test-api", "test", "test-model"),
+            serde_json::json!({}),
+        );
         let ours = map_rig_response(rig, 42);
         assert_eq!(ours.text.as_deref(), Some("intro\noutro"));
         assert_eq!(ours.tool_calls.len(), 1);

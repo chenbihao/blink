@@ -1272,15 +1272,15 @@ mod tests {
 
     #[test]
     fn full_usage_from_rig_usage_maps_all_seven_fields() {
-        let rig_usage = rig_core::completion::Usage {
-            input_tokens: Some(100),
-            output_tokens: Some(50),
-            total_tokens: Some(150),
-            cached_input_tokens: Some(30),
-            cache_creation_input_tokens: Some(10),
-            tool_use_prompt_tokens: Some(200),
-            reasoning_tokens: Some(25),
-        };
+        // 0.45: Usage 标记 non_exhaustive——经 new() + pub 字段构造
+        let mut rig_usage = rig_core::completion::Usage::new();
+        rig_usage.input_tokens = Some(100);
+        rig_usage.output_tokens = Some(50);
+        rig_usage.total_tokens = Some(150);
+        rig_usage.cached_input_tokens = Some(30);
+        rig_usage.cache_creation_input_tokens = Some(10);
+        rig_usage.tool_use_prompt_tokens = Some(200);
+        rig_usage.reasoning_tokens = Some(25);
 
         let full = Usage::from_rig_usage(&rig_usage);
 
@@ -1296,15 +1296,14 @@ mod tests {
 
     #[test]
     fn full_usage_u64_overflow_saturates() {
-        let rig_usage = rig_core::completion::Usage {
-            input_tokens: Some(u64::MAX),
-            output_tokens: Some(u64::MAX),
-            total_tokens: Some(u64::MAX),
-            cached_input_tokens: Some(u64::MAX),
-            cache_creation_input_tokens: Some(u64::MAX),
-            tool_use_prompt_tokens: Some(u64::MAX),
-            reasoning_tokens: Some(u64::MAX),
-        };
+        let mut rig_usage = rig_core::completion::Usage::new();
+        rig_usage.input_tokens = Some(u64::MAX);
+        rig_usage.output_tokens = Some(u64::MAX);
+        rig_usage.total_tokens = Some(u64::MAX);
+        rig_usage.cached_input_tokens = Some(u64::MAX);
+        rig_usage.cache_creation_input_tokens = Some(u64::MAX);
+        rig_usage.tool_use_prompt_tokens = Some(u64::MAX);
+        rig_usage.reasoning_tokens = Some(u64::MAX);
 
         let full = Usage::from_rig_usage(&rig_usage);
 
