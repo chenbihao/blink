@@ -182,6 +182,19 @@ pub async fn init_db(pool: &SqlitePool) -> Result<(), String> {
 
     // 0.27.8 迁移：conversations 表加 manual_summary 列（手动压缩启用标记）
     migrate_add_manual_summary_column(pool).await?;
+    let columns: Vec<(String,)> =
+        sqlx::query_as("SELECT name FROM pragma_table_info('conversations')")
+            .fetch_all(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    if !columns.iter().any(|(name,)| name == "history_revision") {
+        sqlx::query(
+            "ALTER TABLE conversations ADD COLUMN history_revision INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    }
 
     // 0.13.2: memory_fts 全文检索虚拟表（trigram 分词器，中文友好）
     // 归档滑动窗口截断的旧消息，供 BM25 检索召回
@@ -536,6 +549,41 @@ pub async fn append_message_with_attachments(
     Ok(result.last_insert_rowid())
 }
 
+/// 实况回复按冻结的历史代次更新；截断/清空后到达的 flush 不重新插入。
+pub async fn upsert_live_message_at_revision(
+    pool: &SqlitePool,
+    conversation_id: &str,
+    existing_id: Option<i64>,
+    content: &str,
+    expected_revision: i64,
+) -> Result<Option<i64>, String> {
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    let revision: Option<i64> = sqlx::query_scalar("SELECT history_revision FROM conversations WHERE id = ?1")
+        .bind(conversation_id).fetch_optional(&mut *tx).await.map_err(|e| e.to_string())?;
+    if revision != Some(expected_revision) { return Ok(None); }
+    if let Some(id) = existing_id {
+        let updated = sqlx::query("UPDATE messages SET content = ?1 WHERE conversation_id = ?2 AND id = ?3")
+            .bind(content).bind(conversation_id).bind(id).execute(&mut *tx).await.map_err(|e| e.to_string())?;
+        if updated.rows_affected() > 0 {
+            tx.commit().await.map_err(|e| e.to_string())?;
+            return Ok(Some(id));
+        }
+    }
+    let inserted = sqlx::query("INSERT INTO messages (conversation_id, role, content, created_at) VALUES (?1, 'assistant', ?2, ?3)")
+        .bind(conversation_id).bind(content).bind(chrono::Utc::now().timestamp())
+        .execute(&mut *tx).await.map_err(|e| e.to_string())?;
+    tx.commit().await.map_err(|e| e.to_string())?;
+    Ok(Some(inserted.last_insert_rowid()))
+}
+
+/// 加载对话的最后一条消息（role, content）。无消息时返回 None。
+/// 同文失败轮复用时刷新展示徽标，授权引用仍不落库。
+pub async fn update_last_user_attachments(pool: &SqlitePool, conversation_id: &str, attachments: Option<&str>) -> Result<(), String> {
+    sqlx::query("UPDATE messages SET attachments = ?1 WHERE id = (SELECT id FROM messages WHERE conversation_id = ?2 ORDER BY id DESC LIMIT 1) AND role = 'user'")
+        .bind(attachments).bind(conversation_id).execute(pool).await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// 加载对话的最后一条消息（role, content）。无消息时返回 None。
 ///
 /// 供「发出即保存」去重使用：判断尾部是否已是相同 user 消息，避免重发产生重复行。
@@ -750,55 +798,89 @@ pub async fn get_compress_boundary(
     }
 }
 
-/// 清空对话的所有消息（不删 conversation 记录本身）。
-///
-/// 0.13.2: 同时清理 memory_fts 中该对话的归档。
-pub async fn clear_messages(pool: &SqlitePool, conversation_id: &str) -> Result<(), String> {
-    sqlx::query("DELETE FROM messages WHERE conversation_id = ?1")
+/// 历史破坏性修改与派生记忆失效在同一事务内完成。
+async fn invalidate_history(
+    tx: &mut sqlx::SqliteConnection,
+    conversation_id: &str,
+) -> Result<(), String> {
+    for table in ["conversation_summaries", "memory_fts"] {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DELETE FROM {table} WHERE conversation_id = ?1"
+        )))
         .bind(conversation_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
-
-    // 0.13.2: 同步清理 FTS5 归档
-    let _ = clear_memory_fts(pool, conversation_id).await;
-
-    // 0.21.19: 同步清理摘要
-    let _ = clear_summaries(pool, conversation_id).await;
-
+    }
+    sqlx::query("UPDATE conversations SET summarized_until = 0, history_revision = history_revision + 1 WHERE id = ?1")
+        .bind(conversation_id).execute(&mut *tx).await.map_err(|e| e.to_string())?;
     Ok(())
 }
 
-/// 截断对话消息——保留前 `keep_count` 条，删除其余（0.12.5 §5.5）。
-///
-/// 用于消息编辑重发：用户编辑第 N 条消息后，保留前 N 条消息（索引 0 到 N-1），
-/// 删除第 N 条及之后的所有消息，然后重新调 `chat_prompt`。
+/// 清空消息并失效派生记忆，保留 conversation 记录。
+pub async fn clear_messages(pool: &SqlitePool, conversation_id: &str) -> Result<(), String> {
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    sqlx::query("DELETE FROM messages WHERE conversation_id = ?1")
+        .bind(conversation_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+    invalidate_history(&mut tx, conversation_id).await?;
+    tx.commit().await.map_err(|e| e.to_string())
+}
+
+/// 旧调用按原始存储行数截断；UI 使用稳定的 message_id 入口。
 pub async fn truncate_messages(
     pool: &SqlitePool,
     conversation_id: &str,
     keep_count: i64,
 ) -> Result<(), String> {
-    let ids: Vec<i64> =
-        sqlx::query_scalar("SELECT id FROM messages WHERE conversation_id = ?1 ORDER BY id ASC")
-            .bind(conversation_id)
-            .fetch_all(pool)
-            .await
-            .map_err(|e| e.to_string())?;
-
-    if keep_count >= ids.len() as i64 {
-        return Ok(()); // 无需截断
+    if keep_count < 0 {
+        return Err("保留消息数不能为负数".into());
     }
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    let start_id: Option<i64> = sqlx::query_scalar(
+        "SELECT id FROM messages WHERE conversation_id = ?1 ORDER BY id LIMIT 1 OFFSET ?2",
+    )
+    .bind(conversation_id)
+    .bind(keep_count)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+    if let Some(id) = start_id {
+        delete_history_from(&mut tx, conversation_id, id).await?;
+    }
+    tx.commit().await.map_err(|e| e.to_string())
+}
 
-    let start_id = ids[keep_count as usize];
-
+async fn delete_history_from(
+    tx: &mut sqlx::SqliteConnection,
+    conversation_id: &str,
+    id: i64,
+) -> Result<(), String> {
     sqlx::query("DELETE FROM messages WHERE conversation_id = ?1 AND id >= ?2")
         .bind(conversation_id)
-        .bind(start_id)
-        .execute(pool)
+        .bind(id)
+        .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
+    invalidate_history(tx, conversation_id).await
+}
 
-    Ok(())
+/// message_id 必须仍属于该会话；过期 UI 锚点不能退化为位置索引。
+pub async fn truncate_messages_from_id(
+    pool: &SqlitePool,
+    conversation_id: &str,
+    message_id: i64,
+) -> Result<(), String> {
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM messages WHERE conversation_id = ?1 AND id = ?2 AND role = 'user')")
+        .bind(conversation_id).bind(message_id).fetch_one(&mut *tx).await.map_err(|e| e.to_string())?;
+    if !exists {
+        return Err("消息已变化，请重新加载会话后重试".into());
+    }
+    delete_history_from(&mut tx, conversation_id, message_id).await?;
+    tx.commit().await.map_err(|e| e.to_string())
 }
 
 /// 加载对话的**全部**消息（按 id 升序，即时间顺序）。
@@ -840,6 +922,38 @@ pub async fn load_all_messages_with_status(
         .await
         .map_err(|e| e.to_string())?;
     Ok(rows)
+}
+
+/// 历史展示在同一次查询中获取稳定行标识与内容。
+pub async fn load_message_snapshots(
+    pool: &SqlitePool,
+    conversation_id: &str,
+) -> Result<
+    Vec<(
+        i64,
+        String,
+        String,
+        i64,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )>,
+    String,
+> {
+    sqlx::query_as("SELECT id, role, content, created_at, attachments, status, error_text FROM messages WHERE conversation_id = ?1 ORDER BY id")
+        .bind(conversation_id).fetch_all(pool).await.map_err(|e| e.to_string())
+}
+
+/// 同一次读取冻结水位和历史代次；追加消息不会改变代次。
+pub async fn get_summary_revision(
+    pool: &SqlitePool,
+    conversation_id: &str,
+) -> Result<(i64, i64), String> {
+    sqlx::query_as("SELECT summarized_until, history_revision FROM conversations WHERE id = ?1")
+        .bind(conversation_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// 对话总数。
@@ -1202,6 +1316,21 @@ pub async fn archive_to_fts(
     Ok(())
 }
 
+/// 归档与历史代次校验在同一语句中执行，防止在途 load 复活已删除的记忆。
+pub async fn archive_to_fts_at_revision(
+    pool: &SqlitePool, conversation_id: &str, role: &str, content: &str,
+    content_hash: &str, expected_revision: i64,
+) -> Result<(), String> {
+    sqlx::query(
+        "INSERT INTO memory_fts (content, conversation_id, role, content_hash) \
+         SELECT ?1, ?2, ?3, ?4 \
+         WHERE EXISTS(SELECT 1 FROM conversations WHERE id = ?2 AND history_revision = ?5) \
+         AND NOT EXISTS(SELECT 1 FROM memory_fts WHERE conversation_id = ?2 AND content_hash = ?4)",
+    ).bind(content).bind(conversation_id).bind(role).bind(content_hash).bind(expected_revision)
+        .execute(pool).await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// FTS5 BM25 全文检索召回。
 ///
 /// 从 `memory_fts` 中检索与 `query` 相关的旧消息，按 BM25 相关度排序，返回 Top-K。
@@ -1517,11 +1646,9 @@ pub async fn get_summarized_until(pool: &SqlitePool, conversation_id: &str) -> R
     Ok(row.and_then(|(v,)| v).unwrap_or(0))
 }
 
-/// 0.27.8: 手动摘要的 CAS 提交——仅当水位仍等于 `expected_watermark` 时插入
-/// 摘要段并推进水位（phase §5.8.3：摘要输入冻结高水位，编辑/截断/删除推进
-/// 过水位的陈旧结果放弃提交）。
+/// 自动/手动摘要共用 CAS：水位、历史代次均未变且覆盖区间仍存在才提交。
 ///
-/// 返回 `Ok(true)` = 已提交；`Ok(false)` = 水位已变化，本次结果作废
+/// 返回 `Ok(true)` = 已提交；`Ok(false)` = 历史已变化，本次结果作废
 /// （不写任何数据，原摘要水位保持）。
 pub async fn insert_summary_and_advance_watermark_if_unchanged(
     pool: &SqlitePool,
@@ -1532,20 +1659,28 @@ pub async fn insert_summary_and_advance_watermark_if_unchanged(
     content: &str,
     token_est: i64,
     expected_watermark: i64,
+    expected_revision: i64,
 ) -> Result<bool, String> {
     let now = chrono::Utc::now().timestamp();
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
-    // 事务内先核水位（SQLite 单写者，事务保证读到提交后的最新值）
-    let current: Option<(Option<i64>,)> =
-        sqlx::query_as("SELECT summarized_until FROM conversations WHERE id = ?1")
-            .bind(conversation_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|e| e.to_string())?;
-    let current = current.and_then(|(v,)| v).unwrap_or(0);
-    if current != expected_watermark {
-        // 不提交任何数据——回滚即丢弃（tx drop = rollback）
+    let current: Option<(i64, i64)> = sqlx::query_as(
+        "SELECT summarized_until, history_revision FROM conversations WHERE id = ?1",
+    )
+    .bind(conversation_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+    let range_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM messages WHERE conversation_id = ?1 AND id >= ?2 AND id <= ?3)",
+    )
+    .bind(conversation_id)
+    .bind(start_rowid)
+    .bind(end_rowid)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+    if current != Some((expected_watermark, expected_revision)) || !range_exists {
         return Ok(false);
     }
 
@@ -1738,6 +1873,18 @@ pub async fn replace_oldest_two_with_merged(
     let now = chrono::Utc::now().timestamp();
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
+    let source_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM conversation_summaries WHERE conversation_id = ?1 AND id IN (?2, ?3)",
+    )
+    .bind(conversation_id)
+    .bind(id1)
+    .bind(id2)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+    if source_count != 2 {
+        return Err("摘要来源已变化，放弃合并".into());
+    }
     // 删除最旧两段
     sqlx::query("DELETE FROM conversation_summaries WHERE id = ?1 OR id = ?2")
         .bind(id1)
@@ -3172,10 +3319,12 @@ mod tests {
         let pool = setup_pool().await;
         create_conversation(&pool, "c1", Some("t")).await.unwrap();
         let id1 = append_message(&pool, "c1", "user", "{}").await.unwrap();
-        let id2 = append_message(&pool, "c1", "assistant", "{}").await.unwrap();
+        let id2 = append_message(&pool, "c1", "assistant", "{}")
+            .await
+            .unwrap();
 
         let committed = insert_summary_and_advance_watermark_if_unchanged(
-            &pool, "c1", 0, 1, id2, "摘要", 10, 0,
+            &pool, "c1", 0, 1, id2, "摘要", 10, 0, 0,
         )
         .await
         .unwrap();
@@ -3190,7 +3339,9 @@ mod tests {
         let pool = setup_pool().await;
         create_conversation(&pool, "c1", Some("t")).await.unwrap();
         let id1 = append_message(&pool, "c1", "user", "{}").await.unwrap();
-        append_message(&pool, "c1", "assistant", "{}").await.unwrap();
+        append_message(&pool, "c1", "assistant", "{}")
+            .await
+            .unwrap();
 
         // 另一路任务已把水位推进到 id1（模拟自动摘要/并发手动压缩）
         insert_summary_and_advance_watermark(&pool, "c1", 0, 1, id1, "旧摘要", 5)
@@ -3198,7 +3349,15 @@ mod tests {
             .unwrap();
 
         let committed = insert_summary_and_advance_watermark_if_unchanged(
-            &pool, "c1", 1, id1 + 1, id1 + 1, "陈旧摘要", 8, 0, // 冻结水位是 0，已被推进
+            &pool,
+            "c1",
+            1,
+            id1 + 1,
+            id1 + 1,
+            "陈旧摘要",
+            8,
+            0,
+            0, // 冻结水位是 0，已被推进
         )
         .await
         .unwrap();
@@ -3245,4 +3404,184 @@ mod tests {
             0
         );
     }
+    #[tokio::test]
+    async fn truncation_invalidates_memory_and_rejects_stale_summary_even_at_watermark_zero() {
+        let pool = setup_pool().await;
+        create_conversation(&pool, "c1", None).await.unwrap();
+        let a = append_message(&pool, "c1", "user", "a").await.unwrap();
+        let b = append_message(&pool, "c1", "assistant", "b").await.unwrap();
+        let c = append_message(&pool, "c1", "user", "c").await.unwrap();
+        let (watermark, revision) = get_summary_revision(&pool, "c1").await.unwrap();
+        archive_to_fts(&pool, "c1", "user", "deleted memory", "hash")
+            .await
+            .unwrap();
+        truncate_messages_from_id(&pool, "c1", c).await.unwrap();
+        assert_eq!(
+            get_summary_revision(&pool, "c1").await.unwrap(),
+            (0, revision + 1)
+        );
+        // b 仍存在，水位仍是 0；只有内容代次才能拒绝这个陈旧快照。
+        assert!(
+            !insert_summary_and_advance_watermark_if_unchanged(
+                &pool, "c1", 0, a, b, "stale", 1, watermark, revision
+            )
+            .await
+            .unwrap()
+        );
+        let fts_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM memory_fts WHERE conversation_id = 'c1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(fts_count, 0);
+        assert_eq!(count_summaries(&pool, "c1").await.unwrap(), 0);
+        assert_eq!(load_all_messages(&pool, "c1").await.unwrap().len(), 2);
+        assert!(truncate_messages_from_id(&pool, "c1", c).await.is_err());
+        assert!(truncate_messages(&pool, "c1", -1).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn clear_and_truncate_reset_existing_summaries_and_cancel_in_flight_merges() {
+        let pool = setup_pool().await;
+        create_conversation(&pool, "c1", None).await.unwrap();
+        let a = append_message(&pool, "c1", "user", "a").await.unwrap();
+        let b = append_message(&pool, "c1", "assistant", "b").await.unwrap();
+        let c = append_message(&pool, "c1", "user", "c").await.unwrap();
+        insert_summary_and_advance_watermark(&pool, "c1", 0, a, a, "first", 1)
+            .await
+            .unwrap();
+        insert_summary_and_advance_watermark(&pool, "c1", 1, b, b, "second", 1)
+            .await
+            .unwrap();
+        let pair = read_oldest_two_summaries(&pool, "c1")
+            .await
+            .unwrap()
+            .unwrap();
+        truncate_messages_from_id(&pool, "c1", c).await.unwrap();
+        assert!(
+            replace_oldest_two_with_merged(
+                &pool,
+                "c1",
+                pair[0].0,
+                pair[1].0,
+                a,
+                b,
+                "stale merge",
+                1
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(get_summarized_until(&pool, "c1").await.unwrap(), 0);
+        assert_eq!(count_summaries(&pool, "c1").await.unwrap(), 0);
+        let (_, revision) = get_summary_revision(&pool, "c1").await.unwrap();
+        clear_messages(&pool, "c1").await.unwrap();
+        assert_eq!(
+            get_summary_revision(&pool, "c1").await.unwrap(),
+            (0, revision + 1)
+        );
+        assert!(
+            !insert_summary_and_advance_watermark_if_unchanged(
+                &pool, "c1", 0, a, b, "stale", 1, 0, revision
+            )
+            .await
+            .unwrap()
+        );
+        delete_conversation(&pool, "c1").await.unwrap();
+        assert!(
+            !insert_summary_and_advance_watermark_if_unchanged(
+                &pool, "c1", 0, a, b, "deleted", 1, 0, 0
+            )
+            .await
+            .unwrap()
+        );
+        create_conversation(&pool, "c1", None).await.unwrap();
+        append_message(&pool, "c1", "user", "new").await.unwrap();
+        assert!(
+            !insert_summary_and_advance_watermark_if_unchanged(
+                &pool,
+                "c1",
+                0,
+                a,
+                b,
+                "recreated",
+                1,
+                0,
+                0
+            )
+            .await
+            .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn stable_id_truncation_keeps_tool_rows_and_rejects_cross_conversation_anchor() {
+        let pool = setup_pool().await;
+        create_conversation(&pool, "c1", None).await.unwrap();
+        create_conversation(&pool, "c2", None).await.unwrap();
+        let a = append_message(&pool, "c1", "user", "image").await.unwrap();
+        append_message(&pool, "c1", "assistant", "tool call")
+            .await
+            .unwrap();
+        append_message(&pool, "c1", "user", "tool result")
+            .await
+            .unwrap();
+        let b = append_message(&pool, "c1", "user", "next user")
+            .await
+            .unwrap();
+        assert!(truncate_messages_from_id(&pool, "c2", a).await.is_err());
+        truncate_messages_from_id(&pool, "c1", b).await.unwrap();
+        let rows = load_message_snapshots(&pool, "c1").await.unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].0, a);
+        assert_eq!(rows[2].2, "tool result");
+        let before = get_summary_revision(&pool, "c1").await.unwrap();
+        truncate_messages(&pool, "c1", 100).await.unwrap();
+        assert_eq!(get_summary_revision(&pool, "c1").await.unwrap(), before);
+        init_db(&pool).await.unwrap(); // 迁移幂等
+    }
+    #[tokio::test]
+    async fn late_live_flush_cannot_restore_truncated_history_or_overwrite_new_reply() {
+        let pool = setup_pool().await;
+        create_conversation(&pool, "c1", None).await.unwrap();
+        let user = append_message(&pool, "c1", "user", "old").await.unwrap();
+        let partial = upsert_live_message_at_revision(&pool, "c1", None, "old partial", 0).await.unwrap().unwrap();
+        assert_eq!(upsert_live_message_at_revision(&pool, "c1", Some(partial), "updated", 0).await.unwrap(), Some(partial));
+        truncate_messages_from_id(&pool, "c1", user).await.unwrap();
+        assert_eq!(upsert_live_message_at_revision(&pool, "c1", Some(partial), "late", 0).await.unwrap(), None);
+        assert_eq!(upsert_live_message_at_revision(&pool, "c1", None, "late first flush", 0).await.unwrap(), None);
+        append_message(&pool, "c1", "user", "replacement").await.unwrap();
+        let current = upsert_live_message_at_revision(&pool, "c1", None, "new reply", 1).await.unwrap().unwrap();
+        assert_eq!(upsert_live_message_at_revision(&pool, "c1", Some(current), "old overwrites new", 0).await.unwrap(), None);
+        assert_eq!(load_all_messages(&pool, "c1").await.unwrap()[1].1, "new reply");
+    }
+
+    #[tokio::test]
+    async fn summary_cas_accepts_a_boundary_in_another_conversations_rowid_gap() {
+        let pool = setup_pool().await;
+        create_conversation(&pool, "c1", None).await.unwrap();
+        create_conversation(&pool, "c2", None).await.unwrap();
+        let a = append_message(&pool, "c1", "user", "a").await.unwrap();
+        let gap = append_message(&pool, "c2", "user", "unrelated").await.unwrap();
+        append_message(&pool, "c1", "assistant", "retained").await.unwrap();
+        assert!(insert_summary_and_advance_watermark_if_unchanged(&pool, "c1", 0, a, gap, "summary", 1, 0, 0).await.unwrap());
+        assert_eq!(get_summarized_until(&pool, "c1").await.unwrap(), gap);
+    }
+
+    #[tokio::test]
+    async fn archive_revision_prevents_deleted_memory_from_returning() {
+        let pool = setup_pool().await;
+        create_conversation(&pool, "c1", None).await.unwrap();
+        archive_to_fts_at_revision(&pool, "c1", "user", "old", "old-hash", 0).await.unwrap();
+        clear_messages(&pool, "c1").await.unwrap();
+        archive_to_fts_at_revision(&pool, "c1", "user", "late old", "old-hash", 0).await.unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memory_fts").fetch_one(&pool).await.unwrap();
+        assert_eq!(count, 0);
+        for _ in 0..2 {
+            archive_to_fts_at_revision(&pool, "c1", "user", "current", "new-hash", 1).await.unwrap();
+        }
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memory_fts").fetch_one(&pool).await.unwrap();
+        assert_eq!(count, 1);
+    }
+
 }

@@ -434,7 +434,7 @@ mod tests {
 // `build_openai_client` 显式 `Route::Chat` 的实际 wire 行为（不走 mock client，
 // 真实走 rig 编码 + LoggingHttpClient + reqwest 传输，仅端点换成本地捕获桩）。
 #[cfg(test)]
-mod wire_tests {
+pub(super) mod wire_tests {
     use super::*;
     use crate::ai::message::{ChatMessage, CompletionRequest};
     use crate::ai::provider::{AIProvider, StreamChunk};
@@ -445,24 +445,32 @@ mod wire_tests {
 
     /// 捕获到的一次请求。
     #[derive(Debug, Clone)]
-    struct CapturedRequest {
+    pub(crate) struct CapturedRequest {
         method: String,
         path: String,
-        body: String,
+        pub(crate) body: String,
     }
 
     /// 单用途 HTTP 捕获桩：同步服务 `responses.len()` 个请求后自行退出。
     /// 每连接读请求行 + headers + Content-Length body，回写 `responses[i]`（完整响应字节）。
-    fn spawn_capture_server(responses: Vec<Vec<u8>>) -> (SocketAddr, Arc<Mutex<Vec<CapturedRequest>>>) {
+    pub(crate) fn spawn_capture_server(
+        responses: Vec<Vec<u8>>,
+    ) -> (SocketAddr, Arc<Mutex<Vec<CapturedRequest>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
         let addr = listener.local_addr().expect("local_addr");
         let captured: Arc<Mutex<Vec<CapturedRequest>>> = Arc::new(Mutex::new(Vec::new()));
         let sink = captured.clone();
         std::thread::spawn(move || {
             for response in responses {
-                let Ok((stream, _)) = listener.accept() else { break };
+                let Ok((stream, _)) = listener.accept() else {
+                    break;
+                };
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+                let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(5)));
                 let mut reader = BufReader::new(stream);
-                let Some(req) = read_http_request(&mut reader) else { break };
+                let Some(req) = read_http_request(&mut reader) else {
+                    break;
+                };
                 sink.lock().unwrap().push(req);
                 let _ = reader.get_mut().write_all(&response);
                 let _ = reader.get_mut().flush();
@@ -516,7 +524,7 @@ mod wire_tests {
     }
 
     /// 标准 SSE 流式响应（3 个内容 chunk + [DONE]）。
-    fn sse_stream_response() -> Vec<u8> {
+    pub(crate) fn sse_stream_response() -> Vec<u8> {
         // frame() 只产 JSON 载荷，"data: " 前缀由拼接层统一加。
         let frame = |delta: &str, finish: &str| {
             format!(

@@ -48,6 +48,8 @@ import {initComposerBarPopup, invalidateComposerBarCache, refreshPopupIfVisible}
 // 0.12.4 §6.5：openSettings 直接用 invoke，不再需要动态 import
 import {t} from "../i18n/index.js";
 import {createEarlyStreamBuffer} from "../shared/early-stream-buffer.js";
+import {createPrefillConsumer} from "./prefill.js";
+import {createTurnRetryStore, resolvePersistedTurn} from "./turn-retry.js";
 import {ensureSpriteLoaded} from "../shared/icon.js";
 
 /** 流式渲染节流：requestAnimationFrame 句柄 */
@@ -56,6 +58,9 @@ let rafHandle = 0;
 /** 当前 assistant 消息 DOM 引用 */
 let currentAssistantEl = null;
 const earlyStreamBuffer = createEarlyStreamBuffer();
+const turnRetries = createTurnRetryStore();
+let editingTurn = false;
+const lastUserId = () => state.messages.findLast(msg => msg.role === "user")?.id;
 
 /** 对话窗口是否已被用户实际打开（区分预热 vs 真正显示）。
  *  preheat 在启动 3s 后创建隐藏的 chat 窗口，JS init() 会执行但窗口不可见。
@@ -113,11 +118,10 @@ async function init() {
     // 0.19：chat prefill 投递（revision 机制防残留/防旧事件误删）
     //
     // 两条路径都不丢文本：
-    //   冷启动：listener 注册后 take 拉取 pending（take 清空）
+    //   冷启动：listener 注册后 take 读取 pending，成功后 ack
     //   热窗口：listener 收到事件 → ack 清空 pending
     // revision 防止旧事件的 ack 误删新 pending。
-    // appliedRevision 防止 take 和 event 同时命中时重复填充。
-    let appliedRevision = 0;
+    // 共享在途 Promise 防止 take 和 event 同时命中时重复填充。
 
     /**
      * 0.27.9：正文+附件草稿事务（§5.9.5/§8.2）——
@@ -126,37 +130,13 @@ async function init() {
      * （pending 留 TTL 兜底，前端不误删草稿）。
      * @returns {Promise<boolean>} 是否应 ack 该 revision
      */
-    async function applyPrefillPayload(payload, revision) {
-        if (revision && revision === appliedRevision) return true; // 已填充过同一 revision
-        const attachments = Array.isArray(payload?.attachments) ? payload.attachments : [];
-        const hasText = typeof payload?.text === "string" && payload.text.trim().length > 0;
-        if (!hasText && attachments.length === 0) return true; // 空载荷：直接 ack
-
-        if (payload?.newConversation) {
-            await handleNewConversation();
-        }
-        if (hasText) {
-            // 追加当前草稿语义（§5.9.5「不覆盖草稿」）——光标处插入并滚动跟随
-            insertAtCursor(payload.text);
-            focusInput();
-        }
-        let adoptOk = true;
-        if (attachments.length > 0) {
-            addAttachments(attachments.map((a) => ({
-                kind: a.kind,
-                ref: a.ref,
-                display: a.display,
-            })));
-            try {
-                await ipc.adoptChatAttachments(attachments.map((a) => a.ref), state.conversationId);
-            } catch (error) {
-                adoptOk = false;
-                console.warn("[chat] 附件草稿采纳（归属转移）失败:", error);
-            }
-        }
-        appliedRevision = revision || 0;
-        return adoptOk;
-    }
+    const applyPrefillPayload = createPrefillConsumer({
+        getConversationId: () => state.conversationId,
+        newConversation: handleNewConversation,
+        insertText: text => { insertAtCursor(text); focusInput(); },
+        adopt: ipc.adoptChatAttachments,
+        add: addAttachments,
+    });
 
     // 先 await listen，确认 listener 注册成功后再 take
     await listen(EVENTS.CHAT_PREFILL, (event) => {
@@ -363,31 +343,32 @@ async function init() {
  * @param {string} text 持久化正文
  * @param {Array<{kind?: string, name: string}>} [badges] 附件徽标（kind+name，无 ref）
  */
-function renderUserEntry(text, badges = []) {
+function renderUserEntry(text, badges = [], userMessageId = null) {
     if (badges.length > 0) {
-        components.renderUserAttachmentCards(badges);
+        components.renderUserAttachmentCards(badges, userMessageId);
         if (text && text !== attachmentSummaryText(badges)) {
-            components.renderUserMessage(text);
+            components.renderUserMessage(text, userMessageId);
         }
         return;
     }
     if (text) {
-        components.renderUserMessage(text);
+        components.renderUserMessage(text, userMessageId);
     }
 }
 
 /**
  * 渲染持久化的失败轮（0.27.12）：错误说明行 + 「重试」按钮。
- * 重试 = 预填原文到 composer（不自动发送，可修改；附件需重新附加）。
+ * 重试预填草稿，不自动发送；历史附件无会话内快照时提示显式重附。
  * @param {string} errorText
  * @param {string} userText
  */
-function renderFailedTurnError(errorText, userText) {
+function renderFailedTurnError(errorText, userText, userMessageId) {
     const el = components.renderSignal(
         errorText ? `${t("chat.failed.prefix")}${errorText}` : t("chat.failed.prefix_no_reason"),
         "error",
     );
     if (!el) return;
+    el.dataset.userMessageId = userMessageId;
     const retry = document.createElement("button");
     retry.type = "button";
     retry.className = "chat-context-warning-btn";
@@ -396,6 +377,10 @@ function renderFailedTurnError(errorText, userText) {
     retry.textContent = t("chat.failed.retry");
     retry.addEventListener("click", () => {
         setInputValue(userText);
+        const message = state.messages.find(msg => msg.id === userMessageId);
+        const attachments = turnRetries.get(userMessageId, message?.attachments);
+        if (attachments === null) components.renderErrorMessage(t("chat.attach.retry_expired"));
+        else addAttachments(attachments);
         focusInput();
     });
     el.appendChild(retry);
@@ -406,7 +391,7 @@ function renderFailedTurnError(errorText, userText) {
  *
  * 0.23.12：composer 传结构化负载 `{text, attachments}`——text 是用户可见/
  * 持久化正文（气泡、state、标题），attachments 是本轮附件元数据（只注入
- * 本轮模型输入，不进入气泡/标题/历史）。编辑重发/重试路径传纯字符串。
+ * 本轮模型输入，不进入气泡/标题/历史）。编辑重发/重试同样传完整负载。
  *
  * 0.27.9：attachments 为 `{kind, ref, display}` 类型化元数据（§8.2）；
  * 徽标（kind+name）进气泡渲染与 state，ref 只随请求给后端注入本轮模型输入。
@@ -428,15 +413,26 @@ async function handleSend(input, isEdit = false) {
         return;
     }
 
+    const conversationId = state.conversationId;
     // 移除空状态
     components.removeEmptyState();
 
     // 添加用户消息：附件卡片 + 正文气泡（徽标只含 kind+name，ref 不进 DOM/正文）
     const badges = payload.attachments.map((a) => ({kind: a.kind, name: a.display}));
-    renderUserEntry(payload.text, badges);
+    // 预填失败轮后确认发送：后端会复用同文尾部 user，前端也复用同一轮。
+    const tail = state.messages.at(-1);
+    const reuseFailed = tail?.role === "user" && tail.failed && tail.content === payload.text;
+    const userMessage = reuseFailed ? tail : state.addMessage({role: "user", content: payload.text, attachments: badges});
+    if (reuseFailed) {
+        document.querySelectorAll(`[data-user-message-id="${userMessage.id}"]`).forEach(el => el.remove());
+        userMessage.attachments = badges;
+        userMessage.failed = false;
+    }
+    turnRetries.remember(userMessage.id, payload.attachments);
+    renderUserEntry(payload.text, badges, userMessage.id);
     // 用户发消息 → 强制滚到底部（重置上滚标记）
     forceScrollToBottom();
-    state.addMessage({role: "user", content: payload.text, attachments: badges});
+
 
     // 切换到流式模式
     setStreamingMode();
@@ -444,7 +440,7 @@ async function handleSend(input, isEdit = false) {
     state.resetStreamBuffer();
 
     // 创建 assistant 消息 DOM
-    currentAssistantEl = components.createAssistantMessage();
+    currentAssistantEl = components.createAssistantMessage(lastUserId());
     earlyStreamBuffer.begin(state.conversationId);
 
     try {
@@ -459,7 +455,11 @@ async function handleSend(input, isEdit = false) {
         if (payload.attachments.length > 0) {
             opts.attachments = payload.attachments;
         }
-        const requestId = await ipc.chatPrompt(state.conversationId, payload.text, state.currentGroupId, opts);
+        const requestId = await ipc.chatPrompt(conversationId, payload.text, state.currentGroupId, opts);
+        if (state.conversationId !== conversationId || !state.messages.includes(userMessage)) {
+            ipc.chatAbort(requestId).catch(() => {});
+            return;
+        }
         state.setActiveRequestId(requestId);
         for (const payloadChunk of earlyStreamBuffer.resolve(requestId)) dispatchStreamPayload(payloadChunk);
 
@@ -468,11 +468,12 @@ async function handleSend(input, isEdit = false) {
         // rename 才能命中；此前在 prompt 前调用是 no-op。
         // 0.17.6a: 临时对话跳过标题生成（不写 SQLite，promote 后由主窗口负责）
         // 0.23.12：标题输入 = 用户可见正文，不出现 rref_/技术提示
-        const isNewConversation = !isEdit && state.messages.length === 1;
+        const isNewConversation = !reuseFailed && !isEdit && state.messages.length === 1;
         if (isNewConversation && !state.ephemeralMode) {
             const truncatedTitle = payload.text.slice(0, 20) + (payload.text.length > 20 ? "…" : "");
             try {
-                await ipc.renameChatConversation(state.conversationId, truncatedTitle);
+                await ipc.renameChatConversation(conversationId, truncatedTitle);
+                if (state.conversationId !== conversationId) return;
                 await updateBreadcrumb(truncatedTitle);
                 // 0.12.5 §5.3：异步触发 LLM 命名（不等待，失败静默降级保持截断标题）
                 ipc.generateConversationTitle(state.conversationId, payload.text).catch((e) => {
@@ -483,7 +484,28 @@ async function handleSend(input, isEdit = false) {
             }
         }
     } catch (e) {
+        if (state.conversationId !== conversationId || !state.messages.includes(userMessage)) return;
         earlyStreamBuffer.clear();
+        // 启动失败可能已预写失败轮，也可能尚未落库。只回滚未落库的乐观展示。
+        if (!state.ephemeralMode) {
+            try {
+                const snapshots = await ipc.getChatMessages(conversationId);
+                if (state.conversationId !== conversationId || !state.messages.includes(userMessage)) return;
+                const persisted = resolvePersistedTurn(state.messages, userMessage.id, snapshots);
+                userMessage.messageId = persisted;
+                userMessage.failed = true;
+            } catch {
+                if (state.conversationId !== conversationId || !state.messages.includes(userMessage)) return;
+                const index = state.messages.indexOf(userMessage);
+                if (index >= 0) state.messages.splice(index, 1);
+                turnRetries.delete(userMessage.id);
+                document.querySelectorAll(`[data-user-message-id="${userMessage.id}"]`).forEach(el => el.remove());
+            }
+        } else {
+            state.messages.splice(state.messages.indexOf(userMessage), 1);
+            turnRetries.delete(userMessage.id);
+            document.querySelectorAll(`[data-user-message-id="${userMessage.id}"]`).forEach(el => el.remove());
+        }
         console.error("[chat] chatPrompt 失败:", e);
         // 移除空的 assistant 消息 DOM（createAssistantMessage 已创建但 chatPrompt 失败）
         if (currentAssistantEl) {
@@ -511,6 +533,7 @@ async function handleSend(input, isEdit = false) {
         return;
     }
 
+    if (state.conversationId !== conversationId || !state.messages.includes(userMessage)) return;
     clearInput();
     // 0.23.12：附件随消息发出后离开输入框（与输入清空同一成功时机；
     // 只移除本次发送的 ref，发送间隙新附的文件不受影响）。后端 ref 不撤销——
@@ -526,86 +549,91 @@ async function handleSend(input, isEdit = false) {
 
 /**
  * 消息编辑重发：截断后续消息（DB + state）→ 重新渲染 → 重新发送。
- * @param {number} msgIndex 被编辑消息在 state.messages 中的索引
+ * @param {string} userMessageId 被编辑轮的稳定用户消息标识
  * @param {string} newText 编辑后的文本
  */
-async function handleEditMessage(msgIndex, newText) {
-    if (state.isStreaming) {
-        await handleStop();
-    }
-
-    // 1. 截断 DB 消息（保留前 msgIndex 条）
-    try {
-        await ipc.truncateMessages(state.conversationId, msgIndex);
-    } catch (e) {
-        console.error("[chat] 截断消息失败:", e);
+async function handleEditMessage(userMessageId, newText) {
+    if (editingTurn) return;
+    const msgIndex = state.messages.findIndex(msg => msg.id === userMessageId && msg.role === "user");
+    if (msgIndex < 0) return;
+    const original = state.messages[msgIndex];
+    const conversationId = state.conversationId;
+    const attachments = turnRetries.get(userMessageId, original.attachments);
+    if (attachments === null) {
+        setInputValue(newText);
+        focusInput();
+        components.renderErrorMessage(t("chat.attach.retry_expired"));
         return;
     }
-
-    // 2. 截断 state.messages
-    state.messages.length = msgIndex;
-
-    // 3. 重新渲染消息列表（0.23.12：历史消息的附件卡片一并保留）
-    components.clearMessages();
-    for (const msg of state.messages) {
-        if (msg.role === "user") {
-            renderUserEntry(msg.content, msg.attachments ?? []);
-        } else if (msg.role === "assistant") {
-            const el = components.createAssistantMessage();
-            if (el) {
-                components.finalizeAssistantMessage(el, msg.content, "");
+    if (attachments.some(a => a.kind === "image") && !currentModelSupportsVision()) {
+        components.renderErrorMessage(t("chat.attach.vision_blocked"));
+        return;
+    }
+    editingTurn = true;
+    try {
+        if (state.isStreaming) await handleStop();
+        // 资源过期先阻止重发，不先破坏原历史。最终读取仍由后端再次校验。
+        if (attachments.length) {
+            const candidates = await ipc.attachmentListCandidates(conversationId);
+            const valid = new Set((candidates.sessionRefs || []).map(a => a.ref));
+            if (attachments.some(a => !valid.has(a.ref))) {
+                if (state.conversationId === conversationId) {
+                    setInputValue(newText);
+                    focusInput();
+                    components.renderErrorMessage(t("chat.attach.retry_expired"));
+                }
+                return;
             }
         }
+        let messageId = null;
+        const ephemeral = state.ephemeralMode;
+        if (!ephemeral) {
+            const snapshots = await ipc.getChatMessages(conversationId);
+            messageId = resolvePersistedTurn(state.messages, userMessageId, snapshots);
+        }
+        if (state.conversationId !== conversationId || state.messages[msgIndex] !== original) return;
+        const fromEnd = ephemeral ? state.messages.slice(msgIndex + 1).filter(msg => msg.role === "user").length : null;
+        await ipc.truncateMessages(conversationId, 0, messageId, fromEnd);
+        if (state.conversationId !== conversationId || state.messages[msgIndex] !== original) return;
+        for (const msg of state.messages.slice(msgIndex)) turnRetries.delete(msg.id);
+        state.messages.length = msgIndex;
+        components.clearMessages();
+        components.removeSummarySeparator();
+        components.updateContextIndicator(null);
+        invalidateComposerBarCache();
+        let turnId = null;
+        for (const msg of state.messages) {
+            if (msg.role === "user") {
+                turnId = msg.id;
+                renderUserEntry(msg.content, msg.attachments ?? [], turnId);
+            } else if (msg.role === "assistant") {
+                const el = components.createAssistantMessage(turnId);
+                if (el) components.finalizeAssistantMessage(el, msg.content, msg.thinking || "");
+            }
+        }
+        components.renderSignal("消息已编辑", "info");
+        // 发送失败时恢复这轮草稿，保留重新附加/修改的入口。
+        setInputValue(newText);
+        addAttachments(attachments);
+        await handleSend({text: newText, attachments}, true);
+    } catch (error) {
+        console.error("[chat] 编辑重发失败:", error);
+        if (state.conversationId === conversationId) components.renderErrorMessage(String(error));
+    } finally {
+        editingTurn = false;
     }
-
-    // 0.12.7 §6.3：消息已编辑 Signal
-    components.renderSignal("消息已编辑", "info");
-
-    // 4. 重新发送编辑后的消息（isEdit=true 跳过截断标题逻辑）
-    await handleSend(newText, true);
 }
 
-// ── 重试（0.12.6：消息的 retry 按钮）────────────────────────
-
-/**
- * 重试：重新发送被点击的那轮 user 消息。
- * 0.27.12：按事件锚点（msgEl）定位——assistant 锚点取其前最近的 user，
- * user 锚点取自身；无锚点时维持旧行为（最后一条 user，防御性回落）。
- * 截断该轮之后的消息（DB + state）再重发（handleEditMessage 语义）。
- * @param {CustomEvent} [e] chat:retry 事件（detail.msgEl 为消息气泡）
- */
+/** 气泡直接携带所属 user 的稳定标识，不依赖 DOM/存储行数。 */
 async function handleRetry(e) {
-    if (state.isStreaming) return; // 生成中不允许重试
-
-    let userIndex = -1;
-    const msgEl = e?.detail?.msgEl;
-    if (msgEl) {
-        // DOM .chat-msg 下标与 state.messages 对齐（startEditMessage 同款定位；
-        // 纯附件轮不产生 .chat-msg，错位与编辑功能同边界——既有局限）
-        const anchor = msgEl.closest(".chat-msg") || msgEl;
-        const domIndex = Array.from(document.querySelectorAll(".chat-msg")).indexOf(anchor);
-        if (domIndex >= 0) {
-            const from = state.messages[domIndex]?.role === "user" ? domIndex : domIndex - 1;
-            for (let i = from; i >= 0; i--) {
-                if (state.messages[i]?.role === "user") {
-                    userIndex = i;
-                    break;
-                }
-            }
-        }
-    }
-    if (userIndex < 0) {
-        // 无锚点/锚点未命中：最后一条 user（0.12.6 原行为）
-        for (let i = state.messages.length - 1; i >= 0; i--) {
-            if (state.messages[i].role === "user") {
-                userIndex = i;
-                break;
-            }
-        }
-    }
-    if (userIndex < 0) return;
-
-    await handleEditMessage(userIndex, state.messages[userIndex].content);
+    if (state.isStreaming) return;
+    const anchor = e?.detail?.msgEl;
+    const userMessageId = anchor?.dataset?.userMessageId || anchor?.closest("[data-user-message-id]")?.dataset.userMessageId;
+    // 有锚点但找不到对应轮时必须停止，不能误重试最后一轮。
+    const user = anchor
+        ? state.messages.find(msg => msg.id === userMessageId && msg.role === "user")
+        : state.messages.findLast(msg => msg.role === "user");
+    if (user) await handleEditMessage(user.id, user.content);
 }
 
 // ── 停止 ────────────────────────────────────────
@@ -662,7 +690,7 @@ function dispatchStreamPayload(payload) {
             state.setThinking(true);
             // 首条 thinking 时创建 assistant DOM
             if (!currentAssistantEl) {
-                currentAssistantEl = components.createAssistantMessage();
+                currentAssistantEl = components.createAssistantMessage(lastUserId());
             }
             scheduleRender();
             break;
@@ -674,7 +702,7 @@ function dispatchStreamPayload(payload) {
             }
             // tool_call 后 currentAssistantEl 被置 null，新 text 到达时需创建新气泡
             if (!currentAssistantEl) {
-                currentAssistantEl = components.createAssistantMessage();
+                currentAssistantEl = components.createAssistantMessage(lastUserId());
             }
             state.appendStreamBuffer(chunk.text);
             scheduleRender();
@@ -726,12 +754,15 @@ function dispatchStreamPayload(payload) {
             finalizeDone(chunk);
             break;
 
-        case "error":
+        case "error": {
+            const failedUser = state.messages.findLast(msg => msg.role === "user");
+            if (failedUser) failedUser.failed = true;
             // 移除空的 streaming assistant DOM（有内容则先 finalize）
             if (currentAssistantEl) {
                 // 0.18.0: trim 判断——纯空白走 remove 分支
                 if ((state.streamBuffer || "").trim() || (state.thinkingBuffer || "").trim()) {
                     components.finalizeAssistantMessage(currentAssistantEl, state.streamBuffer, state.thinkingBuffer);
+                    state.addMessage({role: "assistant", content: state.streamBuffer, thinking: state.thinkingBuffer});
                 } else {
                     currentAssistantEl.remove();
                 }
@@ -739,6 +770,7 @@ function dispatchStreamPayload(payload) {
             components.renderErrorMessage(chunk.message);
             finishStreaming();
             break;
+        }
     }
 }
 
@@ -1138,6 +1170,7 @@ async function handleNewConversation(groupId = null) {
         console.warn("revoke chat audio attachments failed:", error);
     });
     clearAttachments();
+    turnRetries.clear();
     state.resetConversation();
     state.setCurrentGroupId(groupId);
     components.clearMessages();
@@ -1167,6 +1200,7 @@ async function handleNewEphemeralConversation() {
         console.warn("revoke chat audio attachments failed:", error);
     });
     clearAttachments();
+    turnRetries.clear();
     state.resetConversation();
     state.setEphemeralMode(true);
     components.clearMessages();
@@ -1231,6 +1265,7 @@ async function handleSwitchConversation(conversationId, groupId = null) {
     state.setCurrentGroupId(groupId);
     state.setEphemeralMode(false); // 0.17.6a: 切换到持久对话，退出临时模式
     state.messages.length = 0;
+    turnRetries.clear();
     state.setStreaming(false);
     state.setActiveRequestId(null);
     state.resetStreamBuffer();
@@ -1242,6 +1277,7 @@ async function handleSwitchConversation(conversationId, groupId = null) {
 
     try {
         const messages = await ipc.getChatMessages(conversationId);
+        if (state.conversationId !== conversationId) return;
         if (messages.length === 0) {
             components.renderEmptyState(state.providerConfigured, openSettings);
         } else {
@@ -1258,10 +1294,11 @@ async function handleSwitchConversation(conversationId, groupId = null) {
 
                 if (msg.role === "user") {
                     // 0.27.9：历史加载渲染独立附件卡（DB 徽标 kind+name；兼容旧纯文件名=音频）
-                    renderUserEntry(msg.text, msg.attachments ?? []);
+                    const user = state.addMessage({role: "user", content: msg.text, attachments: msg.attachments ?? [], messageId: msg.message_id, failed: !!msg.failed});
+                    renderUserEntry(msg.text, msg.attachments ?? [], user.id);
                     // 0.27.12：失败轮持久化呈现——错误行 + 重试（预填原文不自动发送）
-                    if (msg.failed) renderFailedTurnError(msg.error_text || "", msg.text);
-                    state.addMessage({role: "user", content: msg.text});
+                    if (msg.failed) renderFailedTurnError(msg.error_text || "", msg.text, user.id);
+
                 } else if (msg.role === "assistant") {
                     // 包含 tool_name 的 assistant 消息渲染为工具调用卡片
                     if (msg.tool_name && !msg.text) {
@@ -1275,7 +1312,7 @@ async function handleSwitchConversation(conversationId, groupId = null) {
                         }
                         continue;
                     }
-                    const el = components.createAssistantMessage();
+                    const el = components.createAssistantMessage(lastUserId());
                     if (el) {
                         components.finalizeAssistantMessage(el, msg.text, msg.thinking || "");
                         state.addMessage({role: "assistant", content: msg.text});
@@ -1284,12 +1321,14 @@ async function handleSwitchConversation(conversationId, groupId = null) {
             }
         }
     } catch (e) {
+        if (state.conversationId !== conversationId) return;
         console.error("[chat] 加载对话历史失败:", e);
         components.renderEmptyState(state.providerConfigured, openSettings);
     }
 
     // 0.12.7 §1：切换对话后更新面包屑（使用 DB 中的 group_id 更可靠）
     const convs = await ipc.listChatConversations();
+    if (state.conversationId !== conversationId) return;
     const conv = convs.find((c) => c.id === conversationId);
     state.setCurrentGroupId(conv?.group_id || groupId);
     await updateBreadcrumb(conv?.title || "新对话");

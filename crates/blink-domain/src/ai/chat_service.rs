@@ -27,8 +27,8 @@ use std::hash::{Hash, Hasher};
 
 use crate::ai::agent_provider::{AgentProvider, ChatStreamChunk};
 use crate::ai::attachment::{
-    AttachmentKind, ResolvedAttachment, TextInjection, TextProbeStatus, TEXT_FILE_MAX_BYTES,
-    TEXT_TOTAL_TOKEN_LIMIT, build_text_injection, classify_text_probe, text_total_overrun,
+    AttachmentKind, ResolvedAttachment, TEXT_FILE_MAX_BYTES, TEXT_TOTAL_TOKEN_LIMIT, TextInjection,
+    TextProbeStatus, build_text_injection, classify_text_probe, text_total_overrun,
 };
 use crate::ai::prompt::{
     chat_system_prompt_with_skills, pure_chat_system_prompt_with_group,
@@ -219,6 +219,8 @@ pub struct ChatPromptHandle {
     pub chunks: mpsc::UnboundedReceiver<ChatStreamChunk>,
     /// 0.17.6: 目标窗口标签（IPC 层据此 emit_to 正确窗口）。
     pub target_window: String,
+    /// 冻结的历史代次，供 IPC 转发的迟到增量写入执行 CAS。
+    pub history_revision: Option<i64>,
 }
 
 /// 定向发送到 chat 窗口的流式事件包装（Phase 4）。
@@ -1215,6 +1217,10 @@ impl ChatService {
             );
         }
 
+        let history_revision = if kind == ConversationKind::Persistent {
+            blink_infra::data::conversations::get_summary_revision(self.persistent_memory.pool(), &conversation_id)
+                .await.ok().map(|(_, revision)| revision)
+        } else { None };
         let target_window_for_task = target_window.clone();
         let kind_for_task = kind;
         // pending 图片 token 估算（预算用）+ 任务内多模态 parts（move）
@@ -1356,6 +1362,7 @@ impl ChatService {
             conversation_id,
             chunks: chunk_rx,
             target_window,
+            history_revision,
         })
     }
 
@@ -1640,6 +1647,41 @@ impl ChatService {
     /// 0.17.6a: 清空临时对话记忆（promote 后清理）。
     pub async fn remove_ephemeral_conversation(&self, conversation_id: &str) {
         self.ephemeral_memory.remove(conversation_id).await;
+    }
+
+    /// 历史修改与 prompt 启动共用门闩，禁止生成过程继续写回被截断的历史。
+    pub async fn truncate_history(
+        &self,
+        conversation_id: &str,
+        keep_count: i64,
+        message_id: Option<i64>,
+        ephemeral_turn_from_end: Option<usize>,
+    ) -> Result<(), String> {
+        let _guard = self.start_gate.lock().await;
+        if self.current_request_context().is_some() {
+            return Err("已有对话正在生成，请停止后重试".into());
+        }
+        if let Some(from_end) = ephemeral_turn_from_end {
+            self.ephemeral_memory
+                .truncate_user_turn(conversation_id, from_end)
+                .await?;
+        } else if let Some(id) = message_id {
+            blink_infra::data::conversations::truncate_messages_from_id(
+                self.persistent_memory.pool(),
+                conversation_id,
+                id,
+            )
+            .await?;
+        } else {
+            blink_infra::data::conversations::truncate_messages(
+                self.persistent_memory.pool(),
+                conversation_id,
+                keep_count,
+            )
+            .await?;
+        }
+        self.last_context_status.invalidate_conversation(conversation_id);
+        Ok(())
     }
 
     /// 0.17.6a: 获取持久化对话记忆的引用（供 promote 写入消息用）。

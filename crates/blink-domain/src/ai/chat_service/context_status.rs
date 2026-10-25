@@ -123,6 +123,11 @@ pub(super) struct ContextStatusCache {
 const CONTEXT_STATUS_CACHE_MAX: usize = 32;
 
 impl ContextStatusCache {
+    pub(super) fn invalidate_conversation(&self, conversation_id: &str) {
+        self.entries.write().expect("ContextStatusCache lock poisoned")
+            .retain(|_, (_, status)| status.conversation_id != conversation_id);
+    }
+
     pub(super) fn new() -> Self {
         Self {
             entries: RwLock::new(HashMap::new()),
@@ -735,6 +740,17 @@ mod tests {
         let cache = ContextStatusCache::new();
         cache.insert("A:p:M1".into(), make_test_status("A", "p", "M1", 100));
         assert!(cache.get_for_conversation("nonexistent").is_none());
+    }
+
+    #[test]
+    fn context_status_cache_invalidates_all_models_of_one_conversation() {
+        let cache = ContextStatusCache::new();
+        cache.insert("A:p:M1".into(), make_test_status("A", "p", "M1", 100));
+        cache.insert("A:p:M2".into(), make_test_status("A", "p", "M2", 200));
+        cache.insert("B:p:M1".into(), make_test_status("B", "p", "M1", 300));
+        cache.invalidate_conversation("A");
+        assert!(cache.get_for_conversation("A").is_none());
+        assert_eq!(cache.get_for_conversation("B").unwrap().estimated_tokens, 300);
     }
 
     #[test]

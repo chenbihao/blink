@@ -12,7 +12,7 @@
 |---|---|
 | **配置化优先** | 可选行为（默认值用户可能想改的）做成配置项 + 合理默认；纯内部参数不暴露 |
 | **平台抽象预留** | 平台相关逻辑走 `infra/platform/` 的 `mod.rs` 接口 + `windows.rs` 实现，domain 不直接 `use windows::` |
-| **不过度工程** | 0.x 阶段不对外发布，产品化基础设施（manifest 升级/权限强制/插件市场）1.0 前不做 |
+| **不过度工程** | 按已确认 phase 建设必要底座。[0.28](../phases/0.28-plugin-platform-and-tools.md) 仅建设官方插件的清单兼容、包/存储/运行时、独立页面受限桥接与分发；不扩大为社区市场、通用 OS 沙箱、任意依赖安装或通用任务平台。Capability 的执行/授权边界不变 |
 | **架构要有前瞻性** | 精心设计持续演进，不过早腐败，不随便堆砌坏味道与技术债，持续收敛 Clean Architecture |
 | **子进程静默** | 调外部进程（`netstat`/`taskkill`/`python`/`node` 等子进程）必须加 `CREATE_NO_WINDOW`，走 `infra/platform/process.rs` 的 `no_window()` / `no_window_tokio()`，**禁止裸 `Command`**——否则会闪命令行黑窗。0.17.0 自启链路曾因此泄漏 cmd 窗口 |
 | **阻塞操作隔离** | CPU 密集或同步阻塞操作（PNG 编解码、图像像素 swap、Win32 同步 API、SQLite 长查询）必须 `tokio::task::spawn_blocking` 挪出工作线程，**禁止在 async 上下文裸跑**——否则阻塞 tokio 调度器影响 Alt+Space 主链路。参考 0.11 截图 PNG 解码 / BGRA swap / 剪贴板写入均走 `spawn_blocking` |

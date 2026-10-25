@@ -186,6 +186,8 @@ pub struct AgentProvider {
     model_id: String,
     /// 0.21.22: per-model 思考控件形态逃生口——构造时从 `ModelEntry.thinking_style` 固化
     thinking_style: Option<ThinkingStyle>,
+    custom_params: Option<serde_json::Value>,
+    default_max_tokens: Option<u64>,
     /// 0.21.17: 工具定义快照——构造时从 `DynamicTool` + MCP tools 提取，
     /// 供 `compute_context_status` 估算 tools_tokens 使用。
     /// 不随 Agent 运行时变化，构造时一次性固化。
@@ -234,6 +236,20 @@ impl AgentProvider {
             String::new()
         };
 
+        Self::with_key(entry, model, tools, mcp_tools, preamble, memory, &key_str)
+    }
+
+    /// 密钥由可信入口注入；测试可用本地 HTTP 桩而不触碰系统凭据。
+    #[allow(clippy::too_many_arguments)]
+    fn with_key(
+        entry: &ProviderEntry,
+        model: &ModelEntry,
+        tools: Vec<DynamicTool>,
+        mcp_tools: Vec<(rmcp::model::Tool, rmcp::service::ServerSink)>,
+        preamble: &str,
+        memory: Arc<dyn ConversationMemory>,
+        key_str: &str,
+    ) -> Result<Self, AIError> {
         // memory 已是 Arc<dyn ConversationMemory>，直接用于 rig AgentBuilder
         let memory_dyn = memory;
 
@@ -325,6 +341,10 @@ impl AgentProvider {
             base_url,
             model_id,
             thinking_style,
+            custom_params: super::rig_provider::build_custom_params_json(&model.custom_parameters),
+            default_max_tokens: default_max_tokens.or_else(|| {
+                (kind == ProviderKind::AnthropicMessages).then_some(ANTHROPIC_DEFAULT_MAX_TOKENS)
+            }),
             tool_prompt_infos,
         })
     }
@@ -366,12 +386,24 @@ impl AgentProvider {
             reasoning_effort.as_deref(),
             self.thinking_style,
         );
+        let mut thinking_patch =
+            super::thinking::merge_chat_parameters(self.custom_params.as_ref(), thinking_patch);
+        if let Err(error) = super::thinking::validate_thinking_budget(
+            self.kind,
+            &mut thinking_patch,
+            self.default_max_tokens,
+        ) {
+            let _ = tx.send(ChatStreamChunk::Error {
+                message: error.to_string(),
+            });
+            return;
+        }
         // 0.21.16: 思考开关状态打 trace——配合"不隐藏真实思考块"，开关失效时便于及时发现
         tracing::trace!(
             conversation_id = %conversation_id,
             thinking_enabled,
             reasoning_effort = ?reasoning_effort,
-            thinking_patch = ?thinking_patch,
+            has_custom_params = self.custom_params.is_some(),
             "stream_prompt: 思考开关/强度状态"
         );
         match &self.agent {
@@ -435,6 +467,22 @@ impl AgentProvider {
             self.thinking_style,
         );
 
+        let mut thinking_patch =
+            super::thinking::merge_chat_parameters(self.custom_params.as_ref(), thinking_patch);
+        // 显式输出上限走 rig 一等字段，不能被模型的同名额外参数覆盖。
+        if let Some(params) = thinking_patch.as_mut().and_then(|p| p.as_object_mut()) {
+            params.remove("max_tokens");
+        }
+        if let Err(error) = super::thinking::validate_thinking_budget(
+            self.kind,
+            &mut thinking_patch,
+            Some(max_tokens),
+        ) {
+            let _ = tx.send(ChatStreamChunk::Error {
+                message: error.to_string(),
+            });
+            return;
+        }
         match &self.agent {
             ChatAgent::Agent(a) => {
                 Self::run_stream_with_max_tokens(
@@ -1459,5 +1507,92 @@ mod tests {
         assert_eq!(infos.len(), 1);
         assert_eq!(infos[0].name, "test_tool");
         assert_eq!(infos[0].description, "测试工具");
+    }
+    #[tokio::test]
+    async fn agent_custom_parameters_and_request_effort_reach_the_wire() {
+        use crate::ai::factory::wire_tests::{spawn_capture_server, sse_stream_response};
+        use crate::config::ai_config::CustomParam;
+        let (addr, captured) =
+            spawn_capture_server(vec![sse_stream_response(), sse_stream_response()]);
+        let entry = ProviderEntry {
+            id: "wire".into(),
+            display_name: "wire".into(),
+            kind: ProviderKind::OpenAICompatible,
+            base_url: Some(format!("http://{addr}/v1")),
+            secret_ref: String::new(),
+            models: vec![],
+            enabled: true,
+            created_at: 0,
+        };
+        let model = ModelEntry {
+            id: "wire-model".into(),
+            display_name: "wire".into(),
+            enabled: true,
+            context_window: None,
+            input_price_per_million: None,
+            output_price_per_million: None,
+            temperature: None,
+            max_tokens: Some(2048),
+            capabilities: vec![],
+            reasoning_effort: None,
+            thinking_style: None,
+            custom_parameters: vec![
+                CustomParam {
+                    key: "top_p".into(),
+                    value: serde_json::json!(0.7),
+                },
+                CustomParam {
+                    key: "reasoning_effort".into(),
+                    value: serde_json::json!("low"),
+                },
+                CustomParam {
+                    key: "max_tokens".into(),
+                    value: serde_json::json!(8192),
+                },
+                CustomParam {
+                    key: "vendor_extension".into(),
+                    value: serde_json::json!({"nested":true}),
+                },
+            ],
+        };
+        let provider = AgentProvider::with_key(
+            &entry,
+            &model,
+            vec![],
+            vec![],
+            "",
+            Arc::new(InMemoryConversationMemory::new()),
+            "wire-test-key",
+        )
+        .unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            provider.stream_prompt("wire1", "hi", &[], tx, true, Some("high".into())),
+        )
+        .await
+        .expect("bounded agent request");
+        let mut done = false;
+        while let Some(chunk) = rx.recv().await {
+            assert!(!matches!(chunk, ChatStreamChunk::Error { .. }), "{chunk:?}");
+            done |= matches!(chunk, ChatStreamChunk::Done { .. });
+        }
+        assert!(done);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            provider.stream_prompt_with_max_tokens("wire2", "summary", tx, false, None, 600),
+        )
+        .await
+        .expect("bounded summary request");
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+        assert_eq!(body["top_p"], 0.7);
+        assert_eq!(body["reasoning_effort"], "high");
+        assert_eq!(body["vendor_extension"]["nested"], true);
+        let summary: serde_json::Value = serde_json::from_str(&requests[1].body).unwrap();
+        assert_eq!(summary["max_tokens"], 600);
+        assert_eq!(summary["top_p"], 0.7);
     }
 }

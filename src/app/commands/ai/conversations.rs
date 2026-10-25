@@ -78,14 +78,12 @@ pub async fn get_chat_messages(
     use rig_core::completion::message::{AssistantContent, UserContent};
 
     let pools = app.state::<crate::infra::data::DbPools>();
-    let rows = crate::infra::data::conversations::load_all_messages_with_status(
-        &pools.ai,
-        &conversation_id,
-    )
-    .await?;
+    let rows =
+        crate::infra::data::conversations::load_message_snapshots(&pools.ai, &conversation_id)
+            .await?;
 
     let mut snapshots: Vec<ChatMessageSnapshot> = Vec::with_capacity(rows.len());
-    for (role, content_json, created_at, attachments_json, status, error_text) in rows {
+    for (message_id, role, content_json, created_at, attachments_json, status, error_text) in rows {
         let msg: Message =
             serde_json::from_str(&content_json).map_err(|e| format!("反序列化消息失败: {e}"))?;
         // 0.27.9：附件徽标（kind+name）——解析失败按无附件降级；
@@ -125,15 +123,20 @@ pub async fn get_chat_messages(
                     _ => None,
                 });
 
-                if let Some(summary) = tool_result_text {
-                    // summarize_tool_result 已处理截断（50000 字符 + 省略号）
-                    // 附加到前一条 ToolCall 快照
-                    if let Some(last_tool) = snapshots
-                        .iter_mut()
-                        .rev()
-                        .find(|s| s.tool_name.is_some() && s.tool_result.is_none())
-                    {
-                        last_tool.tool_result = Some(summary);
+                if content
+                    .iter()
+                    .any(|c| matches!(c, UserContent::ToolResult(_)))
+                {
+                    if let Some(summary) = tool_result_text {
+                        // summarize_tool_result 已处理截断（50000 字符 + 省略号）
+                        // 附加到前一条 ToolCall 快照
+                        if let Some(last_tool) = snapshots
+                            .iter_mut()
+                            .rev()
+                            .find(|s| s.tool_name.is_some() && s.tool_result.is_none())
+                        {
+                            last_tool.tool_result = Some(summary);
+                        }
                     }
                     continue;
                 }
@@ -153,6 +156,7 @@ pub async fn get_chat_messages(
                     text
                 };
                 snapshots.push(ChatMessageSnapshot {
+                    message_id,
                     role,
                     text,
                     thinking: None,
@@ -193,6 +197,7 @@ pub async fn get_chat_messages(
                     }
                 }
                 snapshots.push(ChatMessageSnapshot {
+                    message_id,
                     role,
                     text,
                     thinking: if thinking.is_empty() {
@@ -211,6 +216,7 @@ pub async fn get_chat_messages(
             }
             Message::System { content } => {
                 snapshots.push(ChatMessageSnapshot {
+                    message_id,
                     role,
                     text: content.clone(),
                     thinking: None,
@@ -378,10 +384,19 @@ pub async fn truncate_messages(
     app: tauri::AppHandle,
     conversation_id: String,
     keep_count: i64,
+    message_id: Option<i64>,
+    ephemeral_turn_from_end: Option<usize>,
 ) -> Result<(), String> {
-    let pools = app.state::<crate::infra::data::DbPools>();
-    crate::infra::data::conversations::truncate_messages(&pools.ai, &conversation_id, keep_count)
-        .await?;
+    let chat = app
+        .try_state::<std::sync::Arc<crate::domain::ai::chat_service::ChatService>>()
+        .ok_or("ChatService 未注册")?;
+    chat.truncate_history(
+        &conversation_id,
+        keep_count,
+        message_id,
+        ephemeral_turn_from_end,
+    )
+    .await?;
     tracing::info!(%conversation_id, keep_count, "truncate_messages: 消息已截断");
     Ok(())
 }

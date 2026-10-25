@@ -214,5 +214,6 @@ const many = Array.from({length: 10}, (_, i) => ({
 }));
 composer.addAttachments(many);
 assert.equal(composer.getAttachments().length, 8, "超出单轮上限的尾部被丢弃");
+assert.deepEqual(composer.addAttachments(many.slice(0, 8)).rejected, [], "满载时幂等重放不能被当作超限失败");
 
 console.log("Chat composer attach tests passed");

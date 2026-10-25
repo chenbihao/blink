@@ -257,7 +257,7 @@ pub fn hide_chat_window(app: tauri::AppHandle) {
 /// 前端 init 时拉取待填充载荷（0.19；0.27.9 扩展为正文+附件+新建会话草稿）。
 ///
 /// 返回 `{revision, text, attachments, newConversation}` 或 null。take 后
-/// pending 清空。冷启动路径：listener 尚未注册时 emit 丢失，前端主动 take 兜底。
+/// pending 保留，消费成功后按 revision ack 清空。冷启动路径：listener 尚未注册时 emit 丢失，前端主动 take 兜底。
 #[tauri::command]
 pub fn take_chat_prefill() -> Option<ChatPrefillPayload> {
     crate::infra::platform::window::take_chat_prefill().map(|(revision, data)| {
@@ -313,10 +313,12 @@ async fn persist_live_assistant(
     conversation_id: &str,
     text: &str,
     thinking: &str,
+    history_revision: Option<i64>,
 ) {
+    let Some(history_revision) = history_revision else { return; };
     if let Err(e) = chat
         .persistent_memory()
-        .persist_assistant_delta(conversation_id, text, thinking)
+        .persist_assistant_delta(conversation_id, text, thinking, history_revision)
         .await
     {
         tracing::warn!(
@@ -419,6 +421,7 @@ pub async fn chat_prompt(
         }
     }
     let request_id = handle.request_id;
+    let history_revision = handle.history_revision;
     let conv_id = handle.conversation_id.clone();
     let mut chunks = handle.chunks;
 
@@ -481,6 +484,7 @@ pub async fn chat_prompt(
                         &conv_id_clone,
                         &streamed_text,
                         &streamed_thinking,
+                        history_revision,
                     )
                     .await;
                     last_flush = std::time::Instant::now();
@@ -556,7 +560,7 @@ pub async fn chat_prompt(
             && !done_sent
             && let Some(chat) = chat.as_deref()
         {
-            persist_live_assistant(chat, &conv_id_clone, &streamed_text, &streamed_thinking).await;
+            persist_live_assistant(chat, &conv_id_clone, &streamed_text, &streamed_thinking, history_revision).await;
         }
         // 0.21.16: 流式结束日志——里程碑（info）+ 完整输入输出（debug），
         // 与入参日志（chat_prompt: 收到对话请求）组成对话排查闭环。
@@ -1131,6 +1135,7 @@ pub struct ChatModelOption {
 
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct ChatMessageSnapshot {
+    pub message_id: i64,
     pub role: String,
     pub text: String,
     pub thinking: Option<String>,

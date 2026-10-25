@@ -137,6 +137,73 @@ pub fn thinking_supports_effort( // 0.25.4 crate 化：pub(crate) → pub（bin 
 /// Anthropic 未配 max_tokens 时由上层兜底 4096，2048 居中安全；用户可按模型调大。
 const ANTHROPIC_THINKING_BUDGET: u64 = 2048;
 
+/// 校验最终合并参数。手动思考预算至少 1024，且必须为回答留出输出空间。
+pub(super) fn validate_thinking_budget(
+    kind: ProviderKind,
+    params: &mut Option<serde_json::Value>,
+    max_tokens: Option<u64>,
+) -> Result<(), super::AIError> {
+    if kind != ProviderKind::AnthropicMessages {
+        return Ok(());
+    }
+    let Some(params) = params.as_mut() else {
+        return Ok(());
+    };
+    let max_tokens = match (
+        max_tokens,
+        params.get("max_tokens").and_then(|v| v.as_u64()),
+    ) {
+        (Some(a), Some(b)) => a.min(b),
+        (Some(a), None) | (None, Some(a)) => a,
+        (None, None) => 4096,
+    };
+    if params["thinking"]["type"] != "enabled" {
+        return Ok(());
+    }
+    let budget = params["thinking"]["budget_tokens"].as_u64().unwrap_or(0);
+    if max_tokens <= 1024 || budget < 1024 {
+        return Err(super::AIError::Provider(
+            "Anthropic 深度思考要求 max_tokens 大于 1024，且 budget_tokens 至少为 1024".into(),
+        ));
+    }
+    params["thinking"]["budget_tokens"] = budget.min(max_tokens - 1).into();
+    Ok(())
+}
+
+/// 对话请求开关优先于模型默认值，其余自定义参数保持透传。
+pub(super) fn merge_chat_parameters(
+    custom: Option<&serde_json::Value>,
+    patch: Option<serde_json::Value>,
+) -> Option<serde_json::Value> {
+    let mut params = custom.cloned().unwrap_or_else(|| serde_json::json!({}));
+    if let Some(mut patch) = patch {
+        // 开关没有预算输入：开启时尊重用户配置的手动预算，再统一校验输出上限。
+        if patch["thinking"]["type"] == "enabled" && patch["thinking"].get("budget_tokens").is_some() {
+            if let Some(budget) = params["thinking"].get("budget_tokens") {
+                patch["thinking"]["budget_tokens"] = budget.clone();
+            }
+        }
+        merge_parameter_object(&mut params, patch);
+        if params["thinking"]["type"] == "disabled" {
+            if let Some(thinking) = params.get_mut("thinking").and_then(|v| v.as_object_mut()) {
+                thinking.remove("budget_tokens");
+            }
+        }
+    }
+    (!params.as_object().is_none_or(|map| map.is_empty())).then_some(params)
+}
+
+fn merge_parameter_object(target: &mut serde_json::Value, patch: serde_json::Value) {
+    match (target, patch) {
+        (serde_json::Value::Object(target), serde_json::Value::Object(patch)) => {
+            for (key, value) in patch {
+                merge_parameter_object(target.entry(key).or_insert(serde_json::Value::Null), value);
+            }
+        }
+        (target, value) => *target = value,
+    }
+}
+
 /// 是否 DeepSeek 底座——base_url 含 `deepseek.com`，或模型名以 `deepseek` 开头。
 /// OpenAICompatible 同时覆盖 OpenAI 官方与 DeepSeek，而两者 thinking 开关格式不同，需区分。
 fn is_deepseek_base(base_url: Option<&str>, model_id: &str) -> bool {
@@ -958,5 +1025,59 @@ mod tests {
         });
         let entry: ModelEntry = serde_json::from_value(with_auto).expect("反序列化应成功");
         assert_eq!(entry.thinking_style, Some(ThinkingStyle::Auto));
+    }
+}
+
+#[cfg(test)]
+mod request_parameter_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn chat_parameters_preserve_custom_fields_and_override_only_request_controls() {
+        let custom = json!({"thinking":{"type":"enabled","budget_tokens":4096},"reasoning_effort":"low","top_p":0.8,"extra":{"nested":true}});
+        let merged =
+            merge_chat_parameters(Some(&custom), Some(json!({"reasoning_effort":"high"}))).unwrap();
+        assert_eq!(merged["reasoning_effort"], "high");
+        assert_eq!(merged["top_p"], 0.8);
+        assert_eq!(merged["extra"], custom["extra"]);
+        assert_eq!(merged["thinking"], custom["thinking"]);
+        assert_eq!(merge_chat_parameters(Some(&custom), None), Some(custom));
+        assert_eq!(merge_chat_parameters(None, None), None);
+        let custom = json!({"thinking":{"type":"enabled","budget_tokens":4096,"display":"omitted"}});
+        let enabled = merge_chat_parameters(Some(&custom), Some(json!({"thinking":{"type":"enabled","budget_tokens":2048}}))).unwrap();
+        assert_eq!(enabled["thinking"], custom["thinking"]);
+        let disabled = merge_chat_parameters(Some(&custom), Some(json!({"thinking":{"type":"disabled"}}))).unwrap();
+        assert_eq!(disabled["thinking"]["display"], "omitted");
+        assert!(disabled["thinking"].get("budget_tokens").is_none());
+    }
+
+    #[test]
+    fn anthropic_manual_budget_follows_final_output_limit() {
+        for (max, expected) in [(1025, 1024), (2048, 2047), (4096, 2048)] {
+            let mut params = Some(json!({"thinking":{"type":"enabled","budget_tokens":2048}}));
+            validate_thinking_budget(ProviderKind::AnthropicMessages, &mut params, Some(max))
+                .unwrap();
+            assert_eq!(params.unwrap()["thinking"]["budget_tokens"], expected);
+        }
+        let mut params = Some(json!({"thinking":{"type":"enabled","budget_tokens":2048}}));
+        assert!(
+            validate_thinking_budget(ProviderKind::AnthropicMessages, &mut params, Some(1024))
+                .is_err()
+        );
+        let mut custom_limit =
+            Some(json!({"max_tokens":1024,"thinking":{"type":"enabled","budget_tokens":2048}}));
+        assert!(
+            validate_thinking_budget(
+                ProviderKind::AnthropicMessages,
+                &mut custom_limit,
+                Some(4096)
+            )
+            .is_err()
+        );
+        let mut off = Some(json!({"thinking":{"type":"disabled"}}));
+        assert!(
+            validate_thinking_budget(ProviderKind::AnthropicMessages, &mut off, Some(600)).is_ok()
+        );
     }
 }

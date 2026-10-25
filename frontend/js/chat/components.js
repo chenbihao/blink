@@ -110,12 +110,13 @@ export function clearMessages() {
  * @param {string} text
  * @returns {HTMLElement|null} 消息元素引用（0.12.5 §5.5 编辑重发需要）
  */
-export function renderUserMessage(text) {
+export function renderUserMessage(text, userMessageId = null) {
     if (!messagesEl) return null;
     const el = document.createElement("div");
     el.className = "chat-msg chat-msg-user";
     el.textContent = text;
     el.dataset.rawText = text;
+    if (userMessageId) el.dataset.userMessageId = userMessageId;
     // 0.12.6：hover 操作行（复制 + 编辑 + 重试）
     const actions = createActionsRow();
     actions.appendChild(createCopyAction(rawText => el.dataset.rawText || rawText));
@@ -136,15 +137,14 @@ export function renderUserMessage(text) {
  * 每个附件一张右对齐静音卡片（surface 底 + accent 图标 + 弱化字，与
  * thinking/tool 卡同一家族），圆角语言与用户气泡一致。前缀 paperclip
  * 表达"附件"语义，随后是类型图标（音频为 audio-lines）。文件名超长时
- * 中段省略（保住扩展名），CSS ellipsis 仅作窄窗口兜底。**不带 `.chat-msg`
- * 类**——`startEditMessage` 用 `.chat-msg` 集合定位消息下标，附件卡片
- * 不参与编辑/重试索引；复制/编辑只作用于正文气泡。
+ * 中段省略（保住扩展名），CSS ellipsis 仅作窄窗口兜底。卡片独立于正文
+ * 气泡；二者通过 userMessageId 绑定同一轮，复制/编辑只作用于正文。
  *
  * 0.27.9：徽标类型化 `{kind, name}`（audio/text_file/image；兼容纯字符串
  * 旧音频记录——一律按 audio 渲染）。
  * @param {Array<{kind?: string, name: string}|string>} badges 附件徽标（仅名称与种类，ref 不进 DOM）
  */
-export function renderUserAttachmentCards(badges) {
+export function renderUserAttachmentCards(badges, userMessageId = null) {
     if (!messagesEl) return;
     for (const badge of Array.isArray(badges) ? badges : []) {
         const kind = typeof badge === "string" ? "audio" : (badge?.kind || "audio");
@@ -152,6 +152,7 @@ export function renderUserAttachmentCards(badges) {
         if (!name) continue;
         const card = document.createElement("div");
         card.className = "chat-attachment-card";
+        if (userMessageId) card.dataset.userMessageId = userMessageId;
         const kindLabel = {
             audio: t("chat.attach.card_audio"),
             text_file: t("chat.attach.card_text"),
@@ -201,12 +202,13 @@ export function middleEllipsis(name, max = FILENAME_MAX_CHARS) {
  * 创建 assistant 消息 DOM（流式追加用）。
  * @returns {HTMLElement} 消息元素引用
  */
-export function createAssistantMessage() {
+export function createAssistantMessage(userMessageId = null) {
     if (!messagesEl) return null;
     // 新一条流式消息：思考内容恢复贴底跟随
     thinkingStickBottom = true;
     const el = document.createElement("div");
     el.className = "chat-msg chat-msg-assistant streaming waiting";
+    if (userMessageId) el.dataset.userMessageId = userMessageId;
     // 等待响应：显示 typing 指示器（三点跳动），首条内容到达时由 update/finalize 替换
     el.innerHTML = renderTypingIndicator();
     messagesEl.appendChild(el);
@@ -486,9 +488,8 @@ function injectCodeCopyButtons(el) {
  * @param {string} originalText 原始文本
  */
 function startEditMessage(el, originalText) {
-    const allMsgs = messagesEl.querySelectorAll(".chat-msg");
-    const msgIndex = Array.from(allMsgs).indexOf(el);
-    if (msgIndex < 0) return;
+    const userMessageId = el.dataset.userMessageId;
+    if (!userMessageId) return;
 
     // 切换到编辑态（CSS 控制：隐藏 actions、调整 padding）
     el.classList.add("editing");
@@ -533,7 +534,9 @@ function startEditMessage(el, originalText) {
         done = true;
         const newText = textarea.value.trim();
         if (newText && newText !== originalText) {
-            onEditMessage(msgIndex, newText);
+            // 校验/IPC 失败时仍保留可操作的原气泡，不能卡在 done 的编辑器里。
+            restoreMessage();
+            onEditMessage(userMessageId, newText);
         } else {
             restoreMessage();
         }

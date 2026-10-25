@@ -1112,3 +1112,45 @@ fn inspect_metadata_has_no_path() {
     assert!(!json.contains("C:\\"));
     assert_eq!(meta.backing_kind, "local_file");
 }
+
+#[test]
+fn batch_adoption_is_atomic_idempotent_and_rejects_foreign_or_expired_refs() {
+    let store = DefaultResourceStore::default();
+    let issue = |owner| {
+        store
+            .issue_memory(
+                Bytes::from_static(b"a"),
+                "text/plain",
+                ResourceGrantSpec::new(
+                    ResourceUseSet::single(ResourceUse::AttachmentText),
+                    ReusePolicy::Reusable,
+                    owner,
+                ),
+            )
+            .unwrap()
+    };
+    let a = issue("prefill");
+    let b = issue("other");
+    assert!(!store.transfer_owners(&[a.clone(), b], "prefill", "chat"));
+    assert_eq!(store.list_by_owner("prefill").len(), 1);
+    assert!(store.list_by_owner("chat").is_empty());
+    assert!(store.transfer_owners(&[a.clone()], "prefill", "chat"));
+    assert!(store.transfer_owners(&[a.clone()], "prefill", "chat"));
+    assert_eq!(store.list_by_owner("chat").len(), 1);
+    assert!(!store.transfer_owners(&[a], "prefill", "another-chat"));
+
+    let expired_store =
+        DefaultResourceStore::new(config_with(|c| c.memory.ttl = Duration::ZERO));
+    let expired = expired_store
+        .issue_memory(
+            Bytes::from_static(b"b"),
+            "text/plain",
+            ResourceGrantSpec::new(
+                ResourceUseSet::single(ResourceUse::AttachmentText),
+                ReusePolicy::Reusable,
+                "prefill",
+            ),
+        )
+        .unwrap();
+    assert!(!expired_store.transfer_owners(&[expired], "prefill", "chat"));
+}

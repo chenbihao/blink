@@ -261,8 +261,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, HWND_TOP, IsIconic,
     IsWindowVisible, SET_WINDOW_POS_FLAGS, SW_HIDE, SW_RESTORE, SW_SHOWNOACTIVATE,
     SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_DPICHANGED, WNDPROC, WS_CAPTION,
-    WS_THICKFRAME,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_DPICHANGED, WNDPROC, WS_CAPTION, WS_THICKFRAME,
 };
 
 const ST_HIDDEN: u8 = 0;
@@ -414,13 +413,13 @@ pub fn set_chat_prefill(data: ChatPrefillData) -> u64 {
     revision
 }
 
-/// 拉取并清空 pending（冷启动路径）。
+/// 拉取 pending（冷启动路径），成功消费后显式 ack 才清空。
 /// 返回 (revision, data) 或 None。
 pub fn take_chat_prefill() -> Option<(u64, ChatPrefillData)> {
-    let mut guard = chat_prefill_state()
+    let guard = chat_prefill_state()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    guard.take().map(|p| (p.revision, p.data))
+    guard.as_ref().map(|p| (p.revision, p.data.clone()))
 }
 
 /// 按 revision 清除 pending（热窗口 event 路径）。
@@ -4743,6 +4742,7 @@ pub fn open_settings(app: &AppHandle) {
 #[cfg(test)]
 mod tests_0_19_prefill {
     use super::*;
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn prefill_data(text: &str) -> ChatPrefillData {
         ChatPrefillData {
@@ -4754,7 +4754,11 @@ mod tests_0_19_prefill {
 
     /// take 后清空。
     #[test]
-    fn test_take_clears_pending() {
+    fn test_take_preserves_pending_until_ack() {
+        let _serial = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        *chat_prefill_state()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         // 重置状态：先 take 清空任何残留
         let _ = take_chat_prefill();
 
@@ -4762,13 +4766,19 @@ mod tests_0_19_prefill {
         let taken = take_chat_prefill();
         assert_eq!(taken, Some((rev, prefill_data("hello"))));
 
-        // 再次 take 返回 None
+        // 失败未 ack 时允许重拉；仅成功消费后清空。
+        assert_eq!(take_chat_prefill(), Some((rev, prefill_data("hello"))));
+        ack_chat_prefill(rev);
         assert_eq!(take_chat_prefill(), None);
     }
 
     /// 旧 revision 的 ack 不能清除新值。
     #[test]
     fn test_old_revision_ack_does_not_clear_new() {
+        let _serial = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        *chat_prefill_state()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         let _ = take_chat_prefill();
 
         let rev1 = set_chat_prefill(prefill_data("first"));
@@ -4784,6 +4794,10 @@ mod tests_0_19_prefill {
     /// 匹配 revision 的 ack 清除 pending。
     #[test]
     fn test_matching_revision_ack_clears() {
+        let _serial = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        *chat_prefill_state()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         let _ = take_chat_prefill();
 
         let rev = set_chat_prefill(prefill_data("data"));
@@ -4795,6 +4809,10 @@ mod tests_0_19_prefill {
     /// 失败回滚（clear）不能清除更新后的值。
     #[test]
     fn test_rollback_does_not_clear_newer_value() {
+        let _serial = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        *chat_prefill_state()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         let _ = take_chat_prefill();
 
         let rev1 = set_chat_prefill(prefill_data("old"));
@@ -4809,6 +4827,10 @@ mod tests_0_19_prefill {
     /// 失败回滚匹配 revision 时清除 pending。
     #[test]
     fn test_rollback_matching_revision_clears() {
+        let _serial = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        *chat_prefill_state()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         let _ = take_chat_prefill();
 
         let rev = set_chat_prefill(prefill_data("temp"));
@@ -4819,6 +4841,10 @@ mod tests_0_19_prefill {
     /// revision 单调递增。
     #[test]
     fn test_revision_monotonic() {
+        let _serial = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        *chat_prefill_state()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         let _ = take_chat_prefill();
 
         let r1 = set_chat_prefill(prefill_data("a"));
@@ -4834,6 +4860,10 @@ mod tests_0_19_prefill {
     /// warm event 成功后 ack 无残留。
     #[test]
     fn test_warm_event_ack_no_residue() {
+        let _serial = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        *chat_prefill_state()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         let _ = take_chat_prefill();
 
         let rev = set_chat_prefill(prefill_data("warm-text"));
@@ -4843,16 +4873,20 @@ mod tests_0_19_prefill {
         assert_eq!(take_chat_prefill(), None);
     }
 
-    /// 冷启动路径：take 拉取后，后续 ack 同 revision 是 no-op。
+    /// 冷启动路径：take 拉取后，ack 同 revision 清空。
     #[test]
-    fn test_cold_take_then_ack_same_revision_is_noop() {
+    fn test_cold_take_then_ack_same_revision_clears() {
+        let _serial = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        *chat_prefill_state()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         let _ = take_chat_prefill();
 
         let rev = set_chat_prefill(prefill_data("cold-text"));
         // 冷启动：take 拉取
         let taken = take_chat_prefill();
         assert_eq!(taken, Some((rev, prefill_data("cold-text"))));
-        // 后续 ack 同 revision → pending 已空，no-op（不 panic）
+        // 成功后确认同 revision
         ack_chat_prefill(rev);
         assert_eq!(take_chat_prefill(), None);
     }

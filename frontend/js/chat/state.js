@@ -190,7 +190,9 @@ export function clearToolCalls() {
 }
 
 export function addMessage(msg) {
+    msg.id ??= crypto.randomUUID();
     messages.push(msg);
+    return msg;
 }
 
 /**

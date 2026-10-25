@@ -403,8 +403,8 @@ export function generateConversationTitle(conversationId, firstMessage) {
  * @param {number} keepCount 保留的消息数
  * @returns {Promise<void>}
  */
-export function truncateMessages(conversationId, keepCount) {
-    return invoke("truncate_messages", {conversationId, keepCount});
+export function truncateMessages(conversationId, keepCount, messageId = null, ephemeralTurnFromEnd = null) {
+    return invoke("truncate_messages", {conversationId, keepCount, messageId, ephemeralTurnFromEnd});
 }
 
 // ── 对话分组（0.12.6）──────────────────────────────────────────

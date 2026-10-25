@@ -451,11 +451,11 @@ export function addAttachments(list) {
         .filter((a) => a && typeof a.ref === "string" && a.ref.startsWith("rref_"));
     const rejected = [];
     for (const item of incoming) {
+        if (attachments.some((existing) => existing.ref === item.ref)) continue;
         if (attachments.length >= MAX_ATTACHMENTS) {
             rejected.push(item);
             continue;
         }
-        if (attachments.some((existing) => existing.ref === item.ref)) continue;
         attachments.push({
             kind: item.kind || "text_file",
             ref: item.ref,

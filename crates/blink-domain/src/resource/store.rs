@@ -525,6 +525,27 @@ impl DefaultResourceStore {
         }
     }
 
+    /// 整批采纳，允许同一目标 owner 重放；任一失效或归属不符则整批不改。
+    pub fn transfer_owners(&self, refs: &[ResourceRef], expected: &str, target: &str) -> bool {
+        let mut entries = self.lock_entries();
+        Self::evict_expired(&mut entries);
+        if !refs.iter().all(|r| {
+            entries
+                .get(r.as_str())
+                .is_some_and(|e| e.grant.owner == expected || e.grant.owner == target)
+        }) {
+            return false;
+        }
+        for r in refs {
+            entries
+                .get_mut(r.as_str())
+                .expect("validated under lock")
+                .grant
+                .owner = target.into();
+        }
+        true
+    }
+
     // ── 派生 ─────────────────────────────────────────────────────────────
 
     /// 从仍有效的 ref 派生新 grant——**权限衰减**语义（VAD 调试 clone 语义平移，

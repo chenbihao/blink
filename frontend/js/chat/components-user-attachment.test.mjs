@@ -165,3 +165,10 @@ assert.equal(bubble.querySelectorAll(".chat-attachment-card").length, 0);
 assert.equal(bubble.querySelectorAll(".chat-msg-attachments").length, 0, "旧徽标行应已移除");
 
 console.log("Chat user attachment card tests passed");
+
+// 附件卡、正文和回复绑定同一真实 user 标识；无关卡片不影响下一轮定位。
+messagesEl._children.length = 0;
+components.renderUserAttachmentCards([{kind: "image", name: "a.png"}], "turn-image");
+assert.equal(messagesEl._children[0].dataset.userMessageId, "turn-image");
+assert.equal(components.createAssistantMessage("turn-image").dataset.userMessageId, "turn-image");
+assert.equal(components.renderUserMessage("next", "turn-next").dataset.userMessageId, "turn-next");

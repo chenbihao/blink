@@ -453,6 +453,9 @@ impl SqliteConversationMemory {
         let config = self.config.clone();
         let cfg = config.read().await;
 
+        let history_revision = blink_infra::data::conversations::get_summary_revision(&pool, conversation_id)
+            .await.ok().map(|(_, revision)| revision);
+
         let load_limit = match cfg.mode {
             WindowMode::FixedCount => cfg.window_size,
             WindowMode::TokenAware => TOKEN_AWARE_LOAD_BATCH,
@@ -541,18 +544,20 @@ impl SqliteConversationMemory {
             if !dropped_msgs.is_empty() {
                 // 0.13.2: 归档被挤出的消息到 FTS5（幂等）
                 for msg in &dropped_msgs {
+                    let Some(history_revision) = history_revision else { continue; };
                     let text = extract_message_text(msg);
                     if text.is_empty() {
                         continue;
                     }
                     let role = Self::message_role(msg);
                     let hash = Self::content_hash(&text);
-                    if let Err(e) = blink_infra::data::conversations::archive_to_fts(
+                    if let Err(e) = blink_infra::data::conversations::archive_to_fts_at_revision(
                         &pool,
                         conversation_id,
                         role,
                         &text,
                         &hash,
+                        history_revision,
                     )
                     .await
                     {
@@ -726,6 +731,10 @@ impl SqliteConversationMemory {
             && role == "user"
             && Self::user_text_matches(&content, user_msg)
         {
+            let attachments = if badges.is_empty() { None } else {
+                Some(serde_json::to_string(badges).map_err(|e| e.to_string())?)
+            };
+            blink_infra::data::conversations::update_last_user_attachments(&pool, conversation_id, attachments.as_deref()).await?;
             // 已预写过（如上一轮中断残留）：同样标记为 pending，让 load 丢弃
             // 这条将被 rig 追加的 user，避免请求上下文重复。
             self.pending_users
@@ -777,6 +786,7 @@ impl SqliteConversationMemory {
         conversation_id: &str,
         text: &str,
         thinking: &str,
+        history_revision: i64,
     ) -> Result<(), String> {
         if text.trim().is_empty() && thinking.trim().is_empty() {
             return Ok(());
@@ -786,23 +796,19 @@ impl SqliteConversationMemory {
         let content = serde_json::to_string(&msg).map_err(|e| e.to_string())?;
 
         let mut live = self.live_turns.write().await;
-        if let Some(id) = live.get(conversation_id).copied() {
-            if blink_infra::data::conversations::update_message_content(&pool, id, &content)
-                .await?
-            {
-                return Ok(());
-            }
-            // 行已被外部删除（如 truncate/clear）→ 回退为重新插入
-            live.remove(conversation_id);
-        }
-        let id = blink_infra::data::conversations::append_message(
+        let id = blink_infra::data::conversations::upsert_live_message_at_revision(
             &pool,
             conversation_id,
-            "assistant",
+            live.get(conversation_id).copied(),
             &content,
+            history_revision,
         )
         .await?;
-        live.insert(conversation_id.to_string(), id);
+        if let Some(id) = id {
+            live.insert(conversation_id.to_string(), id);
+        } else {
+            tracing::debug!(conversation_id, "实况回复: 历史已变化，放弃迟到写入");
+        }
         Ok(())
     }
 
@@ -1158,6 +1164,24 @@ impl EphemeralConversationMemory {
     /// 删除指定对话的全部消息（promote 后清理临时记忆）。
     pub async fn remove(&self, conversation_id: &str) {
         self.conversations.write().await.remove(conversation_id);
+    }
+
+    /// 从尾部按真实用户轮定位，工具回投不计数；早已裁掉的轮不能误删其他消息。
+    pub async fn truncate_user_turn(
+        &self,
+        conversation_id: &str,
+        from_end: usize,
+    ) -> Result<(), String> {
+        let mut conversations = self.conversations.write().await;
+        let messages = conversations
+            .get_mut(conversation_id)
+            .ok_or("临时会话已失效")?;
+        let index = messages.iter().enumerate().rev().filter(|(_, msg)| {
+            matches!(msg, Message::User { content } if content.iter().any(|c| matches!(c, UserContent::Text(_)))
+                && !content.iter().any(|c| matches!(c, UserContent::ToolResult(_))))
+        }).nth(from_end).map(|(i, _)| i).ok_or("该轮已离开临时记忆窗口，请重新发送")?;
+        messages.truncate(index);
+        Ok(())
     }
 }
 
@@ -2279,6 +2303,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ephemeral_retry_truncates_real_user_turn_and_preserves_earlier_tool_delivery() {
+        let mem = EphemeralConversationMemory::new();
+        let mut messages = vec![user_msg("image turn"), assistant_msg("reply"), user_msg("next"), assistant_msg("last")];
+        let delivery = Message::User { content: vec![UserContent::ToolResult(
+            rig_core::completion::message::ToolResult {
+                call: rig_core::message::CallId::from_wire("call"),
+                name: rig_core::message::ToolName::try_from("inspect").unwrap(),
+                content: vec![rig_core::completion::message::ToolResultContent::text("tool output")],
+            }
+        )] };
+        messages.insert(2, delivery);
+        mem.append(&ConversationId::new("c"), messages).await.unwrap();
+        mem.truncate_user_turn("c", 0).await.unwrap();
+        assert_eq!(mem.export_messages("c").await.len(), 3);
+        assert!(mem.truncate_user_turn("c", 1).await.is_err());
+        assert_eq!(mem.export_messages("c").await.len(), 3);
+        mem.truncate_user_turn("c", 0).await.unwrap();
+        assert!(mem.export_messages("c").await.is_empty());
+    }
+
+    #[tokio::test]
     async fn ephemeral_export_messages_returns_clone() {
         let mem = EphemeralConversationMemory::new();
 
@@ -2578,7 +2623,7 @@ mod tests {
 
         // 第一轮：预写 user → 流式部分回复 → 中断（不调 append）
         mem.persist_user_message("c", "q1", &[]).await.unwrap();
-        mem.persist_assistant_delta("c", "partial1", "")
+        mem.persist_assistant_delta("c", "partial1", "", 0)
             .await
             .unwrap();
         // 模拟中断：不调 append，live_turns 残留 "c" -> 旧行 id
@@ -2586,7 +2631,7 @@ mod tests {
         // 第二轮：persist_user_message 应清掉残留的 live_turns 标记
         mem.persist_user_message("c", "q2", &[]).await.unwrap();
         // 第二轮的流式部分回复——不应 UPDATE 第一轮的断点行
-        mem.persist_assistant_delta("c", "partial2", "")
+        mem.persist_assistant_delta("c", "partial2", "", 0)
             .await
             .unwrap();
 
@@ -3056,4 +3101,18 @@ mod tests {
         let boundary = compute_truncate_boundary(&[], 1000, 0.8, 0.7);
         assert_eq!(boundary, None);
     }
+    #[tokio::test]
+    async fn retry_same_user_text_refreshes_attachment_badges_without_duplicate_user() {
+        let pool = setup_pool().await;
+        let mem = SqliteConversationMemory::new(pool.clone());
+        let badge = crate::ai::attachment::AttachmentBadge {kind: crate::ai::attachment::AttachmentKind::Image, name: "replacement.png".into()};
+        mem.persist_user_message("c1", "retry", &[]).await.unwrap();
+        mem.persist_user_message("c1", "retry", &[badge]).await.unwrap();
+        let rows = blink_infra::data::conversations::load_all_messages(&pool, "c1").await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].3.as_ref().unwrap().contains("replacement.png"));
+        mem.persist_user_message("c1", "retry", &[]).await.unwrap();
+        assert!(blink_infra::data::conversations::load_all_messages(&pool, "c1").await.unwrap()[0].3.is_none());
+    }
+
 }

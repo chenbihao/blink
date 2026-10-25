@@ -319,7 +319,7 @@ impl ChatService {
         // 内部块——借用 orphan_ids（块的 return 提前退出后清理仍执行）
         let _ = async {
             // 2. 读取水位
-            let watermark = match blink_infra::data::conversations::get_summarized_until(
+            let (watermark, history_revision) = match blink_infra::data::conversations::get_summary_revision(
                 &pool,
                 conversation_id,
             )
@@ -545,7 +545,7 @@ impl ChatService {
             let next_idx = crate::ai::summary::next_summary_idx(summary_count);
             let token_est = crate::ai::memory::estimate_tokens(&summary_text) as i64;
 
-            if let Err(e) = blink_infra::data::conversations::insert_summary_and_advance_watermark(
+            let committed = match blink_infra::data::conversations::insert_summary_and_advance_watermark_if_unchanged(
                 &pool,
                 conversation_id,
                 next_idx,
@@ -553,14 +553,19 @@ impl ChatService {
                 range.1,
                 &summary_text,
                 token_est,
+                watermark,
+                history_revision,
             )
             .await
             {
-                tracing::warn!(
-                    conversation_id,
-                    error = %e,
-                    "摘要任务: 落库失败"
-                );
+                Ok(committed) => committed,
+                Err(e) => {
+                    tracing::warn!(conversation_id, error = %e, "摘要任务: 落库失败");
+                    return;
+                }
+            };
+            if !committed {
+                tracing::debug!(conversation_id, "摘要任务: 历史已变化，放弃陈旧结果");
                 return;
             }
 
@@ -634,19 +639,17 @@ impl ChatService {
 
         // 3. 预检：水位以上是否有消息
         let pool = self.persistent_memory.pool().clone();
-        let watermark = match blink_infra::data::conversations::get_summarized_until(
-            &pool,
-            conversation_id,
-        )
-        .await
-        {
-            Ok(wm) => wm,
-            Err(e) => {
-                tracing::warn!(conversation_id, error = %e, "手动压缩: 读取水位失败");
-                // 水位读不出按 0 处理（全量候选），任务内再全量加载
-                0
-            }
-        };
+        let (watermark, history_revision) =
+            match blink_infra::data::conversations::get_summary_revision(&pool, conversation_id)
+                .await
+            {
+                Ok(wm) => wm,
+                Err(e) => {
+                    tracing::warn!(conversation_id, error = %e, "手动压缩: 读取水位失败");
+                    // 无法冻结历史版本时不启动后台任务。
+                    return ManualCompactPrecheck::NoContent;
+                }
+            };
         let count = blink_infra::data::conversations::count_messages_after_watermark(
             &pool,
             conversation_id,
@@ -663,7 +666,8 @@ impl ChatService {
         let chat = self.clone();
         let conv = conversation_id.to_string();
         tokio::spawn(async move {
-            chat.run_manual_compact_job(job_id, &conv, watermark).await;
+            chat.run_manual_compact_job(job_id, &conv, watermark, history_revision)
+                .await;
         });
         // spawn 成功（失败会 panic，guard 仍 armed 会释放）：单活跃标志由
         // 任务主体持有到终态，本函数返回不释放
@@ -680,6 +684,7 @@ impl ChatService {
         job_id: u64,
         conversation_id: &str,
         frozen_watermark: i64,
+        frozen_revision: i64,
     ) {
         // 单活跃占位接管：start_manual_compact 已 disarm，本 guard 覆盖任务
         // 全程（含所有 early-return 与 panic unwind），终态时释放标志
@@ -836,6 +841,7 @@ impl ChatService {
                     &final_summary,
                     token_est,
                     frozen_watermark,
+                    frozen_revision,
                 )
                 .await
                 .map_err(|e| format!("摘要落库失败: {e}"))?;

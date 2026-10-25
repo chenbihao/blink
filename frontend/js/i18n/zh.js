@@ -972,6 +972,7 @@ export const zh = {
     "chat.cmd.prompt.btn_title": "提示词库",
     "chat.failed.prefix": "本轮发送失败：",
     "chat.failed.prefix_no_reason": "本轮发送失败，请检查网络与模型配置后重试",
+    "chat.attach.retry_expired": "本轮附件引用已失效或未保留，正文已恢复到输入框，请重新附加文件或图片后发送。",
     "chat.failed.retry": "重试",
 
     // ── 0.27.9 @ 附件面板（phase §5.9.4/§8.2） ──

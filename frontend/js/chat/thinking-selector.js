@@ -18,6 +18,7 @@ import {openExclusive, registerPopup} from "./composer-popups.js";
 
 /** 当前选中模型 id（"{provider}:{model}"），供持久化思考强度定位 */
 let currentThinkingModelId = null;
+let effortRevision = 0;
 
 /** @type {HTMLElement} 思考控件触发器按钮 */
 let thinkingTrigger = null;
@@ -75,6 +76,7 @@ export function initThinkingSelector() {
  * @param {string|null} id "{provider}:{model}"
  */
 export function setThinkingModelId(id) {
+    if (id !== currentThinkingModelId) effortRevision++;
     currentThinkingModelId = id;
 }
 
@@ -142,10 +144,13 @@ function renderThinkingDropdown() {
 }
 
 /** 持久化思考强度并刷新控件（空字符串 = omit 不发送）。 */
-async function applyThinkingEffort(effort) {
+export async function applyThinkingEffort(effort) {
     if (!currentThinkingModelId) return;
+    const modelId = currentThinkingModelId;
+    const revision = ++effortRevision;
     try {
-        const ok = await ipc.setModelReasoningEffort(currentThinkingModelId, effort);
+        const ok = await ipc.setModelReasoningEffort(modelId, effort);
+        if (modelId !== currentThinkingModelId || revision !== effortRevision) return;
         if (ok) {
             state.setThinkingEffort(effort);
             syncThinkingControl();

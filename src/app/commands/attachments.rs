@@ -447,14 +447,15 @@ pub async fn attachment_list_candidates(
                 label: v.label,
             })
         })
-        .take(16)
         .collect();
 
     // 最近复制的文件（0.26.9 底座）：逐项预检，非文本/超限/目录只展示原因
     let pools = app.state::<crate::infra::data::DbPools>();
-    let metas =
-        blink_infra::data::clipboard_files::query_recent_file_list(&pools.history, RECENT_FILE_ENTRIES)
-            .await;
+    let metas = blink_infra::data::clipboard_files::query_recent_file_list(
+        &pools.history,
+        RECENT_FILE_ENTRIES,
+    )
+    .await;
     let mut recent_files = Vec::with_capacity(metas.len());
     for meta in metas {
         let Some(full) =
@@ -474,8 +475,8 @@ pub async fn attachment_list_candidates(
     }
 
     // 最近剪贴板图片（0.27.10——签新 ref 不复活截图 SESSION，§2.2）
-    let images = blink_infra::data::clipboard_images::query_recent_image_list(&pools.cache, 6)
-        .await;
+    let images =
+        blink_infra::data::clipboard_images::query_recent_image_list(&pools.cache, 6).await;
     let recent_images = images
         .into_iter()
         .map(|img| RecentImageItem {
@@ -506,12 +507,21 @@ pub async fn adopt_chat_attachments(
     }
     let store = resource_store(&app)?;
     let owner = session_owner(&conversation_id);
-    let adopted = refs
+    if refs.len() > 8 {
+        return Err(CommandError::new("invalid_args", "附件数量超限", false));
+    }
+    let resources: Vec<_> = refs
         .iter()
-        .filter(|r| {
-            store.transfer_owner(&ResourceRef::from_token(r.as_str()), PREFILL_OWNER, &owner)
-        })
-        .count();
+        .map(|r| ResourceRef::from_token(r.as_str()))
+        .collect();
+    if !store.transfer_owners(&resources, PREFILL_OWNER, &owner) {
+        return Err(CommandError::new(
+            "attachment_expired",
+            "附件已失效，请重新附加",
+            false,
+        ));
+    }
+    let adopted = refs.len();
     if adopted > 0 {
         tracing::debug!(adopted, "chat prefill attachments adopted");
     }

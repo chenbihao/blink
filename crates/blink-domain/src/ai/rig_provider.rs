@@ -44,6 +44,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures::StreamExt;
+use rig_core::ProviderResponseError;
 use rig_core::completion::{
     AssistantContent, CompletionRequest as RigCompletionRequest, FinishReason as RigFinishReason,
     Message as RigMessage,
@@ -53,7 +54,6 @@ use rig_core::error::ProviderError;
 use rig_core::message::{CallId as RigCallId, ToolCall as RigToolCall, ToolFunction as RigToolFunc, ToolName as RigToolName};
 use rig_core::operation::Completion;
 use rig_core::streaming::{Item as RigStreamItem, StreamEvent as RigStreamEvent};
-use rig_core::ProviderResponseError;
 use tokio::sync::mpsc;
 
 use crate::ai::message::{
@@ -143,7 +143,7 @@ impl RigProvider {
 ///
 /// 空 vec 返回 `None`——请求侧看到 None 就完全不塞 `additional_params`,保持"零透传"语义。
 /// 重复 key 后者覆盖前者(与 JS `Object.fromEntries` 一致,用户预期)。
-fn build_custom_params_json(params: &[CustomParam]) -> Option<serde_json::Value> {
+pub(super) fn build_custom_params_json(params: &[CustomParam]) -> Option<serde_json::Value> {
     if params.is_empty() {
         return None;
     }
@@ -434,6 +434,8 @@ fn build_rig_request(
         );
     }
 
+    let mut additional_params = merge_thinking_off_patch(custom_params, thinking_off_patch);
+    super::thinking::validate_thinking_budget(kind, &mut additional_params, effective_max_tokens)?;
     Ok(RigCompletionRequest {
         model: None,
         chat_history,
@@ -443,7 +445,7 @@ fn build_rig_request(
         max_tokens: effective_max_tokens,
         tool_choice: None,
         // 0.21.16: 主窗口默认关闭思考——与用户 custom_params 合并（用户显式 key 优先）
-        additional_params: merge_thinking_off_patch(custom_params, thinking_off_patch),
+        additional_params,
         output_schema: None,
         // 0.42: 新增字段
         record_telemetry_content: false,

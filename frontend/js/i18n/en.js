@@ -979,6 +979,7 @@ export const en = {
     "chat.cmd.prompt.btn_title": "Prompt library",
     "chat.failed.prefix": "This message failed to send: ",
     "chat.failed.prefix_no_reason": "This message failed to send — check your network and model config, then retry",
+    "chat.attach.retry_expired": "Attachments for this turn have expired or are unavailable. The text is back in the composer; reattach the files or images before sending.",
     "chat.failed.retry": "Retry",
 
     // ── 0.27.9 @ attachment palette (phase §5.9.4/§8.2) ──

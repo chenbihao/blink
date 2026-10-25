@@ -40,10 +40,10 @@
 
 ### 1.4 窗口预热复用（强制）
 
-> **铁则**：所有窗口在启动后异步预创建并隐藏（`visible:false`），首次 show 直接复用预创建的 webview，不按需创建。
+> **铁则**：静态系统窗口在启动后异步预创建并隐藏（`visible:false`），首次 show 复用预创建的 webview；动态窗口遵循下述例外，不按数量全量预热。
 
 - **预热范围**：`chord-screenshot` / `context-menu` / `voice-overlay` / `chord-pin` / `chat` / `settings` / `content-editor` / `sticky-manager` — 8 个静态 label 窗口全部预热
-- **例外**：动态数量的窗口（`sticky-{id}`）按需创建，但窗口外壳复用机制已有（prevent_close + hide）
+- **例外**：动态便签窗口（`sticky-{id}`）按需创建，沿用 prevent_close + hide。0.28 规划的独立插件窗口同样按需创建、重复唤起复用，不随安装数量全量预热，不默认每插件独立 WebView2 环境；插件窗口的关闭/空闲回收和草稿策略按 [0.28 §3.2](../phases/0.28-plugin-platform-and-tools.md) 落实。single-flight、ready 交接和焦点要求仍适用
 - **时序**：预热在启动 3s 后异步执行（`preheat_secondary_windows`），不阻塞 Alt+Space 主链路
 - **创建 single-flight**：同一 label 的预热与用户唤起必须共用统一的 `get_or_create` 入口，并按 label 串行化“二次检查 + build”；禁止各路径独立执行 `get_webview_window().is_none() → build()`。并发调用只能有一个创建者，其余调用等待后复用同一窗口；创建失败必须释放创建态，允许后续重试
 - **锁粒度**：创建锁只覆盖同一 label 的“检查 + build”，不得跨 label 串行化全部窗口，也不得覆盖后续 `show` / `focus` / `emit`；预热不得持有 Alt+Space 主链路需要的全局锁
