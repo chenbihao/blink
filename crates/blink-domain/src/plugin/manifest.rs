@@ -19,6 +19,19 @@ pub struct PluginManifest {
     pub name: LocalizableText,
     #[allow(dead_code)]
     pub version: String,
+    /// 宿主兼容范围（0.28.1）。缺省 = 不限制。
+    /// 与 schema_version / protocol_version / dataset 版本分开表达——
+    /// schema 管 manifest 结构，本字段管"哪些宿主版本能运行这个插件"。
+    #[serde(default)]
+    pub host: Option<HostCompat>,
+    /// 进程协议版本（0.28.1）。1 = 现状（无初始化帧）；2 = 启动握手
+    /// （宿主发 initialize，插件回 initialized）。超出支持上限拒绝加载。
+    #[serde(default = "default_protocol_version")]
+    pub protocol_version: u32,
+    /// 支持的平台（0.28.1）。空 = 任意平台。取值如 `"windows-x86_64"`；
+    /// 与当前宿主平台不匹配的包在安装时拒绝。
+    #[serde(default)]
+    pub platforms: Vec<String>,
     #[serde(default)]
     #[allow(dead_code)] // 设置页展示用(list_plugins 走 resolve)
     pub description: LocalizableText,
@@ -34,6 +47,9 @@ pub struct PluginManifest {
     /// 存在的 `plugin:{id}` 记录不会被本字段回退——用户之前的开关状态保留。
     #[serde(default = "default_true")]
     pub default_enabled: bool,
+    /// 进程拉起参数。0.28.1 起可缺省——纯页面/纯数据包插件没有进程；
+    /// 契约校验（contract.rs）对 query/tool 型插件强制 exec 非空。
+    #[serde(default)]
     pub runtime: PluginRuntime,
     #[serde(default, deserialize_with = "deserialize_triggers_lenient")]
     pub triggers: Vec<PluginTrigger>,
@@ -49,6 +65,18 @@ pub struct PluginManifest {
     /// 缺失或空 = 该插件不参与 AI tool-call（老插件向后兼容）。
     #[serde(default)]
     pub tools: Vec<ToolDef>,
+    /// 独立页面声明（0.28.1 冻结清单；窗口承载在 0.28.2）。
+    ///
+    /// 每个页面是插件包内一个相对入口（index.html 等）+ 资源。纯页面插件
+    /// 可以没有 runtime.exec——契约校验只对 query/tool 型强制 exec。
+    #[serde(default)]
+    pub pages: Vec<PageDef>,
+    /// 依赖的数据包声明（0.28.1 冻结清单；词库构建在 0.28.4）。
+    ///
+    /// 数据包与插件包独立版本化、分目录存储；缺失数据包不影响插件加载，
+    /// 只影响就绪状态（0.28.2 管理页消费）。
+    #[serde(default)]
+    pub datasets: Vec<DatasetDef>,
     /// 参数提示声明（0.26.17 顶层 `args.hints`）：枚举型参数候选。
     ///
     /// 仅适用 keyword 触发、参数可枚举的插件（IP 的 refresh/local）；自由参数插件
@@ -261,10 +289,49 @@ impl RuntimeType {
     }
 }
 
+/// 宿主兼容范围（0.28.1）。语义版本字符串（如 "0.28.0"），
+/// 由调用方与宿主当前版本比较；缺省字段 = 不设限。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct HostCompat {
+    /// 能运行本插件的最低宿主版本（含）。
+    #[serde(default)]
+    pub min_version: Option<String>,
+    /// 能运行本插件的最高宿主版本（含）。缺省 = 无上限。
+    #[serde(default)]
+    pub max_version: Option<String>,
+}
+
+/// 独立页面声明（0.28.1）。
+#[derive(Debug, Clone, Deserialize)]
+pub struct PageDef {
+    /// 页面逻辑 id（宿主窗口身份 plugin_id/page_id 的 page_id 部分）。
+    /// 字符集 [a-z0-9-]，插件内唯一。
+    pub id: String,
+    /// 页面入口，相对插件包根目录的路径（如 "index.html" / "pages/main.html"）。
+    /// 0.28.1 只校验存在性与不可越界；窗口创建在 0.28.2。
+    pub entry: String,
+}
+
+/// 依赖的数据包声明（0.28.1）。
+#[derive(Debug, Clone, Deserialize)]
+pub struct DatasetDef {
+    /// 数据包 id（如 "ecdict-basic"）。与插件包分开分发、独立版本化。
+    pub id: String,
+    /// 兼容最低数据包版本（语义版本，缺省 = 任意版本）。
+    #[serde(default)]
+    pub min_version: Option<String>,
+}
+
+fn default_protocol_version() -> u32 {
+    1
+}
+
 /// 进程拉起参数。
 #[derive(Debug, Clone, Deserialize)]
 pub struct PluginRuntime {
     /// 可执行路径(相对 manifest 所在目录,或绝对路径)。
+    /// 0.28.1 起可缺省——纯页面/纯数据包插件无进程（见 `PluginManifest::runtime` 注释）。
+    #[serde(default)]
     pub exec: String,
     /// 运行时类型，默认 Process
     #[serde(default)]
@@ -297,6 +364,24 @@ pub struct PluginRuntime {
     /// 前端渲染无差异——就是一条普通 PluginItem，`action=none` 不可执行。
     #[serde(default)]
     pub empty_arg_hint: Option<LocalizableText>,
+}
+
+impl Default for PluginRuntime {
+    /// 空进程参数——纯页面/纯数据包插件（manifest 缺 `runtime` 段）的缺省形态。
+    /// exec 为空串：有 query/tool 能力的插件会被契约校验拒绝（contract.rs），
+    /// 不会走到 spawn。
+    fn default() -> Self {
+        PluginRuntime {
+            exec: String::new(),
+            r#type: RuntimeType::Process,
+            protocol: None,
+            timeout_ms: None,
+            concurrency: None,
+            min_arg_length: None,
+            debounce_ms: None,
+            empty_arg_hint: None,
+        }
+    }
 }
 
 /// 触发器。0.8.2 §3.2.3 加 `Context` 变体。
@@ -654,12 +739,31 @@ impl PluginManifest {
                 manifest.schema_version, SUPPORTED_SCHEMA_VERSION
             ));
         }
+        // 0.28.1：进程协议版本分开校验——未知必需版本拒绝加载（不降级运行）。
+        if manifest.protocol_version > super::protocol::SUPPORTED_PROTOCOL_VERSION {
+            return Err(format!(
+                "protocol_version {} 超出支持上限 {}",
+                manifest.protocol_version,
+                super::protocol::SUPPORTED_PROTOCOL_VERSION
+            ));
+        }
         Ok(manifest)
     }
 
     /// 是否提供 query 召回能力。
     pub fn supports_query(&self) -> bool {
         self.capabilities.iter().any(|c| c == "query")
+    }
+
+    /// 是否声明独立页面（0.28.1）。
+    pub fn supports_pages(&self) -> bool {
+        !self.pages.is_empty()
+    }
+
+    /// 是否需要插件进程——query 召回与 tool-call 都走 JSONL 子进程。
+    /// 纯页面/纯数据包插件返回 false，不要求 runtime.exec。
+    pub fn needs_process(&self) -> bool {
+        self.supports_query() || !self.tools.is_empty()
     }
 
     /// args.hints 声明（0.26.17）；未声明或空表返回空切片。

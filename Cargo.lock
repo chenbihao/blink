@@ -596,7 +596,7 @@ dependencies = [
 
 [[package]]
 name = "blink"
-version = "0.27.15"
+version = "0.28.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -717,6 +717,7 @@ dependencies = [
  "urlencoding",
  "walkdir",
  "zeroize",
+ "zip 2.4.2",
 ]
 
 [[package]]

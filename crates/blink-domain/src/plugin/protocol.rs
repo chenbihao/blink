@@ -16,10 +16,35 @@
 
 use serde::{Deserialize, Serialize};
 
+/// core 支持的插件进程协议版本上限（0.28.1）。
+///
+/// - v1：现状——宿主不发初始化帧，插件冷启动直接收 query/tool_call。
+///   **v1 插件不得被强发不认识的帧**，宿主对 v1 保持完全旧行为。
+/// - v2：启动握手——宿主 spawn 后先发 `initialize`（声明宿主能力与数据目录），
+///   插件回 `initialized`（声明实际协议版本）。manifest `protocol_version` 声明。
+pub const SUPPORTED_PROTOCOL_VERSION: u32 = 2;
+
 /// core → 插件请求。`type` 标签区分 query/cancel/http_response。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum PluginRequest {
+    /// v2 启动握手（0.28.1）——spawn 后、任何业务帧之前发送，仅一次。
+    ///
+    /// 只发给 manifest 声明 `protocol_version >= 2` 的插件；v1 插件收不到本帧。
+    /// 插件以 `PluginUpstreamMessage::Initialized` 应答；在应答到达前宿主
+    /// 缓冲业务帧（0.28.1：等待有界超时，超时按 v1 行为放行——插件可忽略握手）。
+    #[serde(rename = "initialize")]
+    Initialize {
+        /// 宿主声明的协议版本（= SUPPORTED_PROTOCOL_VERSION）。
+        protocol: u32,
+        /// 宿主提供给插件的能力（当前固定 ["http_proxy"]——HTTP 代理执行）。
+        #[serde(default)]
+        capabilities: Vec<String>,
+        /// 宿主为该插件分配的私有目录（绝对路径，逐插件隔离）。
+        /// v1 插件不收本帧、也就没有这些目录——按需从参数/配置取数据。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dirs: Option<PluginDirs>,
+    },
     /// 查询。
     #[serde(rename = "query")]
     Query {
@@ -82,6 +107,20 @@ impl PluginRequest {
     }
 }
 
+/// 宿主为单个插件分配的目录集合（v2 握手下发，0.28.1）。
+///
+/// 三个目录职责分离：data 卸载时可保留（用户数据）、cache 可随时重建、
+/// datasets 挂版本化数据包。插件只看到自己的目录，不获知其他插件路径。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PluginDirs {
+    /// 插件私有数据目录（用户数据，卸载默认保留）。
+    pub data: String,
+    /// 插件私有缓存目录（可重建，卸载/清理直接删）。
+    pub cache: String,
+    /// 插件数据包根目录（版本化词库等挂载点）。
+    pub datasets: String,
+}
+
 /// 查询上下文(随请求传给插件;包含环境上下文供插件决策)。
 ///
 /// 0.8.6 §8.2.2：`clipboard_text` 已移除——插件直接读 Awareness 违反四域架构。
@@ -121,6 +160,15 @@ impl PluginQueryContext {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum PluginUpstreamMessage {
+    /// v2 握手应答（0.28.1）——插件收到 `initialize` 后回此帧。
+    ///
+    /// `protocol` 为插件实际选择的版本（可低于宿主声明，宿主按插件版本走）。
+    /// v1 插件永不发本帧。
+    #[serde(rename = "initialized")]
+    Initialized {
+        /// 插件实际使用的协议版本。
+        protocol: u32,
+    },
     /// 查询结果响应(插件→core)。
     #[serde(rename = "response")]
     Response(PluginResponse),
@@ -320,6 +368,47 @@ pub enum PluginAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── 0.28.1 v2 握手帧 ─────────────────────────────────────────────────
+
+    #[test]
+    fn initialize_frame_serializes_with_dirs() {
+        let req = PluginRequest::Initialize {
+            protocol: 2,
+            capabilities: vec!["http_proxy".into()],
+            dirs: Some(PluginDirs {
+                data: "D:/appdata/blink/plugins/data/extra.dict".into(),
+                cache: "D:/appdata/blink/plugins/cache/extra.dict".into(),
+                datasets: "D:/appdata/blink/plugins/datasets/extra.dict".into(),
+            }),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"type\":\"initialize\""));
+        assert!(json.contains("\"protocol\":2"));
+        assert!(json.contains("\"http_proxy\""));
+        assert!(json.contains("\"datasets\""));
+    }
+
+    #[test]
+    fn initialize_frame_without_dirs_omits_field() {
+        let req = PluginRequest::Initialize {
+            protocol: 2,
+            capabilities: vec![],
+            dirs: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(!json.contains("\"dirs\""));
+    }
+
+    #[test]
+    fn initialized_ack_roundtrips() {
+        let json = r#"{"type":"initialized","protocol":2}"#;
+        let msg: PluginUpstreamMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            PluginUpstreamMessage::Initialized { protocol } => assert_eq!(protocol, 2),
+            _ => panic!("应是 Initialized"),
+        }
+    }
 
     #[test]
     fn request_serializes_with_type_tag() {

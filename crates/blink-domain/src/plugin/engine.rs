@@ -20,13 +20,25 @@ use super::protocol::{PluginAction, PluginItem, PluginQueryContext};
 #[path = "config_tests.rs"]
 mod config_tests;
 
+/// 插件集合快照（0.28.1 §五.4）。
+///
+/// 集合整体替换、`generation` 单调递增：运行期安装/更新/卸载不再固定在
+/// 构造时的 Vec，而是发布新快照。持有旧快照句柄（如已注册的
+/// `PluginCapabilityAdapter`）通过 `PluginEngine::is_active_handle` 的
+/// Arc 指针比对发现代次过期——旧 Arc 不继承新实现的授权。
+pub struct PluginSet {
+    pub generation: u64,
+    pub plugins: Vec<Arc<PluginHandle>>,
+}
+
 /// 聚合所有 builtin 插件的查询执行器(见 §3.5)。
 ///
 /// 0.5.1 起:持有每个插件的 `PluginConfig`(enabled + settings)内存快照 + DB pool。
 /// - `enabled=false`:`query_subset` 跳过该插件。
 /// - `settings`:每次 query 注入 `PluginRequest`(0.5 §2.4 透传协议),天然热更新。
+/// 0.28.1 起:插件集合运行期可变（`PluginSet` 快照，见上）。
 pub struct PluginEngine {
-    plugins: Vec<Arc<PluginHandle>>,
+    plugins: RwLock<Arc<PluginSet>>,
     /// plugin_id → 配置。启动时 `init_configs` 从 DB 加载;`update_config` 时更新。
     configs: Arc<RwLock<HashMap<String, crate::config::PluginConfig>>>,
     pool: SqlitePool,
@@ -43,7 +55,10 @@ impl PluginEngine {
         global_proxy: Option<(String, String)>,
     ) -> Self {
         PluginEngine {
-            plugins,
+            plugins: RwLock::new(Arc::new(PluginSet {
+                generation: 1,
+                plugins,
+            })),
             configs: Arc::new(RwLock::new(HashMap::new())),
             pool,
             update_lock: tokio::sync::Mutex::new(()),
@@ -51,9 +66,65 @@ impl PluginEngine {
         }
     }
 
+    /// 当前集合快照（Arc 克隆，读方无锁遍历）。
+    pub fn plugin_set(&self) -> Arc<PluginSet> {
+        self.plugins.read().unwrap().clone()
+    }
+
+    /// 运行期发布新集合（0.28.1）：整体替换 + generation +1。
+    ///
+    /// 返回 (新 generation, 被替换的旧句柄列表)——调用方（runtime.rs 发布器）
+    /// 负责 bounded drain 旧进程、撤销路由与能力出口；本方法只换快照。
+    pub fn replace_plugins(&self, new_plugins: Vec<Arc<PluginHandle>>) -> (u64, Vec<Arc<PluginHandle>>) {
+        let mut guard = self.plugins.write().unwrap();
+        let retired = guard.plugins.clone();
+        let generation = guard.generation + 1;
+        *guard = Arc::new(PluginSet {
+            generation,
+            plugins: new_plugins,
+        });
+        (generation, retired)
+    }
+
+    /// 指定 handle 是否仍是当前代次的活跃成员（Arc 指针比对）。
+    ///
+    /// 旧 adapter 在 invoke 前复核：插件被更新/卸载后，绑定旧 handle 的
+    /// adapter 必须拒绝执行，不能借旧 Arc 继续调用新实现或复活的旧实现。
+    pub fn is_active_handle(&self, plugin_id: &str, handle: &Arc<PluginHandle>) -> bool {
+        let set = self.plugin_set();
+        set.plugins
+            .iter()
+            .any(|p| p.id() == plugin_id && Arc::ptr_eq(p, handle))
+    }
+
+    /// 为单个插件初始化配置（发布新插件后调用；init_configs 的单插件版）。
+    pub async fn ensure_config_for(&self, plugin: &Arc<PluginHandle>) {
+        let id = plugin.id();
+        if self.configs.read().unwrap().contains_key(id) {
+            return;
+        }
+        let loaded = match crate::config::get_plugin_config(&self.pool, id).await {
+            Some(cfg) => cfg,
+            None => {
+                let manifest = plugin.manifest();
+                let default = crate::config::PluginConfig {
+                    settings: manifest.default_settings(),
+                    enabled: manifest.default_enabled,
+                    ..Default::default()
+                };
+                if let Err(e) = crate::config::set_plugin_config(&self.pool, id, &default).await {
+                    tracing::warn!(plugin = %id, error = %e, "写默认插件配置失败");
+                }
+                default
+            }
+        };
+        self.configs.write().unwrap().insert(id.to_string(), loaded);
+    }
+
     /// 获取所有插件的 manifest 信息（设置页用）。
     pub fn list_plugins(&self, lang: &str) -> Vec<serde_json::Value> {
-        self.plugins
+        self.plugin_set()
+            .plugins
             .iter()
             .map(|p| {
                 let manifest = p.manifest();
@@ -267,12 +338,18 @@ impl PluginEngine {
     }
 
     fn find_plugin(&self, id: &str) -> Option<Arc<PluginHandle>> {
-        self.plugins.iter().find(|p| p.id() == id).cloned()
+        self.plugin_set()
+            .plugins
+            .iter()
+            .find(|p| p.id() == id)
+            .cloned()
     }
 
     /// 获取所有已加载插件的句柄（0.9.3 插件 tool 注册用）。
-    pub fn all_plugins(&self) -> &[Arc<PluginHandle>] {
-        &self.plugins
+    /// 0.28.1 起集合运行期可变——返回快照克隆（Arc 列表），调用方迭代期间
+    /// 的发布不影响本次迭代，但下次调用可见新集合。
+    pub fn all_plugins(&self) -> Vec<Arc<PluginHandle>> {
+        self.plugin_set().plugins.clone()
     }
 
     // ── 配置管理(0.5.1)──────────────────────────────────────────────────────
@@ -284,7 +361,7 @@ impl PluginEngine {
     pub async fn init_configs(&self) {
         // 先完成全部 DB 读写，再短暂持锁合并——避免 RwLock guard 跨 await
         let mut loaded = HashMap::new();
-        for plugin in &self.plugins {
+        for plugin in &self.plugin_set().plugins {
             let id = plugin.id();
             match crate::config::get_plugin_config(&self.pool, id).await {
                 Some(cfg) => {
@@ -453,17 +530,18 @@ impl PluginEngine {
 
     /// 获取插件的 manifest。
     pub fn get_manifest(&self, id: &str) -> Option<super::PluginManifest> {
-        self.plugins
-            .iter()
-            .find(|p| p.id() == id)
-            .map(|p| p.manifest().clone())
+        self.find_plugin(id).map(|p| p.manifest().clone())
     }
 
     /// 列出所有已加载插件的 manifest（0.8.3 §4.6 设置页 context binding 面板用）。
     ///
     /// 用于设置页遍历 `manifest.triggers` 收集所有 `PluginTrigger::Context`。
     pub fn list_manifests(&self) -> Vec<super::PluginManifest> {
-        self.plugins.iter().map(|p| p.manifest().clone()).collect()
+        self.plugin_set()
+            .plugins
+            .iter()
+            .map(|p| p.manifest().clone())
+            .collect()
     }
 
     /// 获取插件的显示名称,回退为 plugin_id。
@@ -507,12 +585,13 @@ impl PluginEngine {
     /// 更新全局代理配置 + 重置所有插件进程(保存后调用)。
     /// 下次 query 自动用新 env 重启，用户零感知热更新。
     pub async fn update_global_proxy(&self, proxy: Option<(String, String)>) {
+        let plugins = self.all_plugins();
         // 先更新每个 PluginHandle 的 proxy 字段(新进程 spawn 时会用它)
-        for plugin in &self.plugins {
+        for plugin in &plugins {
             plugin.update_proxy(proxy.clone());
         }
         // 杀掉已启动的旧进程(下次 query 自动用新 proxy 重启)
-        for plugin in &self.plugins {
+        for plugin in &plugins {
             plugin.reset_process().await;
         }
         tracing::info!("全局代理配置已更新，所有插件进程已重置");
@@ -659,7 +738,8 @@ impl PluginEngine {
     /// `sanitize_config_secrets` 转存 CM → 回写 DB。搬迁后 settings 只剩空串占位，
     /// 再次启动扫描为空自然 no-op——无需 marker。
     pub async fn migrate_secret_fields_to_cm(&self) {
-        for plugin in &self.plugins {
+        let plugins = self.all_plugins();
+        for plugin in &plugins {
             let id = plugin.id();
             let mut config = match self.configs.read().unwrap().get(id).cloned() {
                 Some(c) => c,
@@ -767,7 +847,8 @@ impl super::PluginSettingResolver for PluginEngine {
     /// 读 manifest.name.resolve(lang) 作 Ghost display（0.8.3 §4.13 P0 修订）。
     /// 未加载的插件返回 None,调用方 fallback 到 id 末段。
     fn get_display_name(&self, plugin_id: &str, lang: &str) -> Option<String> {
-        self.plugins
+        self.plugin_set()
+            .plugins
             .iter()
             .find(|p| p.manifest().id == plugin_id)
             .map(|p| p.manifest().name.resolve(lang))

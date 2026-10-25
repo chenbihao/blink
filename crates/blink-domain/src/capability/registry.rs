@@ -66,7 +66,17 @@ static AUDIT_WRITER: OnceLock<AuditWriter> = OnceLock::new();
 /// - 运行期 `register`：返回 `Err(RegistryError::DuplicateId)`，原 capability 不被覆盖。
 /// - 公共 `list()` / `entries()` 均按稳定 id 排序。
 pub struct CapabilityRegistry {
-    caps: RwLock<HashMap<String, Arc<dyn Capability>>>,
+    caps: RwLock<HashMap<String, RegistryEntry>>,
+}
+
+/// 注册表条目：能力 + 归属 owner（0.28.1）。
+///
+/// `owner = Some("plugin:<id>")` 的条目是插件 tool，可被
+/// `revoke_owner` 受控撤销；`None` 是静态（inventory/显式 register）条目。
+#[derive(Clone)]
+struct RegistryEntry {
+    cap: Arc<dyn Capability>,
+    owner: Option<String>,
 }
 
 impl CapabilityRegistry {
@@ -172,14 +182,14 @@ impl CapabilityRegistry {
         // 排序保证无论 inventory 遍历顺序如何，重复检查结果一致。
         entries.sort_by(|a, b| a.0.cmp(&b.0));
 
-        let mut caps: HashMap<String, Arc<dyn Capability>> = HashMap::new();
+        let mut caps: HashMap<String, RegistryEntry> = HashMap::new();
         for (id, cap) in entries {
             if caps.contains_key(&id) {
                 tracing::error!(%id, "CapabilityRegistry: 重复 id，拒绝初始化");
                 return Err(RegistryError::DuplicateId { id });
             }
             tracing::debug!(%id, "capability registered (via inventory)");
-            caps.insert(id, cap);
+            caps.insert(id, RegistryEntry { cap, owner: None });
         }
         tracing::info!(count = caps.len(), "CapabilityRegistry 初始化完成");
         Ok(Self {
@@ -198,12 +208,12 @@ impl CapabilityRegistry {
             .collect();
         sorted.sort_by(|a, b| a.0.cmp(&b.0));
 
-        let mut caps: HashMap<String, Arc<dyn Capability>> = HashMap::new();
+        let mut caps: HashMap<String, RegistryEntry> = HashMap::new();
         for (id, cap) in sorted {
             if caps.contains_key(&id) {
                 return Err(RegistryError::DuplicateId { id });
             }
-            caps.insert(id, cap);
+            caps.insert(id, RegistryEntry { cap, owner: None });
         }
         Ok(Self {
             caps: RwLock::new(caps),
@@ -212,7 +222,7 @@ impl CapabilityRegistry {
 
     /// 按 id 查找能力（clone Arc，锁内完成）。
     pub fn get(&self, id: &str) -> Option<Arc<dyn Capability>> {
-        self.caps.read().unwrap().get(id).cloned()
+        self.caps.read().unwrap().get(id).map(|e| e.cap.clone())
     }
 
     /// 按名称列出所有已注册能力的 schema（供 AI tool 池 / CLI / MCP 消费）。
@@ -225,7 +235,7 @@ impl CapabilityRegistry {
             .read()
             .unwrap()
             .values()
-            .map(|cap| cap.schema())
+            .map(|entry| entry.cap.schema())
             .collect();
         schemas.sort_by(|a, b| a.name.cmp(&b.name));
         schemas
@@ -249,8 +259,88 @@ impl CapabilityRegistry {
             return Err(RegistryError::DuplicateId { id });
         }
         tracing::debug!(%id, "capability registered (via runtime register)");
-        caps.insert(id, cap);
+        caps.insert(id, RegistryEntry { cap, owner: None });
         Ok(())
+    }
+
+    /// 运行期按 owner 注册能力（0.28.1）。
+    ///
+    /// owner 形如 `"plugin:<plugin_id>"`——同一 owner 的条目可被
+    /// [`CapabilityRegistry::revoke_owner`] 整体撤销（插件禁用/卸载/更新的
+    /// 全出口联动入口）。重复 id 仍拒绝，不覆盖既有条目。
+    pub fn register_owned(
+        &self,
+        owner: &str,
+        cap: Arc<dyn Capability>,
+    ) -> Result<(), RegistryError> {
+        let id = cap.id().to_string();
+        let mut caps = self.caps.write().unwrap();
+        if caps.contains_key(&id) {
+            tracing::warn!(%id, %owner, "CapabilityRegistry::register_owned: 重复 id，拒绝注册");
+            return Err(RegistryError::DuplicateId { id });
+        }
+        tracing::debug!(%id, %owner, "capability registered (owned)");
+        caps.insert(id, RegistryEntry {
+            cap,
+            owner: Some(owner.to_string()),
+        });
+        Ok(())
+    }
+
+    /// 撤销指定 owner 的全部能力，返回被移除的 capability id 列表。
+    ///
+    /// 撤销后：`get`/`entries` 不再包含（AI tool 池、MCP tools/list、功能目录
+    /// 均按注册表现读，自然消失）；已在途的 invoke 由能力自身的代次复核拒绝
+    /// （如 PluginCapabilityAdapter 的 handle ptr 比对）。无该 owner 条目返回空。
+    pub fn revoke_owner(&self, owner: &str) -> Vec<String> {
+        let mut caps = self.caps.write().unwrap();
+        let removed: Vec<String> = caps
+            .iter()
+            .filter(|(_, e)| e.owner.as_deref() == Some(owner))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &removed {
+            caps.remove(id);
+        }
+        if !removed.is_empty() {
+            tracing::info!(%owner, count = removed.len(), "owner 能力已撤销");
+        }
+        removed
+    }
+
+    /// 指定 owner 当前拥有的 capability id 列表（按 id 排序）。
+    ///
+    /// 发布器用它精确豁免"同插件更新时自替换"的旧条目——静态/其他 owner
+    /// 的条目仍参与碰撞校验。
+    pub fn ids_owned_by(&self, owner: &str) -> Vec<String> {
+        let caps = self.caps.read().unwrap();
+        let mut ids: Vec<String> = caps
+            .iter()
+            .filter(|(_, e)| e.owner.as_deref() == Some(owner))
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// owner 维度的注册表 epoch——owner 条目集合变化时递增。
+    ///
+    /// 供 Agent 缓存等消费方在能力出口变化后触发重建（与 allowlist
+    /// fingerprint 正交：出口授权与实际注册内容都要进缓存键）。
+    pub fn owner_epoch(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let caps = self.caps.read().unwrap();
+        let mut owned: Vec<(&str, &str)> = caps
+            .iter()
+            .filter_map(|(id, e)| e.owner.as_deref().map(|o| (id.as_str(), o)))
+            .collect();
+        owned.sort_unstable();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for (id, owner) in owned {
+            id.hash(&mut hasher);
+            owner.hash(&mut hasher);
+        }
+        hasher.finish()
     }
 
     /// 已注册能力数量。
@@ -271,7 +361,7 @@ impl CapabilityRegistry {
             .read()
             .unwrap()
             .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|(k, v)| (k.clone(), v.cap.clone()))
             .collect();
         pairs.sort_by(|a, b| a.0.cmp(&b.0));
         pairs

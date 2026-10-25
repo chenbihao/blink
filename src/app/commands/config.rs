@@ -607,9 +607,20 @@ async fn set_config_value(
             match &result {
                 Ok(_) => {
                     tracing::info!(plugin_id = %v.plugin_id, enabled = v.enabled, "插件配置已更新");
+                    // 0.28.1：禁用/启用联动运行时出口——禁用撤销该插件全部 tool
+                    // 注册与路由规则（阻止新调用）；启用重发布（能力/路由重建）。
+                    // 撤销的旧 tool 同步取消待确认与会话级信任（旧确认不授权新实现）。
+                    use tauri::Manager;
+                    if let Some(publisher) = app.try_state::<std::sync::Arc<crate::domain::plugin::PluginRuntimePublisher>>() {
+                        let revoked = publisher.sync_enabled(&v.plugin_id, v.enabled).await;
+                        if !revoked.is_empty()
+                            && let Some(pc) = app.try_state::<std::sync::Arc<crate::domain::ai::tool_adapter::PendingConfirms>>()
+                        {
+                            pc.cancel_for_tools(&revoked).await;
+                        }
+                    }
                     // 0.17.8: 插件禁用时清理该插件的权限记忆行
                     if !v.enabled {
-                        use tauri::Manager;
                         if let Some(pc) = app.try_state::<std::sync::Arc<crate::domain::ai::tool_adapter::PendingConfirms>>() {
                             let prefix = format!("plugin_{}", v.plugin_id);
                             pc.clear_plugin_trusted_db(&prefix).await;

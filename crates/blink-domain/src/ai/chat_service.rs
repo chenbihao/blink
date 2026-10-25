@@ -740,7 +740,11 @@ impl ChatService {
             } else {
                 std::collections::HashSet::new()
             };
-            let ai_capability_epoch = compute_allowlist_fingerprint(&ai_allowlist);
+            // 0.28.1：fingerprint 覆盖 allowlist ∩ 注册表实际条目——
+            // 插件 tool 运行期注册/撤销（owner 维度变化）时，即使 allowlist
+            // 不变也必须让陈旧 Agent 缓存失效，否则旧 Agent 持已注销的死工具。
+            let ai_capability_epoch =
+                compute_allowlist_fingerprint(&ai_allowlist, Some(&self.capability_registry));
 
             let cache_key = AgentCacheKey {
                 provider_id: resolved.cache_key.0.clone(),
@@ -2018,14 +2022,38 @@ fn hash_preamble(preamble: &str) -> u64 {
 ///
 /// 空集合返回 0（纯对话模式）；非空集合对 sorted ids 做 hash。
 /// allowlist 变化时 fingerprint 不同，触发 Agent cache miss → 重建。
-fn compute_allowlist_fingerprint(allowlist: &std::collections::HashSet<String>) -> u64 {
+///
+/// 0.28.1：`registry` 传入时按 **allowlist ∩ 注册表实际条目** 计算——
+/// 授权了但已注销（插件撤销）的 id 不计入；插件 tool 注册/撤销会改变
+/// 交集，触发重建。语义与 `count_allowlisted_capabilities` 的口径一致。
+fn compute_allowlist_fingerprint(
+    allowlist: &std::collections::HashSet<String>,
+    registry: Option<&CapabilityRegistry>,
+) -> u64 {
     if allowlist.is_empty() {
         return 0;
     }
-    let mut ids: Vec<&String> = allowlist.iter().collect();
-    ids.sort();
+    let effective: Vec<&str> = match registry {
+        Some(reg) => {
+            let entries = reg.entries();
+            let registered: std::collections::HashSet<&str> =
+                entries.iter().map(|(id, _)| id.as_str()).collect();
+            let mut ids: Vec<&str> = allowlist
+                .iter()
+                .map(|id| id.as_str())
+                .filter(|id| registered.contains(id))
+                .collect();
+            ids.sort();
+            ids
+        }
+        None => {
+            let mut ids: Vec<&str> = allowlist.iter().map(|id| id.as_str()).collect();
+            ids.sort();
+            ids
+        }
+    };
     let mut hasher = DefaultHasher::new();
-    for id in ids {
+    for id in effective {
         id.hash(&mut hasher);
     }
     hasher.finish()
@@ -2106,7 +2134,44 @@ mod tests {
     #[test]
     fn fingerprint_empty_allowlist_is_zero() {
         let set = std::collections::HashSet::new();
-        assert_eq!(compute_allowlist_fingerprint(&set), 0);
+        assert_eq!(compute_allowlist_fingerprint(&set, None), 0);
+    }
+
+    /// 0.28.1：allowlist 项在注册表注销后不计入 fingerprint——
+    /// 插件 tool 撤销必须让陈旧 Agent 缓存失效。
+    #[test]
+    fn fingerprint_drops_unregistered_allowlist_ids() {
+        let reg = CapabilityRegistry::default();
+        struct Cap1;
+        #[async_trait::async_trait]
+        impl crate::capability::Capability for Cap1 {
+            fn id(&self) -> &str {
+                "alive_cap"
+            }
+            fn schema(&self) -> crate::capability::CapabilitySchema {
+                crate::capability::CapabilitySchema::default()
+            }
+            async fn invoke(
+                &self,
+                _args: serde_json::Value,
+                _ctx: &crate::capability::InvokeContext<'_>,
+            ) -> Result<crate::capability::CapabilityResult, crate::capability::CapabilityError>
+            {
+                unreachable!()
+            }
+        }
+        reg.register(Arc::new(Cap1)).unwrap();
+
+        let mut set = std::collections::HashSet::new();
+        set.insert("alive_cap".to_string());
+        set.insert("revoked_plugin_tool".to_string());
+        // 注册表只剩 alive_cap → 交集指纹 == 只含 alive_cap 的指纹
+        let mut only_alive = std::collections::HashSet::new();
+        only_alive.insert("alive_cap".to_string());
+        assert_eq!(
+            compute_allowlist_fingerprint(&set, Some(&reg)),
+            compute_allowlist_fingerprint(&only_alive, None)
+        );
     }
 
     #[test]
@@ -2114,7 +2179,7 @@ mod tests {
         let mut set = std::collections::HashSet::new();
         set.insert("open_url".to_string());
         set.insert("search_apps".to_string());
-        assert_ne!(compute_allowlist_fingerprint(&set), 0);
+        assert_ne!(compute_allowlist_fingerprint(&set, None), 0);
     }
 
     #[test]
@@ -2131,8 +2196,8 @@ mod tests {
         set2.insert("cap_b".into());
 
         assert_eq!(
-            compute_allowlist_fingerprint(&set1),
-            compute_allowlist_fingerprint(&set2)
+            compute_allowlist_fingerprint(&set1, None),
+            compute_allowlist_fingerprint(&set2, None)
         );
     }
 
@@ -2148,8 +2213,8 @@ mod tests {
         set2.insert("cap_c".into()); // 新增一个
 
         assert_ne!(
-            compute_allowlist_fingerprint(&set1),
-            compute_allowlist_fingerprint(&set2)
+            compute_allowlist_fingerprint(&set1, None),
+            compute_allowlist_fingerprint(&set2, None)
         );
     }
 
@@ -2164,8 +2229,8 @@ mod tests {
         // 移除了 cap_b
 
         assert_ne!(
-            compute_allowlist_fingerprint(&set1),
-            compute_allowlist_fingerprint(&set2)
+            compute_allowlist_fingerprint(&set1, None),
+            compute_allowlist_fingerprint(&set2, None)
         );
     }
 

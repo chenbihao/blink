@@ -1,8 +1,196 @@
 //! plugin 域命令（0.14.6 §2.4 从 commands.rs 拆分）。
+//!
+//! 0.28.1：新增本地包安装/卸载/安装记录查询命令——安装走
+//! `PluginInstaller`（暂存/校验/提交）+ `PluginRuntimePublisher`（契约校验/
+//! owner 注册/快照发布/路由联动）+ 撤销联动取消待确认。官方目录下载在
+//! 0.28.5 接入；当前通道为 dev 本地包（zip 或解包目录）。
 
 use super::ai::cs_count_skills;
 use super::stt::copy_dir_recursive;
 use tauri::Manager;
+
+use crate::app::command_error::CommandError;
+
+/// 读取当前插件子进程代理 env（network 分片同源快照；None = 直连）。
+async fn plugin_env_proxy(
+    pool: &sqlx::SqlitePool,
+) -> Option<(String, String)> {
+    let cfg = crate::app::config::init_network_config(pool).await;
+    cfg.has_proxy().then(|| cfg.to_policy().plugin_env_tuple())
+}
+
+/// 从已提交的版本目录构造插件句柄（含 v2 握手目录注入）。
+fn handle_from_record(
+    installer: &std::sync::Arc<crate::domain::plugin::PluginInstaller>,
+    record: &blink_infra::plugin_storage::InstallRecord,
+    proxy: Option<(String, String)>,
+) -> Result<std::sync::Arc<crate::domain::plugin::PluginHandle>, CommandError> {
+    let dir = installer
+        .active_version_dir(&record.plugin_id)
+        .ok_or_else(|| {
+            CommandError::new("invalid_state", "安装记录存在但版本目录缺失", false)
+        })?;
+    let manifest = crate::domain::plugin::PluginManifest::from_path(&dir.join("manifest.json"))
+        .map_err(|e| {
+            CommandError::new("invalid_manifest", format!("manifest 解析失败: {e}"), false)
+        })?;
+    let handle = std::sync::Arc::new(crate::domain::plugin::PluginHandle::new(
+        std::sync::Arc::new(manifest),
+        dir.clone(),
+        proxy,
+    ));
+    let storage = installer.storage();
+    handle.set_dirs(crate::domain::plugin::PluginDirs {
+        data: storage.data_dir(&record.plugin_id).to_string_lossy().into_owned(),
+        cache: storage.cache_dir(&record.plugin_id).to_string_lossy().into_owned(),
+        datasets: storage.datasets_dir(&record.plugin_id).to_string_lossy().into_owned(),
+    });
+    Ok(handle)
+}
+
+/// 安装本地插件包（0.28.1 dev 通道：zip 归档或解包目录）。
+///
+/// 流程：installer 暂存/校验/提交（spawn_blocking，归档 IO）→ 构造新句柄 →
+/// 发布器发布目标集合（同 id 替换 = 更新）→ 撤销的旧 tool 取消待确认。
+#[tauri::command]
+pub async fn install_plugin_package(
+    app: tauri::AppHandle,
+    path: String,
+) -> Result<blink_infra::plugin_storage::InstallRecord, CommandError> {
+    let installer = app
+        .state::<std::sync::Arc<crate::domain::plugin::PluginInstaller>>()
+        .inner()
+        .clone();
+    let src = std::path::PathBuf::from(&path);
+    if !src.exists() {
+        return Err(CommandError::new(
+            "not_found",
+            format!("包路径不存在: {path}"),
+            false,
+        ));
+    }
+
+    // 归档 IO 隔离到 blocking 线程（spec-backend §一）
+    let installer_for_io = installer.clone();
+    let src_for_io = src.clone();
+    let record = tauri::async_runtime::spawn_blocking(move || {
+        if src_for_io.is_dir() {
+            installer_for_io.install_dir(&src_for_io)
+        } else {
+            installer_for_io.install_zip(&src_for_io)
+        }
+    })
+    .await
+    .map_err(|e| CommandError::new("internal", format!("安装任务失败: {e}"), true))?
+    .map_err(|e| {
+        CommandError::new("install_failed", format!("插件安装失败: {e}"), false)
+    })?;
+
+    // 发布目标集合：同 id 替换（更新语义）
+    let engine = app
+        .state::<std::sync::Arc<crate::domain::plugin::PluginEngine>>()
+        .inner()
+        .clone();
+    let publisher = app
+        .state::<std::sync::Arc<crate::domain::plugin::PluginRuntimePublisher>>()
+        .inner()
+        .clone();
+    let pool = app.state::<crate::infra::data::DbPools>().config.clone();
+    let proxy = plugin_env_proxy(&pool).await;
+    let new_handle = handle_from_record(&installer, &record, proxy)?;
+    let mut target = engine.all_plugins();
+    target.retain(|h| h.id() != record.plugin_id);
+    target.push(new_handle);
+    let report = publisher.publish(target).await.map_err(|e| {
+        CommandError::new(
+            "publish_failed",
+            format!("安装已提交但发布失败（重启后生效）: {e}"),
+            true,
+        )
+    })?;
+    // 旧代次 tool 的待确认/会话信任一并失效
+    if let Some(pc) = app.try_state::<std::sync::Arc<crate::domain::ai::tool_adapter::PendingConfirms>>() {
+        pc.cancel_for_tools(&report.revoked_tool_ids).await;
+    }
+    tracing::info!(
+        plugin = %record.plugin_id,
+        version = %record.version,
+        generation = report.generation,
+        "插件包安装并发布完成"
+    );
+    Ok(record)
+}
+
+/// 卸载插件（0.28.1）。`keep_data=true` 保留用户数据目录。
+#[tauri::command]
+pub async fn uninstall_plugin(
+    app: tauri::AppHandle,
+    plugin_id: String,
+    keep_data: bool,
+) -> Result<serde_json::Value, CommandError> {
+    let installer = app
+        .state::<std::sync::Arc<crate::domain::plugin::PluginInstaller>>()
+        .inner()
+        .clone();
+    let installer_io = installer.clone();
+    let pid = plugin_id.clone();
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        installer_io.uninstall(&pid, keep_data)
+    })
+    .await
+    .map_err(|e| CommandError::new("internal", format!("卸载任务失败: {e}"), true))?
+    .map_err(|e| CommandError::new("uninstall_failed", format!("插件卸载失败: {e}"), false))?;
+
+    // 从运行时撤销（能力/路由/快照）
+    let engine = app
+        .state::<std::sync::Arc<crate::domain::plugin::PluginEngine>>()
+        .inner()
+        .clone();
+    let publisher = app
+        .state::<std::sync::Arc<crate::domain::plugin::PluginRuntimePublisher>>()
+        .inner()
+        .clone();
+    let mut target = engine.all_plugins();
+    target.retain(|h| h.id() != plugin_id);
+    let report = publisher.publish(target).await.map_err(|e| {
+        CommandError::new(
+            "publish_failed",
+            format!("卸载已记录但运行时撤销失败（重启后生效）: {e}"),
+            true,
+        )
+    })?;
+    if let Some(pc) = app.try_state::<std::sync::Arc<crate::domain::ai::tool_adapter::PendingConfirms>>() {
+        pc.cancel_for_tools(&report.revoked_tool_ids).await;
+    }
+
+    Ok(match &outcome {
+        crate::domain::plugin::UninstallOutcome::Removed => serde_json::json!({
+            "removed": true,
+            "pending_files": 0,
+        }),
+        crate::domain::plugin::UninstallOutcome::RemovedPendingFiles { pending_paths } => {
+            serde_json::json!({
+                "removed": true,
+                "pending_files": pending_paths.len(),
+                "note": "部分文件被占用，将在下次启动时清理",
+            })
+        }
+    })
+}
+
+/// 查询用户目录安装记录（0.28.1；设置页"已安装"数据源之一）。
+#[tauri::command]
+pub async fn list_plugin_installations(
+    app: tauri::AppHandle,
+) -> Result<Vec<blink_infra::plugin_storage::InstallRecord>, CommandError> {
+    let installer = app
+        .state::<std::sync::Arc<crate::domain::plugin::PluginInstaller>>()
+        .inner()
+        .clone();
+    installer.list_installed().map_err(|e| {
+        CommandError::new("io", format!("读取安装记录失败: {e}"), true)
+    })
+}
 
 /// 获取所有已加载插件的信息（设置页用）。已含 enabled + settings（0.5.1）。
 #[tauri::command]

@@ -9,7 +9,6 @@ mod infra;
 #[cfg(test)]
 mod arch_guard;
 
-use domain::capability::Capability;
 use domain::event_names::EventNames;
 use tauri::{
     Emitter, Manager, WindowEvent,
@@ -674,6 +673,66 @@ fn setup_app(app: &mut tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error:
         plugins.extend(examples);
         plugins
     };
+    // 0.28.1：随后的用户目录安装覆盖需要可变集合（两个构建变体共用）。
+    let mut plugins = plugins;
+
+    // 0.28.1：插件存储与安装器——启动恢复（staging 残留/孤儿版本/占用待删）
+    // 必须先于已安装插件加载执行。
+    let plugin_storage = blink_infra::plugin_storage::PluginStorage::production_root();
+    let plugin_installer = std::sync::Arc::new(domain::plugin::PluginInstaller::new(
+        plugin_storage.clone(),
+        env!("CARGO_PKG_VERSION"),
+    ));
+    {
+        let report = plugin_installer.recover();
+        tracing::info!(
+            staging = report.staging_cleaned,
+            pending_removed = report.pending_removed,
+            orphans = report.orphan_dirs_cleaned,
+            still_pending = report.still_pending,
+            "插件存储启动恢复完成"
+        );
+    }
+
+    // 0.28.1：加载用户目录安装的插件（installed/<id>/<version>/），同 id
+    // 覆盖随包 builtin（用户更新覆盖随包版）；注入 v2 握手目录。
+    let installed_records = plugin_installer.list_installed().unwrap_or_default();
+    {
+        let mut overridden = std::collections::HashSet::new();
+        for record in &installed_records {
+            let Some(dir) = plugin_installer.active_version_dir(&record.plugin_id) else {
+                continue;
+            };
+            match domain::plugin::PluginManifest::from_path(&dir.join("manifest.json")) {
+                Ok(m) => {
+                    let handle = std::sync::Arc::new(domain::plugin::PluginHandle::new(
+                        std::sync::Arc::new(m),
+                        dir.clone(),
+                        proxy.clone(),
+                    ));
+                    handle.set_dirs(domain::plugin::PluginDirs {
+                        data: plugin_storage.data_dir(&record.plugin_id).to_string_lossy().into_owned(),
+                        cache: plugin_storage.cache_dir(&record.plugin_id).to_string_lossy().into_owned(),
+                        datasets: plugin_storage.datasets_dir(&record.plugin_id).to_string_lossy().into_owned(),
+                    });
+                    plugins.retain(|p| p.id() != record.plugin_id);
+                    overridden.insert(record.plugin_id.clone());
+                    plugins.push(handle);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        plugin = %record.plugin_id,
+                        version = %record.version,
+                        error = %e,
+                        "已安装插件 manifest 加载失败，跳过（记录保留，可重装修复）"
+                    );
+                }
+            }
+        }
+        if !overridden.is_empty() {
+            tracing::info!(?overridden, "已安装插件覆盖随包版本");
+        }
+    }
     // 构造意图路由 RuleRouter,从插件 manifest 注入规则(合并用户自定义 triggers)。
     let router = std::sync::Arc::new(domain::intent::RuleRouter::new(
         app_config.surface_takeover_enabled,
@@ -977,57 +1036,32 @@ fn setup_app(app: &mut tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error:
     });
     domain_env.set_cap_registry(capability_registry.clone());
 
-    // 0.13.7:注册插件 tool 到 CapabilityRegistry——插件语义是「纯计算→返回结果」，
-    // 天然属于 Capability 范畴（入参→出参，不碰 UI）。0.13.7 从旧 ActionRegistry 迁入。
-    // 遍历所有已加载插件的 manifest.tools，为每个 tool 创建 PluginCapabilityAdapter 并注册。
-    {
-        let mut plugin_tool_count = 0usize;
-        for plugin_handle in plugin_engine.all_plugins() {
-            let manifest = plugin_handle.manifest();
-            if manifest.tools.is_empty() {
-                continue;
-            }
-            for tool_def in &manifest.tools {
-                let adapter = crate::domain::plugin::PluginCapabilityAdapter::new(
-                    plugin_handle.clone(),
-                    tool_def,
-                );
-                if capability_registry.get(adapter.id()).is_some() {
-                    tracing::warn!(
-                        plugin = %manifest.id,
-                        tool = %adapter.id(),
-                        "插件 tool id 与已有 Capability 冲突,跳过"
-                    );
-                    continue;
-                }
-                let adapter_id = adapter.id().to_string();
-                tracing::info!(
-                    plugin = %manifest.id,
-                    tool = %adapter_id,
-                    danger = ?tool_def.danger_class,
-                    "注册插件 tool（Capability）"
-                );
-                // 0.21.13：register 返回 Result，插件注册前已用 get() 检查去重。
-                if let Err(e) = capability_registry.register(std::sync::Arc::new(adapter)) {
-                    tracing::error!(
-                        plugin = %manifest.id,
-                        tool = %adapter_id,
-                        error = %e,
-                        "插件 tool 注册失败（id 冲突）"
-                    );
-                    continue;
-                }
-                plugin_tool_count += 1;
-            }
-        }
-        if plugin_tool_count > 0 {
+    // 0.28.1：插件 tool 注册改走运行时发布器（PluginRuntimePublisher）——
+    // 契约集合校验 + 按 owner `plugin:<id>` 注册 + 引擎快照发布 + 路由/hints
+    // 联动一体。0.13.7 的逐条 register 迁移至此；运行期安装/卸载/更新复用
+    // 同一发布路径（commands/plugin.rs）。
+    let plugin_publisher = std::sync::Arc::new(domain::plugin::PluginRuntimePublisher::new(
+        plugin_engine.clone(),
+        capability_registry.clone(),
+        router.clone(),
+    ));
+    match tauri::async_runtime::block_on(
+        plugin_publisher.publish(plugin_engine.all_plugins()),
+    ) {
+        Ok(report) => {
             tracing::info!(
-                count = plugin_tool_count,
+                generation = report.generation,
+                tools = report.registered_tools,
                 total = capability_registry.len(),
-                "插件 tool 注册完成（CapabilityRegistry）"
+                "插件 tool 经发布器注册完成（owner = plugin:<id>）"
             );
         }
+        Err(e) => {
+            tracing::error!(error = %e, "插件集合发布失败：契约校验未通过，插件 tool 未注册");
+        }
     }
+    app.manage(plugin_publisher.clone());
+    app.manage(plugin_installer.clone());
 
     // 0.17.11: CM→keyring 密钥迁移（一次性,幂等）
     // 必须在 AIConfig 读取前执行——AIConfig 加载会触发密钥读取,需先迁到 keyring 新命名。
@@ -1859,6 +1893,9 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
         app::commands::refresh_bookmarks,
         app::commands::get_engine_config,
         app::commands::get_plugins,
+        app::commands::install_plugin_package,
+        app::commands::uninstall_plugin,
+        app::commands::list_plugin_installations,
         app::commands::prompt_library_list,
         app::commands::prompt_library_upsert,
         app::commands::prompt_library_delete,

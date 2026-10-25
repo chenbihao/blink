@@ -87,7 +87,9 @@ const DANGEROUS_CONFIRM_TIMEOUT_SECS: u64 = 60;
 /// - `config_pool = None` 时降级为纯会话级（测试环境）
 pub struct PendingConfirms {
     next_id: AtomicU64,
-    pending: Mutex<HashMap<u64, oneshot::Sender<bool>>>,
+    /// confirm_id → (sender, 关联 tool 名)。tool 名用于撤销联动（0.28.1）：
+    /// 插件撤销/更新时 drop 关联 sender，等待方收 Err（不执行）。
+    pending: Mutex<HashMap<u64, (oneshot::Sender<bool>, String)>>,
     /// 会话级信任列表——`(conversation_id, tool_name)`。
     trusted: Mutex<HashSet<(String, String)>>,
     /// 持久化配置库连接池（0.17.8：跨会话权限记忆）。
@@ -141,20 +143,56 @@ impl PendingConfirms {
     /// receiver 收到：
     /// - `Ok(true)` -> 用户确认执行
     /// - `Ok(false)` -> 用户拒绝
-    /// - `Err(_)` -> sender 被 drop（超时清理 / 注册表丢弃）
+    /// - `Err(_)` -> sender 被 drop（超时清理 / 注册表丢弃 / 工具被撤销）
     #[allow(dead_code)] // 0.12.1 对话窗口 tool call 消费（经 build_agent_tools 间接调用）
-    async fn register(&self) -> (u64, oneshot::Receiver<bool>) {
+    async fn register(&self, tool_name: &str) -> (u64, oneshot::Receiver<bool>) {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id, tx);
+        self.pending
+            .lock()
+            .await
+            .insert(id, (tx, tool_name.to_string()));
         (id, rx)
+    }
+
+    /// 撤销联动（0.28.1）：drop 关联指定 tool 的全部待确认 sender。
+    ///
+    /// 插件撤销/更新发布时调用——迟到的用户确认只应到达已失效的等待方，
+    /// 等待方收 `Err`（ConfirmOutcome::Dropped），不会执行旧实现。
+    /// 同时清这些 tool 的会话级信任，避免同对话内新版本跳过确认。
+    pub async fn cancel_for_tools(&self, tool_names: &[String]) {
+        if tool_names.is_empty() {
+            return;
+        }
+        let mut dropped = 0usize;
+        {
+            let mut pending = self.pending.lock().await;
+            pending.retain(|_, (_, tool)| {
+                let hit = tool_names.iter().any(|t| t == tool);
+                if hit {
+                    dropped += 1;
+                }
+                !hit
+            });
+        }
+        {
+            let mut trusted = self.trusted.lock().await;
+            trusted.retain(|(_, tool)| !tool_names.iter().any(|t| t == tool));
+        }
+        if dropped > 0 {
+            tracing::info!(
+                tools = ?tool_names,
+                dropped,
+                "插件工具撤销：已取消关联待确认与会话级信任"
+            );
+        }
     }
 
     /// 用户确认/拒绝（`confirm_chat_action` command 调）。
     ///
     /// 返回 `true` = 信号已送达；`false` = confirm_id 不存在（超时已清理 / 编号过期）。
     pub async fn resolve(&self, confirm_id: u64, approved: bool) -> bool {
-        if let Some(tx) = self.pending.lock().await.remove(&confirm_id) {
+        if let Some((tx, _tool)) = self.pending.lock().await.remove(&confirm_id) {
             let _ = tx.send(approved);
             true
         } else {
@@ -346,7 +384,7 @@ async fn check_dangerous_confirm(
     }
 
     tracing::warn!(%tool_name, "危险操作被 AI 调用，挂起等待用户确认");
-    let (confirm_id, rx) = pending.register().await;
+    let (confirm_id, rx) = pending.register(tool_name).await;
     match await_dangerous_confirm(
         pending,
         emitter,
@@ -764,7 +802,7 @@ mod tests {
     #[tokio::test]
     async fn pending_confirms_register_and_resolve_approved() {
         let pc = PendingConfirms::new();
-        let (id, rx) = pc.register().await;
+        let (id, rx) = pc.register("t").await;
         // 确认 -> receiver 收 true
         assert!(pc.resolve(id, true).await, "已知 id 应送达");
         assert!(rx.await.unwrap(), "确认应收到 true");
@@ -773,9 +811,33 @@ mod tests {
     #[tokio::test]
     async fn pending_confirms_resolve_rejected() {
         let pc = PendingConfirms::new();
-        let (id, rx) = pc.register().await;
+        let (id, rx) = pc.register("t").await;
         assert!(pc.resolve(id, false).await);
         assert!(!rx.await.unwrap(), "拒绝应收到 false");
+    }
+
+    /// 0.28.1 撤销联动：cancel_for_tools drop 关联 sender（receiver 收 Err），
+    /// 不关联的确认不受影响；会话级信任同步清除。
+    #[tokio::test]
+    async fn pending_confirms_cancel_for_tools_drops_and_untrusts() {
+        let pc = PendingConfirms::new();
+        let (id_revoked, rx_revoked) = pc.register("plugin_x_tool").await;
+        let (id_alive, rx_alive) = pc.register("other_tool").await;
+
+        // 会话级信任预先建立
+        pc.trust("conv1", "plugin_x_tool").await;
+        assert!(pc.is_trusted("conv1", "plugin_x_tool").await);
+
+        pc.cancel_for_tools(&["plugin_x_tool".to_string()]).await;
+
+        // 被撤销工具：sender 已 drop → resolve 落空，receiver 收 Err（不执行）
+        assert!(!pc.resolve(id_revoked, true).await, "撤销后确认不应送达");
+        assert!(rx_revoked.await.is_err(), "等待方应收到通道关闭（不执行）");
+        // 信任已清
+        assert!(!pc.is_trusted("conv1", "plugin_x_tool").await);
+        // 无关工具不受影响
+        assert!(pc.resolve(id_alive, true).await);
+        assert!(rx_alive.await.unwrap());
     }
 
     #[tokio::test]
@@ -788,7 +850,7 @@ mod tests {
     #[tokio::test]
     async fn pending_confirms_resolve_twice_second_fails() {
         let pc = PendingConfirms::new();
-        let (id, _rx) = pc.register().await;
+        let (id, _rx) = pc.register("t").await;
         assert!(pc.resolve(id, true).await, "首次 resolve 成功");
         // 第二次 resolve 同 id -> false（已 remove）
         assert!(!pc.resolve(id, true).await, "重复 resolve 应返回 false");
@@ -797,7 +859,7 @@ mod tests {
     #[tokio::test]
     async fn pending_confirms_discard_drops_sender() {
         let pc = PendingConfirms::new();
-        let (id, rx) = pc.register().await;
+        let (id, rx) = pc.register("t").await;
         pc.discard(id).await; // 超时清理 -> drop sender
         // receiver 收 Err（sender 被 drop）
         assert!(rx.await.is_err(), "discard 后 receiver 应收 Err");
@@ -806,9 +868,9 @@ mod tests {
     #[tokio::test]
     async fn pending_confirms_id_monotonic() {
         let pc = PendingConfirms::new();
-        let (id1, _rx1) = pc.register().await;
-        let (id2, _rx2) = pc.register().await;
-        let (id3, _rx3) = pc.register().await;
+        let (id1, _rx1) = pc.register("t").await;
+        let (id2, _rx2) = pc.register("t").await;
+        let (id3, _rx3) = pc.register("t").await;
         assert!(id2 > id1, "id 应单调递增");
         assert!(id3 > id2, "id 应单调递增");
     }

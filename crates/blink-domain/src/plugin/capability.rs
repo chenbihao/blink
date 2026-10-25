@@ -141,6 +141,14 @@ impl Capability for PluginCapabilityAdapter {
                 detail: "插件已禁用，请先在设置中启用".into(),
             });
         }
+        // 0.28.1 代次复核：本 adapter 绑定的 handle 必须仍是当前快照成员。
+        // 插件更新/卸载发布新集合后，旧 adapter（持旧 Arc）在此拒绝——
+        // 旧确认、旧 schema 不授权新实现，也不能借旧 Arc 复活旧实现。
+        if !plugin_engine.is_active_handle(plugin_id, &self.plugin) {
+            return Err(CapabilityError::InvalidState {
+                detail: "插件已更新或卸载，此工具代次已失效".into(),
+            });
+        }
         let started = std::time::Instant::now();
         let deadline = ctx.deadline.map_or(
             started + std::time::Duration::from_millis(self.plugin.manifest().timeout_ms()),

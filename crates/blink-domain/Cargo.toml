@@ -60,3 +60,5 @@ zeroize = { version = "1.9", features = ["derive"] }
 tracing-subscriber = "0.3"
 keyring-core = "1"
 tempfile = "3"
+# install.rs 测试构造 zip 包（解压实现本体在 blink-infra/plugin_storage）
+zip = "2.2"

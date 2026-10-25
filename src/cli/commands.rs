@@ -81,6 +81,85 @@ pub fn dispatch(cli: Cli) -> i32 {
     ));
     domain_env.set_cap_registry(cap_registry.clone());
 
+    // 0.28.1：CLI 最小插件环境——加载 builtin + 用户目录已安装插件，
+    // 经发布器注册 plugin tool（run/capabilities 可调用）。约束：不启动
+    // WebView/下载/完整搜索；对安装记录只读（不执行 recover 迁移）；
+    // 不复活 stdio MCP（MCP 复用主进程 HTTP，run_mcp_server 保持迁移提示）。
+    {
+        let proxy = if network_config.has_proxy() {
+            Some(network_config.to_policy().plugin_env_tuple())
+        } else {
+            None
+        };
+        let plugins_dir = if cfg!(debug_assertions) {
+            crate::domain::plugin::builtin_plugins_dir()
+        } else {
+            app.path()
+                .resource_dir()
+                .map(|d| d.join("plugins").join("builtin"))
+                .unwrap_or_else(|_| crate::domain::plugin::builtin_plugins_dir())
+        };
+        let mut plugins =
+            crate::domain::plugin::load_builtin_plugins(&plugins_dir, proxy.clone());
+        // 用户目录安装的插件覆盖同 id builtin（与主进程同规则；只读加载）
+        let storage = blink_infra::plugin_storage::PluginStorage::production_root();
+        let installer = crate::domain::plugin::PluginInstaller::new(
+            storage.clone(),
+            env!("CARGO_PKG_VERSION"),
+        );
+        for record in installer.list_installed().unwrap_or_default() {
+            let Some(dir) = installer.active_version_dir(&record.plugin_id) else {
+                continue;
+            };
+            match crate::domain::plugin::PluginManifest::from_path(&dir.join("manifest.json")) {
+                Ok(m) => {
+                    let handle = Arc::new(crate::domain::plugin::PluginHandle::new(
+                        Arc::new(m),
+                        dir.clone(),
+                        proxy.clone(),
+                    ));
+                    handle.set_dirs(crate::domain::plugin::PluginDirs {
+                        data: storage.data_dir(&record.plugin_id).to_string_lossy().into_owned(),
+                        cache: storage.cache_dir(&record.plugin_id).to_string_lossy().into_owned(),
+                        datasets: storage
+                            .datasets_dir(&record.plugin_id)
+                            .to_string_lossy()
+                            .into_owned(),
+                    });
+                    plugins.retain(|p| p.id() != record.plugin_id);
+                    plugins.push(handle);
+                }
+                Err(e) => {
+                    tracing::warn!(plugin = %record.plugin_id, error = %e, "CLI 已安装插件加载失败，跳过");
+                }
+            }
+        }
+        let plugin_engine = Arc::new(crate::domain::plugin::PluginEngine::new(
+            plugins.clone(),
+            pools.config.clone(),
+            proxy,
+        ));
+        tauri::async_runtime::block_on(plugin_engine.init_configs());
+        domain_env.set_plugin_engine(plugin_engine.clone());
+        let router = Arc::new(crate::domain::intent::RuleRouter::new(true));
+        let publisher = crate::domain::plugin::PluginRuntimePublisher::new(
+            plugin_engine,
+            cap_registry.clone(),
+            router,
+        );
+        match tauri::async_runtime::block_on(publisher.publish(plugins)) {
+            Ok(report) => {
+                tracing::debug!(
+                    tools = report.registered_tools,
+                    "CLI 插件 tool 已注册（最小插件环境）"
+                );
+            }
+            Err(e) => {
+                eprintln!("插件集合发布失败（契约校验未通过）: {e}");
+            }
+        }
+    }
+
     // 文件转写 CLI 构造最小 FunASR EngineManager：只使用已安装环境/模型，
     // 不安装、不下载，也不创建 GUI。其他 CLI 命令不承担本地引擎启动成本。
     let cli_engine_service = if matches!(&cli.command, Commands::TranscribeAudio { .. }) {

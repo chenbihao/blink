@@ -47,6 +47,9 @@ pub enum PluginError {
     PluginReturned(PluginErrorPayload),
     #[error("插件忙，请稍后重试")]
     Busy,
+    /// 连续崩溃冷却中（0.28.1 重启预算）。
+    #[error("插件进程连续崩溃，冷却中（约 {retry_in_secs} 秒后自动恢复）")]
+    CrashCooldown { retry_in_secs: u64 },
     /// 协议/IO 错误。
     #[error("IO 错误: {0}")]
     Io(String),
@@ -159,12 +162,17 @@ fn managed_interpreter(
 
 impl PluginProcess {
     /// 拉起进程,挂上 stdout/stderr reader。proxy=(http,https),None=不注入。
+    ///
+    /// `init`（0.28.1 v2 握手）：进程就绪后立即发送的初始化帧——仅
+    /// manifest `protocol_version >= 2` 时由调用方构造，v1 传 None
+    /// （v1 插件不被强发不认识的帧）。
     fn spawn(
         exec_path: &PathBuf,
         work_dir: &PathBuf,
         plugin_id: &str,
         runtime_type: RuntimeType,
         proxy: Option<(String, String)>,
+        init: Option<super::protocol::PluginRequest>,
     ) -> Result<Self, PluginError> {
         // 根据 runtime 类型构造 Command
         let mut cmd = match runtime_type {
@@ -233,6 +241,15 @@ impl PluginProcess {
                 while let Some(id) = cancellations.recv().await {
                     write_message(&stdin, &PluginRequest::Cancel { id }).await;
                 }
+            });
+        }
+
+        // 0.28.1 v2 握手：进程就绪即发初始化帧（有界写，插件可异步应答
+        // initialized；宿主不阻塞等待——业务帧不因握手未回而挂起）。
+        if let Some(frame) = init {
+            let stdin_init = Arc::clone(&stdin);
+            tokio::spawn(async move {
+                write_message(&stdin_init, &frame).await;
             });
         }
 
@@ -312,6 +329,15 @@ impl PluginProcess {
                                     } else {
                                         tracing::debug!(plugin = %id, id = %payload.id, "孤儿 raw_result(无 pending)");
                                     }
+                                }
+                                Ok(PluginUpstreamMessage::Initialized { protocol }) => {
+                                    // 0.28.1 v2 握手应答——握手等待逻辑在 Stage 4 接入；
+                                    // v1 插件永不发此帧，迟到/意外的应答只记录。
+                                    tracing::debug!(
+                                        plugin = %id,
+                                        protocol,
+                                        "收到插件 initialized 握手帧"
+                                    );
                                 }
                                 Err(_) => {
                                     // 向后兼容：尝试旧格式（直接 PluginResponse struct）
@@ -489,6 +515,22 @@ async fn write_message(stdin: &PluginStdin, message: &PluginRequest) {
     };
     let _ = tokio::time::timeout(Duration::from_millis(200), write).await;
 }
+/// 连续崩溃计数与冷却（0.28.1 §3.3 生命周期 6：重启预算/退避）。
+///
+/// 计数信号：上次拉起的进程已死（下次 ensure 时发现）/ 调用报 ProcessClosed。
+/// 成功完成一次调用即清零；达到阈值进入冷却——冷却期内不拉进程，调用
+/// 直接返回 `CrashCooldown`（用户可见，不是静默吞掉）。
+#[derive(Default)]
+struct CrashState {
+    consecutive: u32,
+    cooldown_until: Option<std::time::Instant>,
+}
+
+/// 触发冷却的连续崩溃次数。
+const CRASH_LIMIT: u32 = 3;
+/// 冷却时长。
+const CRASH_COOLDOWN: Duration = Duration::from_secs(30);
+
 /// 一个插件:manifest + 懒启动的进程句柄。
 pub struct PluginHandle {
     manifest: Arc<PluginManifest>,
@@ -498,6 +540,10 @@ pub struct PluginHandle {
     /// 全局代理配置(进程启动时 env 注入),ureq/reqwest 原生读取。运行时可更新。
     proxy: std::sync::Mutex<Option<(String, String)>>,
     query_slots: Arc<Semaphore>,
+    /// v2 握手下发给插件的宿主分配目录（0.28.1；wiring 层注入）。
+    dirs: std::sync::Mutex<Option<super::protocol::PluginDirs>>,
+    /// 连续崩溃计数/冷却。
+    crash: std::sync::Mutex<CrashState>,
 }
 
 impl PluginHandle {
@@ -513,7 +559,47 @@ impl PluginHandle {
             process: Mutex::new(None),
             proxy: std::sync::Mutex::new(proxy),
             query_slots: Arc::new(Semaphore::new(concurrency)),
+            dirs: std::sync::Mutex::new(None),
+            crash: std::sync::Mutex::new(CrashState::default()),
         }
+    }
+
+    /// 注入宿主分配目录（v2 握手用；wiring 在构造后、首次 spawn 前调用）。
+    pub fn set_dirs(&self, dirs: super::protocol::PluginDirs) {
+        *self.dirs.lock().unwrap() = Some(dirs);
+    }
+
+    /// 冷却剩余秒数；None = 未在冷却。
+    fn crash_cooldown_remaining(&self) -> Option<u64> {
+        let state = self.crash.lock().unwrap();
+        state.cooldown_until.map(|until| {
+            until
+                .saturating_duration_since(std::time::Instant::now())
+                .as_secs()
+                .max(1)
+        })
+    }
+
+    /// 记一次崩溃；达到阈值进入冷却。
+    fn record_crash(&self) {
+        let mut state = self.crash.lock().unwrap();
+        state.consecutive += 1;
+        if state.consecutive >= CRASH_LIMIT {
+            state.cooldown_until = Some(std::time::Instant::now() + CRASH_COOLDOWN);
+            tracing::warn!(
+                plugin = %self.manifest.id,
+                consecutive = state.consecutive,
+                cooldown_secs = CRASH_COOLDOWN.as_secs(),
+                "插件进程连续崩溃，进入冷却（重启预算）"
+            );
+        }
+    }
+
+    /// 一次成功调用清零计数。
+    fn record_success(&self) {
+        let mut state = self.crash.lock().unwrap();
+        state.consecutive = 0;
+        state.cooldown_until = None;
     }
 
     pub fn id(&self) -> &str {
@@ -542,17 +628,38 @@ impl PluginHandle {
     /// 懒启动/复用；排队、准备进程、stdin 和结果共用同一总期限。
     async fn ensure_process(&self) -> Result<Arc<PluginProcess>, PluginError> {
         let mut guard = self.process.lock().await;
-        let need_spawn = match guard.as_ref() {
-            None => true,
+        let dead_previous = match guard.as_ref() {
+            None => false,
             Some(p) => !p.is_alive().await,
         };
-        if need_spawn {
+        if dead_previous {
+            // 上次拉起的进程已死（两次调用之间退出）——记崩溃。
+            self.record_crash();
+        }
+        if let Some(secs) = self.crash_cooldown_remaining() {
+            return Err(PluginError::CrashCooldown { retry_in_secs: secs });
+        }
+        if dead_previous || guard.is_none() {
             let exec = self.manifest.exec_path(&self.dir);
             let runtime_type = self.manifest.runtime.r#type;
             tracing::info!(plugin = %self.manifest.id, ?runtime_type, "拉起插件进程");
             let proxy = self.proxy.lock().unwrap().clone();
-            let process =
-                PluginProcess::spawn(&exec, &self.dir, &self.manifest.id, runtime_type, proxy)?;
+            // v2 握手帧：manifest 声明 protocol_version >= 2 才发（v1 保持旧行为）
+            let init = (self.manifest.protocol_version >= 2).then(|| {
+                super::protocol::PluginRequest::Initialize {
+                    protocol: super::protocol::SUPPORTED_PROTOCOL_VERSION,
+                    capabilities: vec!["http_proxy".to_string()],
+                    dirs: self.dirs.lock().unwrap().clone(),
+                }
+            });
+            let process = PluginProcess::spawn(
+                &exec,
+                &self.dir,
+                &self.manifest.id,
+                runtime_type,
+                proxy,
+                init,
+            )?;
             *guard = Some(Arc::new(process));
         }
         Ok(Arc::clone(guard.as_ref().unwrap()))
@@ -588,7 +695,11 @@ impl PluginHandle {
             let proc = self.ensure_process().await?;
             let result = proc.query(query, context, settings, deadline).await;
             if matches!(result, Err(PluginError::ProcessClosed)) {
+                self.record_crash();
                 self.clear_closed_process(&proc).await;
+            }
+            if result.is_ok() {
+                self.record_success();
             }
             result
         };
@@ -629,7 +740,11 @@ impl PluginHandle {
                 .execute_tool_raw(tool_name, arguments, settings, deadline)
                 .await;
             if matches!(result, Err(PluginError::ProcessClosed)) {
+                self.record_crash();
                 self.clear_closed_process(&proc).await;
+            }
+            if result.is_ok() {
+                self.record_success();
             }
             result
         };
@@ -1412,5 +1527,67 @@ mod tests {
             tracing::Level::DEBUG
         );
         assert_eq!(stderr_line_level(""), tracing::Level::DEBUG);
+    }
+
+    // ── 0.28.1 连续崩溃重启预算 ────────────────────────────────────────────
+
+    fn crash_test_handle() -> PluginHandle {
+        let manifest = crate::plugin::manifest::PluginManifest {
+            schema_version: 1,
+            id: "extra.crashy".into(),
+            name: crate::plugin::LocalizableText::Plain("C".into()),
+            version: "1.0".into(),
+            host: None,
+            protocol_version: 1,
+            platforms: vec![],
+            description: crate::plugin::LocalizableText::default(),
+            builtin: false,
+            default_enabled: true,
+            runtime: Default::default(),
+            triggers: vec![],
+            capabilities: vec![],
+            settings_schema: vec![],
+            tools: vec![],
+            pages: vec![],
+            datasets: vec![],
+            args: None,
+        };
+        PluginHandle::new(
+            Arc::new(manifest),
+            std::env::temp_dir(),
+            None,
+        )
+    }
+
+    #[test]
+    fn crash_budget_enters_cooldown_after_three_and_success_resets() {
+        let h = crash_test_handle();
+        // 前两次崩溃：无冷却
+        h.record_crash();
+        h.record_crash();
+        assert!(h.crash_cooldown_remaining().is_none());
+        // 第三次：进入冷却
+        h.record_crash();
+        assert!(h.crash_cooldown_remaining().is_some());
+        // 成功清零，冷却解除
+        h.record_success();
+        assert!(h.crash_cooldown_remaining().is_none());
+        // 再成功一次后两连崩不触发（计数已清）
+        h.record_crash();
+        h.record_crash();
+        assert!(h.crash_cooldown_remaining().is_none());
+    }
+
+    #[test]
+    fn crash_cooldown_error_is_user_visible() {
+        let h = crash_test_handle();
+        for _ in 0..3 {
+            h.record_crash();
+        }
+        let secs = h.crash_cooldown_remaining().unwrap();
+        let err = PluginError::CrashCooldown {
+            retry_in_secs: secs,
+        };
+        assert!(err.to_string().contains("冷却"));
     }
 }
