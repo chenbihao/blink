@@ -156,6 +156,37 @@ pub fn get_ai_config() -> AIConfig {
 
 // ── 单个 Provider ────────────────────────────────────────────────────────
 
+/// OpenAICompatible 端点的兼容方言选择（0.27.14）。
+///
+/// 闭集枚举——首期只启用经验证的 DeepSeek/Moonshot（rig 0.45 `wire::DEEPSEEK`
+/// / `MOONSHOT` dialect，rewrite 行为经 wire 测试钉住）；不开放任意字符串，
+/// 避免未知方言名的解析失败路径。将来扩展新增变体即可。
+///
+/// - `Auto`（默认/旧配置零迁移）：按解析后的 base_url hostname 精确匹配
+///   已知官方端点（`api.deepseek.com` / `api.moonshot.cn|ai`），未知网关
+///   一律通用路径——**不用 URL 子串、显示名或模型名给未知网关套方言**。
+/// - `Generic`：显式通用（禁用 rewrite，哪怕 hostname 命中官方端点）。
+/// - `DeepSeek` / `Moonshot`：显式厂商方言——自建代理转发对应厂商时的覆盖入口。
+///
+/// 方言只表达**兼容协议差异**（请求改写/回传字段），不改变端点：用户 base_url
+/// 与显式 `Route::Chat` 恒保留（见 `factory::build_openai_client`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum CompatDialect {
+    /// 自动——hostname 精确匹配官方端点，未知网关走通用
+    #[default]
+    #[serde(rename = "auto")]
+    Auto,
+    /// 显式通用——OpenAI Chat Completions 通用路径，无 rewrite
+    #[serde(rename = "generic")]
+    Generic,
+    /// 显式 DeepSeek 方言（自建代理覆盖入口）
+    #[serde(rename = "deepseek")]
+    DeepSeek,
+    /// 显式 Moonshot 方言（自建代理覆盖入口）
+    #[serde(rename = "moonshot")]
+    Moonshot,
+}
+
 /// 一个 AI 供应商的配置项。
 ///
 /// **`secret_ref` 是 CM 别名**——`SecretString` 不放这里,序列化到 SQLite / IPC
@@ -176,6 +207,12 @@ pub struct ProviderEntry {
     /// OpenAI 兼容服务(deepseek/moonshot/一元 API 转发)用它。
     #[serde(default)]
     pub base_url: Option<String>,
+
+    /// OpenAICompatible 兼容方言（0.27.14）。仅 `kind = OpenAICompatible` 生效，
+    /// 其余 kind 忽略。`#[serde(default)]`——旧配置缺字段时 Auto，零迁移。
+    /// 解析逻辑见 `ai::compat_dialect::resolve_compat_dialect`（单一真源）。
+    #[serde(default)]
+    pub compat_dialect: CompatDialect,
 
     /// **CM 别名**,不是 raw Key。形如 `"blink/{id}/key"`。
     /// 由 `secret::build_target_name(&id, "key")` 生成,`SecretError::InvalidRef`
@@ -790,6 +827,7 @@ mod tests {
             id: id.to_string(),
             display_name: format!("Test {id}"),
             kind: ProviderKind::OpenAICompatible,
+            compat_dialect: Default::default(),
             base_url: None,
             secret_ref: format!("blink/{id}/key"),
             models: vec![ModelEntry {

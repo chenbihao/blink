@@ -1653,6 +1653,15 @@
                         <input class="input-wide" data-i18n-ph="ai.modal.base_url.ph" id="ai-modal-base-url"
                                type="text"/>
                     </div>
+                    <div class="setting-row" id="ai-modal-compat-dialect-row">
+                        <label class="setting-label" data-i18n="ai.modal.compat_dialect">兼容方言</label>
+                        <select class="input-wide" id="ai-modal-compat-dialect">
+                            <option data-i18n="ai.modal.compat_dialect.auto" value="auto">自动（官方端点识别）</option>
+                            <option data-i18n="ai.modal.compat_dialect.generic" value="generic">通用（不套方言）</option>
+                            <option value="deepseek">DeepSeek</option>
+                            <option value="moonshot">Moonshot</option>
+                        </select>
+                    </div>
                     <div class="setting-row">
                         <label class="setting-label" data-i18n="ai.modal.api_key">API Key</label>
                         <div class="ai-modal-api-key-row">

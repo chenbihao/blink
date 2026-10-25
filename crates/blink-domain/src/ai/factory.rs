@@ -27,6 +27,7 @@ use std::sync::Arc;
 use rig_core::driver::DynModel;
 use rig_core::operation::Completion;
 
+use crate::ai::compat_dialect::{resolve_compat_dialect, ResolvedCompatDialect};
 use crate::ai::provider::{AIError, AIProvider};
 use crate::ai::registry::ProviderFactory;
 use crate::ai::rig_provider::{RigProvider, expose_for_rig};
@@ -102,7 +103,15 @@ impl ProviderFactory for RigFactory {
         //    随 model 引用一路传到 RigProvider::new,由 complete() 做 fallback。
         let provider: Arc<dyn AIProvider> = match entry.kind {
             ProviderKind::OpenAICompatible => {
-                build_openai_compatible(&key_str, entry.base_url.as_deref(), model)?
+                // 0.27.14：方言解析单一真源——Auto 按官方 hostname 精确匹配，
+                // 未知网关恒通用；显式覆盖供自建代理。RigProvider 与 AgentProvider
+                // 两条链共用同一解析结果。
+                let compat = resolve_compat_dialect(
+                    entry.kind,
+                    entry.compat_dialect,
+                    entry.base_url.as_deref(),
+                );
+                build_openai_compatible(&key_str, entry.base_url.as_deref(), model, compat)?
             }
             ProviderKind::AnthropicMessages => {
                 build_anthropic(&key_str, entry.base_url.as_deref(), model)?
@@ -132,9 +141,17 @@ impl ProviderFactory for RigFactory {
 ///
 /// **护栏**：base_url 空一律拒绝--rig 默认落 `api.openai.com`，用户拿着第三方 Key 打去
 /// OpenAI 官方必 401 且极难自诊断（前端已有校验；这里是双重保险，防手动编辑 db 绕过）。
+///
+/// **0.27.14 方言接线**：`compat` 选择 rig 0.45 `Dialect`——DeepSeek/Moonshot 携带
+/// 厂商 rewrite quirks（forced tool choice 处理 / reasoning_content 回传 /
+/// required 降级等），Generic 走通用 Chat Completions。**方言只改协议行为，不改端点**：
+/// 用户 base_url 恒保留（`with_base_url` 覆盖 dialect 默认 URL）、恒显式 `Route::Chat`
+/// （OPENAI dialect 的 completion_route 默认 Responses，DeepSeek/Moonshot 默认 Chat，
+/// 统一显式覆盖防依赖 dialect 默认值）、统一 `LoggingHttpClient`（日志/代理 transport）。
 pub(crate) fn build_openai_client(
     key: &str,
     base_url: Option<&str>,
+    compat: ResolvedCompatDialect,
 ) -> Result<rig_core::providers::openai::OpenAI, AIError> {
     use rig_core::providers::openai;
     let url = base_url.filter(|s| !s.is_empty()).ok_or_else(|| {
@@ -145,10 +162,21 @@ pub(crate) fn build_openai_client(
     // 0.21.16/0.43: 注入 LoggingHttpClient——trace 级别打印真实请求/响应体（wire JSON），
     // 排查 provider 兼容问题（如本地 qwen 思考块）。平时零开销透传。
     // 0.43: OpenAIConfig + connect(http)——client 不再携带 HTTP 泛型参数。
-    // 0.27.1: 显式 Route::Chat——OpenAIConfig::new 默认 OPENAI dialect（completion_route
-    // = Responses），第三方 OpenAICompatible 网关普遍无 /responses 端点会 404。本产品
-    // 协议承诺是 /chat/completions，此处显式覆盖 dialect 默认（wire 测试见 mod wire_tests）。
-    Ok(openai::OpenAIConfig::new(key)
+    // 0.27.1: 显式 Route::Chat——第三方 OpenAICompatible 网关普遍无 /responses 端点会
+    // 404。本产品协议承诺是 /chat/completions，此处显式覆盖 dialect 默认
+    // （wire 测试见 mod wire_tests）。
+    // 0.27.14: with_key(dialect, key) 选择厂商方言——quirks 随 dialect 生效；
+    // with_base_url 之后覆盖 dialect 默认端点，用户填的地址永远生效。
+    let config = match compat {
+        ResolvedCompatDialect::Generic => openai::OpenAIConfig::new(key),
+        ResolvedCompatDialect::DeepSeek => {
+            openai::OpenAIConfig::with_key(&openai::wire::DEEPSEEK, key)
+        }
+        ResolvedCompatDialect::Moonshot => {
+            openai::OpenAIConfig::with_key(&openai::wire::MOONSHOT, key)
+        }
+    };
+    Ok(config
         .with_base_url(url)
         .with_route(openai::Route::Chat)
         .connect(blink_infra::utils::http_log::LoggingHttpClient::from_net()))
@@ -211,11 +239,12 @@ fn build_openai_compatible(
     key: &str,
     base_url: Option<&str>,
     model: &ModelEntry,
+    compat: ResolvedCompatDialect,
 ) -> Result<Arc<dyn AIProvider>, AIError> {
     // **护栏**:base_url 空一律拒绝构造——rig 默认落到 `api.openai.com`,用户拿着
     // 第三方 Key 打去 OpenAI 官方必 401 且极难自诊断(前端已有校验;这里是双重保险,
     // 防止老配置迁移 / 手动编辑 db 绕过前端)。
-    let client = build_openai_client(key, base_url)?;
+    let client = build_openai_client(key, base_url, compat)?;
     let rig_model: DynModel<Completion> = client.completion(&model.id).into();
     Ok(Arc::new(RigProvider::new(
         ProviderKind::OpenAICompatible,
@@ -225,7 +254,7 @@ fn build_openai_compatible(
         model.temperature,
         model.max_tokens,
         &model.custom_parameters,
-        base_url,
+        compat,
         model.reasoning_effort.as_deref(),
         model.thinking_style,
     )))
@@ -247,7 +276,7 @@ fn build_anthropic(
         model.temperature,
         model.max_tokens,
         &model.custom_parameters,
-        base_url,
+        ResolvedCompatDialect::Generic,
         model.reasoning_effort.as_deref(),
         model.thinking_style,
     )))
@@ -273,7 +302,7 @@ fn build_gemini(
         model.temperature,
         model.max_tokens,
         &model.custom_parameters,
-        base_url,
+        ResolvedCompatDialect::Generic,
         model.reasoning_effort.as_deref(),
         model.thinking_style,
     )))
@@ -320,7 +349,7 @@ fn build_ollama(
         model.temperature,
         model.max_tokens,
         &model.custom_parameters,
-        base_url,
+        ResolvedCompatDialect::Generic,
         model.reasoning_effort.as_deref(),
         model.thinking_style,
     )))
@@ -347,6 +376,7 @@ mod tests {
             display_name: "Test".into(),
             kind,
             base_url,
+            compat_dialect: Default::default(),
             secret_ref: "blink/test-provider-uuid/key".into(),
             models: Vec::new(),
             enabled: true,
@@ -563,7 +593,13 @@ pub(super) mod wire_tests {
 
     fn build_provider(base_url: &str) -> Arc<dyn AIProvider> {
         let model = super::tests::sample_model();
-        build_openai_compatible("sk-wire-test", Some(base_url), &model).expect("构造 wire provider")
+        build_openai_compatible(
+            "sk-wire-test",
+            Some(base_url),
+            &model,
+            ResolvedCompatDialect::Generic,
+        )
+        .expect("构造 wire provider")
     }
 
     /// 普通生成走 POST /chat/completions（不是 /responses），body 携带 model 与消息。
@@ -704,4 +740,310 @@ pub(super) mod wire_tests {
             "max_tokens 经 rig 一等参数映射为 options.num_predict（sample 请求 max_tokens=64）"
         );
     }
+
+    // ── 0.27.14 方言接线 wire 测试 ─────────────────────────────────────────
+    //
+    // 钉住三件事（§6.4）：
+    // 1. 方言只改协议行为不改端点——用户 base_url / 显式 Chat 路由 / 统一 transport 恒保留；
+    // 2. rig dialect quirks 经本仓接线真实生效——DeepSeek 思考中 forced tool choice 抑制 +
+    //    reasoning_content 回传、Moonshot required 降级 / 指定单工具本地拒绝；
+    // 3. 未知网关铁律——Auto + 非官方 hostname 一律通用路径，无 rewrite。
+
+    /// DeepSeek/Moonshot 显式方言 + 三种 base_url 形态：保持 Chat 路由、无重复 /v1、
+    /// 请求仍打到用户 base_url（捕获桩），不会被 dialect 默认官方端点改写。
+    #[tokio::test]
+    async fn dialect_keeps_user_base_url_and_chat_route() {
+        use crate::ai::compat_dialect::ResolvedCompatDialect as R;
+        for (dialect, label) in [(R::DeepSeek, "deepseek"), (R::Moonshot, "moonshot")] {
+            for base in ["/v1", "/v1/", ""] {
+                let expect_path = if base.is_empty() {
+                    "/chat/completions"
+                } else {
+                    "/v1/chat/completions"
+                };
+                let (addr, captured) =
+                    spawn_capture_server(vec![chat_completion_response("\"ok\"")]);
+                let model = super::tests::sample_model();
+                let provider = build_openai_compatible(
+                    "sk-wire-test",
+                    Some(&format!("http://{addr}{base}")),
+                    &model,
+                    dialect,
+                )
+                .expect("构造方言 wire provider");
+
+                provider
+                    .complete(sample_wire_request())
+                    .await
+                    .expect("complete 应成功");
+
+                let reqs = captured.lock().unwrap();
+                assert_eq!(
+                    reqs.len(),
+                    1,
+                    "{label} base={base}: 请求必须打到捕获桩——base_url 不得被 dialect 默认端点覆盖"
+                );
+                assert_eq!(
+                    reqs[0].path, expect_path,
+                    "{label} base={base}: 方言不得改变 Chat 路由或产生重复 /v1"
+                );
+            }
+        }
+    }
+
+    /// rig 原生请求 helper——Blink `AIProvider` 接口不表达 tool_choice，
+    /// rewrite 断言经 rig `CompletionRequest` 直驱 wire（构造仍走被测的
+    /// `build_openai_client` 接线点）。
+    async fn post_via_dialect(
+        dialect: crate::ai::compat_dialect::ResolvedCompatDialect,
+        request: rig_core::completion::CompletionRequest,
+        response: Vec<u8>,
+    ) -> (Vec<CapturedRequest>, Result<(), String>) {
+        let (addr, captured) = spawn_capture_server(vec![response]);
+        let client =
+            build_openai_client("sk-wire-test", Some(&format!("http://{addr}/v1")), dialect)
+                .expect("构造方言 client");
+        let model: DynModel<Completion> = client.completion("wire-model").into();
+        let result = model
+            .call(request)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string());
+        (captured.lock().unwrap().clone(), result)
+    }
+
+    /// 带 assistant tool-call 历史的 rig 请求 + additional_params 携带 thinking。
+    fn rig_request_with_tool_history(
+        tool_choice: rig_core::message::ToolChoice,
+        thinking_type: &str,
+    ) -> rig_core::completion::CompletionRequest {
+        use rig_core::message::{
+            AssistantContent, AssistantMessage, Message, ToolCall, ToolFunction, ToolName,
+        };
+        let call = ToolCall::from_wire(
+            "call-wire-1",
+            ToolFunction::new(
+                ToolName::try_from("echo_tool").unwrap(),
+                serde_json::json!({"x":1}),
+            ),
+        );
+        let assistant = Message::Assistant(AssistantMessage::new(vec![
+            AssistantContent::text("先调工具"),
+            AssistantContent::ToolCall(call),
+        ]));
+        let tool_result = Message::tool_result(
+            rig_core::message::CallId::from_wire("call-wire-1"),
+            ToolName::try_from("echo_tool").unwrap(),
+            "42",
+        );
+        let tool = rig_core::completion::ToolDefinition::new(
+            ToolName::try_from("echo_tool").unwrap(),
+            "测试工具",
+            serde_json::json!({"type":"object"}),
+        );
+        let mut request = rig_core::completion::CompletionRequest::new("继续")
+            .messages([assistant, tool_result])
+            .tool(tool)
+            .tool_choice(tool_choice);
+        request.additional_params = Some(serde_json::json!({ "thinking": { "type": thinking_type } }));
+        request
+    }
+
+    fn body_of(req: &CapturedRequest) -> serde_json::Value {
+        serde_json::from_str(&req.body).expect("请求体是 JSON")
+    }
+
+    /// DeepSeek 方言：思考开启时 forced tool choice 被丢弃（官方拒绝该组合），
+    /// assistant 历史（含 tool call）带 `reasoning_content` 回传字段；思考关闭时
+    /// tool_choice 保留。工具调用与工具结果消息本身不被 rewrite 丢弃。
+    #[tokio::test]
+    async fn deepseek_dialect_rewrites_tool_choice_and_replays_reasoning_field() {
+        use rig_core::message::ToolChoice;
+
+        // 思考开启 + required → tool_choice 被 drop
+        let (reqs, result) = post_via_dialect(
+            crate::ai::compat_dialect::ResolvedCompatDialect::DeepSeek,
+            rig_request_with_tool_history(ToolChoice::Required, "enabled"),
+            chat_completion_response("\"done\""),
+        )
+        .await;
+        result.expect("请求应成功发出");
+        let body = body_of(&reqs[0]);
+        assert!(
+            body.get("tool_choice").is_none(),
+            "DeepSeek 思考开启时 forced tool choice 必须被 rewrite 丢弃: {}",
+            body["tool_choice"]
+        );
+        assert_eq!(body["thinking"]["type"], "enabled", "thinking 参数原样随 wire");
+
+        // assistant 历史带 reasoning_content（空串占位——quirk: 每条 assistant 消息恒带）
+        let assistant_msgs: Vec<&serde_json::Value> = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["role"] == "assistant")
+            .collect();
+        assert!(!assistant_msgs.is_empty(), "assistant 历史必须回放");
+        for msg in &assistant_msgs {
+            assert!(
+                msg.get("reasoning_content").is_some(),
+                "DeepSeek 方言下 assistant 消息应带 reasoning_content 回传字段: {msg}"
+            );
+        }
+        // 工具调用与结果不丢——带 tools 定义时历史轮次以标准 tool_calls 数组 +
+        // tool 消息回放（无 tools 时 rig 才降级为文本注记），rewrite 不得丢弃
+        assert!(
+            assistant_msgs.iter().any(|m| m
+                .get("tool_calls")
+                .is_some_and(|t| !t.as_array().unwrap().is_empty())),
+            "assistant 工具调用必须完整回放: {}",
+            body["messages"]
+        );
+        assert!(
+            body["messages"].as_array().unwrap().iter().any(|m| m["role"] == "tool"
+                && m["tool_call_id"] == "call-wire-1"
+                && m["content"].as_str().is_some_and(|c| c.contains("42"))),
+            "工具结果消息必须完整回放（tool_call_id + 内容）: {}",
+            body["messages"]
+        );
+
+        // 思考关闭 → tool_choice 保留（不误伤）
+        let (reqs, _) = post_via_dialect(
+            crate::ai::compat_dialect::ResolvedCompatDialect::DeepSeek,
+            rig_request_with_tool_history(ToolChoice::Required, "disabled"),
+            chat_completion_response("\"done\""),
+        )
+        .await;
+        let body = body_of(&reqs[0]);
+        assert_eq!(
+            body["tool_choice"], "required",
+            "DeepSeek 思考关闭时 tool_choice 不应被丢弃"
+        );
+    }
+
+    /// Moonshot 方言：`required` 降级为 `auto` 并追加引导消息；指定单工具本地拒绝
+    /// （请求不发出，桩收不到任何请求，错误信息明确）。
+    #[tokio::test]
+    async fn moonshot_dialect_coerces_required_and_rejects_specific_choice() {
+        use rig_core::message::{ToolChoice, ToolName};
+
+        // required → auto + 引导消息
+        let (reqs, result) = post_via_dialect(
+            crate::ai::compat_dialect::ResolvedCompatDialect::Moonshot,
+            rig_request_with_tool_history(ToolChoice::Required, "enabled"),
+            chat_completion_response("\"ok\""),
+        )
+        .await;
+        result.expect("required 请求应成功（降级为 auto 后发出）");
+        let body = body_of(&reqs[0]);
+        assert_eq!(
+            body["tool_choice"], "auto",
+            "Moonshot 不支持 required，必须降级为 auto"
+        );
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(
+            messages.last().unwrap()["role"],
+            "user",
+            "降级时应追加引导 user 消息"
+        );
+        let steering = match &messages.last().unwrap()["content"] {
+            serde_json::Value::String(text) => text.clone(),
+            serde_json::Value::Array(parts) => parts
+                .iter()
+                .filter_map(|p| p["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("
+"),
+            other => format!("{other}"),
+        };
+        assert!(
+            steering.contains("tool"),
+            "引导消息应提示模型选用工具: {steering}"
+        );
+
+        // 指定单工具 → 本地拒绝，请求不发出
+        let (reqs, result) = post_via_dialect(
+            crate::ai::compat_dialect::ResolvedCompatDialect::Moonshot,
+            rig_request_with_tool_history(
+                ToolChoice::Specific {
+                    function_names: vec![ToolName::try_from("echo_tool").unwrap()],
+                },
+                "enabled",
+            ),
+            chat_completion_response("\"never\""),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "Moonshot 指定单工具必须本地拒绝，错误: {:?}",
+            result
+        );
+        assert!(
+            result.as_ref().unwrap_err().contains("forcing a specific tool"),
+            "拒绝错误信息应指向根因: {:?}",
+            result
+        );
+        assert!(
+            reqs.is_empty(),
+            "本地拒绝的请求不得发出（桩不应收到请求）"
+        );
+    }
+
+    /// 未知网关铁律：Auto 解析为 Generic（捕获桩 host 非官方域名）时，
+    /// body 不带任何方言 rewrite 痕迹——tool_choice 原样保留、assistant 无
+    /// reasoning_content 注入。
+    #[tokio::test]
+    async fn generic_dialect_sends_unrewritten_body() {
+        use rig_core::message::ToolChoice;
+        // 显式 Generic 直驱（Auto → Generic 的解析由 compat_dialect 单测钉住）
+        let (reqs, result) = post_via_dialect(
+            crate::ai::compat_dialect::ResolvedCompatDialect::Generic,
+            rig_request_with_tool_history(ToolChoice::Required, "enabled"),
+            chat_completion_response("\"ok\""),
+        )
+        .await;
+        result.expect("通用路径请求应成功");
+        let body = body_of(&reqs[0]);
+        assert_eq!(
+            body["tool_choice"], "required",
+            "通用路径不做 tool_choice rewrite"
+        );
+        for msg in body["messages"].as_array().unwrap() {
+            if msg["role"] == "assistant" {
+                assert!(
+                    msg.get("reasoning_content").is_none(),
+                    "通用路径不注入 reasoning_content: {msg}"
+                );
+            }
+        }
+    }
+
+    /// 共享 usage 解析：DeepSeek `prompt_cache_hit_tokens` 在**通用**方言下同样可读
+    /// （rig `normalized_usage` lenient 读取，与方言无关）——证明缓存 token
+    /// 不是接入方言才有的能力，不将其包装成方言收益。
+    #[tokio::test]
+    async fn deepseek_cache_hit_tokens_readable_without_dialect() {
+        let body = r#"{"id":"wire-c","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"prompt_cache_hit_tokens":64,"completion_tokens":4,"total_tokens":104}}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .into_bytes();
+        let (addr, captured) = spawn_capture_server(vec![response]);
+        let provider = build_provider(&format!("http://{addr}/v1"));
+
+        let resp = provider
+            .complete(sample_wire_request())
+            .await
+            .expect("complete 应成功");
+        assert_eq!(
+            resp.usage.cached_input_tokens, 64,
+            "缓存命中 token 经共享解析可读（非方言专属）"
+        );
+        assert!(resp.usage.reported);
+        let reqs = captured.lock().unwrap();
+        assert_eq!(reqs.len(), 1);
+    }
 }
+

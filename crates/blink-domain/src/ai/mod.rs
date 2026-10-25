@@ -18,6 +18,7 @@ pub mod agent_provider;
 pub mod attachment;
 pub mod chat_service;
 pub mod cli_recognizer;
+pub mod compat_dialect;
 pub mod factory;
 pub mod gating;
 pub mod memory;

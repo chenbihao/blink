@@ -1731,7 +1731,7 @@ impl ChatService {
                     Some(model_display),
                     thinking_supports_effort(
                         r.provider.kind,
-                        r.provider.base_url.as_deref(),
+                        crate::ai::compat_dialect::resolve_for_entry(&r.provider),
                         &r.model.id,
                         r.model.thinking_style,
                     ),

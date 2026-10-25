@@ -827,6 +827,7 @@ export function openAIProviderModal(editProviderId) {
         $("ai-modal-preset").value = guessPresetForProvider(p.kind, p.base_url);
         $("ai-modal-display-name").value = p.display_name || "";
         $("ai-modal-base-url").value = p.base_url || "";
+        $("ai-modal-compat-dialect").value = p.compat_dialect || "auto";
         $("ai-modal-api-key").value = "";
         $("ai-modal-api-key").placeholder = t("ai.modal.api_key.ph.edit");
         $("ai-modal-api-key").classList.remove("has-secret-hint");
@@ -856,6 +857,7 @@ export function openAIProviderModal(editProviderId) {
         $("ai-modal-kind").value = "openai_compatible";
         $("ai-modal-display-name").value = "";
         $("ai-modal-base-url").value = "";
+        $("ai-modal-compat-dialect").value = "auto";
         $("ai-modal-api-key").value = "";
         $("ai-modal-api-key").placeholder = t("ai.modal.api_key.ph");
         $("ai-modal-api-key").classList.remove("has-secret-hint");
@@ -871,10 +873,19 @@ export function openAIProviderModal(editProviderId) {
         testResult.classList.add('hidden');
         testResult.textContent = "";
     }
+    updateCompatDialectRowVisible();
     const errEl = $("ai-modal-error");
     if (errEl) errEl.textContent = "";
     overlay.classList.remove('hidden');
     setTimeout(() => $("ai-modal-display-name")?.focus(), 40);
+}
+
+/** 0.27.14：兼容方言行仅对 OpenAICompatible 协议显示——其余协议后端忽略该字段。 */
+function updateCompatDialectRowVisible() {
+    const row = document.getElementById("ai-modal-compat-dialect-row");
+    if (!row) return;
+    const kind = document.getElementById("ai-modal-kind")?.value;
+    row.classList.toggle("hidden", kind !== "openai_compatible");
 }
 
 export function closeAIProviderModal() {
@@ -896,6 +907,7 @@ export async function saveNewProviderFromModal() {
     const baseUrl = $("ai-modal-base-url").value.trim();
     const apiKey = $("ai-modal-api-key").value.trim();
     const overlay = $("ai-modal-overlay");
+    const compatDialect = $("ai-modal-compat-dialect")?.value || "auto";
     const editProviderId = overlay?.dataset?.editProviderId || null;
 
     if (!displayName) {
@@ -911,6 +923,7 @@ export async function saveNewProviderFromModal() {
         await saveEditedProvider(editProviderId, {
             displayName,
             baseUrl,
+            compatDialect,
             apiKey,
             errEl,
             selectedModels: aiState._providerSelectedModels
@@ -920,6 +933,7 @@ export async function saveNewProviderFromModal() {
             kind,
             displayName,
             baseUrl,
+            compatDialect,
             apiKey,
             errEl,
             selectedModels: aiState._providerSelectedModels
@@ -927,7 +941,7 @@ export async function saveNewProviderFromModal() {
     }
 }
 
-async function saveNewProvider({kind, displayName, baseUrl, apiKey, errEl, selectedModels}) {
+async function saveNewProvider({kind, displayName, baseUrl, compatDialect, apiKey, errEl, selectedModels}) {
     // 0.17.11: 恢复 UUID（0.14.6 之前的做法）——slug 方案在重命名/删重建场景会导致密钥失配
     const providerId = (crypto.randomUUID && crypto.randomUUID())
         || `p-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -961,6 +975,8 @@ async function saveNewProvider({kind, displayName, baseUrl, apiKey, errEl, selec
         kind,
         display_name: displayName,
         base_url: baseUrl || null,
+        // 0.27.14：兼容方言（仅 OpenAICompatible 生效；Auto 官方 hostname 精确识别）
+        compat_dialect: kind === "openai_compatible" ? compatDialect : "auto",
         secret_ref: `blink/${providerId}/key`,
         models: newModels,
         enabled: true, // 0.16.0: 新建 provider 默认启用
@@ -1002,7 +1018,7 @@ async function saveNewProvider({kind, displayName, baseUrl, apiKey, errEl, selec
     renderAITierBanner();
 }
 
-async function saveEditedProvider(providerId, {displayName, baseUrl, apiKey, errEl, selectedModels}) {
+async function saveEditedProvider(providerId, {displayName, baseUrl, compatDialect, apiKey, errEl, selectedModels}) {
     const cfg = aiState.currentAIConfig;
     const idx = (cfg.providers || []).findIndex((p) => p.id === providerId);
     if (idx < 0) {
@@ -1038,7 +1054,14 @@ async function saveEditedProvider(providerId, {displayName, baseUrl, apiKey, err
         }));
     const mergedModels = [...(old.models || []), ...newModels];
 
-    const updated = {...old, display_name: displayName, base_url: baseUrl || null, models: mergedModels};
+    const updated = {
+        ...old,
+        display_name: displayName,
+        base_url: baseUrl || null,
+        // 0.27.14：仅 OpenAICompatible 保存方言；其他协议保留原值
+        compat_dialect: old.kind === "openai_compatible" ? compatDialect : (old.compat_dialect || "auto"),
+        models: mergedModels
+    };
     cfg.providers = [
         ...cfg.providers.slice(0, idx),
         updated,

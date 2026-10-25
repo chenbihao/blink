@@ -60,6 +60,7 @@ use crate::ai::message::{
     CompletionRequest, CompletionResponse, FinishReasonKind, Role, ToolCall, Usage,
 };
 use crate::ai::provider::{AIError, AIProvider, StreamChunk};
+use crate::ai::compat_dialect::ResolvedCompatDialect;
 use crate::ai::thinking::thinking_request_patch;
 use crate::config::ai_config::{
     CustomParam, DEFAULT_AI_HARD_TIMEOUT_MS, ProviderKind, ThinkingStyle,
@@ -96,7 +97,8 @@ impl RigProvider {
     ///
     /// `default_timeout_ms` 从 `AIConfig::slo_hard_timeout_ms` 或统一 20 秒默认值来。
     /// `default_temperature / default_max_tokens / custom_parameters` 从 `ModelEntry` 来。
-    /// `base_url` 仅用于按供应商判定 thinking 关闭补丁（DeepSeek vs OpenAI 兼容）。
+    /// `compat` 已解析的兼容方言（0.27.14）——用于按供应商判定 thinking 关闭补丁
+    /// （DeepSeek vs OpenAI 兼容），与 factory 方言接线同一解析真源。
     /// `reasoning_effort` 透传 `ModelEntry.reasoning_effort`——0.21.22.1 前主窗口
     /// 硬编码 None，per-model 的思考强度配置对主窗口不生效。
     #[allow(dead_code, clippy::too_many_arguments)] // 0.9.2 Phase 5b 由 factory 消费
@@ -108,7 +110,7 @@ impl RigProvider {
         default_temperature: Option<f32>,
         default_max_tokens: Option<u32>,
         custom_parameters: &[CustomParam],
-        base_url: Option<&str>,
+        compat: ResolvedCompatDialect,
         reasoning_effort: Option<&str>,
         thinking_style: Option<ThinkingStyle>,
     ) -> Self {
@@ -120,7 +122,7 @@ impl RigProvider {
         //   与对话窗口 agent_provider 同一份语义）。
         let thinking_off_patch = thinking_request_patch(
             kind,
-            base_url,
+            compat,
             &model_id,
             false,
             reasoning_effort,
@@ -834,7 +836,12 @@ mod tests {
         reasoning_effort: Option<&str>,
     ) -> Option<serde_json::Value> {
         let client =
-            crate::ai::factory::build_openai_client("sk-test", Some(base_url)).unwrap();
+            crate::ai::factory::build_openai_client(
+                "sk-test",
+                Some(base_url),
+                crate::ai::compat_dialect::ResolvedCompatDialect::Generic,
+            )
+            .unwrap();
         let rig_model: DynModel<Completion> = client.completion(model_id).into();
         RigProvider::new(
             ProviderKind::OpenAICompatible,
@@ -844,7 +851,7 @@ mod tests {
             None,
             None,
             &[],
-            Some(base_url),
+            crate::ai::compat_dialect::ResolvedCompatDialect::Generic,
             reasoning_effort,
             None,
         )

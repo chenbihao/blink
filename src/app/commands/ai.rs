@@ -804,7 +804,7 @@ pub fn get_chat_models(app: tauri::AppHandle) -> Vec<ChatModelOption> {
                 is_selected,
                 supports_effort_levels: crate::domain::ai::thinking::thinking_supports_effort(
                     provider.kind,
-                    provider.base_url.as_deref(),
+                    crate::domain::ai::compat_dialect::resolve_for_entry(provider),
                     &model.id,
                     model.thinking_style,
                 ),
@@ -1023,7 +1023,7 @@ pub fn get_ephemeral_models(app: tauri::AppHandle) -> Vec<ChatModelOption> {
                 is_selected,
                 supports_effort_levels: crate::domain::ai::thinking::thinking_supports_effort(
                     provider.kind,
-                    provider.base_url.as_deref(),
+                    crate::domain::ai::compat_dialect::resolve_for_entry(provider),
                     &model.id,
                     model.thinking_style,
                 ),

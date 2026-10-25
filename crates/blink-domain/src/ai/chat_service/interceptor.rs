@@ -106,7 +106,7 @@ pub(super) async fn run_intercepted_stream(
     let can_retry_effort = reasoning_effort.as_ref().is_some_and(|e| !e.is_empty())
         && thinking_supports_effort(
             resolved.provider.kind,
-            resolved.provider.base_url.as_deref(),
+            crate::ai::compat_dialect::resolve_for_entry(&resolved.provider),
             &resolved.model.id,
             resolved.model.thinking_style,
         );

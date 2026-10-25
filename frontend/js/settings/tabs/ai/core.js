@@ -511,6 +511,9 @@ function bindAIEvents() {
     $("ai-modal-save")?.addEventListener("click", saveNewProviderFromModal);
     $("ai-modal-kind")?.addEventListener("change", () => {
         $("ai-modal-preset").value = "custom";
+        // 0.27.14：兼容方言行仅 OpenAICompatible 显示
+        const row = $("ai-modal-compat-dialect-row");
+        if (row) row.classList.toggle("hidden", $("ai-modal-kind").value !== "openai_compatible");
     });
     $("ai-modal-base-url")?.addEventListener("input", () => {
         const bu = $("ai-modal-base-url").value.trim();

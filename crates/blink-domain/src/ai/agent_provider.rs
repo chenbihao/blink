@@ -83,6 +83,7 @@ use crate::config::ai_config::{ModelEntry, ProviderEntry, ProviderKind};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::ai::compat_dialect::{resolve_compat_dialect, ResolvedCompatDialect};
 use crate::ai::factory::{
     build_anthropic_client, build_gemini_client, build_ollama_client, build_openai_client,
 };
@@ -185,10 +186,12 @@ pub struct AgentProvider {
     memory: Arc<dyn ChatMemory>,
     /// 当前模型显示名（供 Done chunk 携带，前端在气泡左下角显示）
     model_name: String,
-    /// 供应商身份——请求时按 `kind` + `base_url` + `model_id` 计算 thinking 补丁
+    /// 供应商身份——请求时按 `kind` + `compat` + `model_id` 计算 thinking 补丁
     /// （见 `thinking_request_patch`）。返回 None 的供应商（仅 Gemini）开关不生效。
     kind: ProviderKind,
-    base_url: Option<String>,
+    /// 0.27.14：构造时解析的兼容方言（单一真源 `resolve_compat_dialect`）——
+    /// thinking 判定与 wire 方言接线共享同一结论（原 base_url 子串启发式由其取代）。
+    compat: ResolvedCompatDialect,
     model_id: String,
     /// 0.21.22: per-model 思考控件形态逃生口——构造时从 `ModelEntry.thinking_style` 固化
     thinking_style: Option<ThinkingStyle>,
@@ -269,14 +272,16 @@ impl AgentProvider {
 
         // 供应商身份固化，供请求时计算 thinking 补丁（各供应商格式见 thinking_request_patch）
         let kind = entry.kind;
-        let base_url = entry.base_url.clone();
         let model_id = model.id.clone();
+        // 0.27.14：方言在构造期解析一次——wire 构造与请求期 thinking 判定共享。
+        let compat =
+            resolve_compat_dialect(entry.kind, entry.compat_dialect, entry.base_url.as_deref());
         // 0.21.22: per-model thinking_style 逃生口
         let thinking_style = model.thinking_style;
 
         let agent = match entry.kind {
             ProviderKind::OpenAICompatible => {
-                let client = build_openai_client(&key_str, entry.base_url.as_deref())?;
+                let client = build_openai_client(&key_str, entry.base_url.as_deref(), compat)?;
                 let m = client.completion(&model.id);
                 ChatAgent::Agent(build_agent(
                     m,
@@ -342,7 +347,7 @@ impl AgentProvider {
             memory,
             model_name: model_display_name(entry, model),
             kind,
-            base_url,
+            compat,
             model_id,
             thinking_style,
             custom_params: super::rig_provider::build_custom_params_json(&model.custom_parameters),
@@ -384,7 +389,7 @@ impl AgentProvider {
         // 按 provider + 开关状态 + 显式等级 + per-model style 计算 thinking 补丁
         let thinking_patch = thinking_request_patch(
             self.kind,
-            self.base_url.as_deref(),
+            self.compat,
             &self.model_id,
             thinking_enabled,
             reasoning_effort.as_deref(),
@@ -465,7 +470,7 @@ impl AgentProvider {
         // 思考强制关：reasoning_effort = None
         let thinking_patch = thinking_request_patch(
             self.kind,
-            self.base_url.as_deref(),
+            self.compat,
             &self.model_id,
             thinking_enabled,
             reasoning_effort.as_deref(),
@@ -1500,6 +1505,7 @@ mod tests {
             id: "test".into(),
             display_name: "Test".into(),
             kind: ProviderKind::OllamaHttp,
+            compat_dialect: Default::default(),
             base_url: Some("http://localhost:11434".into()),
             secret_ref: String::new(),
             models: Vec::new(),
@@ -1547,6 +1553,7 @@ mod tests {
             id: "wire".into(),
             display_name: "wire".into(),
             kind: ProviderKind::OpenAICompatible,
+            compat_dialect: Default::default(),
             base_url: Some(format!("http://{addr}/v1")),
             secret_ref: String::new(),
             models: vec![],
@@ -1624,4 +1631,146 @@ mod tests {
         assert_eq!(summary["max_tokens"], 600);
         assert_eq!(summary["top_p"], 0.7);
     }
+
+    /// 0.27.14：对话窗口链（AgentProvider）消费显式 DeepSeek 方言——自建代理场景
+    /// （host 非官方 + compat_dialect=DeepSeek）。多轮工具回放：
+    /// 请求1 携带 thinking.type=enabled（thinking 判定与方言对齐）与 tools；
+    /// 工具执行后请求2 的 assistant 历史带 tool_calls + reasoning_content 回传字段，
+    /// tool 结果以 tool 消息回放——不丢 reasoning、不丢工具结果。
+    #[tokio::test]
+    async fn agent_deepseek_dialect_tool_roundtrip() {
+        use crate::ai::factory::wire_tests::spawn_capture_server;
+        use crate::config::ai_config::CompatDialect;
+        use rig_agent::tool::ToolOutput;
+
+        // SSE 桩1：tool_calls delta + tool_calls finish；桩2：文本 + stop
+        let tool_call_sse = {
+            let frame = |delta: &str, finish: &str| {
+                format!(
+                    r#"{{"id":"wire-tc","object":"chat.completion.chunk","created":1,"model":"m","choices":[{{"index":0,"delta":{delta},"finish_reason":{finish}}}]}}"#
+                )
+            };
+            let body = format!(
+                "data: {}
+
+data: {}
+
+data: [DONE]
+
+",
+                frame(
+                    r#"{"role":"assistant","tool_calls":[{"index":0,"id":"call-ds-1","type":"function","function":{"name":"echo_tool","arguments":"{\"x\":1}"}}]}"#,
+                    "null"
+                ),
+                frame("{}", "\"tool_calls\""),
+            );
+            format!(
+                "HTTP/1.1 200 OK
+Content-Type: text/event-stream
+Connection: close
+Content-Length: {}
+
+{}",
+                body.len(),
+                body
+            )
+            .into_bytes()
+        };
+        let (addr, captured) =
+            spawn_capture_server(vec![tool_call_sse, crate::ai::factory::wire_tests::sse_stream_response()]);
+
+        let entry = ProviderEntry {
+            id: "ds-wire".into(),
+            display_name: "DS proxy".into(),
+            kind: ProviderKind::OpenAICompatible,
+            compat_dialect: CompatDialect::DeepSeek,
+            base_url: Some(format!("http://{addr}/v1")),
+            secret_ref: String::new(),
+            models: vec![],
+            enabled: true,
+            created_at: 0,
+        };
+        let model = ModelEntry {
+            id: "deepseek-v4-flash".into(),
+            display_name: "DS".into(),
+            enabled: true,
+            context_window: None,
+            input_price_per_million: None,
+            output_price_per_million: None,
+            temperature: None,
+            max_tokens: None,
+            capabilities: vec![],
+            reasoning_effort: None,
+            thinking_style: None,
+            custom_parameters: vec![],
+        };
+        let tool = DynamicTool::new(
+            rig_core::message::ToolName::try_from("echo_tool").unwrap(),
+            "回显工具",
+            serde_json::json!({"type":"object"}),
+            |_args| Box::pin(async { Ok(ToolOutput::text("echoed")) }),
+        );
+        let provider = AgentProvider::with_key(
+            &entry,
+            &model,
+            vec![tool],
+            vec![],
+            "",
+            Arc::new(EphemeralConversationMemory::new()),
+            "ds-wire-key",
+        )
+        .unwrap();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            provider.stream_prompt("ds1", "hi", &[], tx, true, None),
+        )
+        .await
+        .expect("bounded agent loop");
+        let mut done = false;
+        while let Some(chunk) = rx.recv().await {
+            assert!(!matches!(chunk, ChatStreamChunk::Error { .. }), "{chunk:?}");
+            done |= matches!(chunk, ChatStreamChunk::Done { .. });
+        }
+        assert!(done, "agent loop 应走完工具轮 + 回答轮");
+
+        let requests = captured.lock().unwrap();
+        assert_eq!(requests.len(), 2, "工具调用 → 工具结果 → 再回答共两轮请求");
+        let first: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+        // thinking 与方言对齐：显式 DeepSeek 方言 → thinking.type（而非 reasoning_effort）
+        assert_eq!(
+            first["thinking"]["type"], "enabled",
+            "DeepSeek 方言链路的思考开关应发 thinking.type: {first}"
+        );
+        assert!(
+            first["tools"].as_array().is_some_and(|t| !t.is_empty()),
+            "工具定义随首轮请求下发"
+        );
+        let second: serde_json::Value = serde_json::from_str(&requests[1].body).unwrap();
+        let assistant: Vec<&serde_json::Value> = second["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["role"] == "assistant")
+            .collect();
+        assert!(
+            assistant
+                .iter()
+                .any(|m| m.get("reasoning_content").is_some()),
+            "DeepSeek 方言下 assistant 历史必须带 reasoning_content 回传: {second}"
+        );
+        assert!(
+            assistant.iter().any(|m| m
+                .get("tool_calls")
+                .is_some_and(|t| !t.as_array().unwrap().is_empty())),
+            "assistant 工具调用必须完整回放: {second}"
+        );
+        assert!(
+            second["messages"].as_array().unwrap().iter().any(|m| m["role"] == "tool"
+                && m["tool_call_id"] == "call-ds-1"),
+            "工具结果必须以 tool 消息回放（不丢结果）: {second}"
+        );
+    }
 }
+

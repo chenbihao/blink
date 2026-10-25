@@ -76,11 +76,21 @@ fn compute_provider_fingerprint(p: &ProviderEntry, secret_epoch: u64) -> String 
         ProviderKind::OllamaHttp => "ollama",
     };
     let bu = p.base_url.as_deref().unwrap_or("");
+    // 0.27.14：解析后的兼容方言纳入 fingerprint——方言切换（含 Auto→显式）后
+    // provider 强制重建，新请求走新 rewrite；在途请求保持旧快照跑完。
+    // Auto 的解析结果由 base_url 决定，bu 已入 key，但显式切换（如 Generic→
+    // DeepSeek，base_url 不变）必须靠此段失效缓存。
+    let dialect = crate::ai::compat_dialect::resolve_compat_dialect(
+        p.kind,
+        p.compat_dialect,
+        p.base_url.as_deref(),
+    )
+    .fingerprint_tag();
     // 0.27.4：network generation 纳入 fingerprint——代理配置变化（net 工厂
     // 换快照）后所有 provider 强制重建，新请求取新代理 client；在途请求持有
     // 旧实例继续跑完（§3.5 当前流不打断）。net 工厂未注入策略时恒为 0，测试稳定。
     let net_gen = blink_infra::net::generation();
-    format!("{kind}|{bu}|e{secret_epoch}|n{net_gen}")
+    format!("{kind}|{bu}|d{dialect}|e{secret_epoch}|n{net_gen}")
 }
 
 /// ChatService 构造 AgentProvider 所需的配置快照。
@@ -456,6 +466,7 @@ mod tests {
                     id: pid.into(),
                     display_name: pid.into(),
                     kind: ProviderKind::OpenAICompatible,
+                    compat_dialect: Default::default(),
                     base_url: None,
                     secret_ref: format!("blink/{pid}/key"),
                     models: models
@@ -661,6 +672,34 @@ mod tests {
     }
 
     #[test]
+    /// 0.27.14：方言进入 fingerprint——显式切换方言（base_url 不变）必须失效
+    /// provider 缓存；Auto 解析结果与 base_url 联动（bu 已入 key）。
+    #[test]
+    fn fingerprint_changes_with_compat_dialect() {
+        use crate::config::ai_config::CompatDialect;
+        let mut entry = make_config(vec![("p1", vec!["m1"])], None)
+            .providers
+            .pop()
+            .unwrap();
+        entry.base_url = Some("https://proxy.example.com/v1".into());
+
+        entry.compat_dialect = CompatDialect::Auto;
+        let auto = compute_provider_fingerprint(&entry, 0);
+        // 代理 host 未知 → Auto 解析为 Generic
+        assert!(auto.contains("|dg|"), "Auto + 未知网关 → 通用段: {auto}");
+
+        entry.compat_dialect = CompatDialect::DeepSeek;
+        let deepseek = compute_provider_fingerprint(&entry, 0);
+        assert!(deepseek.contains("|dds|"), "显式 DeepSeek → ds 段: {deepseek}");
+        assert_ne!(auto, deepseek, "方言切换必须改变 fingerprint（失效缓存）");
+
+        // Auto + 官方 hostname → 解析为 DeepSeek，与显式 DeepSeek 同段
+        entry.base_url = Some("https://api.deepseek.com/v1".into());
+        entry.compat_dialect = CompatDialect::Auto;
+        let auto_official = compute_provider_fingerprint(&entry, 0);
+        assert!(auto_official.contains("|dds|"), "Auto + 官方端点 → ds 段: {auto_official}");
+    }
+
     fn resolve_entries_uses_same_fingerprint_as_provider_pool() {
         let f = Arc::new(CountingFactory::new());
         let cfg = make_config(vec![("p1", vec!["m1"])], Some(("p1", "m1")));
