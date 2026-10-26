@@ -28,6 +28,7 @@ import {cancelIsImageEditorSession} from './ss-editor-policy.js';
 import {hideSsTooltip} from './ss-tooltip.js';
 import {cancelActiveOcr, hideSelLoading, showTransientHint} from './ss-ocr.js';
 import {normalizeError} from '../shared/tauri.js';
+import {enterGifRecordMode} from './ss-gif-prep.js';
 
 /**
  * 清理画布视觉状态——在输出完成（copy/pin/save/cancel）、失焦、单击隐藏等
@@ -62,6 +63,11 @@ export function cleanupCanvasVisuals() {
     annot.clearOverlay();
     // 隐藏 UI 元素
     if (toolbar) toolbar.classList.add('hidden');
+    // 0.28.7：GIF 录制准备栏一并收起（复用窗口时防残留；node 测试 mock 的
+    // document 可能只有 documentElement，按能力探测）
+    if (typeof document !== 'undefined' && typeof document.getElementById === 'function') {
+        document.getElementById('gif-prep-bar')?.classList.add('hidden');
+    }
     if (sizeHint) sizeHint.classList.add('hidden');
     if (typeof ss._cleanupSessionVisuals === 'function') {
         try {
@@ -161,6 +167,17 @@ export function doCopyFullScreen() {
             ss.errorHint.classList.remove('hidden');
             ss.sent = false;
         });
+}
+
+/**
+ * 0.28.7：进入 GIF 录制准备模式（两段式第一段）。
+ *
+ * 工具栏原地切换成录制准备栏（帧率/光标配置），选区可拖动移动；
+ * 点「开始录制」（ss-gif-prep.js）才真正启动后端流水线。
+ */
+export function doGifRecord() {
+    if (!ss.selCss || ss.sent || !ensureOutputReady()) return;
+    enterGifRecordMode();
 }
 
 export function doPinSelection() {

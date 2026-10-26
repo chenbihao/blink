@@ -2552,3 +2552,49 @@ html.eyedropper-picking * {
 
 #stroke-width-trigger-icon { border-bottom: 2px solid currentColor; }
 #stroke-width-trigger-icon[data-stroke-style="dashed"] { border-bottom-style: dashed; }
+
+
+/* ── 0.28.7：GIF 录制准备栏（工具栏原地切换的「录制模式」视图） ──────────
+   视觉与 #toolbar 同款（同底色/边框/圆角/阴影/字号），定位由 JS 复制
+   #toolbar 的 left/top——原地切换无跳变。 */
+#gif-prep-bar {
+    position: fixed;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 8px;
+    background: rgba(30, 30, 30, 0.92);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 10px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+    z-index: var(--z-dropdown);
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+
+.gif-prep-field {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 18px;
+    color: #d8d8de;
+    cursor: default;
+}
+
+.gif-prep-field select {
+    background: rgba(255, 255, 255, 0.08);
+    color: #e8e8ec;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 6px;
+    padding: 2px 6px;
+    font-size: 16px;
+}
+
+.gif-prep-field input[type="checkbox"] {
+    accent-color: #4a9eff;
+    width: 15px;
+    height: 15px;
+}
+
+.gif-prep-cursor {
+    cursor: pointer;
+}

@@ -97,6 +97,7 @@ import {
     updateOverlayButtonsActive,
 } from "./ss-ocr.js";
 import {updateOcrButtonBusy} from "./ss-ocr-busy.js";
+import {bindGifPrepBar, exitGifRecordMode, isGifPrepActive} from './ss-gif-prep.js';
 import {
     cleanupCanvasVisuals,
     compositeSelection,
@@ -574,6 +575,9 @@ function resetState() {
     if (staleSubPanel) staleSubPanel.classList.add('hidden');
     const scrollButton = document.getElementById('btn-scroll');
     if (scrollButton) scrollButton.hidden = false;
+    // 0.28.7：GIF 录制按钮同长截图恢复显式重置
+    const gifButton = document.getElementById('btn-gif');
+    if (gifButton) gifButton.hidden = false;
     // 0.20.x：恢复 pin 来源编辑时隐藏的「钉图」按钮
     const pinButton = document.getElementById('btn-pin');
     if (pinButton) pinButton.hidden = false;
@@ -1186,6 +1190,9 @@ function enterCanvasImageEditor(cropData, pw, ph, source = IMAGE_SOURCE.LONG_SCR
     ss.editorSession.beginCanvasSource(source, baseCanvas);
     const scrollButton = document.getElementById('btn-scroll');
     if (scrollButton) scrollButton.hidden = source === IMAGE_SOURCE.CLIPBOARD;
+    // 0.28.7：GIF 录制只对实时屏幕区域有意义（剪贴板/编辑器会话无对应区域）
+    const gifButton = document.getElementById('btn-gif');
+    if (gifButton) gifButton.hidden = source === IMAGE_SOURCE.CLIPBOARD;
     // 0.20.x：pin 来源编辑器的勾按钮已是「替换回原窗口」，再保留「钉图」会制造第二份 pin，隐藏掉。
     const pinButton = document.getElementById('btn-pin');
     if (pinButton) pinButton.hidden = source === IMAGE_SOURCE.PIN;
@@ -2255,6 +2262,11 @@ document.addEventListener('keydown', (e) => {
 
     if (e.key === 'Escape') {
         e.preventDefault();
+        // 0.28.7：GIF 录制准备模式——ESC 先退回截图标注模式
+        if (isGifPrepActive()) {
+            exitGifRecordMode();
+            return;
+        }
         // 0.15.7：长截图采集阶段——ESC 先退出长截图模式
         if (isScrollCaptureActive()) {
             exitScrollCapture().catch(() => {
@@ -2419,6 +2431,8 @@ window.addEventListener('blur', () => {
 // ════════════════════════════════════════════════════════════
 
 bindToolbar();
+// 0.28.7：GIF 录制准备栏（两段式录制第一段）
+bindGifPrepBar();
 // 0.23.19：自定义 tooltip——原生 title 提示在多屏混合 DPI 下会漂到别的屏幕
 initSsTooltip();
 

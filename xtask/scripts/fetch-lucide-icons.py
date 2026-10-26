@@ -90,6 +90,11 @@ ICON_LIST = [
     "pipette",            # 取色按钮（0.15.12：吸管图标）
     "gallery-horizontal", # 长截图（旧，保留兼容）
     "gallery-vertical",   # 长截图（0.15.7：纵向画廊图标）
+    "video",              # GIF 录制（0.28.7：摄像机图标）
+    "chevron-left",       # GIF 编辑器翻页/步进（0.28.7）
+    "chevron-right",      # GIF 编辑器翻页/步进（0.28.7）
+    "chevrons-left",      # GIF 编辑器回首页（0.28.7）
+    "chevrons-right",     # GIF 编辑器去末页（0.28.7）
     "gallery-vertical-end", # 长截图自动滚动
     "rectangle-vertical",   # 长截图方向-纵向
     "rectangle-horizontal", # 长截图方向-横向

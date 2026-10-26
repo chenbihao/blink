@@ -8,6 +8,7 @@ pub mod command_error; // 0.14.7 W3：IPC 边界的结构化错误协议
 pub mod commands;
 pub mod config;
 pub mod config_sync_service; // 0.28.6：WebDAV 配置同步应用服务（SyncLocalEnv 实现）
+pub mod gif_service; // 0.28.7：GIF 录制编排（会话/控制条/编辑时间轴/导出分派）
 pub mod domain_env; // 0.14.6 §2.2：TauriDomainEnv——DomainEnv trait 的 Tauri 实现
 pub mod editor; // 0.23.1：单 EditorSession 服务（会话身份/窗口绑定/保存分派）
 pub mod editor_draft; // 修复：编辑器恢复草稿存储（原子持久化 + 单调 revision 水位）

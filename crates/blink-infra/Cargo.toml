@@ -19,6 +19,10 @@ dirs-next = "2.0"
 futures = "0.3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 gif = "0.14"
+# zstd: GIF 录制素材块快速无损压缩（0.28.7；经 zip 传递依赖已在树，零新增编译）
+zstd = "0.13"
+# color_quant: GIF 全局调色板 NeuQuant（0.28.7；gif crate 同款传递依赖）
+color_quant = "1.1"
 image-webp = "0.2"
 keyring = { version = "4", features = ["v1"] }
 # keyring-core: secret/store.rs 生产代码直接使用（v2 命名的 Entry::new_with_modifiers target modifier，

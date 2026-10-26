@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8"/>
+    <title>Blink GIF Region Handle</title>
+    <link href="css/entries/gif-region.css" rel="stylesheet"/>
+</head>
+<body>
+<!--
+  0.28.7 GIF 录制区域拖动柄（gif-region-handle 窗口）。
+  - 悬挂在范围框上边缘中央（区域外，不遮挡被录区域内容）；
+    按住拖动 = 移动整个录制区域（位置热更新，尺寸不变）。
+  - 不用系统窗口拖动（-webkit-app-region 会把窗口交给系统移动循环，
+    位置事件回传链路长且松手时机不可控）——pointer 事件自行累计位移，
+    rAF 节流上报目标区域坐标，后端同步更新采集区域 + 范围框 + 本柄位置。
+-->
+<div class="handle-grip" id="handle-grip" title="拖动移动录制区域">
+    <svg aria-hidden="true" class="icon">
+        <use href="#icon-move-up-right"/>
+    </svg>
+</div>
+<script type="module">
+    import {ensureSpriteLoaded} from '../js/shared/icon.js';
+    import {invoke} from '../js/shared/tauri.js';
+
+    ensureSpriteLoaded();
+
+    const grip = document.getElementById('handle-grip');
+    let dragging = false;
+    let startX = 0;
+    let startY = 0;
+    // 起点：后端在创建本窗口时经 URL query 注入区域初始坐标
+    const params = new URLSearchParams(location.search);
+    let regionX = parseInt(params.get('x') || '0', 10);
+    let regionY = parseInt(params.get('y') || '0', 10);
+    let rafPending = false;
+
+    function report() {
+        rafPending = false;
+        invoke('gif_move_recording_region', {x: regionX, y: regionY}).catch(() => {});
+    }
+
+    grip.addEventListener('pointerdown', ev => {
+        if (ev.button !== 0) return;
+        dragging = true;
+        startX = ev.screenX;
+        startY = ev.screenY;
+        grip.setPointerCapture(ev.pointerId);
+        ev.preventDefault();
+    });
+    grip.addEventListener('pointermove', ev => {
+        if (!dragging) return;
+        // 物理 → CSS 坐标换算：regionX/Y 是物理像素，pointer 是 CSS px
+        const dpr = window.devicePixelRatio || 1;
+        regionX += Math.round((ev.screenX - startX) * dpr);
+        regionY += Math.round((ev.screenY - startY) * dpr);
+        startX = ev.screenX;
+        startY = ev.screenY;
+        if (!rafPending) {
+            rafPending = true;
+            requestAnimationFrame(report);
+        }
+    });
+    const endDrag = ev => {
+        if (!dragging) return;
+        dragging = false;
+        try {grip.releasePointerCapture(ev.pointerId);} catch {}
+        report();
+    };
+    grip.addEventListener('pointerup', endDrag);
+    grip.addEventListener('pointercancel', endDrag);
+</script>
+</body>
+</html>

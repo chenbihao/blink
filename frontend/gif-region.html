@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8"/>
+    <title>Blink GIF Region</title>
+    <link href="css/entries/gif-region.css" rel="stylesheet"/>
+</head>
+<body>
+<!--
+  0.28.7 GIF 录制范围指示框（gif-region 窗口）。
+  - 窗口比录制区域外扩 REGION_BORDER px，边框画在窗口最外圈——边框内边缘
+    正好落在录制区域边界上，**不进入录制画面**（控制条/范围框均不入成品）。
+  - 全程鼠标穿透（set_ignore_cursor_events）+ 不抢焦点：被录应用的交互
+    完全不受影响。
+  - 唯一 JS：按 devicePixelRatio 把边框宽度校正为 3 物理像素（CSS px 随
+    DPI 放大会让边框内边缘侵入录制区域——手测曾录到边框入画即此因）。
+-->
+<div id="region-frame"></div>
+<script>
+    {
+        const frame = document.getElementById('region-frame');
+        const apply = () => {
+            // 3 物理像素 = 3 / devicePixelRatio CSS 像素（该窗口所在显示器）
+            frame.style.borderWidth = `${3 / (window.devicePixelRatio || 1)}px`;
+        };
+        apply();
+        window.addEventListener('resize', apply);
+    }
+</script>
+</body>
+</html>

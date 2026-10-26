@@ -1,0 +1,134 @@
+/* ── GIF 录制控制条 entry（0.28.7）────────────────────────────────────
+   加载顺序铁则：reset → tokens → themes → base → components → views */
+
+@import '../base/reset.css';
+@import '../tokens/index.css';
+@import '../themes/dark.css';
+@import '../themes/light.css';
+@import '../themes/gruvbox.css';
+@import '../themes/neutral.css';
+@import '../themes/nvchad.css';
+@import '../themes/genshin.css';
+@import '../base/typography.css';
+@import '../components/icon.css';
+
+/* 控制条：无边框置顶小窗，不抢被录应用焦点 */
+html, body {
+    height: 100%;
+    overflow: hidden;
+    user-select: none;
+}
+
+body {
+    /* 与截图工具栏同款视觉（rgba(30,30,30,.92) + 15% 白边 + 10px 圆角），
+       工具栏→准备栏→控制条全程原地切换时观感一致 */
+    background: rgba(30, 30, 30, 0.92);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 10px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+}
+
+#gif-control {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    height: 100%;
+    padding: 0 14px;
+    -webkit-app-region: drag; /* 整条可拖动微调位置（仍避让选区由用户把控） */
+}
+
+.state {
+    min-width: 120px;
+    display: flex;
+    align-items: center;
+}
+
+.countdown {
+    font-size: 30px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: var(--accent, #e6b450);
+}
+
+.rec-line {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.rec-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: #e05555;
+    animation: rec-pulse 1.2s ease-in-out infinite;
+}
+
+.rec-dot.paused {
+    animation: none;
+    background: var(--text-muted, #8a8a94);
+}
+
+@keyframes rec-pulse {
+    0%, 100% {opacity: 1;}
+    50% {opacity: 0.35;}
+}
+
+.rec-time {
+    font-size: 17px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-primary, #e8e8ec);
+}
+
+.rec-frames {
+    font-size: 12px;
+    color: var(--text-muted, #8a8a94);
+    font-variant-numeric: tabular-nums;
+}
+
+.actions {
+    display: flex;
+    gap: 6px;
+    -webkit-app-region: no-drag;
+}
+
+.ctl-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    height: 34px;
+    min-width: 34px;
+    padding: 0 8px;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-secondary, #c8c8cf);
+    cursor: pointer;
+    font-size: 13px;
+}
+
+.ctl-btn:hover {
+    background: var(--bg-hover, rgba(255, 255, 255, 0.08));
+}
+
+.ctl-btn .icon {
+    width: 16px;
+    height: 16px;
+}
+
+.ctl-primary {
+    background: #4a9eff;
+    color: #fff;
+    font-weight: 600;
+    padding: 0 14px;
+}
+
+.ctl-primary:hover {
+    background: #5faeff;
+}
+
+.ctl-primary:hover {
+    background: var(--accent-strong, #f0c36b);
+}

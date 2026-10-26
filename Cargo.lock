@@ -596,7 +596,7 @@ dependencies = [
 
 [[package]]
 name = "blink"
-version = "0.28.6"
+version = "0.28.7"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -775,6 +775,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "chrono",
+ "color_quant",
  "cpal",
  "dirs-next",
  "futures",
@@ -809,6 +810,7 @@ dependencies = [
  "winreg 0.55.0",
  "zeroize",
  "zip 2.4.2",
+ "zstd",
 ]
 
 [[package]]

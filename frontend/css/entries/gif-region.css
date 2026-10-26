@@ -1,0 +1,52 @@
+/* ── GIF 录制范围指示框 entry（0.28.7）────────────────────────────────
+   透明窗口内画一圈录制边框；加载顺序铁则同其他 entry（此处仅 reset 即可，
+   无文本/组件，最小化样式面）。 */
+
+@import '../base/reset.css';
+
+html, body {
+    height: 100%;
+    background: transparent;
+    overflow: hidden;
+}
+
+/* 边框画在窗口最外圈：窗口本身已比录制区域外扩 REGION_BORDER（后端 3 物理像素），
+   边框内边缘 = 录制区域边界，不入录制画面。颜色与截图选区一致（#4a9eff）——
+   从框选到录制边框视觉连续，无红蓝切换。
+   边框宽度由 JS 按 devicePixelRatio 校正为 3 物理像素（CSS px 会随 DPI 放大
+   导致内边缘侵入录制区域——手测曾录到红边即此因）。 */
+#region-frame {
+    width: 100%;
+    height: 100%;
+    box-sizing: border-box;
+    border: 3px solid #4a9eff;
+    border-radius: 2px;
+    box-shadow: inset 0 0 0 1px rgba(74, 158, 255, 0.35);
+}
+
+
+/* ── 录制区域拖动柄（gif-region-handle 窗口本体，0.28.7） ────────────────
+   挂在范围框上边缘中央；整窗可拖（窗口本身就这一块，不穿透）。 */
+html, body {height: auto;}
+
+.handle-grip {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px;
+    height: 22px;
+    background: rgba(30, 30, 30, 0.92);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-bottom: none;
+    border-radius: 8px 8px 0 0;
+    cursor: grab;
+    color: #d8d8de;
+    -webkit-app-region: no-drag;
+}
+
+.handle-grip:active {cursor: grabbing;}
+
+.handle-grip .icon {
+    width: 13px;
+    height: 13px;
+}

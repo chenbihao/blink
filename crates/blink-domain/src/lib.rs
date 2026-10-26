@@ -17,6 +17,7 @@ pub mod editor; // 0.23.1：内容编辑器域（SourceDescriptor/会话类型/�
 pub mod event; // 0.14.6 §2.2 / 0.21.14：领域环境抽象（EventPort + CapabilityEnv，domain 去 tauri）
 pub mod event_names; // 0.21.14：事件名常量（真源在 blink-infra，此处 re-export）
 pub mod feature_catalog; // 0.21.4：功能目录聚合层
+pub mod gif; // 0.28.7：GIF 时间轴非破坏编辑模型（录制预算/过载在 infra::gif，采集工程侧）
 pub mod intent;
 pub mod mcp; // 0.13.0：MCP client（消费外部 tool，包装进 Tool 适配层）
 pub mod ocr; // 0.22.4：OCR 领域协议（config/error/layout/types 已下沉 blink-infra）

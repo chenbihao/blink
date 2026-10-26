@@ -3,6 +3,7 @@
 pub mod data;
 pub mod event_names; // 0.21.14：事件名常量（从 domain 下沉，消除 infra→domain 反向依赖）
 pub mod local_engine; // 0.22.1：ManagedProcess 受管子进程生命周期与日志管道
+pub mod gif; // 0.28.7：GIF 短演示录制（采集 worker/素材压缩存储/流式编码）
 pub mod managed_runtime; // 0.26.14：托管外部运行时分发（Everything asset-lock + 安装事务）
 pub mod net; // 0.27.4：统一网络策略工厂（代理快照 + generation + 分类 client）
 pub mod platform;

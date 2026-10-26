@@ -1,0 +1,318 @@
+/* ── GIF 编辑器 entry（0.28.7）────────────────────────────────────────
+   加载顺序铁则：reset → tokens → themes → base → components → views */
+
+@import '../base/reset.css';
+@import '../tokens/index.css';
+@import '../themes/dark.css';
+@import '../themes/light.css';
+@import '../themes/gruvbox.css';
+@import '../themes/neutral.css';
+@import '../themes/nvchad.css';
+@import '../themes/genshin.css';
+@import '../base/typography.css';
+@import '../components/icon.css';
+@import '../components/button.css';
+
+html, body {
+    height: 100%;
+    overflow: hidden;
+}
+
+body {
+    background: var(--bg-base, #16161a);
+    color: var(--text-primary, #e8e8ec);
+}
+
+#gif-editor {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+}
+
+/* ── 顶栏 ── */
+.topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+}
+
+.topbar .title {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    font-size: 15px;
+    font-weight: 600;
+}
+
+.topbar .meta {
+    font-size: 12px;
+    font-weight: 400;
+    color: var(--text-muted, #8a8a94);
+}
+
+/* ── 预览 ── */
+.preview {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
+.preview-stage {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 0;
+    padding: 12px;
+    background:
+        repeating-conic-gradient(rgba(255, 255, 255, 0.03) 0% 25%, transparent 0% 50%)
+        50% / 24px 24px;
+}
+
+#preview-canvas {
+    max-width: 100%;
+    max-height: 100%;
+    background: #000;
+    image-rendering: auto;
+    border-radius: 4px;
+}
+
+.preview-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    border-top: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+    font-variant-numeric: tabular-nums;
+}
+
+.preview-pos, .preview-dur {
+    font-size: 13px;
+    color: var(--text-secondary, #c8c8cf);
+}
+
+.total-dur {
+    font-size: 12px;
+    color: var(--text-muted, #8a8a94);
+}
+
+.spacer { flex: 1; }
+
+/* ── 时间轴 ── */
+.timeline {
+    border-top: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+}
+
+.timeline-scroll {
+    overflow-x: auto;
+    padding: 10px 12px 4px;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+
+/* 时间轴横向滚动条（暗色自定义，替代原生样式——同 chord-screenshot 基准） */
+.timeline-scroll::-webkit-scrollbar {
+    height: 10px;
+}
+
+.timeline-scroll::-webkit-scrollbar-track {
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 5px;
+    margin: 0 4px;
+}
+
+.timeline-scroll::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.18);
+    border-radius: 5px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+}
+
+.timeline-scroll::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.32);
+    background-clip: padding-box;
+    border: 2px solid transparent;
+}
+
+/* 连续时间轴：容器 relative + 帧槽 absolute（虚拟化——只保留可视区 DOM，
+   总宽由 sizer 撑起；槽宽按会话宽高比固定） */
+.frame-strip {
+    position: relative;
+    height: 72px;
+    width: max-content; /* 由 JS 设总宽（frameCount × 槽宽） */
+}
+
+.frame-thumb {
+    position: absolute;
+    top: 0;
+    border: 2px solid transparent;
+    border-radius: 6px;
+    cursor: pointer;
+    padding: 0;
+    background: none;
+    overflow: hidden;
+    line-height: 0;
+    height: 68px;
+}
+
+.frame-thumb img {
+    height: 64px;
+    border-radius: 4px;
+    display: block;
+    background: #000;
+}
+
+.frame-thumb.selected {
+    border-color: var(--accent, #e6b450);
+}
+
+.frame-thumb.out-of-range {
+    opacity: 0.32;
+}
+
+.frame-thumb .frame-tag {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    font-size: 10px;
+    line-height: 1.4;
+    padding: 0 4px;
+    border-radius: 3px;
+    background: rgba(0, 0, 0, 0.65);
+    color: #eee;
+    font-variant-numeric: tabular-nums;
+}
+
+.frame-thumb .hold-tag {
+    position: absolute;
+    bottom: 2px;
+    right: 2px;
+    font-size: 10px;
+    line-height: 1.4;
+    padding: 0 4px;
+    border-radius: 3px;
+    background: var(--accent, #e6b450);
+    color: #1e1e22;
+}
+
+.timeline-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px 10px;
+}
+
+.page-ind {
+    font-size: 12px;
+    min-width: 56px;
+    text-align: center;
+    color: var(--text-muted, #8a8a94);
+    font-variant-numeric: tabular-nums;
+}
+
+/* ── 参数区 ── */
+.params {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    padding: 10px 16px;
+    border-top: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+}
+
+.param {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--text-secondary, #c8c8cf);
+}
+
+.param select {
+    background: var(--bg-elevated, #1e1e22);
+    color: var(--text-primary, #e8e8ec);
+    border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.1));
+    border-radius: 6px;
+    padding: 4px 8px;
+    font-size: 13px;
+}
+
+/* ── 导出对话框 ── */
+dialog {
+    border: none;
+    border-radius: 12px;
+    background: var(--bg-elevated, #1e1e22);
+    color: var(--text-primary, #e8e8ec);
+    padding: 20px;
+    min-width: 420px;
+}
+
+dialog::backdrop {
+    background: rgba(0, 0, 0, 0.5);
+}
+
+dialog h3 {
+    font-size: 15px;
+    margin-bottom: 14px;
+}
+
+.form-row {
+    margin-bottom: 12px;
+    display: flex;
+    gap: 12px;
+}
+
+.form-row label {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 13px;
+    flex: 1;
+    color: var(--text-secondary, #c8c8cf);
+}
+
+.path-row {
+    display: flex;
+    gap: 6px;
+}
+
+.path-row input {
+    flex: 1;
+    background: var(--bg-base, #16161a);
+    border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.1));
+    border-radius: 6px;
+    padding: 6px 8px;
+    color: var(--text-primary, #e8e8ec);
+    font-size: 12px;
+}
+
+dialog select {
+    background: var(--bg-base, #16161a);
+    color: var(--text-primary, #e8e8ec);
+    border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.1));
+    border-radius: 6px;
+    padding: 6px 8px;
+}
+
+.progress-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 12px;
+    font-size: 12px;
+    color: var(--text-muted, #8a8a94);
+}
+
+progress {
+    flex: 1;
+    height: 8px;
+}
+
+.dialog-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 8px;
+}

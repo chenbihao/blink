@@ -1265,6 +1265,9 @@ fn setup_app(app: &mut tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error:
     app.manage(dataset_installer.clone());
     // 0.28.5：官方插件中心目录缓存（内存 TTL + 磁盘降级回放）
     app.manage(std::sync::Arc::new(app::commands::PluginCatalogState::default()));
+    // 0.28.7：GIF 录制服务 + 素材 TTL 清理（阻塞 IO，放后台线程）
+    app.manage(std::sync::Arc::new(app::gif_service::GifService::new()));
+    tauri::async_runtime::spawn_blocking(app::gif_service::GifService::startup_cleanup);
     // 0.28.2：插件独立窗口面（会话表 + 窗口编排入口；必须在任何插件窗口打开前管理）
     app.manage(std::sync::Arc::new(app::plugin_surface::PluginSurface::new()));
 
@@ -2107,6 +2110,22 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
         // 0.28.5：官方插件中心（目录 + 从目录下载安装）
         app::commands::get_plugin_catalog,
         app::commands::install_plugin_from_catalog,
+        app::commands::gif_start_recording,
+        app::commands::gif_pause_recording,
+        app::commands::gif_resume_recording,
+        app::commands::gif_stop_recording,
+        app::commands::gif_cancel_recording,
+        app::commands::gif_move_recording_region,
+        app::commands::gif_recorder_state,
+        app::commands::gif_list_sessions,
+        app::commands::gif_discard_session,
+        app::commands::gif_get_session,
+        app::commands::gif_editor_current,
+        app::commands::gif_get_frames,
+        app::commands::gif_edit,
+        app::commands::gif_export,
+        app::commands::gif_export_cancel,
+        app::commands::gif_open_containing_folder,
         app::commands::install_dataset_from_catalog,
         // 0.28.6：固定范围 WebDAV 配置同步（设置/测试/手动同步/首次初始化/覆盖重置）
         app::commands::get_sync_settings,

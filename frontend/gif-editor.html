@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8"/>
+    <title>Blink GIF 编辑器</title>
+    <link href="css/entries/gif-editor.css" rel="stylesheet"/>
+</head>
+<body>
+<!--
+  0.28.7 GIF 编辑器（gif-editor 窗口，单例复用）。
+  - 会话：加载后 `gif_editor_current` 拉取；复用窗口换会话走
+    `blink://gif-editor-session` 事件。
+  - 预览：canvas 逐帧播放（帧按需 `gif_get_frames` 解码，PNG base64）；
+    时间轴分页缩略图懒加载，不整段驻内存。
+  - 编辑：全部非破坏（后端 domain Timeline 投影）；本页只发命令 + 重拉视图。
+  - 导出：dialog 选路径 → `gif_export`（进度事件）→ 打开所在文件夹。
+-->
+<div id="gif-editor">
+    <!-- 顶栏：会话信息 + 导出 -->
+    <header class="topbar">
+        <div class="title">
+            <span id="session-title">GIF 编辑器</span>
+            <span class="meta" id="session-meta"></span>
+        </div>
+        <div class="topbar-actions">
+            <button class="btn" id="btn-export" title="导出 GIF 文件" type="button">
+                <svg aria-hidden="true" class="icon"><use href="#icon-save"/></svg>
+                <span>导出</span>
+            </button>
+        </div>
+    </header>
+
+    <!-- 预览区 -->
+    <section class="preview" id="preview-pane">
+        <div class="preview-stage" id="preview-stage">
+            <canvas id="preview-canvas"></canvas>
+            <div class="preview-empty hidden" id="preview-empty">暂无帧</div>
+        </div>
+        <div class="preview-bar">
+            <button class="btn btn-icon" id="btn-prev" title="上一帧" type="button">
+                <svg aria-hidden="true" class="icon"><use href="#icon-chevron-left"/></svg>
+            </button>
+            <button class="btn btn-icon" id="btn-play" title="播放/暂停预览" type="button">
+                <svg aria-hidden="true" class="icon"><use href="#icon-play"/></svg>
+                <svg aria-hidden="true" class="icon hidden"><use href="#icon-pause"/></svg>
+            </button>
+            <button class="btn btn-icon" id="btn-next" title="下一帧" type="button">
+                <svg aria-hidden="true" class="icon"><use href="#icon-chevron-right"/></svg>
+            </button>
+            <span class="preview-pos" id="preview-pos">0 / 0</span>
+            <span class="preview-dur" id="preview-dur"></span>
+            <span class="spacer"></span>
+            <span class="total-dur" id="total-dur">总时长 0.0s</span>
+        </div>
+    </section>
+
+    <!-- 时间轴：全量连续缩略图（虚拟化渲染——只建可视区 DOM，滚动懒解码；
+         单击选中 / Shift 范围 / Ctrl 切换 / 右键删除） -->
+    <section class="timeline" id="timeline-pane">
+        <div class="timeline-scroll" id="timeline-scroll">
+            <div class="frame-strip" id="frame-strip"></div>
+        </div>
+        <div class="timeline-bar">
+            <span class="page-ind" id="frame-count-ind">0 帧</span>
+            <span class="spacer"></span>
+            <button class="btn" id="btn-trim-start" title="把当前预览帧设为起点" type="button">设为起点</button>
+            <button class="btn" id="btn-trim-end" title="把当前预览帧设为终点" type="button">设为终点</button>
+            <button class="btn" id="btn-delete-frame" title="删除选中帧（时长并入前一帧）" type="button">
+                <svg aria-hidden="true" class="icon"><use href="#icon-trash-2"/></svg>
+                <span>删帧</span>
+            </button>
+            <button class="btn btn-icon" id="btn-undo" title="撤销" type="button">
+                <svg aria-hidden="true" class="icon"><use href="#icon-undo-2"/></svg>
+            </button>
+            <button class="btn btn-icon" id="btn-redo" title="重做" type="button">
+                <svg aria-hidden="true" class="icon"><use href="#icon-redo-2"/></svg>
+            </button>
+            <button class="btn" id="btn-reset" title="重置全部编辑" type="button">重置</button>
+        </div>
+    </section>
+
+    <!-- 参数区：速度/停留/循环 -->
+    <section class="params">
+        <label class="param">
+            <span>速度</span>
+            <select id="sel-speed">
+                <option value="0.5">0.5×</option>
+                <option value="1" selected>1×</option>
+                <option value="1.5">1.5×</option>
+                <option value="2">2×</option>
+                <option value="4">4×</option>
+            </select>
+        </label>
+        <label class="param">
+            <span>当前帧停留</span>
+            <select id="sel-hold">
+                <option value="0" selected>清除</option>
+                <option value="500">+0.5s</option>
+                <option value="1000">+1s</option>
+                <option value="2000">+2s</option>
+            </select>
+        </label>
+        <label class="param">
+            <span>循环</span>
+            <select id="sel-loop">
+                <option value="" selected>无限</option>
+                <option value="1">1 次</option>
+                <option value="3">3 次</option>
+            </select>
+        </label>
+    </section>
+</div>
+
+<!-- 导出对话框 -->
+<dialog id="export-dialog">
+    <form method="dialog">
+        <h3>导出 GIF</h3>
+        <div class="form-row">
+            <label>目标文件
+                <div class="path-row">
+                    <input id="export-path" readonly type="text"/>
+                    <button class="btn" id="btn-pick-path" type="button">选择…</button>
+                </div>
+            </label>
+        </div>
+        <div class="form-row">
+            <label>尺寸
+                <select id="export-size">
+                    <option value="" selected>原始</option>
+                    <option value="640">宽 ≤640</option>
+                    <option value="480">宽 ≤480</option>
+                    <option value="320">宽 ≤320</option>
+                </select>
+            </label>
+            <label>质量
+                <select id="export-quality">
+                    <option value="high">高</option>
+                    <option value="medium" selected>中</option>
+                    <option value="low">低（最快）</option>
+                </select>
+            </label>
+        </div>
+        <div class="progress-row hidden" id="export-progress-row">
+            <progress id="export-progress" max="100" value="0"></progress>
+            <span id="export-progress-text">编码中…</span>
+        </div>
+        <div class="dialog-actions">
+            <button class="btn" id="btn-export-cancel-req" type="button">取消导出</button>
+            <button class="btn" id="btn-export-close" type="button">关闭</button>
+            <button class="btn btn-primary" id="btn-export-confirm" type="button">导出</button>
+        </div>
+    </form>
+</dialog>
+
+<script src="js/gif/editor.js" type="module"></script>
+</body>
+</html>

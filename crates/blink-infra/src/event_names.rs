@@ -301,4 +301,17 @@ impl EventNames {
     /// - `phase: "done"`：安装提交完成（前端随后拉取状态刷新列表）；
     ///   `failed` 附用户可读 `error`。
     pub const PLUGIN_CENTER_PROGRESS: &str = "blink://plugin-center-progress";
+
+    // ── GIF 短演示录制（0.28.7）──
+    /// 录制状态广播（倒计时/录制中/暂停/停止）：payload
+    /// `{ phase: "countdown"|"recording"|"paused"|"stopping"|"idle",
+    ///    sessionId?, countdownMs?, elapsedMs?, frames?, paused }`。
+    /// 控制条窗口与服务层共用；250ms 节流。
+    pub const GIF_RECORDER_STATE: &str = "blink://gif-recorder-state";
+    /// GIF 导出进度：payload `{ sessionId, stage: "encoding"|"done"|"failed"|"cancelled",
+    ///    framesDone, framesTotal, error?, stats? }`。
+    pub const GIF_EXPORT_PROGRESS: &str = "blink://gif-export-progress";
+    /// 复用 GIF 编辑器窗口时定向推送要打开的会话。初始会话由页面加载后
+    /// `gif_editor_current` 拉取（ready/pull 模式）。
+    pub const GIF_EDITOR_SESSION: &str = "blink://gif-editor-session";
 }

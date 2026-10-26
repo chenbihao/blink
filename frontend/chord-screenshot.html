@@ -485,6 +485,12 @@
                 <use href="#icon-gallery-vertical"/>
             </svg>
         </button>
+        <!-- 0.28.7：录制 GIF——按当前选区录制短演示（3 秒倒计时后开始） -->
+        <button class="tool-btn" id="btn-gif" title="录制 GIF（选区范围，3 秒倒计时）">
+            <svg aria-hidden="true" class="icon">
+                <use href="#icon-video"/>
+            </svg>
+        </button>
         <button class="tool-btn" id="btn-save" title="保存为文件">
             <svg aria-hidden="true" class="icon">
                 <use href="#icon-save"/>
@@ -512,6 +518,37 @@
             </svg>
         </button>
     </div>
+</div>
+
+<!-- 0.28.7：GIF 录制准备栏（两段式录制第一段）——点工具栏「录制 GIF」后
+     工具栏原地切换为本栏：配置帧率/光标，选区可拖动移动（复用选区 move
+     交互，不允许缩放），点「开始录制」才真正启动后端流水线。 -->
+<div class="hidden" id="gif-prep-bar">
+    <label class="gif-prep-field" title="录制帧率">
+        <span>帧率</span>
+        <select id="gif-prep-fps">
+            <option value="10">10</option>
+            <option value="15" selected>15</option>
+            <option value="24">24</option>
+            <option value="30">30</option>
+        </select>
+    </label>
+    <label class="gif-prep-field gif-prep-cursor" title="是否录制鼠标光标">
+        <input checked id="gif-prep-cursor" type="checkbox"/>
+        <span>光标</span>
+    </label>
+    <div class="toolbar-divider"></div>
+    <button class="tool-btn tool-btn-primary" id="gif-prep-start" title="开始录制（3 秒倒计时）">
+        <svg aria-hidden="true" class="icon">
+            <use href="#icon-video"/>
+        </svg>
+        <span>开始录制</span>
+    </button>
+    <button class="tool-btn" id="gif-prep-cancel" title="返回截图 (ESC)">
+        <svg aria-hidden="true" class="icon">
+            <use href="#icon-x"/>
+        </svg>
+    </button>
 </div>
 
 <!-- 0.15.12：二级面板——水印表单/文字配置直接显示在工具组下方，支持关闭 -->

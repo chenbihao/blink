@@ -1,6 +1,6 @@
 {
   "lucideVersion": "1.25.0",
-  "generatedAt": "2026-10-26T00:53:25Z",
+  "generatedAt": "2026-10-26T11:51:26Z",
   "icons": [
     "aperture",
     "app-window",
@@ -92,8 +92,13 @@
     "trash-2",
     "triangle-alert",
     "undo-2",
+    "video",
     "wrench",
     "x",
-    "zap"
+    "zap",
+    "chevron-left",
+    "chevron-right",
+    "chevrons-left",
+    "chevrons-right"
   ]
 }
