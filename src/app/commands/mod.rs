@@ -6,7 +6,8 @@
 mod ai;
 mod attachments;
 mod clipboard;
-mod config;
+pub(crate) mod config; // set_config_internal 为同步应用服务复用
+mod config_sync; // 0.28.6：配置同步命令（WebDAV 设置/测试/同步/初始化）
 mod content_editor;
 mod diagnostic;
 mod feature_catalog;
@@ -30,6 +31,7 @@ pub use ai::*;
 pub use attachments::*;
 pub use clipboard::*;
 pub use config::*;
+pub use config_sync::*;
 pub use content_editor::*;
 pub use diagnostic::*;
 pub use feature_catalog::*;

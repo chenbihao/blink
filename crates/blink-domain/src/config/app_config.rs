@@ -166,6 +166,14 @@ pub struct AutosuggestUpdate {
     pub secondary_enabled: bool,
     #[serde(default = "default_true")]
     pub suppress_repeated: bool,
+    /// 0.28.6 同步应用通路补充的三个字段——设置页不发送（None = 保持现值，
+    /// 旧 payload 零影响）；同步按合并结果显式携带。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proactive_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub empty_query_topn: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secondary_min_rank: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -190,6 +198,12 @@ pub struct PluginConfigUpdate {
     pub settings: serde_json::Value,
     #[serde(default)]
     pub expected_revision: Option<u64>,
+    /// 0.28.6 同步应用通路补充：None = 保持现值（设置页不发送，零影响）；
+    /// 同步按合并结果显式携带触发词与默认触发词禁用列表。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_triggers: Option<Vec<crate::config::plugin_config::CustomTrigger>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled_default_triggers: Option<Vec<String>>,
 }
 
 // ── 默认值函数（AppConfig 字段用）──────────────────────────────────────────────

@@ -230,6 +230,9 @@ pub enum SecretModule {
     Stt,
     /// 插件 settings 密钥字段（subject = plugin_id，purpose = 字段 key，0.25.16）
     Plugin,
+    /// WebDAV 同步密码（subject 固定 "webdav"，0.28.6）——连接信息三项中
+    /// 唯一的秘密，随本机不漫游。
+    Sync,
 }
 
 impl SecretModule {
@@ -239,6 +242,7 @@ impl SecretModule {
             Self::Ai => "ai",
             Self::Stt => "stt",
             Self::Plugin => "plugin",
+            Self::Sync => "sync",
         }
     }
 }
@@ -280,6 +284,15 @@ impl SecretRef {
             module: SecretModule::Plugin,
             subject: plugin_id.to_string(),
             purpose: field_key.to_string(),
+        }
+    }
+
+    /// WebDAV 同步密码（0.28.6，subject 固定 "webdav"，purpose "password"）。
+    pub fn webdav_password() -> Self {
+        Self {
+            module: SecretModule::Sync,
+            subject: "webdav".to_string(),
+            purpose: "password".to_string(),
         }
     }
 

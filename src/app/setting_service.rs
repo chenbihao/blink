@@ -209,6 +209,7 @@ pub async fn apply_autosuggest(
 ) -> Result<(), String> {
     let _guard = SETTING_UPDATE_LOCK.lock().await;
     let pool = &app.state::<crate::infra::data::DbPools>().config;
+    let current = ConfigStore::get::<SuggestionConfig>(pool).await;
     let cfg = SuggestionConfig {
         autosuggest_enabled: update.enabled,
         autosuggest_min_score: update.min_score.clamp(0.0, 1.0),
@@ -218,7 +219,10 @@ pub async fn apply_autosuggest(
         ai_suggestion_enabled: update.ai_suggestion_enabled,
         secondary_enabled: update.secondary_enabled,
         suppress_repeated: update.suppress_repeated,
-        ..ConfigStore::get::<SuggestionConfig>(pool).await
+        // 0.28.6：同步通路显式携带才覆盖；设置页旧 payload（None）保持现值。
+        proactive_enabled: update.proactive_enabled.unwrap_or(current.proactive_enabled),
+        empty_query_topn: update.empty_query_topn.unwrap_or(current.empty_query_topn),
+        secondary_min_rank: update.secondary_min_rank.unwrap_or(current.secondary_min_rank),
     };
     save_suggestion(app, &cfg).await
 }

@@ -959,6 +959,35 @@ fn default_ai_access_profile() -> String {
     "recommended".to_string()
 }
 
+// ── SyncSettingsConfig（0.28.6）───────────────────────────────────────────────
+
+/// 最近一次同步结果摘要（仅展示用）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LastSyncRecord {
+    pub revision: u64,
+    /// Unix 秒。
+    pub at: i64,
+    /// 粗粒度结果：up_to_date / done / awaiting_resolution / error。
+    pub outcome: String,
+}
+
+/// WebDAV 同步连接信息分片——**全部留本机**（phase §3.5：WebDAV 登录信息
+/// 不漫游）。密码只在 CM（`SecretRef::webdav_password()`），KV 不存。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SyncSettingsConfig {
+    /// 规范化后的根 URL（空 = 未配置）。
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_sync: Option<LastSyncRecord>,
+}
+
+impl ConfigKey for SyncSettingsConfig {
+    const KEY: &'static str = "sync:settings";
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

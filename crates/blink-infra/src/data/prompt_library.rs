@@ -120,6 +120,41 @@ fn map_row(row: &sqlx::sqlite::SqliteRow) -> Result<PromptLibraryRow, PromptStor
     })
 }
 
+/// 同步落地：按 id upsert 展示字段（revision 自增、时间戳刷新；不触发
+/// CAS——冲突语义由同步引擎的冻结计划承担）。内置条目的 `content`
+/// 随版本提供，不接受同步覆盖；`builtin` 标志以本机行为准不改动。
+/// 返回是否实际写入。
+pub async fn upsert_sync(
+    pool: &SqlitePool,
+    id: &str,
+    name: &str,
+    content: Option<&str>,
+    override_content: Option<&str>,
+    scope: &str,
+    sort_order: i64,
+    hidden: bool,
+) -> Result<bool, PromptStoreError> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let result = sqlx::query(
+        "INSERT INTO prompt_library (id, name, content, override_content, scope, builtin,          sort_order, hidden, revision, created_at, updated_at)          VALUES (?1, ?2, COALESCE(?3, ''), ?4, ?5, 0, ?6, ?7, 1, ?8, ?8)          ON CONFLICT(id) DO UPDATE SET            name = ?2,            content = CASE WHEN ?3 IS NULL THEN prompt_library.content ELSE ?3 END,            override_content = ?4,            sort_order = ?6,            hidden = ?7,            revision = prompt_library.revision + 1,            updated_at = ?8",
+    )
+    .bind(id)
+    .bind(name)
+    .bind(content)
+    .bind(override_content)
+    .bind(scope)
+    .bind(sort_order)
+    .bind(hidden)
+    .bind(now)
+    .execute(pool)
+    .await
+    .map_err(|e| PromptStoreError::Db(e.to_string()))?;
+    Ok(result.rows_affected() > 0)
+}
+
 /// 列出条目（sort_order 升序 → name 稳定次序）；`scope` 为 None 时全量。
 pub async fn list(
     pool: &SqlitePool,

@@ -48,6 +48,7 @@
         <div class="sidebar-group">
             <span class="group-title" data-i18n="sidebar.group.other">其他</span>
             <button class="tab" data-i18n="tab.network" data-tab="network">网络</button>
+            <button class="tab" data-i18n="tab.sync" data-tab="sync">配置同步</button>
             <button class="tab" data-i18n="tab.debug" data-tab="debug">调试</button>
             <button class="tab" data-i18n="tab.storage" data-tab="storage">存储</button>
             <button class="tab" data-i18n="tab.about" data-tab="about">关于</button>
@@ -2603,6 +2604,15 @@
             <p class="panel-lede" data-i18n="network.lede">HTTP / HTTPS 代理，本体与所有插件共用一份配置。</p>
             <div id="network-container">
                 <!-- 网络配置由 JS 动态渲染 -->
+            </div>
+        </div>
+
+        <!-- 配置同步（0.28.6：固定范围 WebDAV） -->
+        <div class="panel" id="sync">
+            <h2 data-i18n="panel.sync">配置同步</h2>
+            <p class="panel-lede" data-i18n="sync.lede">通过 WebDAV 在多台设备间同步固定范围的偏好设置；密钥与本机专属配置不漫游。</p>
+            <div id="sync-container">
+                <!-- 由 JS 动态渲染 -->
             </div>
         </div>
 

@@ -1,0 +1,97 @@
+/* ── 配置同步 Tab（0.28.6：固定范围 WebDAV）────────────────────────────────── */
+
+#sync .sync-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-sm, 8px);
+    margin: var(--space-sm, 8px) 0;
+}
+
+/* 按钮走全局组件类（btn-small / btn-primary）；.btn-primary 无全局 :disabled 样式，此处补齐 */
+#sync .sync-actions .btn-primary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+#sync .sync-http-warning,
+#sync .sync-pending-hint {
+    color: var(--warning, #fab387);
+}
+
+#sync .sync-conflict-row {
+    border: 1px solid var(--surface);
+    border-radius: var(--radius-sm);
+    padding: var(--space-sm, 8px);
+    margin-bottom: var(--space-sm, 8px);
+}
+
+#sync .sync-conflict-head {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm, 8px);
+    flex-wrap: wrap;
+}
+
+#sync .sync-conflict-key {
+    font-size: var(--text-xs);
+    color: var(--accent, var(--text));
+    word-break: break-all;
+}
+
+#sync .sync-conflict-kind {
+    font-size: var(--text-xs);
+    padding: 1px 8px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--surface);
+    color: var(--text-dim);
+}
+
+#sync .sync-conflict-hint {
+    font-size: var(--text-xs);
+    color: var(--warning, #fab387);
+    margin: 4px 0;
+}
+
+#sync .sync-conflict-choices {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 4px var(--space-sm, 8px);
+    align-items: center;
+    margin-top: 6px;
+}
+
+#sync .sync-conflict-value {
+    margin: 0;
+    padding: 4px 8px;
+    background: var(--surface);
+    border-radius: var(--radius-sm);
+    font-size: var(--text-xs);
+    color: var(--text);
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 5.2em;
+    overflow: hidden;
+}
+
+#sync .sync-report-row {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-sm, 8px);
+    padding: 4px 0;
+    font-size: var(--text-sm);
+}
+
+#sync .sync-report-row .sync-report-label {
+    flex-shrink: 0;
+    color: var(--text);
+}
+
+#sync .sync-report-row .sync-report-detail {
+    color: var(--text-dim);
+    word-break: break-all;
+    font-size: var(--text-xs);
+}
+
+#sync .sync-report-row.sync-report-warn .sync-report-label {
+    color: var(--warning, #fab387);
+}

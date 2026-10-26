@@ -610,6 +610,13 @@ async fn set_config_value(
             let mut config = engine.get_config(&v.plugin_id).unwrap_or_default();
             config.enabled = v.enabled;
             config.settings = v.settings;
+            // 0.28.6：同步通路显式携带才覆盖；设置页旧 payload（None）保持现值。
+            if let Some(custom) = v.custom_triggers {
+                config.custom_triggers = custom;
+            }
+            if let Some(disabled) = v.disabled_default_triggers {
+                config.disabled_default_triggers = disabled;
+            }
             if let Some(revision) = v.expected_revision {
                 config.revision = revision;
             } else if v.plugin_id == "builtin.weather" {

@@ -2108,6 +2108,14 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
         app::commands::get_plugin_catalog,
         app::commands::install_plugin_from_catalog,
         app::commands::install_dataset_from_catalog,
+        // 0.28.6：固定范围 WebDAV 配置同步（设置/测试/手动同步/首次初始化/覆盖重置）
+        app::commands::get_sync_settings,
+        app::commands::save_sync_settings,
+        app::commands::clear_sync_password,
+        app::commands::test_sync_connection,
+        app::commands::run_sync,
+        app::commands::sync_initialize,
+        app::commands::reset_sync_overrides,
         // 0.28.2：插件页面受限桥接（plugin-* 窗口）+ 窗口面状态
         app::commands::open_plugin_page,
         app::commands::plugin_page_ready,

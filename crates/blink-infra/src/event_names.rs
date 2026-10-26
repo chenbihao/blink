@@ -98,6 +98,8 @@ impl EventNames {
     // ── 提示词库（0.27.5）──
     /// payload 含 scope，设置页/Chat/Editor 按需刷新缓存。
     pub const PROMPT_LIBRARY_CHANGED: &str = "blink://prompt-library-changed";
+    /// 0.28.6：手动配置同步完成（载荷仅 revision/changed，无敏感内容）。
+    pub const CONFIG_SYNC_DONE: &str = "blink://config-sync-done";
 
     // ── 上下文感知 ──
     pub const AWARENESS_UPDATED: &str = "blink://awareness-updated";

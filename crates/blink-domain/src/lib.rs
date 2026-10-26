@@ -11,6 +11,7 @@ pub mod chord;
 pub mod clipboard; // 0.19.6：剪贴板读写共享语义（command / Capability 共用）
 pub mod color; // 0.20.3：确定性颜色字面量解析（纯函数，Rust/JS 共享 fixture）
 pub mod config; // 0.14.6 §2.1：配置域（stt_config/store 已拆 blink-domain-config）
+pub mod config_sync; // 0.28.6：固定范围跨设备配置同步（WebDAV，域内纯状态机 + port 注入）
 pub mod context;
 pub mod editor; // 0.23.1：内容编辑器域（SourceDescriptor/会话类型/纯决策，框架无关）
 pub mod event; // 0.14.6 §2.2 / 0.21.14：领域环境抽象（EventPort + CapabilityEnv，domain 去 tauri）

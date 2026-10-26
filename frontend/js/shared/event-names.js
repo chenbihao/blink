@@ -96,6 +96,7 @@ export const EVENTS = Object.freeze({
     // ── 配置 ──
     CONFIG_CHANGED: 'blink://config-changed',
     PROMPT_LIBRARY_CHANGED: 'blink://prompt-library-changed',
+    CONFIG_SYNC_DONE: 'blink://config-sync-done',
 
     // ── 上下文感知 ──
     AWARENESS_UPDATED: 'blink://awareness-updated',
