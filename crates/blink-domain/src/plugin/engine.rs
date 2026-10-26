@@ -277,13 +277,26 @@ impl PluginEngine {
         if !manifest.datasets.is_empty()
             && let Some(base) = handle.dirs().map(|d| std::path::PathBuf::from(d.datasets))
         {
-            let missing: Vec<&super::manifest::DatasetDef> = manifest
-                .datasets
-                .iter()
-                .filter(|d| !base.join(&d.id).is_dir())
-                .collect();
-            if !missing.is_empty() {
-                blockers.push(blocker("missing_dataset", Some(&missing[0].id), lang));
+            // 必备包逐个核验（0.28.4）：未挂载 → missing_dataset；指针损坏 →
+            // dataset_corrupt；低于 manifest 声明的 min_version → dataset_outdated。
+            // optional 包（词源等）不阻塞就绪——插件如实降级展示。
+            for def in manifest.datasets.iter().filter(|d| !d.optional) {
+                match super::dataset::resolve_active_version(&base, &def.id) {
+                    super::dataset::ActiveVersion::NotMounted => {
+                        blockers.push(blocker("missing_dataset", Some(&def.id), lang));
+                    }
+                    super::dataset::ActiveVersion::Corrupt => {
+                        blockers.push(blocker("dataset_corrupt", Some(&def.id), lang));
+                    }
+                    super::dataset::ActiveVersion::Mounted(installed) => {
+                        if let Some(min) = &def.min_version
+                            && super::install::compare_versions(&installed, min)
+                                == std::cmp::Ordering::Less
+                        {
+                            blockers.push(blocker("dataset_outdated", Some(&def.id), lang));
+                        }
+                    }
+                }
             }
         }
 
@@ -930,11 +943,15 @@ fn blocker(kind: &str, field: Option<&str>, lang: &str) -> serde_json::Value {
         ("disabled", "插件已禁用，启用后可用"),
         ("missing_secret", "缺少 API 密钥，请在下方配置后再使用"),
         ("missing_dataset", "缺少数据包，安装后可用"),
+        ("dataset_outdated", "数据包版本过低，请更新词库"),
+        ("dataset_corrupt", "数据包损坏，重新安装可修复"),
     ];
     const EN_HINTS: &[(&str, &str)] = &[
         ("disabled", "Plugin is disabled; enable it to use"),
         ("missing_secret", "API keys missing; configure below before use"),
         ("missing_dataset", "Dataset missing; install it to use"),
+        ("dataset_outdated", "Dataset too old; update the word library"),
+        ("dataset_corrupt", "Dataset corrupted; reinstall to repair"),
     ];
     let table = if lang.starts_with("zh") { ZH_HINTS } else { EN_HINTS };
     let hint = table
@@ -952,6 +969,18 @@ fn to_search_item(plugin_id: &str, item: PluginItem) -> SearchItem {
         PluginAction::None => SearchAction::None,
         PluginAction::Copy { text } => SearchAction::Copy { text, hit_id: None },
         PluginAction::Open { path } => SearchAction::Open { path },
+        // 归属注入：plugin_id 由宿主按结果来源绑定（协议不带，插件不能替
+        // 其他插件开窗）；宿主侧经 `open_plugin_page` 内置动作打开，页面/
+        // 启用态在打开时复核。
+        PluginAction::OpenPage { page_id, payload } => SearchAction::RunAction {
+            id: "open_plugin_page".to_string(),
+            arg: Some(serde_json::json!({
+                "plugin_id": plugin_id,
+                "page_id": page_id,
+                "payload": payload,
+            })),
+        },
+        PluginAction::Route { query } => SearchAction::Route { query },
     };
     // 负分 = 插件错误信息，不 clamp（保留负分排到最后）
     let score = if item.score < 0.0 {
@@ -1171,6 +1200,141 @@ mod tests {
         engine.configs.write().unwrap().insert(id.into(), cfg);
         let report = engine.readiness(id, "zh").unwrap();
         assert_eq!(report["ready"], serde_json::json!(true));
+    }
+
+    // ── readiness 数据包分支（0.28.4）─────────────────────────────────────
+
+    async fn engine_with_datasets(
+        id: &str,
+        defs: Vec<crate::plugin::manifest::DatasetDef>,
+        datasets_root: &std::path::Path,
+    ) -> PluginEngine {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let mut manifest = readiness_manifest(id, false);
+        let m = std::sync::Arc::make_mut(&mut manifest);
+        m.datasets = defs;
+        m.protocol_version = 2;
+        let handle = std::sync::Arc::new(super::PluginHandle::new(
+            manifest,
+            std::env::temp_dir(),
+            None,
+        ));
+        handle.set_dirs(crate::plugin::PluginDirs {
+            data: datasets_root.join("data").to_string_lossy().into_owned(),
+            cache: datasets_root.join("cache").to_string_lossy().into_owned(),
+            datasets: datasets_root.to_string_lossy().into_owned(),
+        });
+        PluginEngine::new(vec![handle], pool, None)
+    }
+
+    fn mount_dataset(root: &std::path::Path, dataset_id: &str, version: &str, corrupt: bool) {
+        let dir = root.join(dataset_id).join(version);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("dataset.json"), "{}").unwrap();
+        let ptr = if corrupt {
+            "{ nope".to_string()
+        } else {
+            format!("{{\"version\":\"{version}\"}}")
+        };
+        std::fs::create_dir_all(root.join(dataset_id)).unwrap();
+        std::fs::write(root.join(dataset_id).join("active.json"), ptr).unwrap();
+    }
+
+    #[tokio::test]
+    async fn readiness_dataset_missing_corrupt_outdated_and_optional() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("datasets");
+        std::fs::create_dir_all(&root).unwrap();
+        // 必备包已装 2.0.0；可选包未装；min 1.0.0
+        mount_dataset(&root, "dict-basic", "2.0.0", false);
+        let engine = engine_with_datasets(
+            "readiness.test.dict",
+            vec![
+                crate::plugin::manifest::DatasetDef {
+                    id: "dict-basic".into(),
+                    min_version: Some("1.0.0".into()),
+                    optional: false,
+                },
+                crate::plugin::manifest::DatasetDef {
+                    id: "dict-ety".into(),
+                    min_version: None,
+                    optional: true,
+                },
+            ],
+            &root,
+        )
+        .await;
+
+        // 可选包缺失不阻塞；必备包已装且 ≥ min → 就绪
+        let report = engine.readiness("readiness.test.dict", "zh").unwrap();
+        assert_eq!(report["ready"], serde_json::json!(true));
+
+        // 必备包损坏指针 → dataset_corrupt
+        mount_dataset(&root, "dict-basic", "2.0.0", true);
+        let report = engine.readiness("readiness.test.dict", "zh").unwrap();
+        assert_eq!(
+            report["blockers"][0]["kind"],
+            serde_json::json!("dataset_corrupt")
+        );
+
+        // 必备包版本低于 min → dataset_outdated
+        mount_dataset(&root, "dict-basic", "0.9.0", false);
+        let report = engine.readiness("readiness.test.dict", "zh").unwrap();
+        assert_eq!(
+            report["blockers"][0]["kind"],
+            serde_json::json!("dataset_outdated")
+        );
+
+        // 必备包未挂载 → missing_dataset（恢复删除指针后）
+        std::fs::remove_dir_all(root.join("dict-basic")).unwrap();
+        let report = engine.readiness("readiness.test.dict", "zh").unwrap();
+        assert_eq!(
+            report["blockers"][0]["kind"],
+            serde_json::json!("missing_dataset")
+        );
+        assert_eq!(report["blockers"][0]["field"], serde_json::json!("dict-basic"));
+    }
+
+    // ── to_search_item 动作映射（0.28.4）─────────────────────────────────
+
+    #[test]
+    fn to_search_item_maps_open_page_and_route_actions() {
+        use crate::plugin::protocol::{PluginAction, PluginItem};
+        use crate::search::SearchAction;
+
+        // OpenPage → RunAction(open_plugin_page)，plugin_id 由宿主注入归属
+        let item = PluginItem {
+            title: "apple".into(),
+            action: PluginAction::OpenPage {
+                page_id: Some("main".into()),
+                payload: Some(serde_json::json!({"word": "apple"})),
+            },
+            ..Default::default()
+        };
+        let si = to_search_item("builtin.dictionary", item);
+        match si.action {
+            SearchAction::RunAction { id, arg } => {
+                assert_eq!(id, "open_plugin_page");
+                let arg = arg.unwrap();
+                assert_eq!(arg["plugin_id"], "builtin.dictionary");
+                assert_eq!(arg["payload"]["word"], "apple");
+            }
+            other => panic!("应是 RunAction: {other:?}"),
+        }
+
+        // Route → SearchAction::Route（前端回写输入框）
+        let item = PluginItem {
+            title: "未收录".into(),
+            action: PluginAction::Route {
+                query: "翻译 apple".into(),
+            },
+            ..Default::default()
+        };
+        let si = to_search_item("builtin.dictionary", item);
+        assert!(matches!(
+            si.action,
+            SearchAction::Route { ref query } if query == "翻译 apple"
+        ));
     }
 }
 

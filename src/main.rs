@@ -836,6 +836,31 @@ fn setup_app(app: &mut tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error:
     // 0.28.1：随后的用户目录安装覆盖需要可变集合（两个构建变体共用）。
     let mut plugins = plugins;
 
+    // 0.28.4：builtin 插件也注入私有目录（data/cache/datasets）——词典等
+    // 数据包插件依赖 readiness 判 missing_dataset + v2 握手下发 datasets 路径。
+    // v1 插件不收 initialize 帧，dirs 仅存句柄上无行为影响。
+    {
+        let plugin_storage = blink_infra::plugin_storage::PluginStorage::production_root();
+        for handle in &plugins {
+            if handle.dirs().is_none() {
+                handle.set_dirs(domain::plugin::PluginDirs {
+                    data: plugin_storage
+                        .data_dir(handle.id())
+                        .to_string_lossy()
+                        .into_owned(),
+                    cache: plugin_storage
+                        .cache_dir(handle.id())
+                        .to_string_lossy()
+                        .into_owned(),
+                    datasets: plugin_storage
+                        .datasets_dir(handle.id())
+                        .to_string_lossy()
+                        .into_owned(),
+                });
+            }
+        }
+    }
+
     // 0.28.1：插件存储与安装器——启动恢复（staging 残留/孤儿版本/占用待删）
     // 必须先于已安装插件加载执行。
     let plugin_storage = blink_infra::plugin_storage::PluginStorage::production_root();
@@ -851,6 +876,20 @@ fn setup_app(app: &mut tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error:
             orphans = report.orphan_dirs_cleaned,
             still_pending = report.still_pending,
             "插件存储启动恢复完成"
+        );
+    }
+
+    // 0.28.4：数据包（词库）存储与安装器——恢复孤儿版本/自愈提交点残留。
+    let dataset_installer =
+        std::sync::Arc::new(domain::plugin::DatasetInstaller::new(plugin_storage.clone()));
+    {
+        let report = dataset_installer.recover();
+        tracing::info!(
+            pending_removed = report.pending_removed,
+            orphans = report.orphan_dirs_cleaned,
+            adopted = report.adopted,
+            still_pending = report.still_pending,
+            "数据包存储启动恢复完成"
         );
     }
 
@@ -1222,6 +1261,8 @@ fn setup_app(app: &mut tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error:
     }
     app.manage(plugin_publisher.clone());
     app.manage(plugin_installer.clone());
+    // 0.28.4：数据包安装器（词库安装/卸载命令的数据源）
+    app.manage(dataset_installer.clone());
     // 0.28.2：插件独立窗口面（会话表 + 窗口编排入口；必须在任何插件窗口打开前管理）
     app.manage(std::sync::Arc::new(app::plugin_surface::PluginSurface::new()));
 
@@ -2058,6 +2099,9 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
         app::commands::install_plugin_package,
         app::commands::uninstall_plugin,
         app::commands::list_plugin_installations,
+        // 0.28.4：数据包（词库）安装/卸载/记录
+        app::commands::install_plugin_dataset,
+        app::commands::uninstall_plugin_dataset,
         // 0.28.2：插件页面受限桥接（plugin-* 窗口）+ 窗口面状态
         app::commands::open_plugin_page,
         app::commands::plugin_page_ready,

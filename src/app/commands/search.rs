@@ -229,6 +229,39 @@ pub async fn run_builtin_action(
 ) -> Result<serde_json::Value, crate::app::command_error::CommandError> {
     tracing::debug!(%id, ?arg, "run_builtin_action: 收到请求");
 
+    // 0.28.4：插件结果项"打开详情页"——宿主编排动作，不是注册 Capability
+    // （开窗依赖 AppHandle/PluginSurface，与 check_update 同属 command 层分派）。
+    // plugin_id 由后端 to_search_item 注入归属（插件协议不带），此处复核
+    // 页面存在/启用后经 PluginSurface 打开；主窗随动作收尾隐藏。
+    if id == "open_plugin_page" {
+        let arg = arg.unwrap_or_else(|| serde_json::json!({}));
+        let (plugin_id, page_id, payload) = match (
+            arg.get("plugin_id").and_then(|v| v.as_str()),
+            arg.get("page_id").and_then(|v| v.as_str()),
+            arg.get("payload").cloned(),
+        ) {
+            (Some(pid), page, payload) => (pid.to_string(), page.map(|s| s.to_string()), payload),
+            (None, _, _) => {
+                return Err(crate::app::command_error::CommandError::new(
+                    "invalid_arguments",
+                    "open_plugin_page 缺少 plugin_id".to_string(),
+                    false,
+                ));
+            }
+        };
+        crate::app::plugin_surface::open_plugin_page(
+            &app,
+            &plugin_id,
+            page_id.as_deref(),
+            payload,
+        )
+        .map_err(|e| {
+            crate::app::command_error::CommandError::new("invalid_state", e, true)
+        })?;
+        crate::infra::platform::window::hide(&app, "open_plugin_page");
+        return Ok(serde_json::json!({ "done": true }));
+    }
+
     // 0.26.20 修订：ReturnItems 动作的 command 层分派（descriptor 是准入清单——
     // 见 builtin_engine ACTIONS 表，勿绕过声明直接加 id）。
     if matches!(

@@ -83,6 +83,10 @@ pub struct InstallRegistry {
     /// 格式版本（未来 schema 变更时迁移依据）。
     pub format_version: u32,
     pub records: HashMap<String, InstallRecord>,
+    /// 数据包安装记录（0.28.4）——key 为 `"<plugin_id>/<dataset_id>"`。
+    /// serde default：旧 registry.json 无此字段时按空表读入，向后兼容。
+    #[serde(default)]
+    pub datasets: HashMap<String, DatasetRecord>,
 }
 
 impl InstallRegistry {
@@ -92,8 +96,32 @@ impl InstallRegistry {
         InstallRegistry {
             format_version: Self::FORMAT_VERSION,
             records: HashMap::new(),
+            datasets: HashMap::new(),
         }
     }
+}
+
+/// 单个数据包的持久记录（0.28.4）——词库等可独立版本化的只读数据。
+///
+/// 运行时真源是数据集目录下的 `active.json`（插件进程按它解析当前版本）；
+/// 本记录承载安装溯源/版本展示/占用待删，与插件本体记录分开。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DatasetRecord {
+    pub plugin_id: String,
+    pub dataset_id: String,
+    /// 本次安装的数据包版本（对应 datasets/<pid>/<did>/<version>/ 目录名）。
+    pub version: String,
+    /// dataset.json 的 format_version（快照，诊断用）。
+    pub format_version: u32,
+    pub source: InstallSource,
+    pub installed_at: i64,
+    pub state: InstallState,
+    /// dataset.json 的 content_sha256（构建内容摘要，溯源用）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_sha256: Option<String>,
+    /// PendingRemove 时未能删除的路径（下次启动重试）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_paths: Vec<String>,
 }
 
 /// 插件存储根句柄。`new` 不做 IO（不建目录）；首次写入前由调用方
@@ -146,6 +174,27 @@ impl PluginStorage {
     /// 插件数据包根目录（v2 握手下发给插件；包内容 0.28.4 落地）。
     pub fn datasets_dir(&self, plugin_id: &str) -> PathBuf {
         self.root.join("datasets").join(plugin_id)
+    }
+
+    /// 单个数据集的挂载目录：`datasets/<plugin_id>/<dataset_id>/`，
+    /// 其下为版本子目录 + `active.json`（指向当前版本）。
+    pub fn dataset_dir(&self, plugin_id: &str, dataset_id: &str) -> PathBuf {
+        self.datasets_dir(plugin_id).join(dataset_id)
+    }
+
+    /// 数据集某版本的内容目录（提交后不可变）。
+    pub fn dataset_version_dir(
+        &self,
+        plugin_id: &str,
+        dataset_id: &str,
+        version: &str,
+    ) -> PathBuf {
+        self.dataset_dir(plugin_id, dataset_id).join(version)
+    }
+
+    /// 数据集当前版本指针文件（active.json，安装提交点原子切换）。
+    pub fn dataset_active_path(&self, plugin_id: &str, dataset_id: &str) -> PathBuf {
+        self.dataset_dir(plugin_id, dataset_id).join("active.json")
     }
 
     /// 暂存区子目录（每次安装操作独立 op 目录，崩溃后整体可弃）。
@@ -346,6 +395,56 @@ mod tests {
             storage.load_registry(),
             Err(PluginStorageError::CorruptRegistry { .. })
         ));
+    }
+
+    #[test]
+    fn legacy_registry_without_datasets_field_parses() {
+        // 0.28.4 前的 registry.json 无 datasets 字段 → 空表读入，不报错。
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = PluginStorage::new(tmp.path());
+        storage.ensure_layout().unwrap();
+        std::fs::write(
+            storage.registry_path(),
+            r#"{"format_version":1,"records":{}}"#,
+        )
+        .unwrap();
+        let reg = storage.load_registry().unwrap();
+        assert!(reg.datasets.is_empty());
+
+        // dataset 记录 roundtrip + 路径助手
+        let mut reg2 = reg.clone();
+        reg2.datasets.insert(
+            "builtin.dictionary/dictionary-basic".into(),
+            DatasetRecord {
+                plugin_id: "builtin.dictionary".into(),
+                dataset_id: "dictionary-basic".into(),
+                version: "1.0.0".into(),
+                format_version: 1,
+                source: InstallSource::LocalDev { origin: "D:/pkg".into() },
+                installed_at: 42,
+                state: InstallState::Active,
+                content_sha256: Some("ab".repeat(32)),
+                pending_paths: vec![],
+            },
+        );
+        storage.save_registry(&reg2).unwrap();
+        assert_eq!(storage.load_registry().unwrap(), reg2);
+        assert_eq!(
+            storage.dataset_version_dir("builtin.dictionary", "dictionary-basic", "1.0.0"),
+            tmp.path()
+                .join("datasets")
+                .join("builtin.dictionary")
+                .join("dictionary-basic")
+                .join("1.0.0")
+        );
+        assert_eq!(
+            storage.dataset_active_path("builtin.dictionary", "dictionary-basic"),
+            tmp.path()
+                .join("datasets")
+                .join("builtin.dictionary")
+                .join("dictionary-basic")
+                .join("active.json")
+        );
     }
 
     #[test]

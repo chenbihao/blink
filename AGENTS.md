@@ -53,7 +53,7 @@
 ```bash
 cargo tauri dev          # 开发（debug，控制台 tracing，默认 error 级；设置页可调）
 cargo xtask release      # 打包（= 编译插件 + cargo tauri build；需先 cargo install tauri-cli）
-cargo test --workspace --exclude blink-plugin-ip --exclude blink-plugin-translate --exclude blink-plugin-weather --exclude xtask
+cargo test --workspace --exclude blink-plugin-ip --exclude blink-plugin-translate --exclude blink-plugin-weather --exclude blink-plugin-dictionary --exclude xtask
                          # 全量单测（0.25 起 bin 只是 6 个 workspace crate 之一，--bin blink 只覆盖 app 侧）
 cargo test -p blink-domain-stt
                          # 定向验证：改哪层就测哪个包（blink-domain / blink-infra / blink-domain-stt...），

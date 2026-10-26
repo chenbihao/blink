@@ -240,6 +240,22 @@ pub async fn get_plugin_surface_status(
             })
             .unwrap_or_default();
 
+    // 数据包记录（0.28.4；按 "plugin_id/dataset_id" 键转按插件分组）
+    let mut dataset_records: std::collections::HashMap<
+        String,
+        Vec<blink_infra::plugin_storage::DatasetRecord>,
+    > = std::collections::HashMap::new();
+    if let Some(dataset_installer) =
+        app.try_state::<Arc<crate::domain::plugin::DatasetInstaller>>()
+    {
+        for record in dataset_installer.list().unwrap_or_default() {
+            dataset_records
+                .entry(record.plugin_id.clone())
+                .or_default()
+                .push(record);
+        }
+    }
+
     Ok(engine
         .all_plugins()
         .iter()
@@ -263,6 +279,35 @@ pub async fn get_plugin_surface_status(
                     },
                 })
             });
+            // manifest 声明的数据包逐个合并安装记录（缺装/版本/损坏状态）
+            let installed_ds = dataset_records.get(handle.id());
+            let datasets: Vec<serde_json::Value> = manifest
+                .datasets
+                .iter()
+                .map(|def| {
+                    let record = installed_ds.and_then(|rows| {
+                        rows.iter().find(|r| r.dataset_id == def.id)
+                    });
+                    serde_json::json!({
+                        "id": def.id,
+                        "optional": def.optional,
+                        "min_version": def.min_version,
+                        "installed": record.map(|r| serde_json::json!({
+                            "version": r.version,
+                            "installed_at": r.installed_at,
+                            "state": match r.state {
+                                blink_infra::plugin_storage::InstallState::Active => "active",
+                                blink_infra::plugin_storage::InstallState::PendingRemove => "pending_remove",
+                            },
+                            "source": match &r.source {
+                                blink_infra::plugin_storage::InstallSource::LocalDev { origin } => {
+                                    serde_json::json!({"kind": "local_dev", "origin": origin})
+                                }
+                            },
+                        })),
+                    })
+                })
+                .collect();
             serde_json::json!({
                 "plugin_id": handle.id(),
                 "version": manifest.version,
@@ -271,6 +316,7 @@ pub async fn get_plugin_surface_status(
                 })).collect::<Vec<_>>(),
                 "readiness": readiness,
                 "install": install,
+                "datasets": datasets,
             })
         })
         .collect())

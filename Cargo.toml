@@ -1,13 +1,13 @@
 [package]
 name = "blink"
-version = "0.28.3"
+version = "0.28.4"
 edition = "2024"
 description = "Blink — Windows Universal Action Layer"
 license = "MIT"
 repository = "https://github.com/chenbihao/blink"
 
 [workspace]
-members = ["crates/blink-domain", "crates/blink-domain-capability", "crates/blink-domain-config", "crates/blink-domain-local-engine", "crates/blink-domain-stt", "crates/blink-infra", "plugins/examples/ip", "plugins/examples/translate", "plugins/examples/weather", "xtask"]
+members = ["crates/blink-domain", "crates/blink-domain-capability", "crates/blink-domain-config", "crates/blink-domain-local-engine", "crates/blink-domain-stt", "crates/blink-infra", "plugins/examples/dictionary", "plugins/examples/ip", "plugins/examples/translate", "plugins/examples/weather", "xtask"]
 
 # dev/test 只保留行号表级调试信息：每轮验证都要全量重链接 ~100MB 的 debug 二进制，
 # line-tables-only 让 obj/PDB 明显变小、链接更快，panic 回溯仍带行号。

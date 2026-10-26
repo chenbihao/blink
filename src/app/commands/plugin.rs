@@ -203,6 +203,89 @@ pub async fn list_plugin_installations(
     })
 }
 
+/// 安装本地数据包（0.28.4 词库通道：zip 归档或解包目录，dev 本地包；
+/// 官方目录下载在 0.28.5 接入）。归档 IO/逐文件哈希校验走 blocking 线程。
+///
+/// 安装提交后**不重启插件进程**——插件按 active.json 指针在下次查询自行
+/// 切换版本；readiness 由设置页下一轮 `get_plugin_surface_status` 重算。
+#[tauri::command]
+pub async fn install_plugin_dataset(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    path: String,
+) -> Result<blink_infra::plugin_storage::DatasetRecord, CommandError> {
+    reject_plugin_window(&window)?;
+    let installer = app
+        .state::<std::sync::Arc<crate::domain::plugin::DatasetInstaller>>()
+        .inner()
+        .clone();
+    let src = std::path::PathBuf::from(&path);
+    if !src.exists() {
+        return Err(CommandError::new(
+            "not_found",
+            format!("数据包路径不存在: {path}"),
+            false,
+        ));
+    }
+    let installer_io = installer.clone();
+    let record = tauri::async_runtime::spawn_blocking(move || {
+        if src.is_dir() {
+            installer_io.install_dir(&src)
+        } else {
+            installer_io.install_zip(&src)
+        }
+    })
+    .await
+    .map_err(|e| CommandError::new("internal", format!("数据包安装任务失败: {e}"), true))?
+    .map_err(|e| {
+        CommandError::new("install_failed", format!("数据包安装失败: {e}"), false)
+    })?;
+    tracing::info!(
+        plugin = %record.plugin_id,
+        dataset = %record.dataset_id,
+        version = %record.version,
+        "数据包安装完成"
+    );
+    Ok(record)
+}
+
+/// 卸载数据包（0.28.4）。插件进程可能仍持有 DB 句柄——文件删不净时如实
+/// 返回待清理数（下次启动 recover 重试），不假报已删除。
+#[tauri::command]
+pub async fn uninstall_plugin_dataset(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    plugin_id: String,
+    dataset_id: String,
+) -> Result<serde_json::Value, CommandError> {
+    reject_plugin_window(&window)?;
+    let installer = app
+        .state::<std::sync::Arc<crate::domain::plugin::DatasetInstaller>>()
+        .inner()
+        .clone();
+    let installer_io = installer.clone();
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        installer_io.uninstall(&plugin_id, &dataset_id)
+    })
+    .await
+    .map_err(|e| CommandError::new("internal", format!("数据包卸载任务失败: {e}"), true))?
+    .map_err(|e| {
+        CommandError::new("uninstall_failed", format!("数据包卸载失败: {e}"), false)
+    })?;
+    Ok(match outcome {
+        crate::domain::plugin::UninstallDatasetOutcome::Removed => {
+            serde_json::json!({"removed": true, "pending_files": 0})
+        }
+        crate::domain::plugin::UninstallDatasetOutcome::RemovedPendingFiles {
+            pending_paths,
+        } => serde_json::json!({
+            "removed": true,
+            "pending_files": pending_paths.len(),
+            "note": "部分文件被占用，将在下次启动时清理",
+        }),
+    })
+}
+
 /// 获取所有已加载插件的信息（设置页用）。已含 enabled + settings（0.5.1）。
 #[tauri::command]
 pub async fn get_plugins(app: tauri::AppHandle) -> Vec<serde_json::Value> {

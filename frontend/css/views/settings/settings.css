@@ -3036,3 +3036,45 @@ input.has-secret-hint::placeholder {
     height: 0.85em;
     vertical-align: -0.08em;
 }
+
+/* ===== 数据包行（0.28.4：词库等本地数据集安装/卸载，插件卡片 body） ===== */
+
+.plugin-datasets-section {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 0 0 10px;
+    border-bottom: 1px solid var(--surface);
+    margin-bottom: var(--space-sm, 8px);
+}
+
+.plugin-dataset-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-sm, 8px);
+}
+
+.plugin-dataset-id {
+    font-size: var(--text-xs);
+    color: var(--text);
+}
+
+.plugin-dataset-optional {
+    font-style: normal;
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+    margin-left: 4px;
+}
+
+.plugin-dataset-status {
+    font-size: var(--text-xs);
+    padding: 1px 8px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--surface);
+    color: var(--text-dim);
+}
+
+.plugin-dataset-ready {
+    color: var(--green);
+}

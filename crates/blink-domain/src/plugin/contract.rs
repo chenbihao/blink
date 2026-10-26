@@ -57,6 +57,8 @@ pub enum ContractError {
     },
     #[error("插件 {plugin} 的页面 id 重复: {id}")]
     DuplicatePage { plugin: String, id: String },
+    #[error("插件 {plugin} 的数据包 id 非法: {id:?}（允许 [a-z0-9-]，长度 1..=64）")]
+    InvalidDatasetId { plugin: String, id: String },
 }
 
 /// 单个插件的冻结契约。
@@ -122,6 +124,22 @@ impl PluginContract {
                 });
             }
             page_ids.push(page.id.clone());
+        }
+        // 0.28.4：数据包 id 字符集校验——readiness/安装路径用 `datasets/<pid>/<did>`
+        // 拼接，id 含路径分隔符/点会逃逸挂载目录（与 dataset.json 侧同一字符集）。
+        for def in &m.datasets {
+            let valid = !def.id.is_empty()
+                && def.id.len() <= 64
+                && def
+                    .id
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+            if !valid {
+                return Err(ContractError::InvalidDatasetId {
+                    plugin: m.id.clone(),
+                    id: def.id.clone(),
+                });
+            }
         }
         Ok(PluginContract {
             plugin_id: m.id.clone(),
@@ -419,6 +437,7 @@ mod tests {
         m.datasets.push(crate::plugin::manifest::DatasetDef {
             id: "ecdict-basic".into(),
             min_version: Some("1.0.0".into()),
+            optional: false,
         });
         let c = PluginContract::from_manifest(&m).unwrap();
         assert_eq!(c.datasets, vec!["ecdict-basic".to_string()]);

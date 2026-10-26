@@ -215,3 +215,66 @@ test("a revision conflict keeps drafts and stops queued writes until explicit re
     assert.equal(fixture.card.dataset.configConflict,"true");
     assert.equal(fixture.message.children[0].className,"btn-small plugin-reload");
 });
+
+// ── 0.28.4：数据包（词库）区渲染 ────────────────────────────────────────────
+
+const {renderDatasetsSection} = await import("./plugins.js");
+
+test("renderDatasetsSection renders install states and actions", () => {
+    const plugin = {id: "builtin.dictionary"};
+
+    // 无 surface / 无 datasets 声明 → 不渲染
+    assert.equal(renderDatasetsSection(plugin, undefined), "");
+    assert.equal(renderDatasetsSection(plugin, {datasets: []}), "");
+
+    const base = {
+        datasets: [
+            {id: "dictionary-basic", optional: false, min_version: "1.0.0"},
+            {id: "dictionary-etymology", optional: true, min_version: null},
+        ],
+    };
+
+    // 未安装：必备 → “未安装”；可选 → “未安装（可选）” + 可选标记；只有安装按钮
+    let html = renderDatasetsSection(plugin, {...base, readiness: {ready: false, blockers: [
+        {kind: "missing_dataset", field: "dictionary-basic", hint: "缺少数据包"},
+    ]}});
+    assert.match(html, /plugin-dataset-row/);
+    assert.match(html, /data-dataset="dictionary-basic"/);
+    assert.match(html, /plugin-dataset-status">未安装</);          // 必备包“未安装”
+    assert.match(html, /未安装（可选）/);                            // 可选包
+    assert.match(html, /plugin-dataset-optional/);
+    assert.equal((html.match(/plugin-dataset-install/g) || []).length, 2);
+    assert.doesNotMatch(html, /plugin-dataset-uninstall/); // 未装无卸载按钮
+
+    // 已安装：版本徽标 + 更新/卸载按钮
+    html = renderDatasetsSection(plugin, {...base, readiness: {ready: true, blockers: []},
+        datasets: [
+            {...base.datasets[0], installed: {version: "1.2.0", state: "active"}},
+            {...base.datasets[1], installed: null},
+        ]});
+    assert.match(html, /plugin-dataset-ready">v1\.2\.0</);
+    assert.match(html, /更新…/);
+    assert.match(html, /plugin-dataset-uninstall/);
+
+    // 损坏/过低：readiness blocker 命中该数据包 → 修复徽标
+    html = renderDatasetsSection(plugin, {...base, readiness: {ready: false, blockers: [
+        {kind: "dataset_corrupt", field: "dictionary-basic", hint: "损坏"},
+    ]}, datasets: [
+        {...base.datasets[0], installed: {version: "1.0.0", state: "active"}},
+    ]});
+    assert.match(html, /已损坏，重装修复/);
+    html = renderDatasetsSection(plugin, {...base, readiness: {ready: false, blockers: [
+        {kind: "dataset_outdated", field: "dictionary-basic", hint: "过低"},
+    ]}, datasets: [
+        {...base.datasets[0], installed: {version: "0.9.0", state: "active"}},
+    ]});
+    assert.match(html, /版本过低，请更新/);
+
+    // 待清理状态：无卸载按钮（防重复操作）
+    html = renderDatasetsSection(plugin, {...base, readiness: {ready: false, blockers: []},
+        datasets: [
+            {...base.datasets[0], installed: {version: "1.0.0", state: "pending_remove"}},
+        ]});
+    assert.match(html, /待清理（重启后完成）/);
+    assert.doesNotMatch(html, /plugin-dataset-uninstall/);
+});

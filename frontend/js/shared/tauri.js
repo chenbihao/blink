@@ -111,6 +111,19 @@ export async function saveDialog(opts) {
 }
 
 /**
+ * 打开选择文件对话框（Tauri `dialog.open()`；0.28.4 词库数据包安装选择）。
+ * 返回选中的文件路径，用户取消时返回 null。
+ */
+export async function openDialog(opts) {
+    const TAU = getTAU();
+    const open = TAU?.dialog?.open;
+    if (typeof open !== "function") {
+        throw new Error("文件选择对话框不可用");
+    }
+    return open(opts);
+}
+
+/**
  * 获取当前 Tauri 窗口对象（Tauri v2 `window.getCurrentWindow()`）。
  * 用于 minimize / maximize / close 等窗口操作。
  */

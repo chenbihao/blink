@@ -320,6 +320,10 @@ pub struct DatasetDef {
     /// 兼容最低数据包版本（语义版本，缺省 = 任意版本）。
     #[serde(default)]
     pub min_version: Option<String>,
+    /// 可选增强包（0.28.4 词源等）：缺失不阻塞就绪——插件如实降级展示。
+    /// 缺省 false（必备包，缺失即 blocker）。
+    #[serde(default)]
+    pub optional: bool,
 }
 
 fn default_protocol_version() -> u32 {

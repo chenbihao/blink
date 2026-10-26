@@ -58,6 +58,7 @@ ICON_LIST = [
     "sparkles",         # builtin.ai 🤖 (亦可挪作 AI 通用符)
     "languages",        # builtin.translate 📝
     "cloud-sun",        # builtin.weather 🌤️
+    "book-open",        # builtin.dictionary 📖（0.28.4 离线词典）
 
     # 设置页 extension-icon
     "shield",           # context.js 敏感应用 🛡

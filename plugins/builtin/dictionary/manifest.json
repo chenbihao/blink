@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "id": "builtin.dictionary",
+  "name": { "zh": "离线词典", "en": "Dictionary" },
+  "version": "0.1.0",
+  "description": { "zh": "离线英汉词典与基础汉英反查：词形/短语/详情与可选词源，断网可用", "en": "Offline English-Chinese dictionary with basic reverse lookup, forms, phrases and optional etymology" },
+  "builtin": true,
+  "default_enabled": true,
+  "protocol_version": 2,
+  "host": { "min_version": "0.28.4" },
+  "runtime": {
+    "type": "process",
+    "protocol": "jsonl",
+    "exec": "./bin/blink-plugin-dictionary.exe",
+    "timeout_ms": 5000,
+    "min_arg_length": 1,
+    "debounce_ms": 0,
+    "concurrency": 1,
+    "empty_arg_hint": {
+      "zh": "输入英文单词/短语或中文词",
+      "en": "Type an English word/phrase or a Chinese term"
+    }
+  },
+  "triggers": [
+    { "type": "keyword", "keyword": "查词", "exclusive": true },
+    { "type": "keyword", "keyword": "dict", "exclusive": true }
+  ],
+  "capabilities": ["query"],
+  "tools": [
+    {
+      "name": "dictionary_lookup",
+      "description": "查离线英汉词典。输入英文单词/短语：返回词条（中文释义/英文义项/音标/词性/词形还原/可选词源）；未收录返回候选与状态；不联网、不用 AI 补词义。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "word": { "type": "string", "description": "要查的英文单词或短语" }
+        },
+        "required": ["word"]
+      },
+      "danger_class": "Safe",
+      "result_type": "items",
+      "hint": "返回词条对象或 {status, candidates}；中文翻译以外的语言请用 translate 工具",
+      "progress_hint": "查离线词典",
+      "projection": {
+        "result_shape": "items",
+        "items_pointer": "$",
+        "item_actions": [{ "type": "copy", "pointer": "$.translation" }]
+      }
+    },
+    {
+      "name": "dictionary_search_zh",
+      "description": "中文词反查英文候选（基础汉英，按词频排序）。只覆盖常用概念；查不到时如实返回空列表。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "term": { "type": "string", "description": "中文词（如“苹果”）" }
+        },
+        "required": ["term"]
+      },
+      "danger_class": "Safe",
+      "result_type": "items",
+      "hint": "返回 [{word, translation, freq}]；空列表 = 词库未收录该中文词",
+      "progress_hint": "汉英反查",
+      "projection": {
+        "result_shape": "items",
+        "items_pointer": "$",
+        "item_actions": [{ "type": "copy", "pointer": "$.word" }]
+      }
+    }
+  ],
+  "settings_schema": [
+    {
+      "key": "show_english_definition",
+      "type": "boolean",
+      "title": { "zh": "主窗摘要附带英文义项", "en": "Show English sense in summary" },
+      "description": { "zh": "开启后主窗快查行的副标题附带首条英文义项；详情页始终完整显示", "en": "Append the first English sense to the quick-look subtitle; details page always shows all" },
+      "default": false
+    }
+  ],
+  "pages": [
+    {
+      "id": "main",
+      "entry": "web/index.html"
+    }
+  ],
+  "datasets": [
+    {
+      "id": "dictionary-basic",
+      "min_version": "1.0.0",
+      "optional": false
+    },
+    {
+      "id": "dictionary-etymology",
+      "optional": true
+    }
+  ]
+}

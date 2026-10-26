@@ -5,6 +5,7 @@
 
 mod capability;
 mod contract;
+mod dataset;
 mod direction;
 mod engine;
 mod install;
@@ -22,6 +23,11 @@ pub use capability::{PluginCapabilityAdapter, plugin_tool_id};
 pub use contract::{
     PluginContract, BUILTIN_NAMESPACE, validate_contract_set, validate_namespace,
     validate_plugin_id,
+};
+pub use dataset::{
+    ActiveVersion, DatasetError, DatasetInstaller, DatasetManifest,
+    UninstallDatasetOutcome, SUPPORTED_DATASET_FORMAT_VERSION, resolve_active_at,
+    resolve_active_version,
 };
 pub use direction::{SUPPORTED_TARGETS, lang_display_name, resolve_display_target};
 pub use engine::PluginEngine;
@@ -207,7 +213,10 @@ mod tests {
         let plugins = load_builtin_plugins(&builtin_plugins_dir(), None);
         let mut ids: Vec<_> = plugins.iter().map(|plugin| plugin.id()).collect();
         ids.sort_unstable();
-        assert_eq!(ids, ["builtin.ip", "builtin.translate", "builtin.weather"]);
+        assert_eq!(
+            ids,
+            ["builtin.dictionary", "builtin.ip", "builtin.translate", "builtin.weather"]
+        );
 
         let translate = plugins
             .iter()
@@ -223,6 +232,26 @@ mod tests {
                 "翻译插件应声明 {tool_name} 能力"
             );
         }
+
+        // 0.28.4：词典插件声明数据集依赖（必备 basic + 可选词源），纯加载不
+        // 触发就绪判定——数据集挂载状态由运行期 readiness 消费。
+        let dictionary = plugins
+            .iter()
+            .find(|plugin| plugin.id() == "builtin.dictionary")
+            .expect("应发现词典插件");
+        let ds: Vec<(String, bool)> = dictionary
+            .manifest()
+            .datasets
+            .iter()
+            .map(|d| (d.id.clone(), d.optional))
+            .collect();
+        assert_eq!(
+            ds,
+            vec![
+                ("dictionary-basic".to_string(), false),
+                ("dictionary-etymology".to_string(), true),
+            ]
+        );
     }
 
     /// 0.25.20：examples 目录的脚本示例插件（echo-python / echo-node）必须

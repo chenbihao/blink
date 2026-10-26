@@ -363,6 +363,23 @@ pub enum PluginAction {
     Copy { text: String },
     /// 打开路径(应用/文件/URL)。
     Open { path: String },
+    /// 打开**本插件**声明的独立页面（0.28.4 词典详情等）。
+    ///
+    /// 故意不带 plugin_id——归属由宿主按结果来源插件注入（engine::to_search_item），
+    /// 插件不能宣称其他插件的身份开窗（phase §3.2）。宿主侧映射为
+    /// `open_plugin_page` 内置动作，页面/启用态在打开时复核。
+    /// `page_id: None` = manifest 首个页面；payload 为唤起载荷（如待查单词）。
+    #[serde(rename = "open_page", rename_all = "snake_case")]
+    OpenPage {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        page_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        payload: Option<serde_json::Value>,
+    },
+    /// 以新查询重路由主窗输入（0.28.4 词典未收录转翻译）——前端回写输入框
+    /// 并派发一轮新搜索（与 args.hints 引导项同语义）。插件只给查询文本，
+    /// 是否命中/由谁接管由宿主路由决定；原输入保留在输入框（可改可撤）。
+    Route { query: String },
 }
 
 #[cfg(test)]
@@ -445,6 +462,43 @@ mod tests {
         let json3 = r#"{"id":"z","items":[{"title":"hint","action":{"type":"none"}}]}"#;
         let resp3: PluginResponse = serde_json::from_str(json3).unwrap();
         assert!(matches!(resp3.items[0].action, PluginAction::None));
+    }
+
+    #[test]
+    fn open_page_action_roundtrips_and_omits_optional_fields() {
+        // 完整形态
+        let item: PluginItem = serde_json::from_str(
+            r#"{"title":"t","score":0.9,"action":{"type":"open_page","page_id":"main","payload":{"word":"apple"}}}"#,
+        )
+        .unwrap();
+        match &item.action {
+            PluginAction::OpenPage { page_id, payload } => {
+                assert_eq!(page_id.as_deref(), Some("main"));
+                assert_eq!(payload.as_ref().unwrap()["word"], "apple");
+            }
+            other => panic!("应是 OpenPage: {other:?}"),
+        }
+        // 缺省形态：page_id/payload 均省略 → None（老消费者/极简声明兼容）
+        let minimal: PluginItem = serde_json::from_str(
+            r#"{"title":"t","action":{"type":"open_page"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            minimal.action,
+            PluginAction::OpenPage { page_id: None, payload: None }
+        ));
+    }
+
+    #[test]
+    fn route_action_roundtrips() {
+        let item: PluginItem = serde_json::from_str(
+            r#"{"title":"未收录","action":{"type":"route","query":"翻译 apple"}}"#,
+        )
+        .unwrap();
+        match item.action {
+            PluginAction::Route { query } => assert_eq!(query, "翻译 apple"),
+            other => panic!("应是 Route: {other:?}"),
+        }
     }
 
     #[test]

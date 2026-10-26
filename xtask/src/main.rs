@@ -13,6 +13,7 @@
 //!   cargo xtask icons          拉取 Lucide 图标并生成 SVG sprite（调用 Python 脚本）
 //!   cargo xtask models         从 LiteLLM 精选主流模型目录生成 resources/model_context_windows.json
 //!   cargo xtask lint           前端防新增检查（CSS 禁止新增带 hex fallback 的 var()）
+//!   cargo xtask dictionary     词典数据集构建/校验（--build-basic/--build-ety/--verify/--check-quality，0.28.4）
 //!   cargo xtask test           全量单测 + doctest + 前端测试（有界并行）
 //!   cargo xtask funasr-worker  从锁定 FunASR 源码构建常驻 GGUF STT worker（0.22.7）
 //!
@@ -1411,6 +1412,7 @@ fn main() {
         "tiptap" => bundle_tiptap(), // 打包 Tiptap IIFE 产物
         "models" => fetch_models(), // 从 LiteLLM 精选主流模型目录
         "lint" => lint_frontend(), // 前端防新增检查（var hex fallback 冻结基线）
+        "dictionary" => dictionary::run(&args), // 词典数据集构建/校验（0.28.4）
         "test" => run(
             "node",
             &["xtask/scripts/test-workspace.mjs"],
@@ -1419,11 +1421,19 @@ fn main() {
         "funasr-worker" => funasr_worker::build_workers(), // 构建 GGUF STT worker（0.22.7）
         other => {
             panic!(
-                "未知子命令: {other}\n用法: cargo xtask <prebuild|plugins|copy|release|release-check|funasr-worker|icons|tiptap|models|lint|test> [--debug | --fast] [--timings] [--no-bundle]"
+                "未知子命令: {other}\n用法: cargo xtask <prebuild|plugins|copy|release|release-check|funasr-worker|icons|tiptap|models|lint|dictionary|test> [--debug | --fast] [--timings] [--no-bundle]"
             )
         }
     }
 }
+
+// ── 词典数据集构建编排（0.28.4）────────────────────────────────────────────
+//
+// 委托给 blink-plugin-dictionary 二进制的构建 CLI（同一份构建实现供发布
+// 流程与本地调试复用；xtask 只负责编译编排与参数透传）。用法见
+// plugins/examples/dictionary/DATASETS.md。
+
+mod dictionary;
 
 // ── CSS hex fallback 冻结基线检查（0.21.22.1）────────────────────────────
 //

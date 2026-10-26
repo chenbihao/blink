@@ -1,0 +1,18 @@
+[package]
+name = "blink-plugin-dictionary"
+version = "0.1.0"
+edition = "2024"
+description = "Blink 离线词典插件（Rust 版）— 英汉/基础汉英/词形/可选词源"
+
+[lints]
+workspace = true  # 继承 workspace 级别的 lint（如禁止 UTF-8 字节切片）
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+csv = "1.3"
+rusqlite = { version = "0.36", features = ["bundled"] }
+
+[dev-dependencies]
+tempfile = "3"

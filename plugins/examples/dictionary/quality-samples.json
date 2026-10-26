@@ -1,0 +1,42 @@
+{
+  "comment": "0.28.4 固定质量样本（phase §五.4.1）：常用词/多义/词形/短语/技术词/基础汉英。--check-quality 逐项校验，任一不达标即失败。样本同时是验收基线：上游数据漂移导致不达标时构建即失败，不允许静默降质。",
+  "exact": [
+    { "word": "apple", "expect_translation_contains": "苹果" },
+    { "word": "computer", "expect_translation_contains": "计算机" },
+    { "word": "book", "expect_translation_contains": "书" },
+    { "word": "run", "expect_translation_contains": "跑" },
+    { "word": "beautiful", "expect_translation_contains": "美丽" }
+  ],
+  "multi_sense": [
+    { "word": "bank", "expect_translation_contains": "银行", "min_sense_lines": 2 },
+    { "word": "run", "min_sense_lines": 3 },
+    { "word": "compiler", "expect_translation_contains": "编译", "min_sense_lines": 2 }
+  ],
+  "form": [
+    { "form": "went", "base": "go" },
+    { "form": "running", "base": "run" },
+    { "form": "apples", "base": "apple" },
+    { "form": "better", "base": "good" },
+    { "form": "boxes", "base": "box" }
+  ],
+  "phrase": [
+    { "word": "black tea", "expect_translation_contains": "红茶" },
+    { "word": "look forward to", "expect_translation_contains": "期望" },
+    { "word": "take care of", "expect_translation_contains": "照顾" }
+  ],
+  "tech": [
+    { "word": "async", "expect_translation_contains": "异步" },
+    { "word": "deprecated", "expect_translation_contains": "反对" },
+    { "word": "thread", "expect_translation_contains": "线程" },
+    { "word": "docker", "expect_translation_contains": "码头" },
+    { "word": "lambda", "expect_translation_contains": "希腊" },
+    { "word": "compiler", "expect_translation_contains": "编译" }
+  ],
+  "reverse_zh": [
+    { "term": "苹果", "expect_contains_word": "apple" },
+    { "term": "银行", "expect_contains_word": "bank" },
+    { "term": "线程", "expect_contains_word": "thread" },
+    { "term": "计算机", "expect_contains_word": "computer" },
+    { "term": "美丽", "expect_contains_word": "beautiful" }
+  ]
+}

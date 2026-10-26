@@ -6,7 +6,7 @@
  * 命令名 list_plugins 与容器 plugins-list 均不存在导致页面空白；0.9.5.1 还原原版
  * get_plugins + plugins-container + 整套 schema/触发词/拖拽）。
  */
-import {confirmDialog, invoke, listen} from "../../shared/tauri.js";
+import {commandErrorText, confirmDialog, invoke, listen, openDialog} from "../../shared/tauri.js";
 import {onLangChange, t} from "../../i18n/index.js";
 import {iconHTML} from "../../shared/icon.js";
 import {saveConfig} from "../../shared/config-keys.js";
@@ -30,6 +30,7 @@ const PLUGIN_ICONS = {
     "builtin.ai": "sparkles",
     "builtin.translate": "languages",
     "builtin.weather": "cloud-sun",
+    "builtin.dictionary": "book-open",
     // 0.25.20 示例脚本插件（终端语义）
     "example.echo-python": "terminal",
     "example.echo-node": "terminal",
@@ -163,6 +164,7 @@ function renderPluginCard(plugin) {
     const triggersTags = renderTriggersTags(plugin);
 
     const surfaceSection = renderSurfaceSection(plugin);
+    const datasetsSection = renderDatasetsSection(plugin, surfaceStatus.get(plugin.id));
 
     const configSection = hasFields
         ? renderConfigSection(t("plugin.section"), schema, settings, {collapsible: true, collapsed: true, extraHtml: plugin.id === "builtin.weather" ? renderWeatherSettings(plugin) : "", saveLabel: ""})
@@ -182,7 +184,7 @@ function renderPluginCard(plugin) {
         headerRight,
         attrs: `data-plugin-id="${plugin.id}"`,
         classes: enabled ? "" : "is-disabled",
-        body: `${surfaceSection}${configSection}`,
+        body: `${surfaceSection}${datasetsSection}${configSection}`,
     });
 }
 
@@ -209,6 +211,57 @@ function renderSurfaceSection(plugin) {
       <span class="trigger-label">${t("plugin.surface_section")}</span>
       ${statusHtml}
       <span class="plugin-surface-buttons">${buttons}</span>
+    </div>`;
+}
+
+/**
+ * 数据包（词库）区（0.28.4）：manifest 声明 datasets 的插件逐行渲染
+ * 安装状态 + 本地包安装/更新/卸载。损坏/版本过低的判断来自 readiness
+ * blockers（kind=dataset_corrupt/dataset_outdated 的 field 命中该数据包）。
+ *
+ * 导出供测试（纯字符串渲染，无 DOM 依赖）；surface 参数为
+ * get_plugin_surface_status 的对应行（缺省不渲染）。
+ */
+export function renderDatasetsSection(plugin, surface) {
+    const datasets = surface?.datasets || [];
+    if (!datasets.length) return "";
+    const readiness = surface?.readiness || {};
+    const blockers = readiness.blockers || [];
+    const rows = datasets.map(ds => {
+        const installed = ds.installed;
+        const state = installed?.state;
+        let badge;
+        if (state === "pending_remove") {
+            badge = `<span class="plugin-dataset-status msg-error">${t("plugin.dataset_pending_remove")}</span>`;
+        } else if (installed) {
+            const blocker = blockers.find(b =>
+                (b.kind === "dataset_corrupt" || b.kind === "dataset_outdated") && b.field === ds.id);
+            if (blocker?.kind === "dataset_corrupt") {
+                badge = `<span class="plugin-dataset-status msg-error">${t("plugin.dataset_corrupt")}</span>`;
+            } else if (blocker?.kind === "dataset_outdated") {
+                badge = `<span class="plugin-dataset-status msg-error">${t("plugin.dataset_outdated")}</span>`;
+            } else {
+                badge = `<span class="plugin-dataset-status plugin-dataset-ready">v${escapeHtml(installed.version || "")}</span>`;
+            }
+        } else {
+            badge = `<span class="plugin-dataset-status">${ds.optional
+                ? t("plugin.dataset_missing_optional") : t("plugin.dataset_missing")}</span>`;
+        }
+        const buttons = [
+            `<button class="btn-small plugin-dataset-install" data-dataset="${escapeAttr(ds.id)}">${iconHTML("download")} ${installed ? t("plugin.dataset_update") : t("plugin.dataset_install")}</button>`,
+        ];
+        if (installed && state !== "pending_remove") {
+            buttons.push(`<button class="btn-small plugin-dataset-uninstall" data-dataset="${escapeAttr(ds.id)}">${t("plugin.dataset_uninstall")}</button>`);
+        }
+        return `<div class="plugin-dataset-row" data-dataset="${escapeAttr(ds.id)}">
+          <span class="plugin-dataset-id">${escapeHtml(ds.id)}${ds.optional ? `<em class="plugin-dataset-optional">${t("plugin.dataset_optional_tag")}</em>` : ""}</span>
+          ${badge}
+          <span class="plugin-surface-buttons">${buttons.join("")}</span>
+        </div>`;
+    }).join("");
+    return `<div class="plugin-datasets-section">
+      <span class="trigger-label">${t("plugin.dataset_section")}</span>
+      ${rows}
     </div>`;
 }
 
@@ -715,6 +768,43 @@ export function bindPluginCardEvents(plugin) {
             await invoke("open_plugin_page", {pluginId: id, pageId: button.dataset.page || null});
         } catch (error) {
             flash(card, error?.message || String(error), true, 4000);
+        }
+    }));
+    // 0.28.4：数据包安装/更新（本地 zip；官方目录下载在插件中心阶段接入）
+    card.querySelectorAll(".plugin-dataset-install").forEach(button => button.addEventListener("click", async () => {
+        button.disabled = true;
+        try {
+            const path = await openDialog({
+                title: t("plugin.dataset_pick_title"),
+                filters: [{name: "Blink dataset", extensions: ["zip"]}],
+                multiple: false,
+                directory: false,
+            });
+            if (!path) return;
+            const record = await invoke("install_plugin_dataset", {path});
+            flash(card, t("plugin.dataset_installed_ok", {id: record.dataset_id, version: record.version}), false, 4000);
+            await loadPlugins(true);
+        } catch (error) {
+            flash(card, commandErrorText(error, t("plugin.dataset_install_failed")), true, 6000);
+        } finally {
+            button.disabled = false;
+        }
+    }));
+    // 0.28.4：数据包卸载（二次确认；文件被占用时如实提示待清理）
+    card.querySelectorAll(".plugin-dataset-uninstall").forEach(button => button.addEventListener("click", async () => {
+        const datasetId = button.dataset.dataset;
+        if (!await confirmDialog(t("plugin.dataset_uninstall_confirm", {id: datasetId}), {kind: "warning"})) return;
+        button.disabled = true;
+        try {
+            const result = await invoke("uninstall_plugin_dataset", {pluginId: id, datasetId});
+            flash(card, result?.pending_files
+                ? t("plugin.dataset_uninstall_pending", {count: result.pending_files})
+                : t("plugin.dataset_uninstalled"), result?.pending_files ? true : false, 4000);
+            await loadPlugins(true);
+        } catch (error) {
+            flash(card, commandErrorText(error, t("plugin.dataset_uninstall_failed")), true, 6000);
+        } finally {
+            button.disabled = false;
         }
     }));
     // 未就绪徽标 → 展开配置区（修复入口：缺密钥等在配置区补齐）

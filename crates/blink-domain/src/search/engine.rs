@@ -55,6 +55,10 @@ pub enum SearchAction {
         id: String,
         arg: Option<serde_json::Value>,
     },
+    /// 以新查询重路由主窗输入（0.28.4 插件 `PluginAction::Route` 投影）：
+    /// 前端回写输入框并派发一轮新搜索。与 args.hints 引导项共用前端
+    /// `kind == "route"` 通道；插件只产出查询文本，后续路由由宿主决定。
+    Route { query: String },
 }
 
 /// 引擎召回的单个结果项(内部融合模型)。
@@ -381,6 +385,28 @@ impl SearchItem {
                     ..Default::default()
                 }
             }
+            SearchAction::Route { query } => AppEntry {
+                name: self.title,
+                pinyin_name: String::new(),
+                pinyin_full: String::new(),
+                description: self.subtitle,
+                lnk_path: String::new(),
+                is_calc: false,
+                score,
+                is_placeholder: false,
+                is_error,
+                source: self.source.clone(),
+                actions: vec![Action {
+                    kind: ActionKind::Route,
+                    payload: Some(query),
+                    ..Action::default()
+                }],
+                score_detail,
+                context_aware,
+                is_color_list,
+                color_list_hex,
+                ..Default::default()
+            },
         }
     }
 }
@@ -490,6 +516,29 @@ mod tests {
         assert!(matches!(e.actions[0].kind, ActionKind::Copy));
         // text 透传到 payload(前端复制优先取 payload)
         assert_eq!(e.actions[0].payload.as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn route_item_maps_to_route_app_entry() {
+        // 0.28.4：插件 Route（词典未收录转翻译）→ 前端 kind=="route" 回写输入框
+        let item = SearchItem {
+            id: "plugin:builtin.dictionary:route".into(),
+            title: "「applex」未收录，转翻译".into(),
+            subtitle: None,
+            score: 0.3,
+            action: SearchAction::Route {
+                query: "翻译 applex".into(),
+            },
+            source: "builtin.dictionary".into(),
+            score_detail: None,
+            context_aware: false,
+            color_list_hex: None,
+            pinned_until: 0,
+        };
+        let e = item.into_app_entry();
+        assert!(e.lnk_path.is_empty());
+        assert!(matches!(e.actions[0].kind, ActionKind::Route));
+        assert_eq!(e.actions[0].payload.as_deref(), Some("翻译 applex"));
     }
 
     #[test]
