@@ -6,8 +6,17 @@ import {nextPlayStep, frameState, srcToPlayIndex, playToSrc, commands, formatFra
 
 test('nextPlayStep 循环回到首帧', () => {
     const frames = [{srcIdx: 0, durMs: 100}, {srcIdx: 1, durMs: 66}];
-    assert.deepEqual(nextPlayStep(frames, 0), {cursor: 1, durMs: 100, atEnd: false});
-    assert.deepEqual(nextPlayStep(frames, 1), {cursor: 0, durMs: 66, atEnd: false});
+    // 时长跟游标走：返回的是**下一帧**的停留时长（新帧按自己的时长调度）
+    assert.deepEqual(nextPlayStep(frames, 0), {cursor: 1, durMs: 66, atEnd: false});
+    assert.deepEqual(nextPlayStep(frames, 1), {cursor: 0, durMs: 100, atEnd: false});
+});
+
+test('nextPlayStep 长帧停顿不再错位到后一帧', () => {
+    // 帧 A=500ms、B=50ms：推进到 B 时调度 50ms（旧实现错用 A 的 500ms，
+    // 把长帧的停顿落在 B 身上——正是"长帧卡顿但高亮在下一帧"的根因）
+    const frames = [{srcIdx: 0, durMs: 500}, {srcIdx: 1, durMs: 50}];
+    assert.equal(nextPlayStep(frames, 0).durMs, 50);
+    assert.equal(nextPlayStep(frames, 1).durMs, 500);
 });
 
 test('nextPlayStep 空序列与越界游标', () => {

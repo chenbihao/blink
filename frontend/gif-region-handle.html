@@ -3,13 +3,15 @@
 <head>
     <meta charset="UTF-8"/>
     <title>Blink GIF Region Handle</title>
-    <link href="css/entries/gif-region.css" rel="stylesheet"/>
+    <link href="css/entries/gif-region-handle.css" rel="stylesheet"/>
 </head>
 <body>
 <!--
-  0.28.7 GIF 录制区域拖动柄（gif-region-handle 窗口）。
+  0.28.7 GIF 录制区域拖动柄（gif-region-handle 窗口，保活复用）。
   - 悬挂在范围框上边缘中央（区域外，不遮挡被录区域内容）；
     按住拖动 = 移动整个录制区域（位置热更新，尺寸不变）。
+  - 区域/边界经 `gif_recording_region` 拉取 + `blink://gif-region-updated`
+    事件同步（复用窗口无 URL 重载）。
   - 不用系统窗口拖动（-webkit-app-region 会把窗口交给系统移动循环，
     位置事件回传链路长且松手时机不可控）——pointer 事件自行累计位移，
     rAF 节流上报目标区域坐标，后端同步更新采集区域 + 范围框 + 本柄位置。
@@ -21,7 +23,7 @@
 </div>
 <script type="module">
     import {ensureSpriteLoaded} from '../js/shared/icon.js';
-    import {invoke} from '../js/shared/tauri.js';
+    import {invoke, listen} from '../js/shared/tauri.js';
 
     ensureSpriteLoaded();
 
@@ -29,11 +31,38 @@
     let dragging = false;
     let startX = 0;
     let startY = 0;
-    // 起点：后端在创建本窗口时经 URL query 注入区域初始坐标
-    const params = new URLSearchParams(location.search);
-    let regionX = parseInt(params.get('x') || '0', 10);
-    let regionY = parseInt(params.get('y') || '0', 10);
+    // 区域/边界：窗口保活复用无 URL 重载——加载时 `gif_recording_region`
+    // 拉取，之后以 `blink://gif-region-updated` 事件为准（新录制定位 /
+    // 拖动后端钳制对账）。
+    let regionX = 0;
+    let regionY = 0;
+    let regionW = 0;
+    let regionH = 0;
+    let vx = NaN, vy = NaN, vw = NaN, vh = NaN;
     let rafPending = false;
+
+    function syncFrom(p) {
+        if (!p) return;
+        regionX = p.x; regionY = p.y; regionW = p.w; regionH = p.h;
+        vx = p.vx; vy = p.vy; vw = p.vw; vh = p.vh;
+    }
+
+    invoke('gif_recording_region')
+        .then(p => {
+            if (!dragging) syncFrom(p);
+        })
+        .catch(() => {});
+    listen('blink://gif-region-updated', ev => {
+        if (!dragging) syncFrom(ev.payload); // 拖动中不回写（自身上报的回声）
+    });
+
+    // 虚拟屏内钳制（参数缺失时不钳制，交给后端）——拖出屏幕的采集越界
+    // 部分是黑边，且就地钳制保证区域跟手（后端单侧钳制会出现"先滑出
+    // 再拖回要先走完超出量"的滞后）。
+    const clampX = v => (Number.isFinite(vx) && vw >= regionW)
+        ? Math.max(vx, Math.min(v, vx + vw - regionW)) : v;
+    const clampY = v => (Number.isFinite(vy) && vh >= regionH)
+        ? Math.max(vy, Math.min(v, vy + vh - regionH)) : v;
 
     function report() {
         rafPending = false;
@@ -47,13 +76,22 @@
         startY = ev.screenY;
         grip.setPointerCapture(ev.pointerId);
         ev.preventDefault();
+        // 冷启动兜底：定位事件早于本页监听器就绪会被错过（预热后立即开录
+        // 的窄窗口）——起拖时仍未同步过区域则拉取一次。
+        if (!regionW) {
+            invoke('gif_recording_region')
+                .then(p => {
+                    if (p && dragging) syncFrom(p);
+                })
+                .catch(() => {});
+        }
     });
     grip.addEventListener('pointermove', ev => {
         if (!dragging) return;
         // 物理 → CSS 坐标换算：regionX/Y 是物理像素，pointer 是 CSS px
         const dpr = window.devicePixelRatio || 1;
-        regionX += Math.round((ev.screenX - startX) * dpr);
-        regionY += Math.round((ev.screenY - startY) * dpr);
+        regionX = clampX(regionX + Math.round((ev.screenX - startX) * dpr));
+        regionY = clampY(regionY + Math.round((ev.screenY - startY) * dpr));
         startX = ev.screenX;
         startY = ev.screenY;
         if (!rafPending) {

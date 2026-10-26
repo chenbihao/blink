@@ -47,6 +47,7 @@ export const ss = {
     sent: false,               // 防止复制/保存/钉图重复提交
     singleClickTimeout: null,  // 单击→200ms 后隐藏的定时器
     blurGuard: false,          // blur 事件短窗口防抖
+    gifWindowHold: false,      // GIF 辅助窗口预热/操作期——blur 豁免（WebView2 建窗焦点瞬移非退出意图）
 
     // ── 标注绘制状态（物理像素）────────────────────────────────
     annotStartX: 0, annotStartY: 0,

@@ -63,10 +63,11 @@ export function cleanupCanvasVisuals() {
     annot.clearOverlay();
     // 隐藏 UI 元素
     if (toolbar) toolbar.classList.add('hidden');
-    // 0.28.7：GIF 录制准备栏一并收起（复用窗口时防残留；node 测试 mock 的
+    // 0.28.7：录制准备面随宿主一起收起——清掉宿主模式 class（双面架构下
+    // 准备面没有独立 hidden，防复用窗口以准备面形态重现；node 测试 mock 的
     // document 可能只有 documentElement，按能力探测）
     if (typeof document !== 'undefined' && typeof document.getElementById === 'function') {
-        document.getElementById('gif-prep-bar')?.classList.add('hidden');
+        (ss.toolbar || document.getElementById('toolbar'))?.classList.remove('toolbar-mode-gif-prep');
     }
     if (sizeHint) sizeHint.classList.add('hidden');
     if (typeof ss._cleanupSessionVisuals === 'function') {

@@ -33,6 +33,10 @@ export function renderState(state, dom) {
             break;
         }
     }
+    // 倒计时未开录，暂停无语义——禁用给出明确反馈（recording/paused 恢复）
+    if (pauseBtn) {
+        pauseBtn.disabled = state.phase === 'countdown';
+    }
     // 暂停/继续图标切换（第一个 icon=pause，第二个=play）
     const icons = pauseBtn.querySelectorAll('.icon');
     if (icons.length === 2) {

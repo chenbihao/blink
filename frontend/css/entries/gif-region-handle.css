@@ -1,0 +1,37 @@
+/* ── 录制区域拖动柄 entry（gif-region-handle 窗口，0.28.7） ──────────────
+   此前柄样式寄居在 gif-region.css 末尾——其中 html,body{height:auto} 覆盖
+   了范围框窗口的 height:100%（同特异性后者胜），把 #region-frame 高度
+   塌成 0、录制边框只剩横条。按 entry 一页一样式铁则拆分，两窗互不影响。
+   加载顺序铁则：reset 起头（本页仅一块控件，无文本/组件）。 */
+
+@import '../base/reset.css';
+
+html, body {
+    height: auto;
+    background: transparent;
+    overflow: hidden;
+}
+
+/* 柄挂在范围框上边缘中央（区域外，不遮挡被录区域内容）；整窗可拖
+   （窗口本身就这一块，不穿透）。 */
+.handle-grip {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px;
+    height: 22px;
+    background: rgba(30, 30, 30, 0.92);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-bottom: none;
+    border-radius: 8px 8px 0 0;
+    cursor: grab;
+    color: #d8d8de;
+    -webkit-app-region: no-drag;
+}
+
+.handle-grip:active {cursor: grabbing;}
+
+.handle-grip .icon {
+    width: 13px;
+    height: 13px;
+}

@@ -33,16 +33,24 @@ pub struct RecordingBudget {
     pub queue_frame_cap: usize,
 }
 
+impl RecordingBudget {
+    /// 按帧率折算的短演示预算：帧上限 = fps × 120s——固定 1800 帧会让
+    /// 30fps 只有 60s 有效时长，与 120s 时长上限矛盾。
+    pub fn for_fps(fps: u32) -> Self {
+        Self {
+            max_duration_ms: 120_000,
+            max_frames: fps.clamp(1, 30).saturating_mul(120),
+            max_spool_bytes: 512 * 1024 * 1024,
+            queue_frame_cap: 32,
+        }
+    }
+}
+
 impl Default for RecordingBudget {
     fn default() -> Self {
         // 短演示预算：120s / 15fps=1800 帧 / 512MB 压缩素材 / 队列 ≤ 2s 缓冲
         // （1280×720 帧 3.5MB 时 2s ≈ 30 帧，帧更小则按字节换算后放大）。
-        Self {
-            max_duration_ms: 120_000,
-            max_frames: 1_800,
-            max_spool_bytes: 512 * 1024 * 1024,
-            queue_frame_cap: 32,
-        }
+        Self::for_fps(15)
     }
 }
 
@@ -147,6 +155,14 @@ pub fn finalize_durations(ts_ms: &[u64], fps: u32) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn budget_for_fps_scales_frame_cap_with_fps() {
+        assert_eq!(RecordingBudget::for_fps(15).max_frames, 1800);
+        assert_eq!(RecordingBudget::for_fps(30).max_frames, 3600, "30fps 也应录满 120s");
+        assert_eq!(RecordingBudget::for_fps(5).max_frames, 600);
+        assert_eq!(RecordingBudget::default().max_frames, 1800);
+    }
 
     #[test]
     fn decide_overload_empty_cap_stops() {

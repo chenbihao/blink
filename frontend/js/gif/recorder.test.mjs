@@ -42,6 +42,8 @@ test('倒计时阶段只显示大数字', () => {
     assert.ok(!dom.countdown.classes.has('hidden'));
     assert.ok(dom.recLine.classes.has('hidden'));
     assert.equal(dom.countdown.textContent, '3');
+    // 倒计时未开录，暂停按钮禁用
+    assert.equal(dom.pauseBtn.disabled, true);
     renderState({phase: 'countdown', countdownMs: 900}, dom);
     assert.equal(dom.countdown.textContent, '1');
 });
@@ -54,6 +56,7 @@ test('录制中显示有效时长与帧数', () => {
     assert.ok(!dom.recDot.classes.has('paused'));
     assert.equal(dom.recTime.textContent, '01:05.4');
     assert.equal(dom.recFrames.textContent, '982 帧');
+    assert.equal(dom.pauseBtn.disabled, false, '录制中暂停可用');
 });
 
 test('暂停状态切换圆点与按钮图标', () => {

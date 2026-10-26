@@ -1,7 +1,7 @@
 //! GIF 录制服务编排（0.28.7，bin 侧）。
 //!
 //! 职责：
-//! - **录制会话**：`start`（素材目录 + 采集流水线 + 控制条窗口 + 3s 倒计时）、
+//! - **录制会话**：`start`（素材目录 + 采集流水线 + 控制条窗口 + 倒计时）、
 //!   `pause/resume`、`stop`（排空 → finalize → 构建 Timeline → 打开编辑器）、
 //!   `cancel`（丢弃素材）；同一时刻仅一个活跃录制。
 //! - **状态广播**：`blink://gif-recorder-state`（250ms 节流 ticker + 阶段变化
@@ -27,8 +27,9 @@ use blink_infra::gif::{
     EncodeFrame, EncodePlan, SessionMeta, SpoolReader, SpoolWriter,
 };
 
-/// 录制倒计时（ms）。
-const COUNTDOWN_MS: u64 = 3000;
+/// 录制倒计时（ms）。0 = 无倒计时、点「开始录制」立即采集（2026-10-27
+/// 用户定案；保留倒计时机制，改回 >0 即恢复——控制条已适配两种形态）。
+const COUNTDOWN_MS: u64 = 0;
 /// 状态广播周期。
 const STATE_TICK_MS: u64 = 250;
 /// 素材 TTL。
@@ -53,6 +54,10 @@ pub(crate) struct ActiveRecording {
     cancel_flag: Arc<AtomicBool>,
     /// 共享采集区域位置（拖动柄热更新；与 GdiFrameSource 同一 Arc）。
     region_pos: std::sync::Arc<std::sync::Mutex<(i32, i32)>>,
+    /// 区域尺寸（物理像素）。拖动只改位置；尺寸恒定——移动区域时直接取用，
+    /// 不再从磁盘会话元数据回读（录制中索引还在增长，回读既贵又可能失败）。
+    region_w: u32,
+    region_h: u32,
 }
 
 /// GIF 服务（managed state）。
@@ -268,7 +273,8 @@ pub fn start_recording(
         source,
         writer,
         fps,
-        infra_gif::RecordingBudget::default(),
+        // 帧上限按 fps 折算（fps × 120s），否则 30fps 只有 60s 有效录制
+        infra_gif::RecordingBudget::for_fps(fps),
     );
 
     let cancel_flag = Arc::new(AtomicBool::new(false));
@@ -276,21 +282,29 @@ pub fn start_recording(
     let region_for_rec = Arc::clone(&region_pos);
     #[cfg(not(target_os = "windows"))]
     let region_for_rec = Arc::new(Mutex::new((x, y)));
+
+    // 控制条窗口（区域下方，避让选区——控制条不入成品）；范围指示框
+    // （边框落在区域外，鼠标穿透）；窗口就绪后再收截图 overlay（时序确定：
+    // overlay 的灰罩不会盖住倒计时，录制画面干净）。
+    // 窗口预热（准备模式进入时创建）后这里全部为复用路径——set/show
+    // 毫秒级，「点开始到边框出现」无冷启动间隔。
+    show_control_window(app, x, y, w, h, control_x, control_y);
+    show_region_frame(app, x, y, w, h);
+    show_region_handle(app, x, y, w);
+    emit_region_updated(app, x, y, w, h);
+    crate::infra::platform::window::hide_screenshot_overlay(app);
+
+    // 倒计时基准在窗口就绪后才起算（COUNTDOWN_MS>0 时可见倒计时恒为
+    // 完整时长；当前 0 = 点击即录，此行仅为恢复倒计时时保序）。
     *service.recording.lock().unwrap_or_else(|e| e.into_inner()) = Some(ActiveRecording {
         session_id: session_id.clone(),
         ctl: Arc::clone(&ctl),
         countdown_deadline: Some(std::time::Instant::now() + Duration::from_millis(COUNTDOWN_MS)),
         cancel_flag: Arc::clone(&cancel_flag),
         region_pos: region_for_rec,
+        region_w: w,
+        region_h: h,
     });
-
-    // 控制条窗口（区域下方，避让选区——控制条不入成品）；范围指示框
-    // （边框落在区域外，鼠标穿透）；窗口就绪后再收截图 overlay（时序确定：
-    // overlay 的灰罩不会盖住倒计时，录制画面干净）。
-    show_control_window(app, x, y, w, h, control_x, control_y);
-    show_region_frame(app, x, y, w, h);
-    show_region_handle(app, x, y, w);
-    crate::infra::platform::window::hide_screenshot_overlay(app);
 
     // 倒计时 → Start
     let app2 = app.clone();
@@ -358,7 +372,6 @@ fn finalize_after_stop(
     close_region_frame(app);
     close_region_handle(app);
     let root = GifService::root();
-
     if cancelled {
         let _ = std::fs::remove_dir_all(root.join("sessions").join(session_id));
         service.timelines.lock().unwrap_or_else(|e| e.into_inner()).remove(session_id);
@@ -397,75 +410,146 @@ fn finalize_after_stop(
 }
 
 /// 控制条窗口：优先定位到截图工具栏原位（「工具栏原地切换成录制栏」，
-/// overlay 前端传入物理坐标）；无位置信息时区域下方 12px → 上方 → 主屏底部。
+/// overlay 前端传入物理坐标）；无位置信息时区域下方 12px → 上方。
+///
+/// focusable(false)（WS_EX_NOACTIVATE）：show() 不从被录应用抢前台焦点，
+/// 鼠标点击照常可用——控制条不需要键盘输入。
 fn show_control_window(
     app: &AppHandle,
     x: i32,
     y: i32,
-    _w: u32,
+    w: u32,
     h: u32,
     control_x: Option<i32>,
     control_y: Option<i32>,
 ) {
-    use blink_infra::platform::window::get_or_create_window;
-    let (win, _created) = match get_or_create_window(app, CONTROL_LABEL, || {
-        WebviewWindowBuilder::new(
-            app,
-            CONTROL_LABEL,
-            WebviewUrl::App("gif-recorder.html".into()),
-        )
-        .title("Blink GIF")
-        .inner_size(400.0, 52.0)
-        .decorations(false)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .resizable(false)
-        .visible(false)
-        .build()
-    }) {
+    let win = match show_control_window_builder(app) {
         Ok(v) => v,
         Err(e) => {
             tracing::error!(error = %e, "GIF 控制条窗口创建失败（录制仍继续，用托盘不可停）");
             return;
         }
     };
-    // 位置：工具栏原位优先；否则区域下方 → 上方 → 主屏底部中央。
-    // （物理像素；set_position Physical 直接使用）
+    // 初始位置：工具栏原位优先；否则区域下方。
     let (mut pos_x, mut pos_y) = match (control_x, control_y) {
-        (Some(cx), Some(cy)) => (cx as f64, cy as f64),
-        _ => {
-            let (px, py) = (x as f64, y as f64 + h as f64 + 12.0);
-            if py as i64 + 52 > virtual_screen_bottom() {
-                (px, (y as f64 - 12.0 - 52.0).max(0.0))
-            } else {
-                (px, py)
-            }
-        }
+        (Some(cx), Some(cy)) => (cx, cy),
+        _ => (x, y + h as i32 + 12),
     };
-    if pos_y < 0.0 {
-        // 主屏底部中央兜底
-        pos_x = 0.0;
-        pos_y = primary_work_area_bottom() as f64 - 96.0;
-    }
     let _ = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
-        pos_x as i32, pos_y as i32,
+        pos_x, pos_y,
     )));
-    // 不抢焦点（focused(false) 建窗 + 不 set_focus）：被录应用保持前台，
-    // 光标/键盘上下文不变。
+    // 物理尺寸读回（逻辑 400×52 随所在屏 DPI 缩放；移动后按目标屏实际值）。
+    let (cw, ch) = win
+        .outer_size()
+        .map(|s| (s.width as i32, s.height as i32))
+        .unwrap_or((400, 52));
+    // 工具栏原位可能被拖进过选区 → 控制条会入成品，挪到区域下方，放不下放上方。
+    let overlaps = pos_x < x + w as i32
+        && pos_x + cw > x
+        && pos_y < y + h as i32
+        && pos_y + ch > y;
+    if overlaps {
+        pos_y = y + h as i32 + 12;
+        let (_, vy, _, vh) = virtual_screen_rect();
+        if pos_y + ch > vy + vh {
+            pos_y = y - 12 - ch;
+        }
+    }
+    // 虚拟屏幕边界钳制（多屏负坐标合法，按虚拟屏矩形而非主屏判断）。
+    let (vx, vy, vw, vh) = virtual_screen_rect();
+    pos_x = pos_x.clamp(vx, (vx + vw - cw).max(vx));
+    pos_y = pos_y.clamp(vy, (vy + vh - ch).max(vy));
+    let _ = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+        pos_x, pos_y,
+    )));
     let _ = win.show();
 }
 
+/// 结束录制：控制条隐藏保活（不销毁）。复用路径 `show()` 毫秒级——
+/// 若每次 close/rebuild，WebView2 冷启动会让「点开始到控制条出现」
+/// 有数百毫秒到一秒的空窗。
 fn close_control_window(app: &AppHandle) {
     if let Some(win) = app.get_webview_window(CONTROL_LABEL) {
-        let _ = win.close();
+        let _ = win.hide();
     }
 }
 
 /// 录制范围指示框：透明置顶 + 鼠标穿透 + 不抢焦点；窗口比区域外扩
 /// REGION_BORDER，边框画在窗口最外圈（内边缘 = 区域边界，不入画面）。
 fn show_region_frame(app: &AppHandle, x: i32, y: i32, w: u32, h: u32) {
+    match show_region_frame_builder(app) {
+        Ok(win) => {
+            let _ = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+                x - REGION_BORDER,
+                y - REGION_BORDER,
+            )));
+            let _ = win.set_size(tauri::PhysicalSize::new(
+                w + (REGION_BORDER as u32) * 2,
+                h + (REGION_BORDER as u32) * 2,
+            ));
+            // 鼠标穿透：被录区域内的点击/拖拽完全不受影响
+            let _ = win.set_ignore_cursor_events(true);
+            let _ = win.show();
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "GIF 范围框窗口创建失败（录制继续）");
+        }
+    }
+}
+
+fn close_region_frame(app: &AppHandle) {
+    // 隐藏保活（复用秒显，同 close_control_window 注释）
+    if let Some(win) = app.get_webview_window(REGION_LABEL) {
+        let _ = win.hide();
+    }
+}
+
+/// 播放期间区域变化的统一广播（拖动柄窗口复用时靠此同步，无 URL 重载）。
+fn emit_region_updated(app: &AppHandle, x: i32, y: i32, w: u32, h: u32) {
+    let (vx, vy, vw, vh) = virtual_screen_rect();
+    let _ = app.emit(
+        EventNames::GIF_REGION_UPDATED,
+        serde_json::json!({"x": x, "y": y, "w": w, "h": h, "vx": vx, "vy": vy, "vw": vw, "vh": vh}),
+    );
+}
+
+/// 预热录制辅助窗口（准备模式进入时调用）：三个窗口以隐藏态建好，
+/// 点「开始录制」走复用路径（set/show 毫秒级，无 WebView2 冷启动延迟）。
+/// 已存在则无操作。代价是三个常驻隐藏 WebView（各约十几 MB）——只在
+/// 用户明确表达录制意图后才付出。
+pub fn prewarm_windows(app: &AppHandle) {
+    // 三个 builder 与正式 show 路径一致（含 focusable 等），确保复用时
+    // 窗口行为相同；预热不定位不显示。
+    let _ = show_control_window_builder(app);
+    let _ = show_region_frame_builder(app);
+    let _ = show_region_handle_builder(app);
+}
+
+fn show_control_window_builder(app: &AppHandle) -> Result<tauri::WebviewWindow, String> {
     use blink_infra::platform::window::get_or_create_window;
-    let built = get_or_create_window(app, REGION_LABEL, || {
+    get_or_create_window(app, CONTROL_LABEL, || {
+        WebviewWindowBuilder::new(
+            app,
+            CONTROL_LABEL,
+            WebviewUrl::App("gif-recorder.html".into()),
+        )
+        .title("Blink GIF")
+        .inner_size(340.0, 52.0)
+        .decorations(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .resizable(false)
+        .focusable(false)
+        .focused(false)
+        .visible(false)
+        .build()
+    })
+    .map(|(win, _)| win)
+}
+
+fn show_region_frame_builder(app: &AppHandle) -> Result<tauri::WebviewWindow, String> {
+    use blink_infra::platform::window::get_or_create_window;
+    get_or_create_window(app, REGION_LABEL, || {
         WebviewWindowBuilder::new(
             app,
             REGION_LABEL,
@@ -479,44 +563,20 @@ fn show_region_frame(app: &AppHandle, x: i32, y: i32, w: u32, h: u32) {
         .resizable(false)
         .shadow(false)
         .focusable(false)
+        .focused(false)
         .visible(false)
         .build()
-    });
-    match built {
-        Ok((win, _)) => {
-            let _ = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
-                x - REGION_BORDER,
-                y - REGION_BORDER,
-            )));
-            let _ = win.set_size(tauri::PhysicalSize::new(
-                w as u32 + (REGION_BORDER as u32) * 2,
-                h as u32 + (REGION_BORDER as u32) * 2,
-            ));
-            // 鼠标穿透：被录区域内的点击/拖拽完全不受影响
-            let _ = win.set_ignore_cursor_events(true);
-            let _ = win.show();
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "GIF 范围框窗口创建失败（录制继续）");
-        }
-    }
+    })
+    .map(|(win, _)| win)
 }
 
-fn close_region_frame(app: &AppHandle) {
-    if let Some(win) = app.get_webview_window(REGION_LABEL) {
-        let _ = win.close();
-    }
-}
-
-/// 录制区域拖动柄：范围框上边缘中央的小置顶窗（区域外，不挡被录内容）。
-fn show_region_handle(app: &AppHandle, x: i32, y: i32, w: u32) {
+fn show_region_handle_builder(app: &AppHandle) -> Result<tauri::WebviewWindow, String> {
     use blink_infra::platform::window::get_or_create_window;
-    let url = format!("gif-region-handle.html?x={x}&y={y}");
-    let built = get_or_create_window(app, REGION_HANDLE_LABEL, || {
+    get_or_create_window(app, REGION_HANDLE_LABEL, || {
         WebviewWindowBuilder::new(
             app,
             REGION_HANDLE_LABEL,
-            WebviewUrl::App(url.clone().into()),
+            WebviewUrl::App("gif-region-handle.html".into()),
         )
         .title("")
         .decorations(false)
@@ -525,60 +585,91 @@ fn show_region_handle(app: &AppHandle, x: i32, y: i32, w: u32) {
         .skip_taskbar(true)
         .resizable(false)
         .shadow(false)
+        .focusable(false)
+        .focused(false)
         .inner_size(34.0, 22.0)
         .visible(false)
         .build()
-    });
-    match built {
-        Ok((win, _)) => {
+    })
+    .map(|(win, _)| win)
+}
+
+/// 录制区域拖动柄：范围框上边缘中央的小置顶窗（区域外，不挡被录内容）。
+/// focusable(false)：show() 不抢被录应用焦点（拖拽只需要鼠标）。
+/// 窗口保活复用——初始区域/边界经 GIF_REGION_UPDATED 事件同步（预热线
+/// 无 URL 参数；事件为准）。
+fn show_region_handle(app: &AppHandle, x: i32, y: i32, w: u32) {
+    match show_region_handle_builder(app) {
+        Ok(win) => {
+            // 先粗定位到目标屏（让 DPI 变化生效），再按实际物理尺寸精确定位。
             let _ = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
-                x + w as i32 / 2 - 17,
-                y - REGION_BORDER - 22,
+                x,
+                y,
             )));
+            place_region_handle(app, x, y, w);
             let _ = win.show();
         }
         Err(e) => tracing::warn!(error = %e, "GIF 拖动柄窗口创建失败（录制继续）"),
     }
 }
 
+/// 按实际物理尺寸把柄居中到范围框上边缘中央，并钳制到虚拟屏顶。
+/// 柄窗口以逻辑 34×22 创建，落在不同 DPI 屏上物理宽度不同——用固定
+/// `-17` 物理偏移会在高缩放屏偏心，因此读回 outer_size 后再算。
+fn place_region_handle(app: &AppHandle, x: i32, y: i32, w: u32) {
+    let Some(win) = app.get_webview_window(REGION_HANDLE_LABEL) else {
+        return;
+    };
+    let (phys_w, phys_h) = win
+        .outer_size()
+        .map(|s| (s.width as i32, s.height as i32))
+        .unwrap_or((34, 22));
+    let hx = x + w as i32 / 2 - phys_w / 2;
+    let hy = (y - REGION_BORDER - phys_h).max(virtual_screen_rect().1);
+    let _ = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
+        hx, hy,
+    )));
+}
+
 fn close_region_handle(app: &AppHandle) {
+    // 隐藏保活（复用秒显，同 close_control_window 注释）；区域/边界由
+    // GIF_REGION_UPDATED 事件在下次开始时重新同步（复用无 URL 重载）
     if let Some(win) = app.get_webview_window(REGION_HANDLE_LABEL) {
-        let _ = win.close();
+        let _ = win.hide();
     }
 }
 
 /// 移动录制区域（拖动柄上报目标坐标）：热更新采集位置 + 同步范围框/柄窗口。
+///
+/// 坐标钳制到虚拟屏幕矩形——BitBlt 越界部分是黑边，范围框也不该悬出屏。
+/// 尺寸取 `ActiveRecording` 内存值（会话元数据回读每帧拖动都要解析整个
+/// frames.jsonl，且录制中索引仍在增长）。
 pub fn move_recording_region(app: &AppHandle, x: i32, y: i32) -> GifResult<()> {
     let service = app.state::<Arc<GifService>>();
     let rec = service.recording.lock().unwrap_or_else(|e| e.into_inner());
     let Some(r) = rec.as_ref() else {
         return Err(GifServiceError::NoActiveRecording);
     };
+    let (w, h) = (r.region_w as i32, r.region_h as i32);
+    let (vx, vy, vw, vh) = virtual_screen_rect();
+    let x = x.clamp(vx, (vx + vw - w).max(vx));
+    let y = y.clamp(vy, (vy + vh - h).max(vy));
     if let Ok(mut g) = r.region_pos.lock() {
         *g = (x, y);
     }
-    let (w, h) = {
-        let root = GifService::root();
-        // 尺寸从会话元数据读（ActiveRecording 不存尺寸）
-        let meta = SpoolReader::open(&root, &r.session_id).ok().map(|m| (m.meta.region.w, m.meta.region.h));
-        meta.unwrap_or((0, 0))
-    };
     if let Some(win) = app.get_webview_window(REGION_LABEL) {
         let _ = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
             x - REGION_BORDER,
             y - REGION_BORDER,
         )));
         let _ = win.set_size(tauri::PhysicalSize::new(
-            w as u32 + (REGION_BORDER as u32) * 2,
-            h as u32 + (REGION_BORDER as u32) * 2,
+            r.region_w + (REGION_BORDER as u32) * 2,
+            r.region_h + (REGION_BORDER as u32) * 2,
         ));
     }
-    if let Some(win) = app.get_webview_window(REGION_HANDLE_LABEL) {
-        let _ = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
-            x + w as i32 / 2 - 17,
-            y - REGION_BORDER - 22,
-        )));
-    }
+    place_region_handle(app, x, y, r.region_w);
+    // 后端钳制结果回发（拖动端就地钳制为主，此为对账同步）
+    emit_region_updated(app, x, y, r.region_w, r.region_h);
     Ok(())
 }
 
@@ -620,35 +711,35 @@ pub fn open_editor(app: &AppHandle, session_id: &str) {
 
 // ── 简单屏幕几何（Win32 直查；避免引入窗口管理依赖） ──────────────────────────
 
-fn virtual_screen_bottom() -> i64 {
-    #[cfg(target_os = "windows")]
-    unsafe {
-        let top = windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
-            windows::Win32::UI::WindowsAndMessaging::SM_YVIRTUALSCREEN,
-        );
-        let h = windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
-            windows::Win32::UI::WindowsAndMessaging::SM_CYVIRTUALSCREEN,
-        );
-        top as i64 + h as i64
-    }
-    #[cfg(not(target_os = "windows"))]
-    4096
+/// 当前录制区域快照（拖动柄窗口加载时拉取；无活跃录制返回 None）。
+pub fn recording_region_snapshot(service: &Arc<GifService>) -> Option<serde_json::Value> {
+    let rec = service.recording.lock().unwrap_or_else(|e| e.into_inner());
+    let r = rec.as_ref()?;
+    let (x, y) = r.region_pos.lock().map(|g| *g).unwrap_or((0, 0));
+    let (vx, vy, vw, vh) = virtual_screen_rect();
+    Some(serde_json::json!({
+        "x": x, "y": y, "w": r.region_w, "h": r.region_h,
+        "vx": vx, "vy": vy, "vw": vw, "vh": vh,
+    }))
 }
 
-fn primary_work_area_bottom() -> i32 {
+/// 虚拟屏幕矩形（物理像素，多屏时左上角可为负坐标）。
+fn virtual_screen_rect() -> (i32, i32, i32, i32) {
     #[cfg(target_os = "windows")]
-    unsafe {
-        let mut rc = windows::Win32::Foundation::RECT::default();
-        let ok = windows::Win32::UI::WindowsAndMessaging::SystemParametersInfoW(
-            windows::Win32::UI::WindowsAndMessaging::SPI_GETWORKAREA,
-            0,
-            Some(&mut rc as *mut _ as *mut _),
-            windows::Win32::UI::WindowsAndMessaging::SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
-        );
-        if ok.is_ok() { rc.bottom } else { 1080 }
+    {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+            SM_YVIRTUALSCREEN,
+        };
+        // SAFETY: GetSystemMetrics 为纯查询，无副作用
+        let x = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
+        let y = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
+        let w = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
+        let h = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
+        (x, y, w, h)
     }
     #[cfg(not(target_os = "windows"))]
-    1080
+    (0, 0, 4096, 4096)
 }
 
 fn now_ms() -> u64 {

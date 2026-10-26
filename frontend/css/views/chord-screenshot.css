@@ -2554,21 +2554,26 @@ html.eyedropper-picking * {
 #stroke-width-trigger-icon[data-stroke-style="dashed"] { border-bottom-style: dashed; }
 
 
-/* ── 0.28.7：GIF 录制准备栏（工具栏原地切换的「录制模式」视图） ──────────
-   视觉与 #toolbar 同款（同底色/边框/圆角/阴影/字号），定位由 JS 复制
-   #toolbar 的 left/top——原地切换无跳变。 */
+/* ── 0.28.7：GIF 录制准备面（#toolbar 的第二形态，单一宿主双面） ──────────
+   #toolbar 是唯一定位/拖动/跟随宿主：positionToolbar 的选区跟随、用户拖动
+   位置（data-user-moved）、屏内 clamp、uiScale 缩放、#toolbar-drag 抓手
+   全部作用于宿主——准备面自动继承，不存在第二条需要同步的定位链路。
+   切面 = 宿主加 toolbar-mode-gif-prep：隐藏标注工具组（抓手保留）、显示
+   本面。双栏并行在结构上不可能发生。 */
+#toolbar.toolbar-mode-gif-prep > *:not(#toolbar-drag):not(#gif-prep-bar) {
+    display: none;
+}
+
 #gif-prep-bar {
-    position: fixed;
+    display: none;
+}
+
+#toolbar.toolbar-mode-gif-prep > #gif-prep-bar {
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 3px 8px;
-    background: rgba(30, 30, 30, 0.92);
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    border-radius: 10px;
-    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
-    z-index: var(--z-dropdown);
-    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    padding: 0 5px 0 3px;
+    margin-left: 2px;
 }
 
 .gif-prep-field {
@@ -2587,12 +2592,19 @@ html.eyedropper-picking * {
     border-radius: 6px;
     padding: 2px 6px;
     font-size: 16px;
+    /* 原生下拉弹层随暗色渲染（WebView2 默认白底弹层的根源） */
+    color-scheme: dark;
 }
 
 .gif-prep-field input[type="checkbox"] {
     accent-color: #4a9eff;
     width: 15px;
     height: 15px;
+}
+
+/* 录制面按钮：图标与文字留呼吸感（标注面按钮多为纯图标，不在此全局加 gap） */
+#gif-prep-bar .tool-btn {
+    gap: 6px;
 }
 
 .gif-prep-cursor {

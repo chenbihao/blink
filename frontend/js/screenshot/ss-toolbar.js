@@ -1080,8 +1080,12 @@ export function bindToolbar() {
         }
     });
     bind('btn-pin', doPinSelection);
-    // 0.28.7：GIF 录制——同长截图，只在选区已定时动作
-    bind('btn-gif', doGifRecord);
+    // 0.28.7：GIF 录制——同长截图，只在选区已定时动作。准备模式的选区
+    // 移动交互依赖选取工具，从非 select 工具进入时先切回（否则拖选区=画图）
+    bind('btn-gif', () => {
+        if (annot.getTool() !== 'select') selectTool('select');
+        doGifRecord();
+    });
     bind('btn-ocr', doOcrSelection);
     bind('btn-ocr-diag', doOcrDiagnostics);
     bind('btn-translate', doTranslateSelection);

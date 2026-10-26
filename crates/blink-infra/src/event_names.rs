@@ -314,4 +314,8 @@ impl EventNames {
     /// 复用 GIF 编辑器窗口时定向推送要打开的会话。初始会话由页面加载后
     /// `gif_editor_current` 拉取（ready/pull 模式）。
     pub const GIF_EDITOR_SESSION: &str = "blink://gif-editor-session";
+    /// 录制区域变化（新录制定位 / 拖动柄移动）：payload
+    /// `{ x, y, w, h, vx, vy, vw, vh }`（虚拟屏物理像素，已钳制）。
+    /// 拖动柄窗口复用时无 URL 重载——以此事件同步最新区域与边界。
+    pub const GIF_REGION_UPDATED: &str = "blink://gif-region-updated";
 }

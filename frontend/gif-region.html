@@ -20,8 +20,13 @@
     {
         const frame = document.getElementById('region-frame');
         const apply = () => {
-            // 3 物理像素 = 3 / devicePixelRatio CSS 像素（该窗口所在显示器）
-            frame.style.borderWidth = `${3 / (window.devicePixelRatio || 1)}px`;
+            // 与截图选区边框（canvas lineWidth = 2×DPR 物理像素）对齐，
+            // 但钳制 ≤3 物理像素——窗口只外扩了 3px，更粗的边框内边缘会
+            // 侵入录制区域（手测曾录到边框入画即此因）。100% 屏 2px、
+            // ≥150% 屏 3px，与截图态视觉连续。
+            const dpr = window.devicePixelRatio || 1;
+            const phys = Math.min(3, Math.max(2, Math.round(2 * dpr)));
+            frame.style.borderWidth = `${phys / dpr}px`;
         };
         apply();
         window.addEventListener('resize', apply);

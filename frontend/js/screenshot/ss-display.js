@@ -136,8 +136,11 @@ export function findDisplayContainingRect(rect) {
  *  先确定目标屏（选区右下角内侧），计算候选位置后无条件 clamp 到屏内。
  *  用户已手动拖动过时，保留位置但重新 clamp 防止越界。
  *  工具栏按选区右下角所在屏的 DPR 计算 UI scale，用 transform: scale 补偿
- *  跨屏 renderScale 差异，保证物理尺寸一致。 */
-export function positionToolbar(rect) {
+ *  跨屏 renderScale 差异，保证物理尺寸一致。
+ *  `immediate`：跳过「-9999 移出 + rAF」测量流程同步定位——用于工具栏
+ *  已可见且已布局的场景（宿主双面切换：面宽变化后按新宽度右对齐，避免
+ *  准备面首次停在旧左边界、拖一次选区才归位）。 */
+export function positionToolbar(rect, immediate = false) {
     const {toolbar} = ss;
     toolbar.classList.remove('hidden');
 
@@ -169,10 +172,7 @@ export function positionToolbar(rect) {
         return;
     }
 
-    toolbar.style.left = '-9999px';
-    toolbar.style.top = '-9999px';
-
-    requestAnimationFrame(() => {
+    const place = () => {
         const tw = toolbar.offsetWidth * uiScale;
         const th = toolbar.offsetHeight * uiScale;
         const MARGIN = 8;
@@ -209,7 +209,15 @@ export function positionToolbar(rect) {
         top = Math.max(minTop, Math.min(top, maxTop));
 
         applyToolbarPos(left, top, floating, uiScale);
-    });
+    };
+
+    if (immediate) {
+        place();
+    } else {
+        toolbar.style.left = '-9999px';
+        toolbar.style.top = '-9999px';
+        requestAnimationFrame(place);
+    }
 }
 
 function applyToolbarPos(left, top, floating, uiScale = 1) {

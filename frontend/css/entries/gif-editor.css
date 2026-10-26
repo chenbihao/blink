@@ -29,6 +29,68 @@ body {
     height: 100%;
 }
 
+/* ── 停止原因横幅（预算到顶/过载/采集失败；用户主动停止不展示） ── */
+.stop-reason-banner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    font-size: 12px;
+    color: var(--text-secondary, #c8c8d0);
+    background: var(--bg-elevated, rgba(255, 255, 255, 0.04));
+    border-bottom: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+}
+
+.stop-reason-banner span {
+    flex: 1;
+}
+
+.stop-reason-banner .banner-close {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-muted, #8a8a94);
+    cursor: pointer;
+}
+
+.stop-reason-banner .banner-close:hover {
+    color: var(--text-primary, #e8e8ec);
+    background: var(--bg-hover, rgba(255, 255, 255, 0.08));
+}
+
+.stop-reason-banner .icon {
+    width: 12px;
+    height: 12px;
+}
+
+/* ── 瞬时提示（编辑失败等） ── */
+.editor-hint {
+    position: fixed;
+    top: 14px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 60;
+    max-width: 70%;
+    padding: 6px 14px;
+    border-radius: 6px;
+    font-size: 12px;
+    color: var(--text-primary, #e8e8ec);
+    background: var(--bg-elevated, #26262c);
+    border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.1));
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+    pointer-events: none;
+}
+
+.editor-hint.hint-error {
+    border-color: rgba(224, 82, 82, 0.5);
+}
+
 /* ── 顶栏 ── */
 .topbar {
     display: flex;
@@ -81,12 +143,32 @@ body {
 }
 
 .preview-bar {
+    position: relative; /* 播放进度条贴底定位的包含块 */
     display: flex;
     align-items: center;
     gap: 8px;
     padding: 8px 16px;
     border-top: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
     font-variant-numeric: tabular-nums;
+}
+
+/* ── 播放进度条（贴 preview-bar 底边，按时间连续推进） ── */
+.play-progress {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 3px;
+    background: rgba(255, 255, 255, 0.08);
+    pointer-events: none;
+}
+
+.play-progress-fill {
+    height: 100%;
+    width: 0;
+    background: #4a9eff;
+    border-radius: 0 2px 2px 0;
+    transition: none; /* rAF 逐帧推进，不做 CSS 过渡（会与帧切换抢拍） */
 }
 
 .preview-pos, .preview-dur {
@@ -173,6 +255,22 @@ body {
     opacity: 0.32;
 }
 
+/* 已删帧：右键可恢复——与修剪外帧（仅不导出）视觉区分：斜杠划掉 */
+.frame-thumb.frame-deleted {
+    opacity: 0.4;
+}
+
+.frame-thumb.frame-deleted::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(to top left,
+        transparent calc(50% - 1px),
+        rgba(224, 82, 82, 0.85) 50%,
+        transparent calc(50% + 1px));
+    pointer-events: none;
+}
+
 .frame-thumb .frame-tag {
     position: absolute;
     top: 2px;
@@ -205,6 +303,21 @@ body {
     padding: 6px 12px 10px;
 }
 
+/* transport（0.28.7 优化：播放控制从 preview-bar 下移到时间轴操作行左侧，
+   与帧编辑按钮同排；分隔用细竖线与帧计数区隔） */
+.transport {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+}
+
+.transport + .toolbar-divider {
+    width: 1px;
+    height: 18px;
+    margin: 0 4px;
+    background: var(--border-subtle, rgba(255, 255, 255, 0.12));
+}
+
 .page-ind {
     font-size: 12px;
     min-width: 56px;
@@ -213,21 +326,19 @@ body {
     font-variant-numeric: tabular-nums;
 }
 
-/* ── 参数区 ── */
-.params {
-    display: flex;
-    align-items: center;
-    gap: 20px;
-    padding: 10px 16px;
-    border-top: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
-}
-
+/* ── 播放参数（0.28.7 优化：随信息行并入 preview-bar 右侧） ── */
 .param {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
     font-size: 13px;
     color: var(--text-secondary, #c8c8cf);
+}
+
+.btn:disabled {
+    opacity: 0.4;
+    cursor: default;
+    pointer-events: none;
 }
 
 .param select {
@@ -237,6 +348,44 @@ body {
     border-radius: 6px;
     padding: 4px 8px;
     font-size: 13px;
+    /* 原生下拉弹层随暗色渲染 */
+    color-scheme: dark;
+}
+
+/* 帧时长数字输入（param 内联，窄一些）——去原生外观：
+   隐藏调节钮、暗色渲染（弹层/自动填充随暗色） */
+.param input[type="number"] {
+    width: 72px;
+    background: var(--bg-elevated, #1e1e22);
+    color: var(--text-primary, #e8e8ec);
+    border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.1));
+    border-radius: 6px;
+    padding: 4px 6px;
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+    color-scheme: dark;
+    appearance: textfield;
+    -moz-appearance: textfield;
+}
+
+.param input[type="number"]::-webkit-inner-spin-button,
+.param input[type="number"]::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+}
+
+.param input[type="number"]:focus {
+    outline: none;
+    border-color: #4a9eff;
+}
+
+.param .btn-icon {
+    padding: 3px;
+}
+
+.param .btn-icon .icon {
+    width: 12px;
+    height: 12px;
 }
 
 /* ── 导出对话框 ── */

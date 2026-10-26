@@ -45,7 +45,10 @@ const els = {
     frameCountInd: $('frame-count-ind'),
     btnPlay: $('btn-play'),
     speed: $('sel-speed'),
-    hold: $('sel-hold'),
+    /** 帧时长输入（ms）——作用于全部选中帧（set_hold_many 单 undo）。 */
+    durInput: $('inp-dur'),
+    durClear: $('btn-dur-clear'),
+    btnDelete: $('btn-delete-frame'),
     loop: $('sel-loop'),
     undo: $('btn-undo'),
     redo: $('btn-redo'),
@@ -59,6 +62,12 @@ const els = {
     progressRow: $('export-progress-row'),
     progress: $('export-progress'),
     progressText: $('export-progress-text'),
+    hint: $('editor-hint'),
+    stopBanner: $('stop-reason-banner'),
+    stopBannerText: $('stop-reason-text'),
+    stopBannerClose: $('stop-reason-close'),
+    /** 播放进度条填充（按时间轴推进；贴 preview-bar 底边）。 */
+    playProgress: $('play-progress-fill'),
 };
 
 /** 会话状态。 */
@@ -70,6 +79,8 @@ const state = {
     anchor: null,
     playing: false,
     playTimer: 0,
+    /** 播放时钟的绝对到期时刻（漂移补偿基准；performance.now 系）。 */
+    playDue: 0,
     /** 当前帧开始展示的时刻（空格启动时据此保留剩余时长）。 */
     frameShownAt: 0,
     /** 时间轴几何（会话加载时按宽高比计算）。 */
@@ -77,15 +88,25 @@ const state = {
     slotW: 102,
     /** 预览解码宽度（显示区物理像素，clamp 到源宽）。 */
     previewWidth: 480,
-    thumbCache: new Map(),   // srcIdx -> ImageBitmap（缩略 160 档）
+    // 缩略图直接缓存后端返回的 PNG data URL（字符串）——不再转 ImageBitmap
+    // 后又 canvas 重编码回 PNG（每个缩略图一次主线程同步编码，几百帧可观）。
+    thumbCache: new Map(),   // srcIdx -> data URL（160 档缩略）
     previewCache: new Map(), // srcIdx -> ImageBitmap（previewWidth 档）
     previewBytes: 0,
+    /** 素材帧号 → 有效时长（帧标签显示用；编辑后重建）。 */
+    durBySrc: new Map(),
+    /** 播放时间轴前缀和：prefix[i] = 播放序列前 i 帧累计时长（进度条用）。 */
+    durPrefix: [0],
+    /** 进度条 rAF 句柄（播放时驱动帧内连续推进）。 */
+    progressRaf: 0,
     /** 已建 DOM 的帧槽（虚拟化窗口内）。 */
     liveThumbs: new Map(),   // srcIdx -> HTMLElement
     /** 解码批次队列（串行执行，防并发 invoke 爆炸）。 */
     decoding: false,
     pendingBatches: [],
     exporting: false,
+    /** 瞬时提示定时器。 */
+    hintTimer: 0,
 };
 
 // ── 帧解码（批量懒加载 + 缓存淘汰） ─────────────────────────────────────
@@ -111,9 +132,11 @@ async function pumpDecode() {
             try {
                 const frames = await invoke('gif_get_frames', {sessionId, indices: batch, maxW});
                 for (const f of frames) {
-                    const blob = await (await fetch(`data:image/png;base64,${f.pngBase64}`)).blob();
-                    cache.set(f.index, await createImageBitmap(blob));
-                    if (cache === state.previewCache) {
+                    if (cache === state.thumbCache) {
+                        cache.set(f.index, `data:image/png;base64,${f.pngBase64}`);
+                    } else {
+                        const blob = await (await fetch(`data:image/png;base64,${f.pngBase64}`)).blob();
+                        cache.set(f.index, await createImageBitmap(blob));
                         state.previewBytes += f.width * f.height * 4;
                     }
                 }
@@ -129,13 +152,13 @@ async function pumpDecode() {
 }
 
 function evictPreviewCache() {
-    // thumb 兜底上限（450 帧 160px ≈ 26MB，一般全存；极端长会话裁剪）
+    // thumb 兜底上限（按 data URL 字符串长度估算字节；一般全存，极端长会话裁剪）
     let thumbBytes = 0;
-    for (const [, bmp] of state.thumbCache) thumbBytes += bmp.width * bmp.height * 4;
+    for (const [, url] of state.thumbCache) thumbBytes += url.length * 2;
     while (state.thumbCache.size && thumbBytes > 64 << 20) {
         const firstKey = state.thumbCache.keys().next().value;
-        const bmp = state.thumbCache.get(firstKey);
-        thumbBytes -= bmp.width * bmp.height * 4;
+        const url = state.thumbCache.get(firstKey);
+        thumbBytes -= url.length * 2;
         state.thumbCache.delete(firstKey);
     }
     let bytes = state.previewBytes;
@@ -199,8 +222,8 @@ function refreshLiveThumbs() {
         const img = el.querySelector('img');
         if (img && !img.src) {
             const idx = Number(el.dataset.idx);
-            const bmp = state.thumbCache.get(idx);
-            if (bmp) img.src = bmpToDataUrl(bmp);
+            const url = state.thumbCache.get(idx);
+            if (url) img.src = url;
         }
     }
 }
@@ -221,18 +244,21 @@ function buildThumb(view, idx) {
     btn.dataset.idx = String(idx);
     btn.style.left = `${idx * state.slotW}px`;
     btn.style.width = `${state.thumbW}px`;
-    if (!fs.visible) btn.classList.add('out-of-range');
+    // 已删（可右键恢复）与修剪外（只是不导出）是两种状态，视觉必须可区分
+    if (fs.deleted) btn.classList.add('frame-deleted');
+    else if (!fs.visible) btn.classList.add('out-of-range');
     if (state.selectedSet.has(idx)) btn.classList.add('selected');
     const img = document.createElement('img');
     img.style.height = `${THUMB_H}px`;
     img.style.width = '100%';
     img.style.objectFit = 'contain';
-    const bmp = state.thumbCache.get(idx);
-    if (bmp) img.src = bmpToDataUrl(bmp);
+    const url = state.thumbCache.get(idx);
+    if (url) img.src = url;
     btn.appendChild(img);
     const tag = document.createElement('span');
     tag.className = 'frame-tag';
-    tag.textContent = formatFrameDur(rawFrameDur(view, idx));
+    // 有效时长（hold/速度编辑后的真实播放值）；已删/修剪外帧回退素材原始值
+    tag.textContent = formatFrameDur(state.durBySrc.get(idx) ?? rawFrameDur(view, idx));
     btn.appendChild(tag);
     if (fs.held) {
         const hold = document.createElement('span');
@@ -254,14 +280,6 @@ function rawFrameDur(view, srcIdx) {
     const fps = view.meta?.fps || 15;
     const f = (view.frames || []).find(x => x.srcIdx === srcIdx);
     return f ? f.durMs : Math.round(1000 / fps);
-}
-
-function bmpToDataUrl(bmp) {
-    const c = document.createElement('canvas');
-    c.width = bmp.width;
-    c.height = bmp.height;
-    c.getContext('2d').drawImage(bmp, 0, 0);
-    return c.toDataURL('image/png');
 }
 
 /** 更新全部已建槽的选中态（选择集变化后）。 */
@@ -287,9 +305,28 @@ function renderPreview() {
     const srcIdx = view.frames[cur].srcIdx;
     const bmp = state.previewCache.get(srcIdx);
     if (bmp) {
+        // LRU 触碰：命中重插到队尾。Map 插入序淘汰近似 FIFO——循环播放中
+        // 命中不重排会把"刚播放过"的帧当最旧逐出，触发 逐出→重解码→
+        // 缩略图降级 的抖动链（多循环几轮后预览频繁变模糊/变小的根因）。
+        state.previewCache.delete(srcIdx);
+        state.previewCache.set(srcIdx, bmp);
         drawPreview(bmp);
     } else {
-        // miss：保持上一帧画面（不闪不黑），请求解码；完成后若播放头未变再上屏
+        // miss：先上缩略图降级帧（帧内容正确优先于清晰度，图片与播放头
+        // /高亮不再错位），再请求全尺寸解码；完成后播放头未变才上屏。
+        // 降级绘制不改写 canvas 位图尺寸（按预览档位初始化后只拉伸绘制）
+        // ——canvas 显示尺寸跟随位图（max-width:100%），被缩略图尺寸定型
+        // 就是"大图变小"的直接表现。
+        const thumbUrl = state.thumbCache.get(srcIdx);
+        if (thumbUrl) {
+            const fallback = new Image();
+            fallback.onload = () => {
+                if (currentPlaySrc() === srcIdx && !state.previewCache.has(srcIdx)) {
+                    drawFallback(fallback);
+                }
+            };
+            fallback.src = thumbUrl;
+        }
         requestDecode(state.sessionId, [srcIdx], state.previewWidth, state.previewCache, true);
         const wait = setInterval(() => {
             const b = state.previewCache.get(srcIdx);
@@ -302,6 +339,8 @@ function renderPreview() {
     els.pos.textContent = `${cur + 1} / ${view.frames.length}`;
     els.dur.textContent = formatFrameDur(view.frames[cur].durMs) + (view.frames[cur].held ? '（停留）' : '');
     els.totalDur.textContent = `总时长 ${formatSeconds(view.totalMs)}`;
+    // 非播放态（步进/点选/编辑后）进度停在该帧起点；播放态由 rAF 循环推进
+    updatePlayProgress();
 }
 
 function drawPreview(bmp) {
@@ -309,6 +348,20 @@ function drawPreview(bmp) {
     if (c.width !== bmp.width) c.width = bmp.width;
     if (c.height !== bmp.height) c.height = bmp.height;
     c.getContext('2d').drawImage(bmp, 0, 0);
+    els.canvasEmpty.classList.add('hidden');
+}
+
+/** 缩略图降级绘制：不缩小 canvas 位图（按预览档位/首帧比例初始化），
+ *  缩略图拉伸铺满——模糊但帧正确、尺寸稳定，全尺寸解码后无缝替换。 */
+function drawFallback(img) {
+    const c = els.canvas;
+    if (c.width <= 0 || c.height <= 0) {
+        const w = state.previewWidth || img.naturalWidth;
+        const aspect = img.naturalHeight > 0 ? img.naturalHeight / img.naturalWidth : 1;
+        c.width = w;
+        c.height = Math.max(1, Math.round(w * aspect));
+    }
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
     els.canvasEmpty.classList.add('hidden');
 }
 
@@ -338,7 +391,11 @@ function playTick() {
     renderPreview();
     prefetchAhead();
     syncPlayhead(playToSrc(view, step.cursor));
-    scheduleNext(step.durMs);
+    // 漂移补偿：按绝对时刻累计（playDue），setTimeout 只补差值——渲染耗时
+    // 与 setTimeout 惰性不再逐帧累积，长会话播放不越播越慢
+    const now = performance.now();
+    state.playDue = Math.max(state.playDue + step.durMs, now + 5);
+    scheduleNext(state.playDue - now);
 }
 
 /** 播放头前方预取（预览档位）——播放中后台解码，避免到帧才解码的卡顿。 */
@@ -361,14 +418,21 @@ function setPlaying(on) {
         icons[1].classList.toggle('hidden', !on);
     }
     clearTimeout(state.playTimer);
+    cancelAnimationFrame(state.progressRaf);
+    state.progressRaf = 0;
     if (on) {
         // 保留当前帧剩余展示时长（不立即跳帧——空格启动也丝滑）
         const view = state.view;
         if (view && view.frames.length) {
             const cur = Math.min(state.playIdx, view.frames.length - 1);
             const elapsed = performance.now() - state.frameShownAt;
-            scheduleNext(view.frames[cur].durMs - elapsed);
+            const remaining = Math.max(5, view.frames[cur].durMs - elapsed);
+            state.playDue = performance.now() + remaining;
+            scheduleNext(remaining);
         }
+        progressLoop();
+    } else {
+        updatePlayProgress();
     }
 }
 
@@ -392,6 +456,22 @@ function syncPlayhead(srcIdx) {
 }
 
 // ── 选中模型 ─────────────────────────────────────────────────────────────
+
+/** 编辑后播放头锚定：尽量停在同一个素材帧上；锚点帧被删则跳到其后
+ *  第一个存活帧（srcIdx 升序），全删则落到末帧——此前 playIdx 数字不变
+ *  但序列左移，删任何一帧预览都会跳帧、删末帧直接回到第 0 帧。 */
+function anchorPlayIndex(view, srcAnchor, fallback) {
+    if (!view.frames.length) return 0;
+    if (srcAnchor != null) {
+        const exact = srcToPlayIndex(view, srcAnchor);
+        if (exact >= 0) return exact;
+        for (let i = 0; i < view.frames.length; i++) {
+            if (view.frames[i].srcIdx > srcAnchor) return i;
+        }
+        return view.frames.length - 1;
+    }
+    return Math.min(fallback, view.frames.length - 1);
+}
 
 function handleThumbClick(idx, ev) {
     if (ev.shiftKey && state.anchor != null) {
@@ -418,19 +498,41 @@ function handleThumbContextMenu(idx, ev) {
     ev.preventDefault();
     if (!state.selectedSet.has(idx)) {
         state.selectedSet = new Set([idx]);
+        refreshSelectionClasses();
     }
-    deleteSelected();
+    // 点在已删帧上 → 恢复（保留选中，便于继续操作）；否则删除
+    const deletedSet = new Set(state.view?.deleted || []);
+    if (deletedSet.has(idx)) restoreSelected();
+    else deleteSelected();
 }
 
 async function deleteSelected() {
-    const frames = [...state.selectedSet].filter(i => i < (state.view?.frameCount ?? 0));
-    if (!frames.length) return;
-    const cmd = frames.length === 1
-        ? commands.deleteFrame(frames[0])
-        : commands.deleteFrames(frames);
+    const view = state.view;
+    const sel = [...state.selectedSet].filter(i => i < (view?.frameCount ?? 0));
+    if (!sel.length) return;
+    const deletedSet = new Set(view?.deleted || []);
+    const toDelete = sel.filter(i => !deletedSet.has(i));
+    if (!toDelete.length) {
+        showHint('所选帧已是删除状态（右键可恢复）');
+        return;
+    }
+    const skipped = sel.length - toDelete.length;
     state.selectedSet.clear();
     state.anchor = null;
+    const cmd = toDelete.length === 1
+        ? commands.deleteFrame(toDelete[0])
+        : commands.deleteFrames(toDelete);
     await edit(cmd);
+    if (skipped > 0) showHint(`已删除 ${toDelete.length} 帧，${skipped} 帧先前已删（跳过）`);
+}
+
+/** 恢复选中集合中已删除的帧（时长从素材基线还原；保留选中便于继续操作）。 */
+async function restoreSelected() {
+    const view = state.view;
+    const deletedSet = new Set(view?.deleted || []);
+    const toRestore = [...state.selectedSet].filter(i => deletedSet.has(i));
+    if (!toRestore.length) return;
+    await edit(commands.restoreFrames(toRestore));
 }
 
 // ── 会话加载 ─────────────────────────────────────────────────────────────
@@ -443,6 +545,8 @@ async function loadSession(sessionId) {
     state.anchor = null;
     state.playing = false;
     clearTimeout(state.playTimer);
+    cancelAnimationFrame(state.progressRaf);
+    state.progressRaf = 0;
     state.thumbCache.clear();
     state.previewCache.clear();
     state.previewBytes = 0;
@@ -452,9 +556,12 @@ async function loadSession(sessionId) {
     els.stripScroll.scrollLeft = 0;
     state.frameShownAt = performance.now();
     state.view = await invoke('gif_get_session', {sessionId});
+    state.durBySrc = effectiveDurMap(state.view);
+    buildDurPrefix(state.view);
     const m = state.view.meta;
     els.title.textContent = 'GIF 编辑器';
     els.meta.textContent = `${m.width}×${m.height} · ${m.fps}fps · ${state.view.frameCount} 帧`;
+    renderStopBanner(m.stopReason);
     measurePreviewWidth(state.view);
     layoutGeometry(state.view);
     relayoutStrip();
@@ -485,15 +592,106 @@ function startPreload() {
 
 // ── 编辑 ─────────────────────────────────────────────────────────────────
 
+/** 瞬时提示（编辑失败等；2.5s 自动消失）。 */
+function showHint(text, isError = true) {
+    const el = els.hint;
+    if (!el) return;
+    el.textContent = text;
+    el.classList.toggle('hint-error', isError);
+    el.classList.remove('hidden');
+    clearTimeout(state.hintTimer);
+    state.hintTimer = setTimeout(() => el.classList.add('hidden'), 2500);
+}
+
+/** 非用户主动停止的会话横幅（预算到顶/过载/采集失败——用户需要知道
+ *  录制为何提前结束）；用户主动停止不展示。 */
+const STOP_REASON_TEXT = {
+    budget_exhausted: '录制已达到时长/帧数/素材上限，自动停止',
+    overload: '采集过载，录制已自动停止（素材完整保留）',
+    capture_failed: '屏幕采集中断，录制提前结束（已录部分完整保留）',
+};
+
+function renderStopBanner(reason) {
+    const banner = els.stopBanner;
+    if (!banner) return;
+    const text = STOP_REASON_TEXT[reason];
+    if (!text) {
+        banner.classList.add('hidden');
+        return;
+    }
+    if (els.stopBannerText) els.stopBannerText.textContent = text;
+    banner.classList.remove('hidden');
+}
+
+els.stopBannerClose?.addEventListener('click', () => {
+    els.stopBanner?.classList.add('hidden');
+});
+
 async function edit(command) {
     if (!state.sessionId) return;
-    state.view = await invoke('gif_edit', {sessionId: state.sessionId, command});
-    if (state.playIdx >= state.view.frames.length) state.playIdx = 0;
+    const srcAnchor = currentPlaySrc();
+    let view;
+    try {
+        view = await invoke('gif_edit', {sessionId: state.sessionId, command});
+    } catch (err) {
+        console.error('[gif-editor] 编辑命令失败', err);
+        showHint(`操作失败：${normalizeError(err).message}`);
+        return;
+    }
+    state.view = view;
+    state.durBySrc = effectiveDurMap(view);
+    buildDurPrefix(view);
+    state.playIdx = anchorPlayIndex(view, srcAnchor, state.playIdx);
     state.frameShownAt = performance.now();
-    layoutGeometry(state.view);
+    layoutGeometry(view);
+    // 已建帧槽全部重建（relayoutStrip 只补缺——不清空的话旧槽的
+    // 时长标签/已删状态类不会随编辑刷新）
+    for (const [, el] of state.liveThumbs) el.remove();
+    state.liveThumbs.clear();
     relayoutStrip();
     renderPreview();
     renderControls();
+}
+
+/** 素材帧号 → 有效时长（含 hold/速度编辑后的真实播放值），帧标签用。 */
+function effectiveDurMap(view) {
+    return new Map((view.frames || []).map(f => [f.srcIdx, f.durMs]));
+}
+
+/** 播放时间轴前缀和（编辑后重建）。 */
+function buildDurPrefix(view) {
+    const prefix = [0];
+    for (const f of view.frames || []) {
+        prefix.push(prefix[prefix.length - 1] + f.durMs);
+    }
+    state.durPrefix = prefix;
+}
+
+/**
+ * 播放进度（按时间轴，非帧号——帧时长不均时进度仍连续，缓解"某帧停顿
+ * 很久画面不动"的卡顿感）。播放中含帧内已播时间；暂停/步进停在该帧起点。
+ */
+function updatePlayProgress() {
+    const view = state.view;
+    const fill = els.playProgress;
+    if (!fill || !view) return;
+    const total = state.durPrefix[state.durPrefix.length - 1] || 0;
+    if (total <= 0 || !view.frames.length) {
+        fill.style.width = '0%';
+        return;
+    }
+    const cur = Math.min(state.playIdx, view.frames.length - 1);
+    const inFrame = state.playing
+        ? Math.min(performance.now() - state.frameShownAt, view.frames[cur].durMs)
+        : 0;
+    const pos = (state.durPrefix[cur] + inFrame) / total;
+    fill.style.width = `${Math.min(100, pos * 100)}%`;
+}
+
+function progressLoop() {
+    if (!state.playing) return;
+    updatePlayProgress();
+    state.progressRaf = requestAnimationFrame(progressLoop);
 }
 
 function renderControls() {
@@ -503,11 +701,24 @@ function renderControls() {
     els.redo.disabled = !view.canRedo;
     els.speed.value = String(view.speed);
     els.loop.value = view.loopCount == null ? '' : String(view.loopCount);
-    const single = state.selectedSet.size === 1 ? [...state.selectedSet][0] : null;
-    if (single != null) {
-        const held = view.holds && view.holds[String(single)];
-        els.hold.value = held ? String(Math.min(2000, Math.round(held / 500) * 500)) : '0';
+    // 帧时长回显：单选显示该帧有效时长；多选留空（placeholder 提示批量）
+    const sel = [...state.selectedSet].filter(i => i < (view.frameCount ?? 0));
+    if (sel.length === 1) {
+        const f = (view.frames || []).find(x => x.srcIdx === sel[0]);
+        if (els.durInput) {
+            els.durInput.value = f ? String(f.durMs) : '';
+            els.durInput.placeholder = '—';
+        }
+    } else if (els.durInput) {
+        els.durInput.value = '';
+        els.durInput.placeholder = sel.length > 1 ? `${sel.length} 帧` : '选中帧后设置';
     }
+    // 删除按钮：选中集合里没有可删帧时禁用（已删帧右键恢复）
+    const deletedSet = new Set(view.deleted || []);
+    const deletable = sel.some(i => !deletedSet.has(i));
+    if (els.btnDelete) els.btnDelete.disabled = !deletable && sel.length > 0;
+    // 导出按钮：0 有效帧不可导出
+    els.exportBtn.disabled = !((view.frames || []).length);
 }
 
 // ── 事件绑定 ─────────────────────────────────────────────────────────────
@@ -574,9 +785,23 @@ $('btn-reset').addEventListener('click', () => edit({type: 'reset'}));
 
 els.speed.addEventListener('change', () => edit(commands.setSpeed(parseFloat(els.speed.value))));
 els.loop.addEventListener('change', () => edit(commands.setLoop(els.loop.value === '' ? null : parseInt(els.loop.value, 10))));
-els.hold.addEventListener('change', () => {
-    const single = state.selectedSet.size === 1 ? [...state.selectedSet][0] : null;
-    if (single != null) edit(commands.setHold(single, parseInt(els.hold.value, 10)));
+
+// 帧时长（ms）：作用于全部选中帧——批量单 undo；清空 = 恢复自动计算
+const DUR_MIN_MS = 10, DUR_MAX_MS = 6000;
+els.durInput?.addEventListener('change', () => {
+    const sel = [...state.selectedSet].filter(i => i < (state.view?.frameCount ?? 0));
+    if (!sel.length) {
+        showHint('请先选中要设置时长的帧');
+        return;
+    }
+    const raw = parseInt(els.durInput.value, 10);
+    if (!Number.isFinite(raw)) return;
+    edit(commands.setHoldMany(sel, Math.max(DUR_MIN_MS, Math.min(DUR_MAX_MS, raw))));
+});
+els.durClear?.addEventListener('click', () => {
+    const sel = [...state.selectedSet].filter(i => i < (state.view?.frameCount ?? 0));
+    if (!sel.length) return;
+    edit(commands.setHoldMany(sel, 0));
 });
 
 // ── 导出 ─────────────────────────────────────────────────────────────────

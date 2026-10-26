@@ -2116,6 +2116,8 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
         app::commands::gif_stop_recording,
         app::commands::gif_cancel_recording,
         app::commands::gif_move_recording_region,
+        app::commands::gif_prewarm_windows,
+        app::commands::gif_recording_region,
         app::commands::gif_recorder_state,
         app::commands::gif_list_sessions,
         app::commands::gif_discard_session,

@@ -33,10 +33,16 @@ pub enum EditCommand {
     DeleteFrame { frame: u32 },
     /// 批量删除（素材原始索引集合）；单命令单 undo 粒度。任一越界整条拒绝。
     DeleteFrames { frames: Vec<u32> },
+    /// 恢复已删除的帧（素材原始索引集合，时长从素材基线还原）；
+    /// 单命令单 undo 粒度。任一越界整条拒绝；未删除的条目跳过。
+    RestoreFrames { frames: Vec<u32> },
     /// 全局速度因子，clamp 到 [0.25, 4.0]。
     SetSpeed { factor: f32 },
-    /// 单帧停留时长（ms）；0 表示清除停留。帧号为素材原始索引。
+    /// 单帧停留时长（ms）；0 表示清除停留（回退速度计算）。帧号为素材原始索引。
     SetHold { frame: u32, ms: u32 },
+    /// 批量设置多帧停留时长（同值；ms=0 批量清除）。单命令单 undo 粒度。
+    /// 任一越界整条拒绝。
+    SetHoldMany { frames: Vec<u32>, ms: u32 },
     /// 循环次数：None = 无限循环；Some(0) = 播放一次（GIF Finite(0)）。
     SetLoop { count: Option<u16> },
     /// 重置全部编辑（不可撤销其他命令之后——reset 本身可撤销）。
@@ -215,7 +221,8 @@ impl Timeline {
 
     fn apply_core(&self, cmd: &EditCommand) -> Result<Core, EditError> {
         let mut c = self.core.clone();
-        // DeleteFrames 含 Vec 字段，不能经 `match *cmd` 按值解构——前置特判。
+        // 含 Vec 字段的命令（DeleteFrames/RestoreFrames/SetHoldMany）不能经
+        // `match *cmd` 按值解构——前置特判。
         if let EditCommand::DeleteFrames { frames } = cmd {
             if frames.iter().any(|f| *f >= self.frame_count) {
                 return Err(EditError::FrameOutOfRange);
@@ -228,6 +235,44 @@ impl Timeline {
                 }
             }
             return Ok(if changed { c } else { self.core.clone() }); // 全删幂等=原状态
+        }
+        if let EditCommand::RestoreFrames { frames } = cmd {
+            if frames.iter().any(|f| *f >= self.frame_count) {
+                return Err(EditError::FrameOutOfRange);
+            }
+            let mut changed = false;
+            for frame in frames {
+                // 时长从素材原始基线还原（删除时置 0）
+                if c.deleted.remove(frame) {
+                    c.base_dur_ms[*frame as usize] =
+                        self.origin_durs.get(*frame as usize).copied().unwrap_or(1).max(1);
+                    changed = true;
+                }
+            }
+            return Ok(if changed { c } else { self.core.clone() }); // 未删除的条目跳过
+        }
+        if let EditCommand::SetHoldMany { frames, ms } = cmd {
+            if frames.iter().any(|f| *f >= self.frame_count) {
+                return Err(EditError::FrameOutOfRange);
+            }
+            let clamped = (*ms).min(MAX_DELAY_CS * 10);
+            let mut changed = false;
+            for frame in frames {
+                let next = if clamped == 0 { None } else { Some(clamped) };
+                let cur = c.holds.get(frame).copied();
+                if cur != next {
+                    match next {
+                        Some(v) => {
+                            c.holds.insert(*frame, v);
+                        }
+                        None => {
+                            c.holds.remove(frame);
+                        }
+                    }
+                    changed = true;
+                }
+            }
+            return Ok(if changed { c } else { self.core.clone() }); // 同值幂等
         }
         match *cmd {
             EditCommand::TrimStart { frame } => {
@@ -261,6 +306,8 @@ impl Timeline {
                 c.base_dur_ms[frame as usize] = 0;
             }
             EditCommand::DeleteFrames { .. } => unreachable!("DeleteFrames 由 apply_core 前置特判处理"),
+            EditCommand::RestoreFrames { .. } => unreachable!("RestoreFrames 由 apply_core 前置特判处理"),
+            EditCommand::SetHoldMany { .. } => unreachable!("SetHoldMany 由 apply_core 前置特判处理"),
             EditCommand::SetSpeed { factor } => {
                 c.speed = factor.clamp(0.25, 4.0);
             }
@@ -437,6 +484,65 @@ mod tests {
         let rev = t.revision();
         assert_eq!(t.apply(&EditCommand::DeleteFrame { frame: 2 }), Ok(false));
         assert_eq!(t.revision(), rev, "重复删除不推进 revision");
+    }
+
+    #[test]
+    fn restore_frames_recovers_duration_single_undo() {
+        let mut t = tl();
+        t.apply(&EditCommand::DeleteFrames { frames: vec![1, 3] }).unwrap();
+        // 恢复 1（3 保持删除）
+        t.apply(&EditCommand::RestoreFrames { frames: vec![1] }).unwrap();
+        let idx: Vec<u32> = t.effective_frames().iter().map(|f| f.src_idx).collect();
+        assert_eq!(idx, vec![0, 1, 2, 4]);
+        assert_eq!(t.effective_total_ms(), 400, "恢复帧时长从素材基线还原");
+        // 全未删除的恢复 = 幂等，不推进 revision
+        let rev = t.revision();
+        assert_eq!(t.apply(&EditCommand::RestoreFrames { frames: vec![1, 2] }), Ok(false));
+        assert_eq!(t.revision(), rev);
+        // 一次 undo 回到「1、3 均删除」
+        t.undo();
+        let idx: Vec<u32> = t.effective_frames().iter().map(|f| f.src_idx).collect();
+        assert_eq!(idx, vec![0, 2, 4]);
+        // 越界整条拒绝
+        assert_eq!(
+            t.apply(&EditCommand::RestoreFrames { frames: vec![1, 9] }),
+            Err(EditError::FrameOutOfRange)
+        );
+    }
+
+    #[test]
+    fn set_hold_many_batch_single_undo_and_clear() {
+        let mut t = tl();
+        let rev = t.revision();
+        t.apply(&EditCommand::SetHoldMany { frames: vec![0, 2, 4], ms: 300 }).unwrap();
+        assert_eq!(t.revision(), rev + 1, "批量同值单命令推进一次 revision");
+        let v = t.effective_frames();
+        for i in [0, 2, 4] {
+            assert_eq!(v[i].dur_ms, 300);
+            assert!(v[i].held);
+        }
+        assert_eq!(v[1].dur_ms, 100, "未选中帧不受影响");
+        // 同值幂等
+        assert_eq!(t.apply(&EditCommand::SetHoldMany { frames: vec![0, 2], ms: 300 }), Ok(false));
+        // ms=0 批量清除 → 回速度计算
+        t.apply(&EditCommand::SetHoldMany { frames: vec![0, 2, 4], ms: 0 }).unwrap();
+        assert!(t.effective_frames().iter().all(|f| !f.held));
+        // 一次 undo 回到「0/2/4 hold 300」（帧 1/3 从未被 hold）
+        t.undo();
+        let v = t.effective_frames();
+        for i in [0, 2, 4] {
+            assert_eq!(v[i].dur_ms, 300);
+            assert!(v[i].held);
+        }
+        assert_eq!(v[1].dur_ms, 100);
+        // 越界整条拒绝
+        assert_eq!(
+            t.apply(&EditCommand::SetHoldMany { frames: vec![0, 9], ms: 100 }),
+            Err(EditError::FrameOutOfRange)
+        );
+        // 超 clamp 收敛到上限（MAX_DELAY_CS*10 = 6000ms）
+        t.apply(&EditCommand::SetHoldMany { frames: vec![1], ms: 99_999 }).unwrap();
+        assert_eq!(t.effective_frames()[1].dur_ms, 6000);
     }
 
     #[test]

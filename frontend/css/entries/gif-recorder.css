@@ -31,14 +31,14 @@ body {
 #gif-control {
     display: flex;
     align-items: center;
-    gap: 12px;
+    justify-content: center; /* 内容聚成一组整体居中——不再左状态右按钮、中间留死区 */
+    gap: 16px;
     height: 100%;
     padding: 0 14px;
     -webkit-app-region: drag; /* 整条可拖动微调位置（仍避让选区由用户把控） */
 }
 
 .state {
-    min-width: 120px;
     display: flex;
     align-items: center;
 }
@@ -127,8 +127,4 @@ body {
 
 .ctl-primary:hover {
     background: #5faeff;
-}
-
-.ctl-primary:hover {
-    background: var(--accent-strong, #f0c36b);
 }

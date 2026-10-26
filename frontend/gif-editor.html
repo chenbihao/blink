@@ -16,6 +16,13 @@
   - 导出：dialog 选路径 → `gif_export`（进度事件）→ 打开所在文件夹。
 -->
 <div id="gif-editor">
+    <!-- 非用户主动停止的提示横幅（预算到顶/过载/采集失败；可关闭） -->
+    <div class="stop-reason-banner hidden" id="stop-reason-banner">
+        <span id="stop-reason-text"></span>
+        <button class="banner-close" id="stop-reason-close" title="关闭" type="button">
+            <svg aria-hidden="true" class="icon"><use href="#icon-x"/></svg>
+        </button>
+    </div>
     <!-- 顶栏：会话信息 + 导出 -->
     <header class="topbar">
         <div class="title">
@@ -36,21 +43,39 @@
             <canvas id="preview-canvas"></canvas>
             <div class="preview-empty hidden" id="preview-empty">暂无帧</div>
         </div>
+        <!-- 预览信息行 + 播放参数（0.28.7 优化：与 transport 分离，参数贴近预览） -->
         <div class="preview-bar">
-            <button class="btn btn-icon" id="btn-prev" title="上一帧" type="button">
-                <svg aria-hidden="true" class="icon"><use href="#icon-chevron-left"/></svg>
-            </button>
-            <button class="btn btn-icon" id="btn-play" title="播放/暂停预览" type="button">
-                <svg aria-hidden="true" class="icon"><use href="#icon-play"/></svg>
-                <svg aria-hidden="true" class="icon hidden"><use href="#icon-pause"/></svg>
-            </button>
-            <button class="btn btn-icon" id="btn-next" title="下一帧" type="button">
-                <svg aria-hidden="true" class="icon"><use href="#icon-chevron-right"/></svg>
-            </button>
             <span class="preview-pos" id="preview-pos">0 / 0</span>
             <span class="preview-dur" id="preview-dur"></span>
-            <span class="spacer"></span>
             <span class="total-dur" id="total-dur">总时长 0.0s</span>
+            <span class="spacer"></span>
+            <label class="param" title="全局速度因子">
+                <span>速度</span>
+                <select id="sel-speed">
+                    <option value="0.5">0.5×</option>
+                    <option value="1" selected>1×</option>
+                    <option value="1.5">1.5×</option>
+                    <option value="2">2×</option>
+                    <option value="4">4×</option>
+                </select>
+            </label>
+            <label class="param" title="所选帧的显示时长（ms，10–6000；多选批量应用，单次撤销）">
+                <span>帧时长</span>
+                <input id="inp-dur" max="6000" min="10" placeholder="—" step="10" type="number"/>
+                <button class="btn btn-icon" id="btn-dur-clear" title="恢复自动时长（清除手动设置）" type="button">
+                    <svg aria-hidden="true" class="icon"><use href="#icon-x"/></svg>
+                </button>
+            </label>
+            <label class="param" title="循环次数">
+                <span>循环</span>
+                <select id="sel-loop">
+                    <option value="" selected>无限</option>
+                    <option value="1">1 次</option>
+                    <option value="3">3 次</option>
+                </select>
+            </label>
+            <!-- 播放进度（按时间实时走——帧时长不均时给视觉连续性，缓解"卡顿/错位"感） -->
+            <div class="play-progress" id="play-progress"><div class="play-progress-fill" id="play-progress-fill"></div></div>
         </div>
     </section>
 
@@ -60,7 +85,22 @@
         <div class="timeline-scroll" id="timeline-scroll">
             <div class="frame-strip" id="frame-strip"></div>
         </div>
+        <!-- 操作行：transport（0.28.7 优化：从 preview-bar 下移到时间轴左侧，
+             与帧编辑按钮同排）+ 帧计数 + 编辑操作 -->
         <div class="timeline-bar">
+            <div class="transport">
+                <button class="btn btn-icon" id="btn-prev" title="上一帧" type="button">
+                    <svg aria-hidden="true" class="icon"><use href="#icon-chevron-left"/></svg>
+                </button>
+                <button class="btn btn-icon" id="btn-play" title="播放/暂停预览（空格）" type="button">
+                    <svg aria-hidden="true" class="icon"><use href="#icon-play"/></svg>
+                    <svg aria-hidden="true" class="icon hidden"><use href="#icon-pause"/></svg>
+                </button>
+                <button class="btn btn-icon" id="btn-next" title="下一帧" type="button">
+                    <svg aria-hidden="true" class="icon"><use href="#icon-chevron-right"/></svg>
+                </button>
+            </div>
+            <div class="toolbar-divider"></div>
             <span class="page-ind" id="frame-count-ind">0 帧</span>
             <span class="spacer"></span>
             <button class="btn" id="btn-trim-start" title="把当前预览帧设为起点" type="button">设为起点</button>
@@ -78,38 +118,10 @@
             <button class="btn" id="btn-reset" title="重置全部编辑" type="button">重置</button>
         </div>
     </section>
-
-    <!-- 参数区：速度/停留/循环 -->
-    <section class="params">
-        <label class="param">
-            <span>速度</span>
-            <select id="sel-speed">
-                <option value="0.5">0.5×</option>
-                <option value="1" selected>1×</option>
-                <option value="1.5">1.5×</option>
-                <option value="2">2×</option>
-                <option value="4">4×</option>
-            </select>
-        </label>
-        <label class="param">
-            <span>当前帧停留</span>
-            <select id="sel-hold">
-                <option value="0" selected>清除</option>
-                <option value="500">+0.5s</option>
-                <option value="1000">+1s</option>
-                <option value="2000">+2s</option>
-            </select>
-        </label>
-        <label class="param">
-            <span>循环</span>
-            <select id="sel-loop">
-                <option value="" selected>无限</option>
-                <option value="1">1 次</option>
-                <option value="3">3 次</option>
-            </select>
-        </label>
-    </section>
 </div>
+
+<!-- 瞬时提示（编辑失败等，2.5s 自动消失） -->
+<div class="editor-hint hidden" id="editor-hint"></div>
 
 <!-- 导出对话框 -->
 <dialog id="export-dialog">

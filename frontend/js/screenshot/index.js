@@ -578,6 +578,8 @@ function resetState() {
     // 0.28.7：GIF 录制按钮同长截图恢复显式重置
     const gifButton = document.getElementById('btn-gif');
     if (gifButton) gifButton.hidden = false;
+    // 0.28.7：宿主双面架构——新会话一律从标注面开始（防上一会话的准备面残留）
+    toolbar.classList.remove('toolbar-mode-gif-prep');
     // 0.20.x：恢复 pin 来源编辑时隐藏的「钉图」按钮
     const pinButton = document.getElementById('btn-pin');
     if (pinButton) pinButton.hidden = false;
@@ -1193,6 +1195,8 @@ function enterCanvasImageEditor(cropData, pw, ph, source = IMAGE_SOURCE.LONG_SCR
     // 0.28.7：GIF 录制只对实时屏幕区域有意义（剪贴板/编辑器会话无对应区域）
     const gifButton = document.getElementById('btn-gif');
     if (gifButton) gifButton.hidden = source === IMAGE_SOURCE.CLIPBOARD;
+    // 画布编辑器工具栏永远是标注面（防准备面残留）
+    toolbar.classList.remove('toolbar-mode-gif-prep');
     // 0.20.x：pin 来源编辑器的勾按钮已是「替换回原窗口」，再保留「钉图」会制造第二份 pin，隐藏掉。
     const pinButton = document.getElementById('btn-pin');
     if (pinButton) pinButton.hidden = source === IMAGE_SOURCE.PIN;
@@ -1303,6 +1307,8 @@ function triggerOcrPrewarm(pw, ph) {
 /** 退出标注模式（清除选区，回到可拖选状态） */
 function exitAnnotationMode() {
     console.debug('[screenshot] exitAnnotationMode');
+    // 0.28.7：准备模式依赖选区存在——选区清除路径一律先收起准备栏
+    if (isGifPrepActive()) exitGifRecordMode();
     // Task 6: 取消在途 OCR 请求
     cancelActiveOcr();
     cancelSelectionNudge();
@@ -1513,7 +1519,7 @@ canvas.addEventListener('pointerdown', (e) => {
     }
 
     if (ss.isAnnotating && ss.selCss && tool === 'select' && !ss.eyedropperActive) {
-        const handle = getSelectionHandle(point.offsetX, point.offsetY, ss.selCss);
+        const handle = isGifPrepActive() ? null : getSelectionHandle(point.offsetX, point.offsetY, ss.selCss);
         if (handle) {
             capturePointer(canvas, e);
             beginSelectionInteraction('resize', point, handle);
@@ -1528,7 +1534,10 @@ canvas.addEventListener('pointerdown', (e) => {
         // 此前行为是 beginSelectionInteraction('move')，对全屏选区来说没有"外部"，
         // 用户被困在全屏标注中无法退出。改为仅退出标注模式，overlay 保留，
         // 用户可再次 click+drag 开始新选区。
+        // 0.28.7：GIF 准备模式下选区即将消失，先退出准备模式（否则准备栏
+        // 悬空挂着、开始录制无选区可用）。
         console.debug('[screenshot] click outside selection → exit annotation mode');
+        if (isGifPrepActive()) exitGifRecordMode();
         exitAnnotationMode();
         clearHover();
         clearControlHover();
@@ -2237,9 +2246,10 @@ document.addEventListener('keydown', (e) => {
     // 0.20.6：方向键移动选区 1 bitmap px（标注模式下、选取工具、有选区、无标注拖拽时）
     if (ss.isAnnotating && ss.selCss && annot.getTool() === 'select' && !ss.isAnnotDragging && !ss.selectionInteraction) {
         // 标注对象键盘操作优先于选区；文本输入/IME 优先于截图快捷键
+        // 0.28.7：SELECT（准备面 fps 下拉）聚焦时方向键属于控件操作，不移动选区
         const tgt = e.target;
-        if (tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable)) {
-            // 文本输入中不拦截方向键
+        if (tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA' || tgt.tagName === 'SELECT' || tgt.isContentEditable)) {
+            // 文本/控件输入中不拦截方向键
         } else if (!e.isComposing) {
             let dx = 0, dy = 0;
             if (e.key === 'ArrowLeft') {
@@ -2261,6 +2271,9 @@ document.addEventListener('keydown', (e) => {
     }
 
     if (e.key === 'Escape') {
+        // 0.28.7：准备面 fps 下拉持有焦点时 ESC 只关下拉（原生行为），
+        // 不冒泡成「退出录制准备」
+        if (e.target && e.target.tagName === 'SELECT') return;
         e.preventDefault();
         // 0.28.7：GIF 录制准备模式——ESC 先退回截图标注模式
         if (isGifPrepActive()) {
@@ -2384,6 +2397,15 @@ window.addEventListener('blur', () => {
             frameCount: ss.scrollSession?.scrollFrames?.length || 0,
             documentFocus: document.hasFocus(),
         });
+        return;
+    }
+    // 0.28.7：GIF 辅助窗口预热/操作期的焦点瞬移不视为退出意图——WebView2
+    // 建窗时会把窗口级焦点 SetFocus 给新窗口（前台进程未变、后端看门狗
+    // 按 PID 判定不触发），只有本 blur 路径会误杀准备模式会话（曾表现为
+    // 「首次点录制 GIF 按钮退出一次」，第二次窗口已存在不再复现）。
+    // 真正切走（异进程前台）仍由后端看门狗 150ms 兜底隐藏。
+    if (ss.gifWindowHold) {
+        console.debug('[screenshot] window blur ignored (gif window ops hold)');
         return;
     }
     // 0.20.4：图片编辑器模式下用更长的 blurGuard 防止主窗口关闭导致的

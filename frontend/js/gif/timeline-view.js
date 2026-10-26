@@ -6,12 +6,14 @@
 //!   用户需要看到被删的帧才能恢复/定位）；
 //! - 编辑命令直接构造 `EditCommand` JSON（后端 serde tag `type` snake_case）。
 
-/** 播放调度：给定播放序列与当前序号，返回下一帧序号与该帧停留时长。 */
+/** 播放调度：给定播放序列与当前序号，返回下一帧序号与**下一帧**的停留时长。
+ *  时长语义必须跟着游标走（新帧按自己的时长调度）——曾返回当前帧时长，
+ *  导致长帧 A 的停顿实际落在后一帧 B 身上，播放节奏整体错位一帧。 */
 export function nextPlayStep(frames, cursor) {
     if (!frames.length) return {cursor: 0, durMs: 0, atEnd: true};
     const cur = Math.min(Math.max(cursor, 0), frames.length - 1);
     const next = cur + 1 >= frames.length ? 0 : cur + 1; // 预览循环播放
-    return {cursor: next, durMs: frames[cur].durMs, atEnd: false};
+    return {cursor: next, durMs: frames[next].durMs, atEnd: false};
 }
 
 /** 帧在时间轴上的展示状态。 */
@@ -48,8 +50,10 @@ export const commands = {
     trimEnd: frame => ({type: 'trim_end', frame}),
     deleteFrame: frame => ({type: 'delete_frame', frame}),
     deleteFrames: frames => ({type: 'delete_frames', frames}),
+    restoreFrames: frames => ({type: 'restore_frames', frames}),
     setSpeed: factor => ({type: 'set_speed', factor}),
     setHold: (frame, ms) => ({type: 'set_hold', frame, ms}),
+    setHoldMany: (frames, ms) => ({type: 'set_hold_many', frames, ms}),
     setLoop: count => ({type: 'set_loop', count}),
     undo: () => ({type: 'undo'}),
     redo: () => ({type: 'redo'}),
@@ -57,8 +61,7 @@ export const commands = {
 
 /** 秒展示（ms → `1.2s` / `12.5s`）。 */
 export function formatSeconds(ms) {
-    const s = ms / 1000;
-    return `${s >= 10 ? s.toFixed(1) : s.toFixed(1)}s`;
+    return `${(ms / 1000).toFixed(1)}s`;
 }
 
 /** 帧时长展示（ms → `66ms` / `1.2s`）。 */

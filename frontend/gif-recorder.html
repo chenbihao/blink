@@ -11,7 +11,7 @@
   - 只展示状态 + 发指令（暂停/继续/停止/取消）；状态真源在后端
     `blink://gif-recorder-state` 事件 + `gif_recorder_state` 拉取。
   - 窗口由后端定位在选区下方（避让选区——控制条不入成品）；
-    倒计时数字大显示，录制中显示有效时长（暂停剔除）。
+    倒计时数字大显示（COUNTDOWN_MS>0 时），录制中显示有效时长（暂停剔除）。
 -->
 <div id="gif-control">
     <div class="state">

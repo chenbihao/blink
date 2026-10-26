@@ -125,6 +125,22 @@ pub fn gif_move_recording_region(app: AppHandle, x: i32, y: i32) -> Result<(), C
     gif_service::move_recording_region(&app, x, y).map_err(err)
 }
 
+/// 预热录制辅助窗口（准备模式进入时调用）：三窗隐藏态建好，点开始走
+/// 复用路径毫秒级出边框。async 同 gif_start_recording——窗口创建不能在
+/// 同步命令（主线程）里执行（WebView2 初始化互等）。
+#[tauri::command]
+pub async fn gif_prewarm_windows(app: AppHandle) -> Result<(), CommandError> {
+    gif_service::prewarm_windows(&app);
+    Ok(())
+}
+
+/// 当前录制区域 + 虚拟屏边界（拖动柄窗口加载时拉取；无活跃录制返回 null）。
+#[tauri::command]
+pub fn gif_recording_region(app: AppHandle) -> Option<serde_json::Value> {
+    let service = app.state::<Arc<GifService>>();
+    gif_service::recording_region_snapshot(&service)
+}
+
 /// 控制条 ready 拉取当前状态。
 #[tauri::command]
 pub fn gif_recorder_state(app: AppHandle) -> serde_json::Value {
@@ -204,7 +220,7 @@ pub fn gif_get_session(
         CommandError::new("gif_session", "时间轴构建失败", false)
     })?;
     let mut view = gif_service::timeline_view(tl);
-    // 附加会话元数据
+    // 附加会话元数据（stopReason 供编辑器展示"为何自动停止"）
     let obj = view.as_object_mut().unwrap();
     obj.insert(
         "meta".into(),
@@ -216,6 +232,7 @@ pub fn gif_get_session(
             "showCursor": reader.meta.show_cursor,
             "createdAt": reader.meta.created_at,
             "state": reader.meta.state,
+            "stopReason": reader.meta.stop_reason,
         }),
     );
     Ok(view)
