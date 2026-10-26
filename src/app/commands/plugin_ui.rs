@@ -276,6 +276,9 @@ pub async fn get_plugin_surface_status(
                         blink_infra::plugin_storage::InstallSource::LocalDev { origin } => {
                             serde_json::json!({"kind": "local_dev", "origin": origin})
                         }
+                        blink_infra::plugin_storage::InstallSource::Official { catalog_url } => {
+                            serde_json::json!({"kind": "official", "catalog_url": catalog_url})
+                        }
                     },
                 })
             });
@@ -302,6 +305,9 @@ pub async fn get_plugin_surface_status(
                             "source": match &r.source {
                                 blink_infra::plugin_storage::InstallSource::LocalDev { origin } => {
                                     serde_json::json!({"kind": "local_dev", "origin": origin})
+                                }
+                                blink_infra::plugin_storage::InstallSource::Official { catalog_url } => {
+                                    serde_json::json!({"kind": "official", "catalog_url": catalog_url})
                                 }
                             },
                         })),

@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 /// 安装记录文件名（root 下）。
 const REGISTRY_FILE: &str = "registry.json";
 
-/// 安装来源（0.28.1 仅本地开发包；官方目录在 0.28.5 扩展）。
+/// 安装来源（0.28.1 本地开发包；0.28.5 增官方目录）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "source", rename_all = "snake_case")]
 pub enum InstallSource {
@@ -39,6 +39,12 @@ pub enum InstallSource {
     LocalDev {
         /// 安装时的归档/目录路径（仅记录溯源，不作为运行时依赖）。
         origin: String,
+    },
+    /// 官方目录（0.28.5 插件中心下载）。资产 sha256 已按目录条目核验；
+    /// 官方分发与随包同信任级（允许 builtin.* 命名空间，等同随包覆盖）。
+    Official {
+        /// 下载该包的目录端点（溯源：目录漂移时可定位来源版本）。
+        catalog_url: String,
     },
 }
 
@@ -150,6 +156,12 @@ impl PluginStorage {
 
     pub fn registry_path(&self) -> PathBuf {
         self.root.join(REGISTRY_FILE)
+    }
+
+    /// 官方目录的磁盘缓存（0.28.5 插件中心）：目录端点不可达时的降级
+    /// 只读数据源，内容为最近一次成功拉取的 catalog.json 原文。
+    pub fn catalog_cache_path(&self) -> PathBuf {
+        self.root.join("catalog-cache.json")
     }
 
     pub fn installed_root(&self) -> PathBuf {

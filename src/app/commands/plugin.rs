@@ -49,12 +49,72 @@ fn handle_from_record(
     Ok(handle)
 }
 
-/// 安装本地插件包（0.28.1 dev 通道：zip 归档或解包目录）。
+/// 本地包安装命令的统一开发模式门禁（0.28.5）：LocalDev 通道（zip/目录）
+/// 只在 debug 构建（开发模式）开放；发布给用户的构建只能走官方插件中心
+/// （phase §3.1：生产不接任意来源/社区投稿）。插件中心命令不做此限制。
+pub(crate) fn reject_production_local_install() -> Result<(), CommandError> {
+    if cfg!(debug_assertions) {
+        Ok(())
+    } else {
+        Err(CommandError::new(
+            "dev_only",
+            "本地包安装仅开发模式可用；请从官方插件中心获取插件与数据包",
+            false,
+        ))
+    }
+}
+
+/// 安装提交后的运行时发布编排（本地包与插件中心两条安装命令共用，0.28.5 提取）：
+/// 构造新句柄 → 发布目标集合（同 id 替换 = 更新）→ 撤销旧 tool 待确认 →
+/// 关闭旧代次窗口（0.28.2：旧代次窗口不继承新实现）。
+pub(crate) async fn publish_installed_plugin(
+    app: &tauri::AppHandle,
+    record: &blink_infra::plugin_storage::InstallRecord,
+) -> Result<(), CommandError> {
+    let installer = app
+        .state::<std::sync::Arc<crate::domain::plugin::PluginInstaller>>()
+        .inner()
+        .clone();
+    let engine = app
+        .state::<std::sync::Arc<crate::domain::plugin::PluginEngine>>()
+        .inner()
+        .clone();
+    let publisher = app
+        .state::<std::sync::Arc<crate::domain::plugin::PluginRuntimePublisher>>()
+        .inner()
+        .clone();
+    let pool = app.state::<crate::infra::data::DbPools>().config.clone();
+    let proxy = plugin_env_proxy(&pool).await;
+    let new_handle = handle_from_record(&installer, record, proxy)?;
+    let mut target = engine.all_plugins();
+    target.retain(|h| h.id() != record.plugin_id);
+    target.push(new_handle);
+    let report = publisher.publish(target).await.map_err(|e| {
+        CommandError::new(
+            "publish_failed",
+            format!("安装已提交但发布失败（重启后生效）: {e}"),
+            true,
+        )
+    })?;
+    // 旧代次 tool 的待确认/会话信任一并失效
+    if let Some(pc) = app.try_state::<std::sync::Arc<crate::domain::ai::tool_adapter::PendingConfirms>>() {
+        pc.cancel_for_tools(&report.revoked_tool_ids).await;
+    }
+    crate::app::plugin_surface::close_plugin_windows(app, &record.plugin_id);
+    tracing::info!(
+        plugin = %record.plugin_id,
+        version = %record.version,
+        generation = report.generation,
+        "插件包安装并发布完成"
+    );
+    Ok(())
+}
+
+/// 安装本地插件包（0.28.1 dev 通道：zip 归档或解包目录；0.28.5 起仅
+/// 开发模式可用——生产走官方插件中心）。
 ///
-/// 流程：installer 暂存/校验/提交（spawn_blocking，归档 IO）→ 构造新句柄 →
-/// 发布器发布目标集合（同 id 替换 = 更新）→ 撤销的旧 tool 取消待确认。
-/// 0.28.2：更新/安装后关闭该插件旧窗口（撤销旧页面会话——旧代次窗口不继承
-/// 新实现）；插件窗口自身不得调用本命令（生态敏感命令门禁）。
+/// 流程：installer 暂存/校验/提交（spawn_blocking，归档 IO）→ 发布目标
+/// 集合（同 id 替换 = 更新）；插件窗口自身不得调用本命令（生态敏感命令门禁）。
 #[tauri::command]
 pub async fn install_plugin_package(
     app: tauri::AppHandle,
@@ -62,6 +122,7 @@ pub async fn install_plugin_package(
     path: String,
 ) -> Result<blink_infra::plugin_storage::InstallRecord, CommandError> {
     reject_plugin_window(&window)?;
+    reject_production_local_install()?;
     let installer = app
         .state::<std::sync::Arc<crate::domain::plugin::PluginInstaller>>()
         .inner()
@@ -91,40 +152,7 @@ pub async fn install_plugin_package(
         CommandError::new("install_failed", format!("插件安装失败: {e}"), false)
     })?;
 
-    // 发布目标集合：同 id 替换（更新语义）
-    let engine = app
-        .state::<std::sync::Arc<crate::domain::plugin::PluginEngine>>()
-        .inner()
-        .clone();
-    let publisher = app
-        .state::<std::sync::Arc<crate::domain::plugin::PluginRuntimePublisher>>()
-        .inner()
-        .clone();
-    let pool = app.state::<crate::infra::data::DbPools>().config.clone();
-    let proxy = plugin_env_proxy(&pool).await;
-    let new_handle = handle_from_record(&installer, &record, proxy)?;
-    let mut target = engine.all_plugins();
-    target.retain(|h| h.id() != record.plugin_id);
-    target.push(new_handle);
-    let report = publisher.publish(target).await.map_err(|e| {
-        CommandError::new(
-            "publish_failed",
-            format!("安装已提交但发布失败（重启后生效）: {e}"),
-            true,
-        )
-    })?;
-    // 旧代次 tool 的待确认/会话信任一并失效
-    if let Some(pc) = app.try_state::<std::sync::Arc<crate::domain::ai::tool_adapter::PendingConfirms>>() {
-        pc.cancel_for_tools(&report.revoked_tool_ids).await;
-    }
-    // 0.28.2：撤销旧页面会话（更新语义下旧代次窗口关闭，重开走新包）
-    crate::app::plugin_surface::close_plugin_windows(&app, &record.plugin_id);
-    tracing::info!(
-        plugin = %record.plugin_id,
-        version = %record.version,
-        generation = report.generation,
-        "插件包安装并发布完成"
-    );
+    publish_installed_plugin(&app, &record).await?;
     Ok(record)
 }
 
@@ -204,7 +232,8 @@ pub async fn list_plugin_installations(
 }
 
 /// 安装本地数据包（0.28.4 词库通道：zip 归档或解包目录，dev 本地包；
-/// 官方目录下载在 0.28.5 接入）。归档 IO/逐文件哈希校验走 blocking 线程。
+/// 0.28.5 起仅开发模式可用——生产走官方插件中心）。归档 IO/逐文件哈希
+/// 校验走 blocking 线程。
 ///
 /// 安装提交后**不重启插件进程**——插件按 active.json 指针在下次查询自行
 /// 切换版本；readiness 由设置页下一轮 `get_plugin_surface_status` 重算。
@@ -215,6 +244,7 @@ pub async fn install_plugin_dataset(
     path: String,
 ) -> Result<blink_infra::plugin_storage::DatasetRecord, CommandError> {
     reject_plugin_window(&window)?;
+    reject_production_local_install()?;
     let installer = app
         .state::<std::sync::Arc<crate::domain::plugin::DatasetInstaller>>()
         .inner()

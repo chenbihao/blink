@@ -1,0 +1,83 @@
+# 官方插件目录发布（0.28.5）——手动触发的独立发布流水线。
+#
+# 与应用 Release（release.yml，tag v*）完全独立：
+# - 资产上传到固定 tag `plugins-catalog` 的 Release，端点 URL 恒定
+#   （https://github.com/<repo>/releases/download/plugins-catalog/blink-plugins-catalog.json），
+#   不参与 latest 指针竞争——插件/词库与应用版本各自独立（phase 0.28 §五.5）。
+# - 每次发布覆盖该 Release 的全部资产：目录与 zip 必须同批生成（sha256 一致），
+#   部分覆盖会造成目录引用过期哈希。
+# - 词库数据源在 CI 现场拉取（ECDICT release csv + raw wordroot.txt），
+#   构建可重复性由 dataset.json 的 content_sha256 保证（DATASETS.md）。
+#
+# 本地 `cargo xtask pack` 产物 ≠ 公开发布；以本工作流上传的 Release 资产为准。
+
+name: Plugin Catalog Release
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '资产所在 Release tag（默认固定 plugins-catalog）'
+        required: false
+        default: 'plugins-catalog'
+        type: string
+
+jobs:
+  publish:
+    name: Pack & Publish Plugin Catalog
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust (1.97.1)
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: '.'
+
+      # ── 词库数据源（ECDICT）：release csv（7z）+ raw wordroot ──────────────
+      - name: Fetch ECDICT sources
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Invoke-WebRequest -Uri 'https://github.com/skywind3000/ECDICT/releases/download/1.0.28/ecdict_csv.7z' -OutFile target/ecdict_csv.7z
+          7z x target/ecdict_csv.7z -otarget\ecdict -y
+          $csv = Get-ChildItem target\ecdict -Recurse -Filter ecdict.csv | Select-Object -First 1
+          if (-not $csv) { throw 'ecdict.csv 未找到（7z 解压失败？）' }
+          Copy-Item $csv.FullName target/ecdict.csv
+          Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/skywind3000/ECDICT/master/wordroot.txt' -OutFile target/wordroot.txt
+          Write-Host "ecdict.csv: $((Get-Item target\ecdict.csv).Length) bytes; wordroot: $((Get-Item target\wordroot.txt).Length) bytes"
+
+      # ── 打包：编译插件 + 构建词库 + zip + catalog.json + 产物自校验 ──────────
+      - name: Pack plugins and datasets
+        run: cargo xtask pack --ecdict target/ecdict.csv --wordroot target/wordroot.txt
+
+      # ── 上传：固定 tag Release 全量覆盖（目录与资产必须同批）────────────────
+      - name: Upload catalog release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || 'plugins-catalog' }}
+          name: 'Blink Plugin Catalog'
+          body: |
+            官方插件目录与资产（由 `cargo xtask pack` 生成，发布证据见 workflow 日志）。
+
+            - `blink-plugins-catalog.json`：目录（应用端插件中心拉取的清单）
+            - `builtin.*-<version>-windows-x86_64.zip`：官方插件包
+            - `dictionary-*.zip`：词库数据包
+
+            > 哈希核验：目录条目内含每个资产的 sha256/bytes；应用端安装时逐项校验。
+          draft: false
+          prerelease: false
+          overwrite_files: true
+          files: |
+            target/plugin-dist/blink-plugins-catalog.json
+            target/plugin-dist/*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

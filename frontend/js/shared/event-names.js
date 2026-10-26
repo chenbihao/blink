@@ -210,4 +210,11 @@ export const EVENTS = Object.freeze({
      * 应用退出后事件不再产生，以「应用自动重启」作为成功终点。
      */
     UPDATE_INSTALL_PROGRESS: 'blink://update-install-progress',
+
+    /**
+     * 官方插件中心下载安装进度（0.28.5）。
+     * payload: { kind: "plugin"|"dataset", id, phase: "downloading"|"installing"|"done"|"failed",
+     *            received?, total?, error? }
+     */
+    PLUGIN_CENTER_PROGRESS: 'blink://plugin-center-progress',
 });

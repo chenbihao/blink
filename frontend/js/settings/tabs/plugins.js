@@ -23,6 +23,14 @@ const renderedPlugins = new Map();
 // 0.28.2：插件窗口面状态（get_plugin_surface_status → pages/readiness/install），
 // 与 get_plugins 同轮拉取；拉取失败静默降级（无窗口行的旧展示）。
 const surfaceStatus = new Map();
+// 0.28.5：官方插件中心目录状态（get_plugin_catalog）。null/加载中/错误态都
+// 不影响已安装插件展示——目录区独立渲染，失败只降级"获取"视图。
+let catalogState = null;
+let catalogRevision = 0;
+let catalogProgressBound = false;
+// 进行中的目录安装（progressId → 无）：done/failed 时按 data-progress-id
+// 重查 DOM（loadPlugins 重渲染会重建按钮，不持引用）。
+const catalogPending = new Set();
 
 /** 插件图标映射（0.10.8：emoji → Lucide 图标名） */
 const PLUGIN_ICONS = {
@@ -44,6 +52,8 @@ let _langChangeRegistered = false;
  */
 export function initPluginsTab() {
     loadPlugins(true);
+    loadCatalog(true);
+    bindCatalogProgress();
     initNumberSpinner();
     initExternalLinkDelegate();
     if (!pluginConfigListener) {
@@ -64,7 +74,7 @@ export function initPluginsTab() {
     }
     if (!_langChangeRegistered) {
         _langChangeRegistered=true;
-        onLangChange(()=>loadPlugins(true));
+        onLangChange(()=>{loadPlugins(true); renderCatalog();});
     }
 }
 // ── 插件列表（搬自原 settings.js）─────────────────────────────────────────────
@@ -164,7 +174,12 @@ function renderPluginCard(plugin) {
     const triggersTags = renderTriggersTags(plugin);
 
     const surfaceSection = renderSurfaceSection(plugin);
-    const datasetsSection = renderDatasetsSection(plugin, surfaceStatus.get(plugin.id));
+    const datasetsSection = renderDatasetsSection(
+        plugin,
+        surfaceStatus.get(plugin.id),
+        catalogState?.catalog,
+        catalogState?.devMode !== false,
+    );
 
     const configSection = hasFields
         ? renderConfigSection(t("plugin.section"), schema, settings, {collapsible: true, collapsed: true, extraHtml: plugin.id === "builtin.weather" ? renderWeatherSettings(plugin) : "", saveLabel: ""})
@@ -214,15 +229,177 @@ function renderSurfaceSection(plugin) {
     </div>`;
 }
 
+// ── 官方插件中心（0.28.5）────────────────────────────────────────────────────
+
+/**
+ * 点分数字版本比较（与后端 compare_versions 同语义：非数字段按 0，段数短的补 0）。
+ * 返回 <0 / 0 / >0。导出供测试与"已最新"判定共用。
+ */
+export function compareVersions(a, b) {
+    const parse = (s) => String(s ?? "").split(".").map((seg) => {
+        const n = parseInt(seg, 10);
+        return Number.isFinite(n) ? n : 0;
+    });
+    const va = parse(a), vb = parse(b);
+    const n = Math.max(va.length, vb.length);
+    for (let i = 0; i < n; i++) {
+        const x = va[i] || 0, y = vb[i] || 0;
+        if (x !== y) return x - y;
+    }
+    return 0;
+}
+
+/**
+ * 拉取官方目录（独立于插件列表：失败只降级目录区，不阻断已安装展示）。
+ */
+async function loadCatalog(force = false) {
+    const revision = ++catalogRevision;
+    const container = document.getElementById("plugin-catalog-container");
+    if (!container) return;
+    container.innerHTML = `<p class="msg-muted plugin-catalog-loading">${t("plugin.catalog_loading")}</p>`;
+    try {
+        const res = await invoke("get_plugin_catalog", {forceRefresh: force});
+        if (revision !== catalogRevision) return;
+        catalogState = res;
+    } catch (error) {
+        if (revision !== catalogRevision) return;
+        catalogState = {catalog: null, stale: false, devMode: true, error: commandErrorText(error, t("plugin.catalog_unavailable"))};
+    }
+    if (revision === catalogRevision) renderCatalog();
+}
+
+function renderCatalog() {
+    const container = document.getElementById("plugin-catalog-container");
+    if (!container) return;
+    container.innerHTML = renderCatalogSection(catalogState, surfaceStatus);
+    bindCatalogEvents(container);
+}
+
+/**
+ * 渲染插件中心目录区（0.28.5）。导出为纯字符串函数供测试：
+ * - state 为 get_plugin_catalog 的返回（catalog/stale/devMode）或 {error} 错误态；
+ * - surfaceStatus 为 plugin_id → get_plugin_surface_status 行的 Map；
+ *   行的 install.version（用户目录安装）或 version（随包 manifest）用于
+ *   "已最新 / 可更新"判定。
+ */
+export function renderCatalogSection(state, surfaceStatusMap) {
+    if (!state) return `<p class="msg-muted plugin-catalog-loading">${t("plugin.catalog_loading")}</p>`;
+    if (state.error || !state.catalog) {
+        return `<div class="plugin-catalog plugin-catalog-error">
+          <span class="msg-error">${escapeHtml(state.error || t("plugin.catalog_unavailable"))}</span>
+          <button class="btn-small plugin-catalog-refresh">${iconHTML("refresh-cw")} ${t("plugin.catalog_retry")}</button>
+        </div>`;
+    }
+    const rows = (state.catalog.plugins || []).map((entry) => {
+        const surface = surfaceStatusMap?.get?.(entry.plugin_id);
+        const current = surface?.install?.version || surface?.version;
+        const upToDate = current != null && compareVersions(entry.version, current) <= 0;
+        const action = upToDate
+            ? `<span class="plugin-catalog-status plugin-catalog-uptodate">${t("plugin.catalog_uptodate")}</span>`
+            : `<button class="btn-small plugin-catalog-install" data-plugin-id="${escapeAttr(entry.plugin_id)}" data-progress-id="${escapeAttr(entry.plugin_id)}">
+                 ${iconHTML("download")} ${current ? t("plugin.catalog_update") : t("plugin.catalog_install")}
+               </button>`;
+        const size = formatBytes(entry.asset?.bytes);
+        return `<div class="plugin-catalog-row" data-plugin-id="${escapeAttr(entry.plugin_id)}">
+          <span class="plugin-catalog-name">${escapeHtml(entry.plugin_id)}</span>
+          <span class="version-badge">v${escapeHtml(entry.version)}</span>
+          <span class="plugin-catalog-size">${escapeHtml(size)}</span>
+          ${action}
+        </div>`;
+    }).join("");
+    return `<div class="plugin-catalog">
+      <div class="plugin-catalog-head">
+        <span class="trigger-label">${t("plugin.catalog_section")}</span>
+        ${state.stale ? `<span class="plugin-catalog-stale">${t("plugin.catalog_stale")}</span>` : ""}
+        <button class="btn-small plugin-catalog-refresh">${iconHTML("refresh-cw")} ${t("plugin.catalog_refresh")}</button>
+      </div>
+      ${rows || `<p class="msg-muted">${t("plugin.catalog_empty")}</p>`}
+    </div>`;
+}
+
+/** 字节数 → 人类可读（MB/KB），目录条目大小展示。 */
+function formatBytes(bytes) {
+    if (!Number.isFinite(bytes) || bytes <= 0) return "";
+    if (bytes >= 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + " MB";
+    return Math.max(1, Math.round(bytes / 1024)) + " KB";
+}
+
+function bindCatalogEvents(container) {
+    container.querySelectorAll(".plugin-catalog-refresh").forEach((btn) =>
+        btn.addEventListener("click", () => loadCatalog(true)));
+    container.querySelectorAll(".plugin-catalog-install").forEach((btn) =>
+        btn.addEventListener("click", () => installFromCatalog(btn, "plugin", btn.dataset.pluginId)));
+}
+
+/** 目录安装入口（插件/数据包共用）：按钮置忙 → invoke → done/failed 由进度事件恢复。 */
+async function installFromCatalog(button, kind, payload, progressId) {
+    if (catalogPending.has(progressId)) return;
+    catalogPending.add(progressId);
+    button.disabled = true;
+    button._label = button.innerHTML;
+    button.innerHTML = t("plugin.catalog_downloading");
+    try {
+        await invoke(kind === "plugin" ? "install_plugin_from_catalog" : "install_dataset_from_catalog", payload);
+        // done 事件负责恢复按钮与刷新；此处兜底（事件丢失时仍解锁）
+        finishCatalogInstall(progressId, null);
+    } catch (error) {
+        finishCatalogInstall(progressId, commandErrorText(error, t("plugin.catalog_install_failed")));
+    }
+}
+
+/** 安装结束：恢复按钮 + 刷新列表/目录（错误非空时提示）。 */
+function finishCatalogInstall(progressId, error) {
+    catalogPending.delete(progressId);
+    const button = document.querySelector(`[data-progress-id="${CSS.escape(progressId)}"]`);
+    if (button) {
+        button.disabled = false;
+        if (button._label) button.innerHTML = button._label;
+    }
+    if (error) {
+        const host = button?.closest(".extension-card, .plugin-catalog");
+        if (host) flash(host, error, true, 6000);
+    }
+    loadPlugins(true);
+    renderCatalog();
+}
+
+/** 进度事件 → 更新进行中按钮文案（percent / 安装中 / 完成恢复）。 */
+function bindCatalogProgress() {
+    if (catalogProgressBound) return;
+    catalogProgressBound = true;
+    listen(EVENTS.PLUGIN_CENTER_PROGRESS, ({payload}) => {
+        const p = payload || {};
+        const button = document.querySelector(`[data-progress-id="${CSS.escape(p.id || "")}"]`);
+        if (p.phase === "downloading" && button && !button.disabled) return;
+        if (p.phase === "downloading" && button) {
+            const pct = p.total > 0 ? Math.floor((p.received / p.total) * 100) : null;
+            button.innerHTML = pct != null
+                ? `${t("plugin.catalog_downloading")} ${pct}%`
+                : t("plugin.catalog_downloading");
+        } else if (p.phase === "installing" && button) {
+            button.innerHTML = t("plugin.catalog_installing");
+        } else if (p.phase === "done") {
+            finishCatalogInstall(p.id, null);
+        } else if (p.phase === "failed") {
+            finishCatalogInstall(p.id, p.error || t("plugin.catalog_install_failed"));
+        }
+    });
+}
+
+
 /**
  * 数据包（词库）区（0.28.4）：manifest 声明 datasets 的插件逐行渲染
- * 安装状态 + 本地包安装/更新/卸载。损坏/版本过低的判断来自 readiness
+ * 安装状态 + 安装/更新/卸载。损坏/版本过低的判断来自 readiness
  * blockers（kind=dataset_corrupt/dataset_outdated 的 field 命中该数据包）。
+ *
+ * 0.28.5：官方目录有该数据包条目时主安装按钮走目录下载（data-catalog）；
+ * dev 模式（默认 true，测试两参调用兼容）追加"本地 zip"按钮；生产模式且
+ * 目录无条目时提示目录不可用（官方词库必在目录，此为降级路径）。
  *
  * 导出供测试（纯字符串渲染，无 DOM 依赖）；surface 参数为
  * get_plugin_surface_status 的对应行（缺省不渲染）。
  */
-export function renderDatasetsSection(plugin, surface) {
+export function renderDatasetsSection(plugin, surface, catalog = null, devMode = true) {
     const datasets = surface?.datasets || [];
     if (!datasets.length) return "";
     const readiness = surface?.readiness || {};
@@ -247,9 +424,19 @@ export function renderDatasetsSection(plugin, surface) {
             badge = `<span class="plugin-dataset-status">${ds.optional
                 ? t("plugin.dataset_missing_optional") : t("plugin.dataset_missing")}</span>`;
         }
-        const buttons = [
-            `<button class="btn-small plugin-dataset-install" data-dataset="${escapeAttr(ds.id)}">${iconHTML("download")} ${installed ? t("plugin.dataset_update") : t("plugin.dataset_install")}</button>`,
-        ];
+        const catEntry = catalog?.datasets?.find(
+            (d) => d.plugin_id === plugin.id && d.dataset_id === ds.id);
+        const buttons = [];
+        if (catEntry) {
+            buttons.push(`<button class="btn-small plugin-dataset-install" data-dataset="${escapeAttr(ds.id)}" data-catalog="1" data-progress-id="${escapeAttr(`${plugin.id}/${ds.id}`)}">${iconHTML("download")} ${installed ? t("plugin.dataset_update") : t("plugin.dataset_install")}</button>`);
+        } else if (devMode) {
+            buttons.push(`<button class="btn-small plugin-dataset-install" data-dataset="${escapeAttr(ds.id)}">${iconHTML("download")} ${installed ? t("plugin.dataset_update") : t("plugin.dataset_install")}</button>`);
+        } else {
+            buttons.push(`<span class="plugin-dataset-status plugin-catalog-stale" title="${escapeAttr(t("plugin.catalog_unavailable"))}">${t("plugin.dataset_no_source")}</span>`);
+        }
+        if (devMode && catEntry) {
+            buttons.push(`<button class="btn-small plugin-dataset-install-local" data-dataset="${escapeAttr(ds.id)}" title="${escapeAttr(t("plugin.dataset_local_hint"))}">${iconHTML("folder-open")} ${t("plugin.dataset_local")}</button>`);
+        }
         if (installed && state !== "pending_remove") {
             buttons.push(`<button class="btn-small plugin-dataset-uninstall" data-dataset="${escapeAttr(ds.id)}">${t("plugin.dataset_uninstall")}</button>`);
         }
@@ -770,8 +957,13 @@ export function bindPluginCardEvents(plugin) {
             flash(card, error?.message || String(error), true, 4000);
         }
     }));
-    // 0.28.4：数据包安装/更新（本地 zip；官方目录下载在插件中心阶段接入）
-    card.querySelectorAll(".plugin-dataset-install").forEach(button => button.addEventListener("click", async () => {
+    // 0.28.5：数据包安装/更新。data-catalog=1 → 官方目录下载（主通道）；
+    // 无标记 / -local 后缀 → dev 本地 zip（仅开发模式出现，生产由后端门禁兜底）
+    card.querySelectorAll(".plugin-dataset-install[data-catalog='1']").forEach(button => button.addEventListener("click", () => {
+        installFromCatalog(button, "dataset",
+            {pluginId: id, datasetId: button.dataset.dataset}, `${id}/${button.dataset.dataset}`);
+    }));
+    card.querySelectorAll(".plugin-dataset-install:not([data-catalog='1']), .plugin-dataset-install-local").forEach(button => button.addEventListener("click", async () => {
         button.disabled = true;
         try {
             const path = await openDialog({

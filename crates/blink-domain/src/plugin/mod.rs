@@ -4,6 +4,7 @@
 //! 接 async lane。第三方插件目录(%APPDATA%\blink\plugins)、permissions、热重载等后续。
 
 mod capability;
+mod catalog;
 mod contract;
 mod dataset;
 mod direction;
@@ -20,6 +21,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub use capability::{PluginCapabilityAdapter, plugin_tool_id};
+pub use catalog::{
+    CatalogAsset, CatalogCompat, CatalogDatasetEntry, CatalogError, CatalogPluginEntry,
+    PluginCatalog, SUPPORTED_CATALOG_FORMAT_VERSION, parse_catalog, plugin_entry_compat,
+};
 pub use contract::{
     PluginContract, BUILTIN_NAMESPACE, validate_contract_set, validate_namespace,
     validate_plugin_id,

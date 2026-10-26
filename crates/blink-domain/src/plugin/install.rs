@@ -66,6 +66,8 @@ pub enum InstallError {
     Contract(#[from] contract::ContractError),
     #[error("插件处于待卸载状态，请重启后重试（文件被占用）")]
     PendingRemoveBusy,
+    #[error("包摘要不匹配（期望 {expected}，实际 {actual}）——下载损坏或目录过期")]
+    ChecksumMismatch { expected: String, actual: String },
     #[error("未安装的插件: {0}")]
     NotInstalled(String),
     #[error("IO 失败: {0}")]
@@ -132,7 +134,48 @@ impl PluginInstaller {
         let staging = self.storage.staging_dir(&next_op_id());
         let pkg_dir = staging.join("pkg");
 
-        let result = self.install_zip_inner(zip_path, &pkg_dir, sha);
+        let result = self.install_zip_inner(
+            zip_path,
+            &pkg_dir,
+            sha,
+            InstallSource::LocalDev {
+                origin: zip_path.to_string_lossy().into_owned(),
+            },
+        );
+        let _ = std::fs::remove_dir_all(&staging);
+        result
+    }
+
+    /// 从官方目录下载的 zip 归档安装（0.28.5 插件中心通道）。
+    ///
+    /// 与 dev 通道的差别：① 归档 sha256 必须与目录条目声明一致（内容校验
+    /// 是供应链主防线）；② 来源记 [`InstallSource::Official`]——官方分发与
+    /// 随包同信任级（允许 `builtin.*`，实现"官方更新覆盖随包版"）。
+    pub fn install_official_zip(
+        &self,
+        zip_path: &Path,
+        expected_sha256: &str,
+        catalog_url: &str,
+    ) -> Result<InstallRecord, InstallError> {
+        let _guard = self.op_lock.lock().unwrap();
+        if expected_sha256.len() != 64 || !expected_sha256.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(InstallError::InvalidPackage(
+                "目录条目 sha256 格式非法".into(),
+            ));
+        }
+        let actual = sha256_file(zip_path).map_err(InstallError::Io)?;
+        if !actual.eq_ignore_ascii_case(expected_sha256) {
+            return Err(InstallError::ChecksumMismatch {
+                expected: expected_sha256.to_lowercase(),
+                actual,
+            });
+        }
+        let staging = self.storage.staging_dir(&next_op_id());
+        let pkg_dir = staging.join("pkg");
+        let source = InstallSource::Official {
+            catalog_url: catalog_url.to_string(),
+        };
+        let result = self.install_zip_inner(zip_path, &pkg_dir, actual, source);
         let _ = std::fs::remove_dir_all(&staging);
         result
     }
@@ -142,18 +185,13 @@ impl PluginInstaller {
         zip_path: &Path,
         pkg_dir: &Path,
         sha: String,
+        source: InstallSource,
     ) -> Result<InstallRecord, InstallError> {
         let result = archive::extract_zip_safely(zip_path, pkg_dir, self.limits)
             .map_err(|e| InstallError::Archive(e.to_string()))?;
         let package_root = resolve_package_root(pkg_dir, result.single_root_dir.as_deref())?;
 
-        self.validate_and_commit(
-            &package_root,
-            InstallSource::LocalDev {
-                origin: zip_path.to_string_lossy().into_owned(),
-            },
-            Some(sha),
-        )
+        self.validate_and_commit(&package_root, source, Some(sha))
     }
 
     /// 从已解包目录安装（dev 模式；源目录不被移动/破坏，内容有界复制进暂存）。
@@ -234,9 +272,14 @@ impl PluginInstaller {
             });
         }
 
-        // 4. 命名空间 + 契约冻结（非随包来源不授 builtin.*）
-        contract::validate_namespace(&manifest.id, false).map_err(|_| InstallError::NamespaceReserved)?;
-        let contract = PluginContract::from_manifest_checked(&manifest, false)?;
+        // 4. 命名空间 + 契约冻结（非随包/非官方来源不授 builtin.*——
+        //    0.28.5：Official 与随包同信任级，支撑"官方更新覆盖随包版"）
+        let trusted = matches!(source, InstallSource::Official { .. });
+        if !trusted {
+            contract::validate_namespace(&manifest.id, false)
+                .map_err(|_| InstallError::NamespaceReserved)?;
+        }
+        let contract = PluginContract::from_manifest_checked(&manifest, trusted)?;
 
         // 5. 单插件互斥：PendingRemove 期间拒绝新安装（防文件争抢）
         let mut registry = self.storage.load_registry()?;
@@ -664,6 +707,73 @@ mod tests {
         assert_eq!(compare_versions("0.28.1", "0.28.2"), Less);
         assert_eq!(compare_versions("0.28", "0.28.0"), Equal);
         assert_eq!(compare_versions("1.0.0", "0.99.99"), Greater);
+    }
+
+    /// 构造包目录的 zip 归档（manifest 在根，供 official 通道测试）。
+    fn make_zip(pkg_dir: &Path, zip_path: &Path) {
+        let file = std::fs::File::create(zip_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let mut paths = vec![pkg_dir.join("manifest.json"), pkg_dir.join("t.exe")];
+        let web = pkg_dir.join("web");
+        if web.is_dir() {
+            for entry in std::fs::read_dir(&web).unwrap().flatten() {
+                paths.push(entry.path());
+            }
+        }
+        for path in paths {
+            let content = std::fs::read(&path).unwrap();
+            let rel = path.strip_prefix(pkg_dir).unwrap().to_string_lossy().into_owned();
+            let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            zip.start_file(rel, opts).unwrap();
+            std::io::Write::write_all(&mut zip, &content).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    #[test]
+    fn official_zip_verifies_sha_and_allows_builtin_namespace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inst = installer(tmp.path());
+        let pkg = tmp.path().join("pkg");
+        // builtin.* 对 LocalDev 保留；官方目录分发等同随包信任级（0.28.5）
+        write_manifest(&pkg, "builtin.dictionary", "0.2.0");
+        let zip_path = tmp.path().join("pkg.zip");
+        make_zip(&pkg, &zip_path);
+
+        let real_sha = sha256_file(&zip_path).unwrap();
+        // 1) sha 不匹配 → 拒绝，无任何提交
+        assert!(matches!(
+            inst.install_official_zip(&zip_path, &"0".repeat(64), "https://example.invalid/catalog.json"),
+            Err(InstallError::ChecksumMismatch { .. })
+        ));
+        assert!(inst.list_installed().unwrap().is_empty());
+        // sha 格式非法同样拒绝
+        assert!(inst
+            .install_official_zip(&zip_path, "abcd", "https://example.invalid/catalog.json")
+            .is_err());
+
+        // 2) 匹配 sha → 提交成功，来源与摘要如实记录
+        let record = inst
+            .install_official_zip(&zip_path, &real_sha, "https://example.invalid/catalog.json")
+            .unwrap();
+        assert_eq!(record.plugin_id, "builtin.dictionary");
+        assert_eq!(
+            record.source,
+            InstallSource::Official {
+                catalog_url: "https://example.invalid/catalog.json".into()
+            }
+        );
+        assert_eq!(record.sha256.as_deref(), Some(real_sha.as_str()));
+        assert_eq!(
+            inst.active_version_dir("builtin.dictionary").unwrap(),
+            inst.storage().version_dir("builtin.dictionary", "0.2.0")
+        );
+
+        // 对照：同一 builtin 包走 LocalDev 通道仍被命名空间拒绝
+        assert!(matches!(
+            inst.install_zip(&zip_path),
+            Err(InstallError::NamespaceReserved)
+        ));
     }
 
     #[test]

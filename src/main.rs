@@ -1263,6 +1263,8 @@ fn setup_app(app: &mut tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error:
     app.manage(plugin_installer.clone());
     // 0.28.4：数据包安装器（词库安装/卸载命令的数据源）
     app.manage(dataset_installer.clone());
+    // 0.28.5：官方插件中心目录缓存（内存 TTL + 磁盘降级回放）
+    app.manage(std::sync::Arc::new(app::commands::PluginCatalogState::default()));
     // 0.28.2：插件独立窗口面（会话表 + 窗口编排入口；必须在任何插件窗口打开前管理）
     app.manage(std::sync::Arc::new(app::plugin_surface::PluginSurface::new()));
 
@@ -2102,6 +2104,10 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
         // 0.28.4：数据包（词库）安装/卸载/记录
         app::commands::install_plugin_dataset,
         app::commands::uninstall_plugin_dataset,
+        // 0.28.5：官方插件中心（目录 + 从目录下载安装）
+        app::commands::get_plugin_catalog,
+        app::commands::install_plugin_from_catalog,
+        app::commands::install_dataset_from_catalog,
         // 0.28.2：插件页面受限桥接（plugin-* 窗口）+ 窗口面状态
         app::commands::open_plugin_page,
         app::commands::plugin_page_ready,

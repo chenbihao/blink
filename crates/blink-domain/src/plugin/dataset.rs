@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 
 use blink_infra::plugin_storage::archive::{self, ExtractLimits};
 use blink_infra::plugin_storage::{
@@ -42,6 +43,8 @@ pub enum DatasetError {
     Corrupt(String),
     #[error("格式版本 {found} 高于本宿主支持（最高 {supported}）")]
     FormatTooNew { found: u32, supported: u32 },
+    #[error("归档摘要不匹配（期望 {expected}，实际 {actual}）——下载损坏或目录过期")]
+    ChecksumMismatch { expected: String, actual: String },
     #[error("IO 失败: {0}")]
     Io(String),
 }
@@ -187,6 +190,48 @@ impl DatasetInstaller {
             &pkg_dir,
             InstallSource::LocalDev {
                 origin: zip_path.to_string_lossy().into_owned(),
+            },
+        );
+        let _ = std::fs::remove_dir_all(&staging);
+        result
+    }
+
+    /// 从官方目录下载的 zip 归档安装（0.28.5 插件中心通道）：归档 sha256
+    /// 先与目录条目核验（包内 dataset.json 的逐文件哈希校验仍独立执行）。
+    pub fn install_official_zip(
+        &self,
+        zip_path: &Path,
+        expected_sha256: &str,
+        catalog_url: &str,
+    ) -> Result<DatasetRecord, DatasetError> {
+        let _guard = self.op_lock.lock().unwrap();
+        if expected_sha256.len() != 64 || !expected_sha256.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(DatasetError::InvalidManifest(
+                "目录条目 sha256 格式非法".into(),
+            ));
+        }
+        let mut hasher = sha2::Sha256::new();
+        let mut file = std::fs::File::open(zip_path).map_err(|e| DatasetError::Io(e.to_string()))?;
+        std::io::copy(&mut file, &mut hasher)
+            .map_err(|e| DatasetError::Io(e.to_string()))?;
+        let actual = format!("{:x}", hasher.finalize());
+        if !actual.eq_ignore_ascii_case(expected_sha256) {
+            return Err(DatasetError::ChecksumMismatch {
+                expected: expected_sha256.to_lowercase(),
+                actual,
+            });
+        }
+        let staging = self.storage.staging_dir(&next_op_id());
+        let pkg_dir = staging.join("pkg");
+        let result = self.install_inner(
+            |pkg| {
+                archive::extract_zip_safely(zip_path, pkg, self.limits)
+                    .map(|_| ())
+                    .map_err(|e| DatasetError::Archive(e.to_string()))
+            },
+            &pkg_dir,
+            InstallSource::Official {
+                catalog_url: catalog_url.to_string(),
             },
         );
         let _ = std::fs::remove_dir_all(&staging);
@@ -683,6 +728,57 @@ mod tests {
             .join("dict.db")
             .is_file());
         assert_eq!(inst.list().unwrap().len(), 1);
+    }
+
+    /// 把数据包目录打成 zip（dataset.json 在根，供 official 通道测试）。
+    fn make_zip(pkg_dir: &Path, zip_path: &Path) {
+        let file = std::fs::File::create(zip_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        for entry in ["dataset.json", "dict.db"] {
+            let content = std::fs::read(pkg_dir.join(entry)).unwrap();
+            let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            zip.start_file(entry, opts).unwrap();
+            std::io::Write::write_all(&mut zip, &content).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    fn sha256_of(path: &Path) -> String {
+        let mut hasher = sha2::Sha256::new();
+        std::io::copy(&mut std::fs::File::open(path).unwrap(), &mut hasher).unwrap();
+        format!("{:x}", hasher.finalize())
+    }
+
+    #[test]
+    fn official_zip_verifies_sha_and_records_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inst = installer(tmp.path());
+        let pkg = tmp.path().join("pkg");
+        write_pkg(&pkg, "builtin.dictionary", "dictionary-basic", "1.0.0");
+        let zip_path = tmp.path().join("ds.zip");
+        make_zip(&pkg, &zip_path);
+
+        let real_sha = sha256_of(&zip_path);
+        assert!(matches!(
+            inst.install_official_zip(&zip_path, &"f".repeat(64), "https://example.invalid/c.json"),
+            Err(DatasetError::ChecksumMismatch { .. })
+        ));
+        assert!(inst.list().unwrap().is_empty());
+
+        let record = inst
+            .install_official_zip(&zip_path, &real_sha, "https://example.invalid/c.json")
+            .unwrap();
+        assert_eq!(
+            record.source,
+            InstallSource::Official {
+                catalog_url: "https://example.invalid/c.json".into()
+            }
+        );
+        let base = inst.storage().datasets_dir("builtin.dictionary");
+        assert_eq!(
+            resolve_active_version(&base, "dictionary-basic"),
+            ActiveVersion::Mounted("1.0.0".into())
+        );
     }
 
     #[test]

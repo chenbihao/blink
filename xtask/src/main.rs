@@ -47,6 +47,7 @@ use std::process::{Command, Stdio};
 mod artifacts;
 mod build_log;
 mod funasr_worker;
+mod pack;
 
 /// 自动发现所有 Rust 插件（扫描 plugins/examples/ 目录）。
 fn discover_rust_plugins() -> Vec<String> {
@@ -1413,6 +1414,7 @@ fn main() {
         "models" => fetch_models(), // 从 LiteLLM 精选主流模型目录
         "lint" => lint_frontend(), // 前端防新增检查（var hex fallback 冻结基线）
         "dictionary" => dictionary::run(&args), // 词典数据集构建/校验（0.28.4）
+        "pack" => pack::run(&args), // 官方插件/词库打包 + 目录生成（0.28.5）
         "test" => run(
             "node",
             &["xtask/scripts/test-workspace.mjs"],

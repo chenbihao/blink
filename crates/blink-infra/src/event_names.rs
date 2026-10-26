@@ -287,4 +287,16 @@ impl EventNames {
     /// 复用插件窗口再次唤起时的新载荷推送（定向 emit 到该窗口）。
     /// 初始 payload 不走事件——由 `plugin_page_ready` 握手返回（ready/pull）。
     pub const PLUGIN_PAGE_PAYLOAD: &str = "blink://plugin-page-payload";
+
+    // ── 官方插件中心（0.28.5）──
+    /// 插件/数据包从官方目录下载安装的进度。payload:
+    /// `{ kind: "plugin"|"dataset", id, phase: "downloading"|"installing"|"done"|"failed",
+    ///    received, total, error? }`。
+    ///
+    /// - `received/total`：downloading 阶段的字节计数（total 用目录条目声明值
+    ///   做分母）；进度节流 ≥512KB/条。
+    /// - `phase: "installing"`：下载完成进入本地校验/提交（install.rs 状态机）。
+    /// - `phase: "done"`：安装提交完成（前端随后拉取状态刷新列表）；
+    ///   `failed` 附用户可读 `error`。
+    pub const PLUGIN_CENTER_PROGRESS: &str = "blink://plugin-center-progress";
 }

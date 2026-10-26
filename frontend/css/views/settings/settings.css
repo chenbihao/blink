@@ -3037,6 +3037,73 @@ input.has-secret-hint::placeholder {
     vertical-align: -0.08em;
 }
 
+/* ===== 官方插件中心（0.28.5：plugins 面板顶部的获取/更新视图） ===== */
+
+.plugin-catalog {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 10px 12px;
+    margin-bottom: var(--space-md, 16px);
+    border: 1px solid var(--surface);
+    border-radius: var(--radius-md);
+}
+
+.plugin-catalog-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-sm, 8px);
+}
+
+.plugin-catalog-stale {
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+}
+
+.plugin-catalog-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-sm, 8px);
+}
+
+.plugin-catalog-name {
+    font-size: var(--text-xs);
+    color: var(--text);
+}
+
+.plugin-catalog-size {
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+}
+
+.plugin-catalog-row .version-badge {
+    margin-left: 0;
+}
+
+/* 目录行的操作按钮/状态徽标右对齐（与数据包行同一视觉锚点） */
+.plugin-catalog-row .btn-small,
+.plugin-catalog-row .plugin-catalog-status {
+    margin-left: auto;
+}
+
+.plugin-catalog-uptodate {
+    font-size: var(--text-xs);
+    color: var(--green);
+}
+
+.plugin-catalog-error {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.plugin-catalog-loading {
+    padding: 4px 0;
+    margin: 0 0 var(--space-md, 16px);
+}
+
 /* ===== 数据包行（0.28.4：词库等本地数据集安装/卸载，插件卡片 body） ===== */
 
 .plugin-datasets-section {

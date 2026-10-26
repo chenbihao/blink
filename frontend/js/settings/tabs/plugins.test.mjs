@@ -278,3 +278,74 @@ test("renderDatasetsSection renders install states and actions", () => {
     assert.match(html, /待清理（重启后完成）/);
     assert.doesNotMatch(html, /plugin-dataset-uninstall/);
 });
+
+// ── 0.28.5：官方插件中心（目录区渲染 + 版本比较 + 目录模式数据包） ──────────
+
+const {renderCatalogSection, compareVersions} = await import("./plugins.js");
+
+test("compareVersions follows dotted numeric semantics", () => {
+    assert.equal(compareVersions("0.28.1", "0.28.2") < 0, true);
+    assert.equal(compareVersions("0.28", "0.28.0"), 0);
+    assert.equal(compareVersions("1.0.0", "0.99.99") > 0, true);
+    assert.equal(compareVersions(undefined, "0.1") < 0, true);
+});
+
+test("renderCatalogSection covers loading/error/catalog states", () => {
+    // 加载中 / 错误态
+    assert.match(renderCatalogSection(null, new Map()), /plugin-catalog-loading/);
+    assert.match(renderCatalogSection({error: "目录不可达"}, new Map()), /plugin-catalog-error/);
+    assert.match(renderCatalogSection({error: "目录不可达"}, new Map()), /plugin-catalog-refresh/);
+
+    const catalog = {plugins: [
+        {plugin_id: "builtin.dictionary", version: "0.2.0", asset: {url: "https://x/y.zip", sha256: "a".repeat(64), bytes: 5 * 1024 * 1024}},
+        {plugin_id: "builtin.translate", version: "0.4.0", asset: {url: "https://x/t.zip", sha256: "b".repeat(64), bytes: 300 * 1024}},
+    ], datasets: []};
+    const surfaces = new Map([
+        // 已通过目录安装 0.2.0 → 已最新
+        ["builtin.dictionary", {install: {version: "0.2.0"}, version: "0.1.0"}],
+        // 只有随包 0.3.0 → 目录 0.4.0 可更新
+        ["builtin.translate", {version: "0.3.0"}],
+        // 不在 surface（未安装插件）→ 安装按钮
+    ]);
+    const html = renderCatalogSection({catalog, stale: true, devMode: false}, surfaces);
+    assert.match(html, /plugin-catalog-stale/);                       // 离线缓存标记
+    assert.match(html, /data-plugin-id="builtin\.dictionary"/);
+    assert.match(html, /已最新/);                                      // 0.2.0 安装记录 ≥ 目录版
+    assert.match(html, /更新/);                                        // 随包 0.3.0 < 目录 0.4.0
+    const notLoaded = renderCatalogSection({catalog, stale: false}, new Map());
+    assert.equal((notLoaded.match(/plugin-catalog-install/g) || []).length, 2); // 未安装 → 安装按钮
+    assert.match(notLoaded, /5\.0 MB/);                                // 大小展示
+});
+
+test("renderDatasetsSection prefers catalog source and gates local install by dev mode", () => {
+    const plugin = {id: "builtin.dictionary"};
+    const surface = {
+        datasets: [{id: "dictionary-basic", optional: false, min_version: "1.0.0", installed: null}],
+        readiness: {ready: false, blockers: []},
+    };
+    const catalog = {datasets: [
+        {plugin_id: "builtin.dictionary", dataset_id: "dictionary-basic", version: "1.1.0",
+         asset: {url: "https://x/d.zip", sha256: "c".repeat(64), bytes: 107000000}},
+    ]};
+
+    // 目录有条目 + dev：主按钮走目录（data-catalog），本地 zip 按钮并存
+    let html = renderDatasetsSection(plugin, surface, catalog, true);
+    assert.match(html, /plugin-dataset-install" data-dataset="dictionary-basic" data-catalog="1"/);
+    assert.match(html, /data-progress-id="builtin\.dictionary\/dictionary-basic"/);
+    assert.match(html, /plugin-dataset-install-local/);
+
+    // 目录有条目 + 生产：只有目录按钮，无本地入口
+    html = renderDatasetsSection(plugin, surface, catalog, false);
+    assert.match(html, /data-catalog="1"/);
+    assert.doesNotMatch(html, /plugin-dataset-install-local/);
+
+    // 无目录 + 生产：无安装按钮，提示无安装源
+    html = renderDatasetsSection(plugin, surface, null, false);
+    assert.doesNotMatch(html, /plugin-dataset-install/);
+    assert.match(html, /暂无安装源/);
+
+    // 无目录 + dev：保持 0.28.4 本地 zip 行为（两参调用兼容）
+    html = renderDatasetsSection(plugin, surface);
+    assert.equal((html.match(/plugin-dataset-install\b/g) || []).length, 1);
+    assert.doesNotMatch(html, /data-catalog/);
+});
