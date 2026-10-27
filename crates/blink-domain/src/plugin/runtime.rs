@@ -284,6 +284,7 @@ mod tests {
             pages: vec![],
             datasets: vec![],
             args: None,
+            channel: Default::default(),
         };
         // process 型插件需要 exec
         m.runtime.exec = format!("{id}.exe");

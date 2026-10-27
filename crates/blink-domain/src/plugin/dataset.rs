@@ -204,6 +204,40 @@ impl DatasetInstaller {
         expected_sha256: &str,
         catalog_url: &str,
     ) -> Result<DatasetRecord, DatasetError> {
+        self.install_catalog_zip_inner(zip_path, expected_sha256, || {
+            InstallSource::Official {
+                catalog_url: catalog_url.to_string(),
+            }
+        })
+    }
+
+    /// 从 dev 本地目录源安装（0.28.12）：sha 校验同官方通道，来源如实记
+    /// LocalDev（不冒充 Official）；仅 debug 构建（生产域层兜底拒绝）。
+    pub fn install_local_catalog_zip(
+        &self,
+        zip_path: &Path,
+        expected_sha256: &str,
+        origin_dir: &str,
+    ) -> Result<DatasetRecord, DatasetError> {
+        if !cfg!(debug_assertions) {
+            return Err(DatasetError::InvalidManifest(
+                "本地目录源安装仅开发模式可用".into(),
+            ));
+        }
+        self.install_catalog_zip_inner(zip_path, expected_sha256, || {
+            InstallSource::LocalDev {
+                origin: origin_dir.to_string(),
+            }
+        })
+    }
+
+    /// 目录 zip 通道公共路径：sha256 核验 → 暂存解压 → 状态机提交。
+    fn install_catalog_zip_inner(
+        &self,
+        zip_path: &Path,
+        expected_sha256: &str,
+        source: impl FnOnce() -> InstallSource,
+    ) -> Result<DatasetRecord, DatasetError> {
         let _guard = self.op_lock.lock().unwrap();
         if expected_sha256.len() != 64 || !expected_sha256.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err(DatasetError::InvalidManifest(
@@ -230,9 +264,7 @@ impl DatasetInstaller {
                     .map_err(|e| DatasetError::Archive(e.to_string()))
             },
             &pkg_dir,
-            InstallSource::Official {
-                catalog_url: catalog_url.to_string(),
-            },
+            source(),
         );
         let _ = std::fs::remove_dir_all(&staging);
         result

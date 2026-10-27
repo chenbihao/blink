@@ -305,6 +305,7 @@ mod tests {
             pages: vec![],
             datasets: vec![],
             args: None,
+            channel: Default::default(),
         }
     }
 

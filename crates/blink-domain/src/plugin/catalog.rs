@@ -54,6 +54,23 @@ pub struct CatalogPluginEntry {
     #[serde(default)]
     pub platforms: Vec<String>,
     pub asset: CatalogAsset,
+    // ── 展示元数据（0.28.12）：全部可选，旧目录缺省 = 前端按约定回退 ──
+    /// 展示名称（双语）。缺省回退 plugin_id；旧目录无此字段为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<super::manifest::LocalizableText>,
+    /// 展示描述（双语）。缺省不显示描述行。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<super::manifest::LocalizableText>,
+    /// 是否声明独立页面。旧目录为 None = 未知——前端不显示成"无页面"。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub has_pages: Option<bool>,
+    /// 发布通道（0.28.12）。缺省 stable；非法值整个目录拒绝（构建产物不猜意图）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<super::manifest::PluginChannel>,
+    /// 发布更新时间（RFC3339）。仅在有可靠发布时间时填写——本机 pack 不把
+    /// 文件修改时间当发布时间，缺省 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
 }
 
 fn default_host_min() -> String {
@@ -155,6 +172,14 @@ pub fn parse_catalog(raw: &str) -> Result<PluginCatalog, CatalogError> {
         if entry.platforms.iter().any(|p| p.is_empty()) {
             return Err(ctx("platforms 含空标签"));
         }
+        // 展示字段（0.28.12）：updated_at 只做长度/字符集约束（RFC3339 由 pack 侧
+        // 保证）；name/description/channel 的结构由 serde 类型保证——非法 channel
+        // 值在反序列化阶段即整个目录拒绝。
+        if let Some(ts) = &entry.updated_at
+            && (ts.is_empty() || ts.len() > 64 || !ts.chars().all(|c| c.is_ascii_graphic()))
+        {
+            return Err(ctx("updated_at 字符集非法"));
+        }
         validate_asset(&entry.asset).map_err(|r| ctx(&r))?;
     }
 
@@ -251,6 +276,54 @@ mod tests {
         assert!(c.plugin("builtin.translate").is_some());
         assert!(c.dataset("builtin.dictionary", "dictionary-basic").is_some());
         assert!(c.dataset("builtin.dictionary", "nope").is_none());
+    }
+
+    // ── 0.28.12 展示元数据：新旧目录双向兼容 ─────────────────────────────
+
+    #[test]
+    fn display_metadata_parses_and_legacy_catalog_stays_compatible() {
+        // 新目录：name/description 双语 + has_pages + channel + updated_at
+        let entry = r#"{"plugin_id":"builtin.dictionary","version":"0.2.0",
+            "host_min_version":"0.28.1","platforms":["windows-x86_64"],
+            "asset":{ASSET},
+            "name":{"zh":"离线词典","en":"Dictionary"},
+            "description":{"zh":"离线查词","en":"Offline lookup"},
+            "has_pages":true,"channel":"beta","updated_at":"2026-10-28T00:00:00Z"}"#
+            .replace("ASSET", &asset_json());
+        let c = parse_catalog(&catalog_json(&entry, "")).unwrap();
+        let e = &c.plugins[0];
+        assert_eq!(
+            e.name.as_ref().unwrap().resolve("zh"),
+            "离线词典"
+        );
+        assert_eq!(e.description.as_ref().unwrap().resolve("en"), "Offline lookup");
+        assert_eq!(e.has_pages, Some(true));
+        assert_eq!(e.channel, Some(super::super::manifest::PluginChannel::Beta));
+        assert_eq!(e.updated_at.as_deref(), Some("2026-10-28T00:00:00Z"));
+
+        // 旧目录（0.28.5 产物，无展示字段）：全部 None = 前端按约定回退
+        let legacy = plugin_entry("extra.demo");
+        let c = parse_catalog(&catalog_json(&legacy, "")).unwrap();
+        let e = &c.plugins[0];
+        assert!(e.name.is_none());
+        assert!(e.description.is_none());
+        assert_eq!(e.has_pages, None);
+        assert_eq!(e.channel, None);
+        assert!(e.updated_at.is_none());
+    }
+
+    #[test]
+    fn display_metadata_bad_values_rejected() {
+        // 未知 channel 值：整个目录拒绝（serde 类型即校验）
+        let bad_channel = r#"{"plugin_id":"extra.demo","version":"1.0.0",
+            "asset":{ASSET},"channel":"nightly"}"#
+            .replace("ASSET", &asset_json());
+        assert!(parse_catalog(&catalog_json(&bad_channel, "")).is_err());
+        // updated_at 含空白（非 ascii_graphic）拒绝
+        let bad_ts = r#"{"plugin_id":"extra.demo","version":"1.0.0",
+            "asset":{ASSET},"updated_at":"2026-10-28 00:00"}"#
+            .replace("ASSET", &asset_json());
+        assert!(parse_catalog(&catalog_json(&bad_ts, "")).is_err());
     }
 
     #[test]

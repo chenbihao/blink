@@ -6,8 +6,8 @@
  * 命令名 list_plugins 与容器 plugins-list 均不存在导致页面空白；0.9.5.1 还原原版
  * get_plugins + plugins-container + 整套 schema/触发词/拖拽）。
  */
-import {commandErrorText, confirmDialog, invoke, listen, openDialog} from "../../shared/tauri.js";
-import {onLangChange, t} from "../../i18n/index.js";
+import {commandErrorText, choiceDialog, confirmDialog, invoke, listen, openDialog} from "../../shared/tauri.js";
+import {getLang, onLangChange, t} from "../../i18n/index.js";
 import {iconHTML} from "../../shared/icon.js";
 import {saveConfig} from "../../shared/config-keys.js";
 import {navigateSettings} from "../navigation.js";
@@ -32,6 +32,26 @@ let catalogProgressBound = false;
 // 进行中的目录安装（progressId → 无）：done/failed 时按 data-progress-id
 // 重查 DOM（loadPlugins 重渲染会重建按钮，不持引用）。
 const catalogPending = new Set();
+// 0.28.12 dev 目录源选择："auto"（在线→磁盘缓存→本地 pack 降级）或 "local"
+// （显式本地目录，优先于线上/缓存）。目录路径存 localStorage——生产构建
+// 前端隐藏入口、后端另有 dev 门禁，不落配置 DB。
+let catalogSourceMode = "auto";
+let catalogLocalDir = null;
+try {
+    catalogLocalDir = localStorage.getItem("blink.catalog.localDir");
+    if (localStorage.getItem("blink.catalog.sourceMode") === "local" && catalogLocalDir) {
+        catalogSourceMode = "local";
+    }
+} catch { /* localStorage 不可用时保持自动模式 */ }
+
+/** LocalizableText 解析（目录条目 name/description）：字符串原样；对象按
+ * lang → zh → 首个值取（与后端 manifest resolve 同语义）。 */
+function resolveLocalized(value, lang) {
+    if (value == null) return "";
+    if (typeof value === "string") return value;
+    const key = lang || "zh";
+    return value[key] || value.zh || Object.values(value)[0] || "";
+}
 
 /** 插件图标映射（0.10.8：emoji → Lucide 图标名） */
 const PLUGIN_ICONS = {
@@ -152,11 +172,24 @@ async function loadPlugins(force = false, refreshSurface = false) {
     weatherEditors.clear();
     renderedPlugins.clear();
     for (const plugin of plugins) renderedPlugins.set(plugin.id, plugin);
-    if (plugins.length === 0) {
+    if (plugins.length === 0 && ![...surfaceStatus.values()].some(s => s.install?.state === "pending_remove")) {
         container.innerHTML = `<p class="msg-muted" style="padding: 20px;">${t("plugin.empty")}</p>`;
         return;
     }
-    container.innerHTML = plugins.map(renderPluginCard).join("");
+    // 0.28.12：待清理插件（卸载时文件被占用）已从运行时撤销——引擎列表无句柄，
+    // 按安装记录渲染占位行如实展示"待清理（重启后完成）"，不留隐形状态。
+    const pendingRows = [...surfaceStatus.values()]
+        .filter(s => s.install?.state === "pending_remove"
+            && !plugins.some(p => p.id === s.plugin_id))
+        .map(s => `<div class="extension-card" data-plugin-id="${escapeAttr(s.plugin_id)}">
+          <div class="extension-body">
+            <div class="plugin-install-row">
+              <span class="plugin-catalog-id">${escapeHtml(s.plugin_id)}</span>
+              <span class="plugin-dataset-status msg-error">${t("plugin.uninstall_pending_remove")}</span>
+            </div>
+          </div>
+        </div>`).join("");
+    container.innerHTML = plugins.map(renderPluginCard).join("") + pendingRows;
     for (const plugin of plugins) bindPluginCardEvents(plugin);
     initSortableLists();
 }
@@ -177,6 +210,7 @@ function renderPluginCard(plugin) {
     const triggersTags = renderTriggersTags(plugin);
 
     const surfaceSection = renderSurfaceSection(plugin);
+    const installSection = renderInstallSection(plugin, surfaceStatus.get(plugin.id));
     const datasetsSection = renderDatasetsSection(
         plugin,
         surfaceStatus.get(plugin.id),
@@ -202,7 +236,7 @@ function renderPluginCard(plugin) {
         headerRight,
         attrs: `data-plugin-id="${plugin.id}"`,
         classes: enabled ? "" : "is-disabled",
-        body: `${surfaceSection}${datasetsSection}${configSection}`,
+        body: `${surfaceSection}${installSection}${datasetsSection}${configSection}`,
     });
 }
 
@@ -254,6 +288,7 @@ export function compareVersions(a, b) {
 
 /**
  * 拉取官方目录（独立于插件列表：失败只降级目录区，不阻断已安装展示）。
+ * 0.28.12：显式本地源（dev）时传 localDir——优先使用，失败如实展示不切回线上。
  */
 async function loadCatalog(force = false) {
     const revision = ++catalogRevision;
@@ -261,7 +296,10 @@ async function loadCatalog(force = false) {
     if (!container) return;
     container.innerHTML = `<p class="msg-muted plugin-catalog-loading">${t("plugin.catalog_loading")}</p>`;
     try {
-        const res = await invoke("get_plugin_catalog", {forceRefresh: force});
+        const res = await invoke("get_plugin_catalog", {
+            forceRefresh: force,
+            localDir: catalogSourceMode === "local" ? catalogLocalDir : null,
+        });
         if (revision !== catalogRevision) return;
         catalogState = res;
     } catch (error) {
@@ -276,6 +314,14 @@ async function loadCatalog(force = false) {
     }
 }
 
+/** dev 目录源状态（0.28.12）：当前模式/目录写回 localStorage（仅 dev UI 用）。 */
+function persistCatalogSource() {
+    try {
+        localStorage.setItem("blink.catalog.sourceMode", catalogSourceMode);
+        if (catalogLocalDir) localStorage.setItem("blink.catalog.localDir", catalogLocalDir);
+    } catch { /* 私隐模式等场景忽略 */ }
+}
+
 function renderCatalog() {
     const container = document.getElementById("plugin-catalog-container");
     if (!container) return;
@@ -284,11 +330,14 @@ function renderCatalog() {
 }
 
 /**
- * 渲染插件中心目录区（0.28.5）。导出为纯字符串函数供测试：
- * - state 为 get_plugin_catalog 的返回（catalog/stale/devMode）或 {error} 错误态；
+ * 渲染插件中心目录区（0.28.5；0.28.12 升级为展示元数据卡片 + dev 源选择）。
+ * 导出为纯字符串函数供测试：
+ * - state 为 get_plugin_catalog 的返回（catalog/stale/devMode/source）或 {error} 错误态；
  * - surfaceStatus 为 plugin_id → get_plugin_surface_status 行的 Map；
  *   行的 install.version（用户目录安装）或 version（随包 manifest）用于
  *   "已最新 / 可更新"判定。
+ * - 目录条目展示元数据（name/description 双语、has_pages、channel）缺省回退：
+ *   名称回退 plugin_id、描述不显示、页面信息未知不显示"无页面"、channel 缺省 stable。
  */
 export function renderCatalogSection(state, surfaceStatusMap) {
     if (!state) return `<p class="msg-muted plugin-catalog-loading">${t("plugin.catalog_loading")}</p>`;
@@ -298,6 +347,7 @@ export function renderCatalogSection(state, surfaceStatusMap) {
           <button class="btn-small plugin-catalog-refresh">${iconHTML("refresh-cw")} ${t("plugin.catalog_retry")}</button>
         </div>`;
     }
+    const lang = getLang();
     const rows = (state.catalog.plugins || []).map((entry) => {
         const surface = surfaceStatusMap?.get?.(entry.plugin_id);
         const current = surface?.install?.version || surface?.version;
@@ -308,17 +358,52 @@ export function renderCatalogSection(state, surfaceStatusMap) {
                  ${iconHTML("download")} ${current ? t("plugin.catalog_update") : t("plugin.catalog_install")}
                </button>`;
         const size = formatBytes(entry.asset?.bytes);
-        return `<div class="plugin-catalog-row" data-plugin-id="${escapeAttr(entry.plugin_id)}">
-          <span class="plugin-catalog-name">${escapeHtml(entry.plugin_id)}</span>
-          <span class="version-badge">v${escapeHtml(entry.version)}</span>
-          <span class="plugin-catalog-size">${escapeHtml(size)}</span>
-          ${action}
+        const name = resolveLocalized(entry.name, lang) || entry.plugin_id;
+        const desc = resolveLocalized(entry.description, lang);
+        const badges = [];
+        if (entry.channel === "beta") {
+            badges.push(`<span class="plugin-catalog-badge plugin-catalog-beta">${t("plugin.catalog_beta")}</span>`);
+        }
+        if (entry.has_pages === true) {
+            badges.push(`<span class="plugin-catalog-badge" title="${escapeAttr(t("plugin.catalog_has_pages_hint"))}">${iconHTML("app-window")} ${t("plugin.catalog_has_pages")}</span>`);
+        }
+        return `<div class="plugin-catalog-entry" data-plugin-id="${escapeAttr(entry.plugin_id)}">
+          <div class="plugin-catalog-row">
+            <span class="plugin-catalog-name">${escapeHtml(name)}</span>
+            <span class="plugin-catalog-id">${escapeHtml(entry.plugin_id)}</span>
+            <span class="version-badge">v${escapeHtml(entry.version)}</span>
+            ${badges.join("")}
+            <span class="plugin-catalog-size">${escapeHtml(size)}</span>
+            ${action}
+          </div>
+          ${desc ? `<div class="plugin-catalog-desc">${escapeHtml(desc)}</div>` : ""}
         </div>`;
     }).join("");
+    const sourceBadge = state.source === "local"
+        ? `<span class="plugin-catalog-stale">${t("plugin.catalog_source_local")}</span>`
+        : state.source === "cache"
+            ? `<span class="plugin-catalog-stale">${t("plugin.catalog_source_cache")}</span>`
+            : "";
+    const devSource = state.devMode === true
+        ? `<span class="plugin-catalog-dev-source">
+             <label class="plugin-catalog-source-select">
+               ${t("plugin.catalog_dev_source")}
+               <select class="plugin-catalog-source-mode">
+                 <option value="auto" ${catalogSourceMode === "auto" ? "selected" : ""}>${t("plugin.catalog_dev_auto")}</option>
+                 <option value="local" ${catalogSourceMode === "local" ? "selected" : ""}>${t("plugin.catalog_dev_local")}</option>
+               </select>
+             </label>
+             ${catalogSourceMode === "local"
+                 ? `<button class="btn-small plugin-catalog-pick-dir" title="${escapeAttr(catalogLocalDir || t("plugin.catalog_dev_pick_dir"))}">${iconHTML("folder-open")} ${t("plugin.catalog_dev_pick_dir")}</button>`
+                 : ""}
+           </span>`
+        : "";
     return `<div class="plugin-catalog">
       <div class="plugin-catalog-head">
         <span class="trigger-label">${t("plugin.catalog_section")}</span>
-        ${state.stale ? `<span class="plugin-catalog-stale">${t("plugin.catalog_stale")}</span>` : ""}
+        ${sourceBadge}
+        ${state.stale && state.source !== "local" ? `<span class="plugin-catalog-stale">${t("plugin.catalog_stale")}</span>` : ""}
+        ${devSource}
         <button class="btn-small plugin-catalog-refresh">${iconHTML("refresh-cw")} ${t("plugin.catalog_refresh")}</button>
       </div>
       ${rows || `<p class="msg-muted">${t("plugin.catalog_empty")}</p>`}
@@ -337,9 +422,40 @@ function bindCatalogEvents(container) {
         btn.addEventListener("click", () => loadCatalog(true)));
     container.querySelectorAll(".plugin-catalog-install").forEach((btn) =>
         btn.addEventListener("click", () => installFromCatalog(btn, "plugin", btn.dataset.pluginId)));
+    // 0.28.12 dev 源选择：自动 / 本地目录；本地模式需先选 pack 输出目录。
+    container.querySelectorAll(".plugin-catalog-source-mode").forEach((sel) =>
+        sel.addEventListener("change", async () => {
+            catalogSourceMode = sel.value;
+            if (catalogSourceMode === "local" && !catalogLocalDir) {
+                await pickCatalogLocalDir();
+                if (!catalogLocalDir) catalogSourceMode = "auto";
+            }
+            persistCatalogSource();
+            loadCatalog(false);
+        }));
+    container.querySelectorAll(".plugin-catalog-pick-dir").forEach((btn) =>
+        btn.addEventListener("click", async () => {
+            await pickCatalogLocalDir();
+            if (catalogLocalDir) loadCatalog(false);
+        }));
 }
 
-/** 目录安装入口（插件/数据包共用）：按钮置忙 → invoke → done/failed 由进度事件恢复。 */
+/** 选择本地 pack 输出目录（含 blink-plugins-catalog.json 的目录）。 */
+async function pickCatalogLocalDir() {
+    try {
+        const path = await openDialog({
+            title: t("plugin.catalog_dev_dir_title"),
+            multiple: false,
+            directory: true,
+        });
+        if (path) catalogLocalDir = path;
+    } catch (e) {
+        console.error("pickCatalogLocalDir failed:", e);
+    }
+}
+
+/** 目录安装入口（插件/数据包共用）：按钮置忙 → invoke → done/failed 由进度事件恢复。
+ * 0.28.12：显式本地源模式下安装走同一本地目录（来源与目录快照一致）。 */
 async function installFromCatalog(button, kind, payload, progressId) {
     if (catalogPending.has(progressId)) return;
     catalogPending.add(progressId);
@@ -347,7 +463,9 @@ async function installFromCatalog(button, kind, payload, progressId) {
     button._label = button.innerHTML;
     button.innerHTML = t("plugin.catalog_downloading");
     try {
-        await invoke(kind === "plugin" ? "install_plugin_from_catalog" : "install_dataset_from_catalog", payload);
+        const args = {...payload};
+        if (catalogSourceMode === "local" && catalogLocalDir) args.localDir = catalogLocalDir;
+        await invoke(kind === "plugin" ? "install_plugin_from_catalog" : "install_dataset_from_catalog", args);
         // done 事件负责恢复按钮与刷新；此处兜底（事件丢失时仍解锁）
         finishCatalogInstall(progressId, null);
     } catch (error) {
@@ -394,6 +512,39 @@ function bindCatalogProgress() {
     });
 }
 
+
+/**
+ * 安装管理行（0.28.12）：仅对**有用户安装记录**的插件渲染——
+ * - 覆盖随包版（install 存在且 bundled）：「移除更新并恢复随包版」；
+ * - 纯用户安装（install 存在且非 bundled，如 extra.*）：「卸载」；
+ * - 待清理（pending_remove）：如实显示重启后完成，不给重复卸载按钮；
+ * - 仅随包（无 install）：不渲染——随包插件只能禁用，不能物理卸载。
+ *
+ * 卸载确认三选一：默认保留插件数据与全部词库；第三动作同时清除。
+ */
+export function renderInstallSection(plugin, surface) {
+    const install = surface?.install;
+    if (!install) return "";
+    if (install.state === "pending_remove") {
+        return `<div class="plugin-install-row">
+          <span class="trigger-label">${t("plugin.install_section")}</span>
+          <span class="plugin-dataset-status msg-error">${t("plugin.uninstall_pending_remove")}</span>
+        </div>`;
+    }
+    const bundled = surface?.bundled === true;
+    const button = bundled
+        ? `<button class="btn-small plugin-uninstall" data-bundled="1" title="${escapeAttr(t("plugin.uninstall_restore_hint"))}">${iconHTML("rotate-ccw")} ${t("plugin.uninstall_restore")}</button>`
+        : `<button class="btn-small plugin-uninstall" title="${escapeAttr(t("plugin.uninstall_hint"))}">${iconHTML("trash-2")} ${t("plugin.uninstall")}</button>`;
+    const source = install.source?.kind === "official"
+        ? `<span class="plugin-catalog-uptodate">${t("plugin.install_source_official")}</span>`
+        : `<span class="plugin-catalog-stale">${t("plugin.install_source_localdev")}</span>`;
+    return `<div class="plugin-install-row">
+      <span class="trigger-label">${t("plugin.install_section")}</span>
+      <span class="plugin-dataset-status">v${escapeHtml(install.version || "")}</span>
+      ${source}
+      <span class="plugin-surface-buttons">${button}</span>
+    </div>`;
+}
 
 /**
  * 数据包（词库）区（0.28.4）：manifest 声明 datasets 的插件逐行渲染
@@ -962,6 +1113,38 @@ export function bindPluginCardEvents(plugin) {
         } catch (error) {
             flash(card, error?.message || String(error), true, 4000);
         }
+    }));
+    // 0.28.12：卸载 / 移除更新并恢复随包版。三选一确认：默认保留数据与词库，
+    // 第三动作同时清除；后端先撤销运行时再清理文件（占用如实报待清理）。
+    card.querySelectorAll(".plugin-uninstall").forEach(button => button.addEventListener("click", async () => {
+        const bundled = button.dataset.bundled === "1";
+        const name = plugin.name || id;
+        const message = bundled
+            ? t("plugin.uninstall_restore_confirm", {name})
+            : t("plugin.uninstall_confirm", {name});
+        const choice = await choiceDialog(message, {
+            kind: "warning",
+            okLabel: bundled ? t("plugin.uninstall_restore") : t("plugin.uninstall_keep_data"),
+            thirdAction: bundled ? null : {label: t("plugin.uninstall_clear_data")},
+        });
+        if (choice === "cancel") return;
+        button.disabled = true;
+        try {
+            const result = await invoke("uninstall_plugin", {pluginId: id, keepData: choice === "ok"});
+            if (result?.pending_files) {
+                flash(card, t("plugin.uninstall_done_pending", {count: result.pending_files}), true, 6000);
+            } else if (result?.restored_bundled) {
+                flash(card, t("plugin.uninstall_restored"), false, 4000);
+            } else {
+                flash(card, t("plugin.uninstall_done"), false, 4000);
+            }
+        } catch (error) {
+            flash(card, commandErrorText(error, t("plugin.uninstall_failed")), true, 6000);
+        } finally {
+            button.disabled = false;
+        }
+        await loadPlugins(true);
+        await loadCatalog(false);
     }));
     // 0.28.5：数据包安装/更新。data-catalog=1 → 官方目录下载（主通道）；
     // -local 后缀 → dev 本地 zip（仅开发模式出现，生产由后端门禁兜底）

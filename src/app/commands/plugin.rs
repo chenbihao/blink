@@ -31,22 +31,12 @@ fn handle_from_record(
         .ok_or_else(|| {
             CommandError::new("invalid_state", "安装记录存在但版本目录缺失", false)
         })?;
-    let manifest = crate::domain::plugin::PluginManifest::from_path(&dir.join("manifest.json"))
-        .map_err(|e| {
-            CommandError::new("invalid_manifest", format!("manifest 解析失败: {e}"), false)
-        })?;
-    let handle = std::sync::Arc::new(crate::domain::plugin::PluginHandle::new(
-        std::sync::Arc::new(manifest),
-        dir.clone(),
+    handle_from_dir(
+        installer.storage(),
+        &dir,
+        &record.plugin_id,
         proxy,
-    ));
-    let storage = installer.storage();
-    handle.set_dirs(crate::domain::plugin::PluginDirs {
-        data: storage.data_dir(&record.plugin_id).to_string_lossy().into_owned(),
-        cache: storage.cache_dir(&record.plugin_id).to_string_lossy().into_owned(),
-        datasets: storage.datasets_dir(&record.plugin_id).to_string_lossy().into_owned(),
-    });
-    Ok(handle)
+    )
 }
 
 /// 本地包安装命令的统一开发模式门禁（0.28.5）：LocalDev 通道（zip/目录）
@@ -62,6 +52,53 @@ pub(crate) fn reject_production_local_install() -> Result<(), CommandError> {
             false,
         ))
     }
+}
+
+/// 随包插件根目录（0.28.12 从 main.rs 提取为单一真源）：
+/// debug = 仓库源码目录，release = 安装包资源目录下的 plugins/builtin。
+pub(crate) fn bundled_plugins_root(app: &tauri::AppHandle) -> std::path::PathBuf {
+    if cfg!(debug_assertions) {
+        crate::domain::plugin::builtin_plugins_dir()
+    } else {
+        use tauri::Manager;
+        app.path()
+            .resource_dir()
+            .map(|d| d.join("plugins").join("builtin"))
+            .unwrap_or_else(|_| crate::domain::plugin::builtin_plugins_dir())
+    }
+}
+
+/// 某 plugin_id 是否存在随包版本（卸载回退判定：仅随包不可物理卸载、
+/// 覆盖版卸载后可恢复随包）。
+pub(crate) fn has_bundled_version(app: &tauri::AppHandle, plugin_id: &str) -> bool {
+    bundled_plugins_root(app)
+        .join(plugin_id)
+        .join("manifest.json")
+        .is_file()
+}
+
+/// 从包目录（随包目录或安装版本目录）构造插件句柄 + 注入私有目录。
+fn handle_from_dir(
+    storage: &blink_infra::plugin_storage::PluginStorage,
+    manifest_dir: &std::path::Path,
+    plugin_id: &str,
+    proxy: Option<(String, String)>,
+) -> Result<std::sync::Arc<crate::domain::plugin::PluginHandle>, CommandError> {
+    let manifest = crate::domain::plugin::PluginManifest::from_path(&manifest_dir.join("manifest.json"))
+        .map_err(|e| {
+            CommandError::new("invalid_manifest", format!("manifest 解析失败: {e}"), false)
+        })?;
+    let handle = std::sync::Arc::new(crate::domain::plugin::PluginHandle::new(
+        std::sync::Arc::new(manifest),
+        manifest_dir.to_path_buf(),
+        proxy,
+    ));
+    handle.set_dirs(crate::domain::plugin::PluginDirs {
+        data: storage.data_dir(plugin_id).to_string_lossy().into_owned(),
+        cache: storage.cache_dir(plugin_id).to_string_lossy().into_owned(),
+        datasets: storage.datasets_dir(plugin_id).to_string_lossy().into_owned(),
+    });
+    Ok(handle)
 }
 
 /// 安装提交后的运行时发布编排（本地包与插件中心两条安装命令共用，0.28.5 提取）：
@@ -197,7 +234,21 @@ pub async fn install_plugin_package(
     Ok(outcome.record)
 }
 
-/// 卸载插件（0.28.1）。`keep_data=true` 保留用户数据目录。
+/// 卸载插件（0.28.12 卸载事务：先撤销门禁 → 撤运行时 → 后清理文件）。
+///
+/// `keep_data=true`（默认保留）：插件私有 data 与全部词库目录不动；
+/// `keep_data=false`：另清 data 与该插件全部已登记/遗留数据集（占用如实
+/// 报 PendingRemove，不假报成功）。仅随包插件无安装记录，返回结构化错误
+/// （前端只对有安装记录的插件显示卸载入口；随包版只能禁用）。
+///
+/// 顺序约束（phase 0.28.12）：
+/// 1. `begin_uninstall` 同步标记 PendingRemove——门禁早于本命令首个异步
+///    等待，之后新安装被拒、启动不复活；
+/// 2. 关闭页面会话 + 运行时撤销（撤能力/路由/快照、reset 杀进程）——文件
+///    清理前进程已死，不再撞 exe 锁；
+/// 3. 撤销失败保持不可调用并报可重试错误，**不继续删除文件**；
+/// 4. `complete_uninstall` 清文件（占用 → PendingRemove 如实报告）；
+/// 5. 存在随包版本时按当前启用态重新发布随包句柄（「移除更新并恢复随包版」）。
 #[tauri::command]
 pub async fn uninstall_plugin(
     app: tauri::AppHandle,
@@ -206,22 +257,34 @@ pub async fn uninstall_plugin(
     keep_data: bool,
 ) -> Result<serde_json::Value, CommandError> {
     reject_plugin_window(&window)?;
-    // 0.28.2：先关窗口（撤销页面会话），再走运行时撤销
-    crate::app::plugin_surface::close_plugin_windows(&app, &plugin_id);
     let installer = app
         .state::<std::sync::Arc<crate::domain::plugin::PluginInstaller>>()
         .inner()
         .clone();
+
+    // 1. 门禁：同步标记 PendingRemove（spawn_blocking 前无 await 点）。
     let installer_io = installer.clone();
-    let pid = plugin_id.clone();
-    let outcome = tauri::async_runtime::spawn_blocking(move || {
-        installer_io.uninstall(&pid, keep_data)
+    let pid_for_begin = plugin_id.clone();
+    let begin_result = tauri::async_runtime::spawn_blocking(move || {
+        installer_io.begin_uninstall(&pid_for_begin, keep_data)
     })
     .await
-    .map_err(|e| CommandError::new("internal", format!("卸载任务失败: {e}"), true))?
-    .map_err(|e| CommandError::new("uninstall_failed", format!("插件卸载失败: {e}"), false))?;
+    .map_err(|e| CommandError::new("internal", format!("卸载任务失败: {e}"), true))?;
+    if let Err(e) = begin_result {
+        return Err(match &e {
+            crate::domain::plugin::InstallError::NotInstalled(_) if has_bundled_version(&app, &plugin_id) => {
+                CommandError::new(
+                    "bundled_no_install",
+                    format!("插件 {plugin_id} 是随包版本，没有可卸载的用户安装；可使用禁用"),
+                    false,
+                )
+            }
+            _ => CommandError::new("uninstall_failed", format!("插件卸载失败: {e}"), false),
+        });
+    }
 
-    // 从运行时撤销（能力/路由/快照）
+    // 2. 撤销页面会话与运行时出口（撤能力/路由/快照 + 杀进程）。
+    crate::app::plugin_surface::close_plugin_windows(&app, &plugin_id);
     let engine = app
         .state::<std::sync::Arc<crate::domain::plugin::PluginEngine>>()
         .inner()
@@ -233,9 +296,13 @@ pub async fn uninstall_plugin(
     let mut target = engine.all_plugins();
     target.retain(|h| h.id() != plugin_id);
     let report = publisher.publish(target).await.map_err(|e| {
+        // 撤销失败：保持不可调用（PendingRemove 已标记，重启也不复活），
+        // 不继续删除文件——用户可重试（重复卸载幂等沿用首次意图）。
         CommandError::new(
             "publish_failed",
-            format!("卸载已记录但运行时撤销失败（重启后生效）: {e}"),
+            format!(
+                "插件已标记待移除但运行时撤销失败（重启后保持不可用，可重试卸载）: {e}"
+            ),
             true,
         )
     })?;
@@ -243,19 +310,135 @@ pub async fn uninstall_plugin(
         pc.cancel_for_tools(&report.revoked_tool_ids).await;
     }
 
-    Ok(match &outcome {
-        crate::domain::plugin::UninstallOutcome::Removed => serde_json::json!({
-            "removed": true,
-            "pending_files": 0,
-        }),
-        crate::domain::plugin::UninstallOutcome::RemovedPendingFiles { pending_paths } => {
-            serde_json::json!({
-                "removed": true,
-                "pending_files": pending_paths.len(),
-                "note": "部分文件被占用，将在下次启动时清理",
-            })
-        }
+    // 3. 文件清理（进程已死，文件不再被插件自身占用）。
+    let installer_io = installer.clone();
+    let pid_for_cleanup = plugin_id.clone();
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        installer_io.complete_uninstall(&pid_for_cleanup)
     })
+    .await
+    .map_err(|e| CommandError::new("internal", format!("卸载任务失败: {e}"), true))?
+    .map_err(|e| {
+        CommandError::new("uninstall_failed", format!("插件卸载失败: {e}"), false)
+    })?;
+    let pending_files = match &outcome {
+        crate::domain::plugin::UninstallOutcome::Removed => 0,
+        crate::domain::plugin::UninstallOutcome::RemovedPendingFiles { pending_paths } => {
+            pending_paths.len()
+        }
+    };
+
+    // 4. 数据集清除（仅 keep_data=false）：逐条卸载已登记数据集 + 清遗留目录；
+    //    占用由数据集记录自身 PendingRemove 承接，数量并入如实报告。
+    let mut dataset_pending = 0usize;
+    if !keep_data {
+        if let Some(dataset_installer) = app
+            .try_state::<std::sync::Arc<crate::domain::plugin::DatasetInstaller>>()
+            .map(|s| s.inner().clone())
+        {
+            let ds = dataset_installer.clone();
+            let pid_ds = plugin_id.clone();
+            let pid_log = plugin_id.clone();
+            dataset_pending = tauri::async_runtime::spawn_blocking(move || {
+                clear_plugin_datasets(&ds, &pid_ds)
+            })
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(plugin = %pid_log, %e, "数据集清理任务失败（下次启动 recover 兜底）");
+                0
+            });
+        }
+    }
+
+    // 5. 随包回退：随包目录存在该插件时按当前启用态重新发布随包句柄
+    //    （「移除更新并恢复随包版」；发布内部按 is_enabled 决定能力注册，
+    //    配置与授权保留）。发布失败不回滚卸载——重启后随包版自然恢复。
+    let mut restored_bundled = false;
+    if has_bundled_version(&app, &plugin_id) {
+        let pool = app.state::<crate::infra::data::DbPools>().config.clone();
+        let proxy = plugin_env_proxy(&pool).await;
+        let manifest_dir = bundled_plugins_root(&app).join(&plugin_id);
+        match handle_from_dir(installer.storage(), &manifest_dir, &plugin_id, proxy) {
+            Ok(handle) => {
+                let mut target = engine.all_plugins();
+                target.retain(|h| h.id() != plugin_id);
+                target.push(handle);
+                match publisher.publish(target).await {
+                    Ok(_) => {
+                        restored_bundled = true;
+                        tracing::info!(plugin = %plugin_id, "已恢复随包版本");
+                    }
+                    Err(e) => {
+                        tracing::warn!(plugin = %plugin_id, %e, "随包版本恢复发布失败（重启后生效）");
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(plugin = %plugin_id, %e, "随包版本句柄构造失败（重启后生效）");
+            }
+        }
+    }
+
+    tracing::info!(
+        plugin = %plugin_id,
+        pending_files,
+        dataset_pending,
+        restored_bundled,
+        keep_data,
+        "插件卸载完成"
+    );
+    Ok(serde_json::json!({
+        "removed": true,
+        "pending_files": pending_files + dataset_pending,
+        "restored_bundled": restored_bundled,
+        "note": if pending_files + dataset_pending > 0 {
+            "部分文件被占用，将在下次启动时清理"
+        } else { "" },
+    }))
+}
+
+/// 清除某插件的全部数据集（卸载勾选"同时清除数据与词库"时）：
+/// 逐条卸载已登记记录（占用 → 数据集自身 PendingRemove）+ 删除该插件
+/// datasets 根目录（覆盖无记录的遗留挂载）。返回占用未删净的路径数。
+fn clear_plugin_datasets(
+    installer: &crate::domain::plugin::DatasetInstaller,
+    plugin_id: &str,
+) -> usize {
+    let mut pending = 0usize;
+    let records: Vec<String> = installer
+        .list()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| r.plugin_id == plugin_id)
+        .map(|r| r.dataset_id)
+        .collect();
+    for dataset_id in records {
+        match installer.uninstall(plugin_id, &dataset_id) {
+            Ok(crate::domain::plugin::UninstallDatasetOutcome::Removed) => {}
+            Ok(crate::domain::plugin::UninstallDatasetOutcome::RemovedPendingFiles {
+                pending_paths,
+            }) => pending += pending_paths.len(),
+            Err(e) => {
+                tracing::warn!(plugin = plugin_id, dataset = %dataset_id, %e, "数据集卸载失败");
+            }
+        }
+    }
+    // 遗留挂载（无登记记录）：直接清目录，占用不再登记（该插件已被卸载，
+    // 下次无 recover 线索——记日志如实暴露）。
+    let root = installer.storage().datasets_dir(plugin_id);
+    if root.exists() {
+        let failed = installer.storage().delete_paths_best_effort(&[root]);
+        if !failed.is_empty() {
+            tracing::warn!(
+                plugin = plugin_id,
+                count = failed.len(),
+                paths = ?failed,
+                "插件数据集遗留目录清理未完成（占用，请手动删除或稍后重试卸载）"
+            );
+            pending += failed.len();
+        }
+    }
+    pending
 }
 
 /// 查询用户目录安装记录（0.28.1；设置页"已安装"数据源之一）。

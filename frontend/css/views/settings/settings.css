@@ -3140,9 +3140,84 @@ input.has-secret-hint::placeholder {
     gap: var(--space-sm, 8px);
 }
 
+/* 目录条目卡片（0.28.12：名称/描述/徽标两行展示） */
+.plugin-catalog-entry {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 4px 0;
+}
+
 .plugin-catalog-name {
     font-size: var(--text-xs);
     color: var(--text);
+}
+
+.plugin-catalog-id {
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+    font-family: var(--font-mono, monospace);
+}
+
+.plugin-catalog-desc {
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+    padding-right: 8px;
+}
+
+/* 展示徽标（beta 通道 / 独立窗口）与 stale 同级弱化 */
+.plugin-catalog-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+    border: 1px solid var(--surface);
+    border-radius: var(--radius-sm, 4px);
+    padding: 0 6px;
+    line-height: 18px;
+}
+
+.plugin-catalog-beta {
+    color: var(--accent);
+    border-color: var(--accent);
+}
+
+/* dev 目录源选择（0.28.12：仅开发模式渲染） */
+.plugin-catalog-dev-source {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-sm, 8px);
+    margin-left: auto;
+}
+
+.plugin-catalog-source-select {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--text-xs);
+    color: var(--text-dim);
+}
+
+.plugin-catalog-source-mode {
+    font-size: var(--text-xs);
+    padding: 2px 6px;
+    border: 1px solid var(--surface);
+    border-radius: var(--radius-sm, 4px);
+    background: var(--surface-2);
+    color: var(--text);
+}
+
+/* 插件卡片安装管理行（0.28.12：版本/来源/卸载入口） */
+.plugin-install-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-sm, 8px);
+}
+
+.plugin-install-row .plugin-surface-buttons {
+    margin-left: auto;
 }
 
 .plugin-catalog-size {

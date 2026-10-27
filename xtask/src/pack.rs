@@ -131,17 +131,15 @@ pub fn run(args: &[String]) {
         } else {
             vec![]
         };
-        let host_min = manifest["host"]["min_version"]
-            .as_str()
-            .unwrap_or("0")
-            .to_string();
-        plugins.push(serde_json::json!({
-            "plugin_id": plugin_id,
-            "version": version,
-            "host_min_version": host_min,
-            "platforms": platforms,
-            "asset": {"url": format!("{}/{filename}", parsed.base), "sha256": sha, "bytes": bytes},
-        }));
+        plugins.push(project_plugin_entry(
+            &manifest,
+            &version,
+            &platforms,
+            &filename,
+            sha,
+            bytes,
+            &parsed.base,
+        ));
     }
 
     // ── 数据集 zip：target/dictionary/<dataset_id>/<version>/，dataset.json 在根 ──
@@ -281,8 +279,36 @@ fn check_asset(out: &Path, entry: &serde_json::Value, root_marker: &str) {
     assert!(has_marker, "{id} zip 根缺少 {root_marker}");
 }
 
-fn parse_args(args: &[String], root: &Path) -> PackArgs {
-    let value_of = |flag: &str| -> Option<String> {
+/// 插件目录条目投影（0.28.12 展示元数据）：manifest 已有字段原样抄录——
+/// name/description 双语、channel（缺省 stable）、has_pages 由 `pages` 推导。
+/// updated_at 不填——本机 pack 没有可靠发布时间，不把文件修改时间当发布时间。
+fn project_plugin_entry(
+    manifest: &serde_json::Value,
+    version: &str,
+    platforms: &[String],
+    filename: &str,
+    sha: String,
+    bytes: u64,
+    base: &str,
+) -> serde_json::Value {
+    let host_min = manifest["host"]["min_version"]
+        .as_str()
+        .unwrap_or("0")
+        .to_string();
+    serde_json::json!({
+        "plugin_id": manifest["id"],
+        "version": version,
+        "host_min_version": host_min,
+        "platforms": platforms,
+        "asset": {"url": format!("{base}/{filename}"), "sha256": sha, "bytes": bytes},
+        "name": manifest["name"],
+        "description": manifest["description"],
+        "has_pages": manifest["pages"].as_array().is_some_and(|p| !p.is_empty()),
+        "channel": manifest["channel"].as_str().unwrap_or("stable"),
+    })
+}
+
+fn parse_args(args: &[String], root: &Path) -> PackArgs {    let value_of = |flag: &str| -> Option<String> {
         args.iter()
             .position(|a| a == flag)
             .and_then(|i| args.get(i + 1))
@@ -369,4 +395,72 @@ fn sha256_file_hex(path: &Path) -> String {
     let mut file = std::fs::File::open(path).unwrap();
     std::io::copy(&mut file, &mut hasher).unwrap();
     format!("{:x}", hasher.finalize())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 0.28.12：目录条目从 manifest 投影展示元数据（name/description/channel/
+    /// has_pages），updated_at 不填（无可靠发布时间）。产物必须能被应用端
+    /// `parse_catalog` 接受（xtask 与 domain 的目录 schema 双向对齐）。
+    #[test]
+    fn project_plugin_entry_carries_display_metadata() {
+        let manifest: serde_json::Value = serde_json::from_str(
+            r#"{"id":"builtin.dictionary","version":"0.2.0",
+                "name":{"zh":"离线词典","en":"Dictionary"},
+                "description":{"zh":"离线查词","en":"Offline lookup"},
+                "pages":[{"id":"main","entry":"web/index.html"}],
+                "host":{"min_version":"0.28.1"},
+                "channel":"beta"}"#,
+        )
+        .unwrap();
+        let entry = project_plugin_entry(
+            &manifest,
+            "0.2.0",
+            &["windows-x86_64".to_string()],
+            "builtin.dictionary-0.2.0-windows-x86_64.zip",
+            "a".repeat(64),
+            1234,
+            "https://example.invalid/plugins-catalog",
+        );
+        assert_eq!(entry["name"]["zh"], "离线词典");
+        assert_eq!(entry["description"]["en"], "Offline lookup");
+        assert_eq!(entry["has_pages"], true);
+        assert_eq!(entry["channel"], "beta");
+        assert_eq!(entry["host_min_version"], "0.28.1");
+        assert_eq!(
+            entry["asset"]["url"],
+            "https://example.invalid/plugins-catalog/builtin.dictionary-0.2.0-windows-x86_64.zip"
+        );
+        assert!(entry.get("updated_at").is_none());
+        // 端到端校验（pack 产物形态）：zip 根清单等由 verify_dist 把关；此处
+        // 确认目录文档完整可序列化。schema 与应用端 parse_catalog 的对齐由
+        // blink-domain catalog 测试用同形 JSON 锁定，xtask 不引 domain 依赖。
+        let catalog = serde_json::json!({
+            "format_version": 1,
+            "generated_at": "2026-10-28T00:00:00Z",
+            "plugins": [entry],
+            "datasets": [],
+        });
+        assert!(serde_json::to_string_pretty(&catalog).is_ok());
+    }
+
+    /// 无展示字段的极简 manifest 投影：name/description 投影为 null（应用端
+    /// Option → None → 前端回退 plugin_id/无描述），has_pages=false，channel=stable。
+    #[test]
+    fn project_plugin_entry_minimal_manifest_falls_back() {
+        let manifest: serde_json::Value = serde_json::from_str(
+            r#"{"id":"extra.demo","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        let entry = project_plugin_entry(
+            &manifest, "1.0.0", &[], "extra.demo-1.0.0.zip",
+            "b".repeat(64), 10, "https://example.invalid/plugins-catalog",
+        );
+        assert!(entry["name"].is_null());
+        assert!(entry["description"].is_null());
+        assert_eq!(entry["has_pages"], false);
+        assert_eq!(entry["channel"], "stable");
+    }
 }

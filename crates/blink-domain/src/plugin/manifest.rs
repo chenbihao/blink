@@ -85,6 +85,19 @@ pub struct PluginManifest {
     /// （`ip r` → 影子补全 refresh）。未声明（老 manifest）为 None，行为不变。
     #[serde(default)]
     pub args: Option<ArgsSpec>,
+    /// 发布通道（0.28.12 目录展示元数据）：目录条目据此显示稳定度徽标。
+    /// 纯展示字段，不参与安装/加载判定；缺省 stable（老 manifest 零迁移）。
+    #[serde(default)]
+    pub channel: PluginChannel,
+}
+
+/// 插件发布通道（0.28.12）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PluginChannel {
+    #[default]
+    Stable,
+    Beta,
 }
 
 /// manifest 顶层 `args` 段（0.26.17）。
@@ -490,7 +503,7 @@ where
 /// 可本地化文本:既接受纯字符串,也接受多语言对象(serde untagged)。
 /// resolve(lang) 按传入语言取值(回退 zh → 首个);lang 由调用方从 AppConfig.language 传入,
 /// Rust 类型与前端均无需随 manifest 数据形态变化而改动。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum LocalizableText {
     Plain(String),
@@ -1446,6 +1459,20 @@ mod tests {
         // desc 兼容纯字符串（Plain 形态，回退 zh 取原文）
         assert_eq!(hints[1].desc.resolve("en"), "仅本机地址");
         assert!(hints[1].aliases.is_empty());
+    }
+
+    #[test]
+    fn channel_defaults_stable_and_parses_beta() {
+        // 0.28.12：缺省 stable（老 manifest 零迁移）；显式 beta 正常解析。
+        let base = r#"{"schema_version":1,"id":"x","name":"X","version":"0","runtime":{"exec":"x.exe"}}"#;
+        let m: PluginManifest = serde_json::from_str(base).unwrap();
+        assert_eq!(m.channel, super::PluginChannel::Stable);
+        let with_beta = format!("{},\"channel\":\"beta\"}}", &base[..base.len() - 1]);
+        let m: PluginManifest = serde_json::from_str(&with_beta).unwrap();
+        assert_eq!(m.channel, super::PluginChannel::Beta);
+        // 未知通道值拒绝（manifest 是静态产物，不猜意图）
+        let with_bad = format!("{},\"channel\":\"nightly\"}}", &base[..base.len() - 1]);
+        assert!(serde_json::from_str::<PluginManifest>(&with_bad).is_err());
     }
 
     #[test]

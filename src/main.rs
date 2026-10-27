@@ -849,14 +849,9 @@ fn setup_app(app: &mut tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error:
     } else {
         None
     };
-    let plugins_dir = if cfg!(debug_assertions) {
-        domain::plugin::builtin_plugins_dir()
-    } else {
-        app.path()
-            .resource_dir()
-            .map(|d| d.join("plugins").join("builtin"))
-            .unwrap_or_else(|_| domain::plugin::builtin_plugins_dir())
-    };
+    // 0.28.12：随包目录解析收敛到 commands::plugin::bundled_plugins_root（与
+    // 卸载回退同一真源）。
+    let plugins_dir = app::commands::bundled_plugins_root(&app.app_handle().clone());
     let plugins = domain::plugin::load_builtin_plugins(&plugins_dir, proxy.clone());
     // 0.25.20：dev 额外加载 examples 示例插件（echo-python / echo-node
     // 验证托管脚本解释器链路；release 包不含 examples 资源——编译期

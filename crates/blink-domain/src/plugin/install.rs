@@ -84,6 +84,20 @@ pub enum UninstallOutcome {
     RemovedPendingFiles { pending_paths: Vec<PathBuf> },
 }
 
+/// 卸载第一阶段的计划（0.28.12 卸载事务）：begin 时冻结待删路径清单。
+///
+/// `paths` 含数据目录意图（keep_data=false 时）——它同时写入 registry 的
+/// pending_paths，是崩溃/占用后 recover 重试删除的**唯一真源**；沿用
+/// 「用户数据仅在卸载时明确选择删除才进入 pending_paths」的既有语义。
+#[derive(Debug, Clone, PartialEq)]
+pub struct UninstallPlan {
+    pub plugin_id: String,
+    pub version: String,
+    /// 本轮要删除的全部路径（installed / cache / 视意图 data / 旧债务）。
+    pub paths: Vec<PathBuf>,
+    pub clear_data: bool,
+}
+
 /// 安装提交结果：新记录 + 发布失败回滚预案（0.28.7）。
 ///
 /// 旧版本清理从提交点推迟到发布确认后（[`PluginInstaller::finalize_publish`]），
@@ -162,6 +176,7 @@ impl PluginInstaller {
             InstallSource::LocalDev {
                 origin: zip_path.to_string_lossy().into_owned(),
             },
+            false,
         );
         let _ = std::fs::remove_dir_all(&staging);
         result
@@ -196,7 +211,47 @@ impl PluginInstaller {
         let source = InstallSource::Official {
             catalog_url: catalog_url.to_string(),
         };
-        let result = self.install_zip_inner(zip_path, &pkg_dir, actual, source);
+        let result = self.install_zip_inner(zip_path, &pkg_dir, actual, source, true);
+        let _ = std::fs::remove_dir_all(&staging);
+        result
+    }
+
+    /// 从 dev 本地目录源（`cargo xtask pack --out` 产物）安装（0.28.12）。
+    ///
+    /// 与官方通道同样核验目录声明的 sha256，但来源如实记 [`InstallSource::LocalDev`]
+    /// （不冒充 Official）；`builtin.*` 保留命名空间**仅 debug 构建放开**——
+    /// 支撑 0.28.13 后 dev 以本地源装/卸词典做全链路验证；生产构建本方法
+    /// 直接拒绝（app 层另有 dev 门禁，此处域层兜底）。
+    pub fn install_local_catalog_zip(
+        &self,
+        zip_path: &Path,
+        expected_sha256: &str,
+        origin_dir: &str,
+    ) -> Result<InstallOutcome, InstallError> {
+        let _guard = self.op_lock.lock().unwrap();
+        if !cfg!(debug_assertions) {
+            return Err(InstallError::InvalidPackage(
+                "本地目录源安装仅开发模式可用".into(),
+            ));
+        }
+        if expected_sha256.len() != 64 || !expected_sha256.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(InstallError::InvalidPackage(
+                "目录条目 sha256 格式非法".into(),
+            ));
+        }
+        let actual = sha256_file(zip_path).map_err(InstallError::Io)?;
+        if !actual.eq_ignore_ascii_case(expected_sha256) {
+            return Err(InstallError::ChecksumMismatch {
+                expected: expected_sha256.to_lowercase(),
+                actual,
+            });
+        }
+        let staging = self.storage.staging_dir(&next_op_id());
+        let pkg_dir = staging.join("pkg");
+        let source = InstallSource::LocalDev {
+            origin: origin_dir.to_string(),
+        };
+        let result = self.install_zip_inner(zip_path, &pkg_dir, actual, source, true);
         let _ = std::fs::remove_dir_all(&staging);
         result
     }
@@ -207,12 +262,13 @@ impl PluginInstaller {
         pkg_dir: &Path,
         sha: String,
         source: InstallSource,
+        trusted_namespace: bool,
     ) -> Result<InstallOutcome, InstallError> {
         let result = archive::extract_zip_safely(zip_path, pkg_dir, self.limits)
             .map_err(|e| InstallError::Archive(e.to_string()))?;
         let package_root = resolve_package_root(pkg_dir, result.single_root_dir.as_deref())?;
 
-        self.validate_and_commit(&package_root, source, Some(sha))
+        self.validate_and_commit(&package_root, source, Some(sha), trusted_namespace)
     }
 
     /// 从已解包目录安装（dev 模式；源目录不被移动/破坏，内容有界复制进暂存）。
@@ -245,17 +301,23 @@ impl PluginInstaller {
                 origin: dir.to_string_lossy().into_owned(),
             },
             None,
+            false,
         )
     }
 
     /// 暂存内容已就位后的公共路径：校验 → 隔离交换提交（registry 写锁内）。
     /// 旧版本清理与发布回滚交给 [`PluginInstaller::finalize_publish`] /
     /// [`PluginInstaller::rollback_publish`]——提交点不再销毁旧内容。
+    ///
+    /// `trusted_namespace`：是否允许 `builtin.*` 保留命名空间。Official 与
+    /// 随包同信任级（true）；LocalDev 手选包 false；LocalDev 本地目录源仅
+    /// debug（0.28.12，见 [`PluginInstaller::install_local_catalog_zip`]）。
     fn validate_and_commit(
         &self,
         package_root: &Path,
         source: InstallSource,
         sha256: Option<String>,
+        trusted_namespace: bool,
     ) -> Result<InstallOutcome, InstallError> {
         // 1. manifest 结构校验（schema/protocol 上限在 from_path 内）
         let manifest_path = package_root.join("manifest.json");
@@ -296,13 +358,14 @@ impl PluginInstaller {
         }
 
         // 4. 命名空间 + 契约冻结（非随包/非官方来源不授 builtin.*——
-        //    0.28.5：Official 与随包同信任级，支撑"官方更新覆盖随包版"）
-        let trusted = matches!(source, InstallSource::Official { .. });
-        if !trusted {
+        //    0.28.5：Official 与随包同信任级，支撑"官方更新覆盖随包版"；
+        //    0.28.12：本地目录源在 debug 下与 Official 同命名空间待遇但来源
+        //    仍如实记 LocalDev）
+        if !trusted_namespace {
             contract::validate_namespace(&manifest.id, false)
                 .map_err(|_| InstallError::NamespaceReserved)?;
         }
-        let contract = PluginContract::from_manifest_checked(&manifest, trusted)?;
+        let contract = PluginContract::from_manifest_checked(&manifest, trusted_namespace)?;
 
         // 5. 提交：registry 写锁内完成「互斥检查 → 隔离交换 → 记录写入」，
         //    与数据包安装器及其他写方串行（update_registry 进程级锁）。
@@ -486,33 +549,98 @@ impl PluginInstaller {
         Ok(Some(plan.old_record.clone()))
     }
 
-    /// 卸载：改记录 → 删文件。`keep_data = true` 保留用户数据目录。
-    pub fn uninstall(&self, plugin_id: &str, keep_data: bool) -> Result<UninstallOutcome, InstallError> {
+    /// 卸载第一步（0.28.12 卸载事务）：registry 写锁内标记 PendingRemove。
+    ///
+    /// **门禁语义**：标记即刻生效——新安装被 [`InstallError::PendingRemoveBusy`]
+    /// 拒绝、`active_version_dir` 返回 None（启动加载跳过）、不会重启复活。
+    /// 删除意图（data 是否清除）在本步冻结进 pending_paths，之后无论进程
+    /// 崩溃还是文件占用，recover 都按同一意图重试。
+    ///
+    /// 返回计划供调用方在运行时撤销（异步）完成后调
+    /// [`PluginInstaller::complete_uninstall`] 清理文件——**先撤销后清理**。
+    /// 重复调用幂等：沿用首次的删除意图。
+    pub fn begin_uninstall(
+        &self,
+        plugin_id: &str,
+        keep_data: bool,
+    ) -> Result<UninstallPlan, InstallError> {
         let _guard = self.op_lock.lock().unwrap();
         self.storage
-            .update_registry(|registry| -> Result<UninstallOutcome, InstallError> {
+            .update_registry(|registry| -> Result<UninstallPlan, InstallError> {
                 let Some(record) = registry.records.get(plugin_id).cloned() else {
                     return Err(InstallError::NotInstalled(plugin_id.to_string()));
                 };
-
-                let mut to_delete: Vec<PathBuf> = vec![
+                // 已在卸载语义下（重复调用/上一轮占用残留）：沿用首次意图。
+                if record.state == InstallState::PendingRemove {
+                    let mut paths: Vec<PathBuf> = vec![
+                        self.storage.installed_root().join(plugin_id),
+                        self.storage.cache_dir(plugin_id),
+                    ];
+                    paths.extend(record.pending_paths.iter().map(PathBuf::from));
+                    let clear_data = record
+                        .pending_paths
+                        .iter()
+                        .any(|p| Path::new(p) == self.storage.data_dir(plugin_id));
+                    return Ok(UninstallPlan {
+                        plugin_id: plugin_id.to_string(),
+                        version: record.version,
+                        paths,
+                        clear_data,
+                    });
+                }
+                let mut paths: Vec<PathBuf> = vec![
                     self.storage.installed_root().join(plugin_id),
                     self.storage.cache_dir(plugin_id),
                 ];
                 if !keep_data {
-                    to_delete.push(self.storage.data_dir(plugin_id));
+                    paths.push(self.storage.data_dir(plugin_id));
                 }
-                to_delete.extend(record.pending_paths.iter().map(PathBuf::from));
+                paths.extend(record.pending_paths.iter().map(PathBuf::from));
+                let rec = registry.records.get_mut(plugin_id).expect("上方已确认存在");
+                rec.state = InstallState::PendingRemove;
+                rec.pending_paths = paths
+                    .iter()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect();
+                tracing::info!(
+                    plugin = plugin_id,
+                    version = %record.version,
+                    clear_data = !keep_data,
+                    "插件卸载已开始（记录标记待移除，新调用被拒）"
+                );
+                Ok(UninstallPlan {
+                    plugin_id: plugin_id.to_string(),
+                    version: record.version,
+                    paths,
+                    clear_data: !keep_data,
+                })
+            })
+            .map_err(InstallError::from)?
+    }
 
+    /// 卸载第二步：按 begin 冻结的计划清理文件。删净移除记录；占用更新
+    /// pending_paths（如实报告，不假报物理删除）。可与 begin 之间插入运行时
+    /// 撤销（撤能力/杀进程）——届时文件不再被进程锁住。
+    pub fn complete_uninstall(&self, plugin_id: &str) -> Result<UninstallOutcome, InstallError> {
+        let _guard = self.op_lock.lock().unwrap();
+        self.storage
+            .update_registry(|registry| -> Result<UninstallOutcome, InstallError> {
+                let Some(record) = registry.records.get(plugin_id).cloned() else {
+                    // 无记录 = 已删净（幂等重入）
+                    return Ok(UninstallOutcome::Removed);
+                };
+                let mut to_delete: Vec<PathBuf> = vec![
+                    self.storage.installed_root().join(plugin_id),
+                    self.storage.cache_dir(plugin_id),
+                ];
+                to_delete.extend(record.pending_paths.iter().map(PathBuf::from));
                 let failed = self.storage.delete_paths_best_effort(&to_delete);
                 if failed.is_empty() {
                     registry.records.remove(plugin_id);
                     tracing::info!(plugin = plugin_id, "插件已卸载（文件已删净）");
                     Ok(UninstallOutcome::Removed)
                 } else {
-                    // 文件被占用：记录降级 PendingRemove——插件不可用，但不谎报已删除。
                     let rec = registry.records.get_mut(plugin_id).expect("上方已确认存在");
-                    rec.state = InstallState::PendingRemove;
                     rec.pending_paths = failed
                         .iter()
                         .map(|p| p.to_string_lossy().into_owned())
@@ -526,6 +654,13 @@ impl PluginInstaller {
                 }
             })
             .map_err(InstallError::from)?
+    }
+
+    /// 卸载：标记 → 删文件（begin + complete 组合，一步完成）。
+    /// 需要在两步之间插入运行时撤销（先杀进程再删文件）时用两阶段入口。
+    pub fn uninstall(&self, plugin_id: &str, keep_data: bool) -> Result<UninstallOutcome, InstallError> {
+        self.begin_uninstall(plugin_id, keep_data)?;
+        self.complete_uninstall(plugin_id)
     }
 
     /// 启动恢复：清 staging、重试 PendingRemove、清孤儿版本目录。
@@ -1047,5 +1182,128 @@ mod tests {
         assert_eq!(report.pending_removed, 1);
         let record = inst.install_dir(&tmp.path().join("pkg")).unwrap().record;
         assert_eq!(record.version, "1.0.0");
+    }
+
+    // ── 0.28.12 卸载事务：begin 门禁先于文件清理 ─────────────────────────
+
+    #[test]
+    fn begin_uninstall_gates_before_file_cleanup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inst = installer(tmp.path());
+        write_manifest(&tmp.path().join("pkg"), "extra.demo", "1.0.0");
+        inst.install_dir(&tmp.path().join("pkg")).unwrap();
+
+        // begin：标记即刻生效——记录 PendingRemove、活动目录不可见、
+        // 新安装被拒，但**文件尚未删除**（运行时撤销窗口内插件目录仍在）。
+        let plan = inst.begin_uninstall("extra.demo", true).unwrap();
+        assert_eq!(plan.version, "1.0.0");
+        assert!(!plan.clear_data);
+        assert!(inst.storage().version_dir("extra.demo", "1.0.0").is_dir());
+        assert!(inst.active_version_dir("extra.demo").is_none());
+        assert!(matches!(
+            inst.install_dir(&tmp.path().join("pkg")),
+            Err(InstallError::PendingRemoveBusy)
+        ));
+
+        // 重复 begin 幂等：沿用首次意图（keep_data）
+        let again = inst.begin_uninstall("extra.demo", false).unwrap();
+        assert!(!again.clear_data, "重复调用沿用首次数据意图");
+        // 路径不含 data 目录
+        assert!(!again.paths.contains(&inst.storage().data_dir("extra.demo")));
+
+        // complete：删净移除记录 → 可重装
+        assert_eq!(
+            inst.complete_uninstall("extra.demo").unwrap(),
+            UninstallOutcome::Removed
+        );
+        assert!(!inst.storage().installed_root().join("extra.demo").exists());
+        assert!(inst.list_installed().unwrap().is_empty());
+        // complete 幂等（无记录 = 已删净）
+        assert_eq!(
+            inst.complete_uninstall("extra.demo").unwrap(),
+            UninstallOutcome::Removed
+        );
+    }
+
+    #[test]
+    fn begin_uninstall_crash_between_phases_keeps_intent_for_recover() {
+        // begin 之后、complete 之前崩溃：重启 recover 按 begin 冻结的意图执行——
+        // 清除意图（keep_data=false）会删 data；保留意图不删。
+        for keep in [true, false] {
+            let tmp = tempfile::tempdir().unwrap();
+            let inst = installer(tmp.path());
+            write_manifest(&tmp.path().join("pkg"), "extra.demo", "1.0.0");
+            inst.install_dir(&tmp.path().join("pkg")).unwrap();
+            let data = inst.storage().data_dir("extra.demo");
+            std::fs::create_dir_all(&data).unwrap();
+            std::fs::write(data.join("user.txt"), "x").unwrap();
+
+            inst.begin_uninstall("extra.demo", keep).unwrap();
+            // （模拟崩溃：不调 complete，直接 recover）
+            inst.recover();
+            assert!(inst.list_installed().unwrap().is_empty());
+            let survived = data.join("user.txt").is_file();
+            assert_eq!(survived, keep, "data 存活应等于 keep_data 意图（keep={keep}）");
+            assert!(!inst.storage().installed_root().join("extra.demo").exists());
+        }
+    }
+
+    #[test]
+    fn begin_uninstall_clear_data_intent_survives_occupied_cleanup() {
+        // keep_data=false 且 data 目录删除失败（模拟占用）：complete 报占用，
+        // pending_paths 保留 data 路径，recover 重试时仍按清除意图执行。
+        let tmp = tempfile::tempdir().unwrap();
+        let inst = installer(tmp.path());
+        write_manifest(&tmp.path().join("pkg"), "extra.demo", "1.0.0");
+        inst.install_dir(&tmp.path().join("pkg")).unwrap();
+        let data = inst.storage().data_dir("extra.demo");
+        std::fs::create_dir_all(&data).unwrap();
+
+        let plan = inst.begin_uninstall("extra.demo", false).unwrap();
+        assert!(plan.clear_data);
+        assert!(plan.paths.contains(&data));
+        // complete：全部可删（此环境无真实占用）→ Removed，data 目录消失
+        assert_eq!(
+            inst.complete_uninstall("extra.demo").unwrap(),
+            UninstallOutcome::Removed
+        );
+        assert!(!data.exists());
+    }
+
+    // ── 0.28.12 本地目录源：sha 校验 + debug 放开 builtin 命名空间 ─────────
+
+    #[test]
+    fn local_catalog_zip_verifies_sha_and_allows_builtin_in_dev() {
+        // 本测试在 debug 构建跑（cargo test 默认 dev profile）：builtin.* 经
+        // 本地目录源可装，来源如实记 LocalDev；sha 不匹配拒绝。
+        if !cfg!(debug_assertions) {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let inst = installer(tmp.path());
+        let pkg = tmp.path().join("pkg");
+        write_manifest(&pkg, "builtin.dictionary", "0.2.0");
+        let zip_path = tmp.path().join("pkg.zip");
+        make_zip(&pkg, &zip_path);
+        let real_sha = sha256_file(&zip_path).unwrap();
+
+        // sha 不匹配 → 拒绝
+        assert!(matches!(
+            inst.install_local_catalog_zip(&zip_path, &"0".repeat(64), tmp.path().to_str().unwrap()),
+            Err(InstallError::ChecksumMismatch { .. })
+        ));
+        assert!(inst.list_installed().unwrap().is_empty());
+
+        // 匹配 → 提交成功，来源 LocalDev（不冒充 Official）
+        let outcome = inst
+            .install_local_catalog_zip(&zip_path, &real_sha, tmp.path().to_str().unwrap())
+            .unwrap();
+        assert_eq!(outcome.record.plugin_id, "builtin.dictionary");
+        assert_eq!(
+            outcome.record.source,
+            InstallSource::LocalDev {
+                origin: tmp.path().to_string_lossy().into_owned()
+            }
+        );
     }
 }

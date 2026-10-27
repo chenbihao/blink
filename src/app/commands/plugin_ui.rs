@@ -281,7 +281,7 @@ pub async fn get_plugin_surface_status(
         }
     }
 
-    Ok(engine
+    let mut rows: Vec<serde_json::Value> = engine
         .all_plugins()
         .iter()
         .map(|handle| {
@@ -343,6 +343,9 @@ pub async fn get_plugin_surface_status(
                 "plugin_id": handle.id(),
                 "dev_mode": cfg!(debug_assertions),
                 "version": manifest.version,
+                // 0.28.12：随包身份标记——有安装记录的覆盖版卸载后可恢复随包版；
+                // 仅随包插件无卸载入口（前端只显示禁用开关）。
+                "bundled": crate::app::commands::has_bundled_version(&app, handle.id()),
                 "pages": manifest.pages.iter().map(|p| serde_json::json!({
                     "id": p.id, "entry": p.entry,
                 })).collect::<Vec<_>>(),
@@ -351,5 +354,36 @@ pub async fn get_plugin_surface_status(
                 "datasets": datasets,
             })
         })
-        .collect())
+        .collect();
+    // 0.28.12：待清理插件（卸载时文件被占用）已从运行时撤销——引擎集合无
+    // 句柄，按安装记录追加占位行，前端如实展示"待清理（重启后完成）"。
+    for (pid, record) in &installs {
+        if record.state != blink_infra::plugin_storage::InstallState::PendingRemove
+            || rows.iter().any(|r| r["plugin_id"] == *pid)
+        {
+            continue;
+        }
+        rows.push(serde_json::json!({
+            "plugin_id": pid,
+            "dev_mode": cfg!(debug_assertions),
+            "bundled": crate::app::commands::has_bundled_version(&app, pid),
+            "pages": [],
+            "readiness": {"ready": false, "blockers": []},
+            "install": {
+                "version": record.version,
+                "installed_at": record.installed_at,
+                "state": "pending_remove",
+                "source": match &record.source {
+                    blink_infra::plugin_storage::InstallSource::LocalDev { origin } => {
+                        serde_json::json!({"kind": "local_dev", "origin": origin})
+                    }
+                    blink_infra::plugin_storage::InstallSource::Official { catalog_url } => {
+                        serde_json::json!({"kind": "official", "catalog_url": catalog_url})
+                    }
+                },
+            },
+            "datasets": [],
+        }));
+    }
+    Ok(rows)
 }

@@ -38,11 +38,11 @@ pub use direction::{SUPPORTED_TARGETS, lang_display_name, resolve_display_target
 pub use engine::PluginEngine;
 pub use install::{
     InstallError, InstallOutcome, PluginInstaller, RollbackPlan, UninstallOutcome,
-    compare_versions, current_platform_tag,
+    UninstallPlan, compare_versions, current_platform_tag,
 };
 pub use manifest::{
     ArgHint, DatasetDef, HostCompat, LocalizableText, ManifestContextWhen, ManifestSurfaceHint,
-    PageDef, PluginManifest, PluginTrigger,
+    PageDef, PluginChannel, PluginManifest, PluginTrigger,
 };
 pub use process::PluginHandle;
 pub use runtime::{PluginRuntimePublisher, PublishReport};
