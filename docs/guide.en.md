@@ -285,6 +285,7 @@ The "Thinking" button next to the input renders according to the **current model
 
 ### Common operations
 
+- Refresh the official catalog under **Settings → Plugins → Plugin Center**, then click **Install** or **Update** to download a plugin; download dictionaries and other resources from the plugin's **Datasets** section.
 - Enable a plugin and expand its configuration under **Settings → Plugins**, then type its trigger in the main window. Translate is disabled by default; enable it and configure engine credentials first.
 - Ordinary settings save automatically. Weather's “Save location” button commits only the location draft, so click it after choosing a place.
 - Weather and Translate credential groups start collapsed each time you open settings. Their headings show Not configured, Incomplete or Configured; expand a group for its registration link. Configured means all fields are present; an actual query checks whether they work. Use “Remove spaces” below an input if it contains whitespace. Password fields are stored in Windows Credential Manager: leaving them blank keeps the saved value; use the side button to clear it.

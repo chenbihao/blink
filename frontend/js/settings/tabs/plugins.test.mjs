@@ -243,7 +243,8 @@ test("renderDatasetsSection renders install states and actions", () => {
     assert.match(html, /plugin-dataset-status">未安装</);          // 必备包“未安装”
     assert.match(html, /未安装（可选）/);                            // 可选包
     assert.match(html, /plugin-dataset-optional/);
-    assert.equal((html.match(/plugin-dataset-install/g) || []).length, 2);
+    assert.doesNotMatch(html, /plugin-dataset-install/);
+    assert.match(html, /暂无安装源/);
     assert.doesNotMatch(html, /plugin-dataset-uninstall/); // 未装无卸载按钮
 
     // 已安装：版本徽标 + 更新/卸载按钮
@@ -253,7 +254,7 @@ test("renderDatasetsSection renders install states and actions", () => {
             {...base.datasets[1], installed: null},
         ]});
     assert.match(html, /plugin-dataset-ready">v1\.2\.0</);
-    assert.match(html, /更新…/);
+    assert.match(html, /暂无安装源/);
     assert.match(html, /plugin-dataset-uninstall/);
 
     // 损坏/过低：readiness blocker 命中该数据包 → 修复徽标
@@ -344,8 +345,11 @@ test("renderDatasetsSection prefers catalog source and gates local install by de
     assert.doesNotMatch(html, /plugin-dataset-install/);
     assert.match(html, /暂无安装源/);
 
-    // 无目录 + dev：保持 0.28.4 本地 zip 行为（两参调用兼容）
+    // 未知模式/无目录不展示开发入口；开发模式仅显示明确的“本地包”。
     html = renderDatasetsSection(plugin, surface);
-    assert.equal((html.match(/plugin-dataset-install\b/g) || []).length, 1);
+    assert.doesNotMatch(html, /plugin-dataset-install/);
+    html = renderDatasetsSection(plugin, surface, null, true);
+    assert.match(html, /plugin-dataset-install-local/);
+    assert.doesNotMatch(html, /class="btn-small plugin-dataset-install"/);
     assert.doesNotMatch(html, /data-catalog/);
 });

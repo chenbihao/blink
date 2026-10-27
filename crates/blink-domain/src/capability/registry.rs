@@ -323,22 +323,25 @@ impl CapabilityRegistry {
         ids
     }
 
-    /// owner 维度的注册表 epoch——owner 条目集合变化时递增。
+    /// owner 维度的注册表指纹，覆盖能力实例替换（稳定 id 的 schema 也可能变化）。
     ///
     /// 供 Agent 缓存等消费方在能力出口变化后触发重建（与 allowlist
     /// fingerprint 正交：出口授权与实际注册内容都要进缓存键）。
     pub fn owner_epoch(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let caps = self.caps.read().unwrap();
-        let mut owned: Vec<(&str, &str)> = caps
+        let mut owned: Vec<(&str, &str, usize)> = caps
             .iter()
-            .filter_map(|(id, e)| e.owner.as_deref().map(|o| (id.as_str(), o)))
+            .filter_map(|(id, e)| e.owner.as_deref().map(|o| {
+                (id.as_str(), o, Arc::as_ptr(&e.cap) as *const () as usize)
+            }))
             .collect();
         owned.sort_unstable();
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        for (id, owner) in owned {
+        for (id, owner, instance) in owned {
             id.hash(&mut hasher);
             owner.hash(&mut hasher);
+            instance.hash(&mut hasher);
         }
         hasher.finish()
     }

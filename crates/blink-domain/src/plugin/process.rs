@@ -166,7 +166,7 @@ impl PluginProcess {
     /// `init`（0.28.1 v2 握手）：进程就绪后立即发送的初始化帧——仅
     /// manifest `protocol_version >= 2` 时由调用方构造，v1 传 None
     /// （v1 插件不被强发不认识的帧）。
-    fn spawn(
+    async fn spawn(
         exec_path: &PathBuf,
         work_dir: &PathBuf,
         plugin_id: &str,
@@ -247,10 +247,11 @@ impl PluginProcess {
         // 0.28.1 v2 握手：进程就绪即发初始化帧（有界写，插件可异步应答
         // initialized；宿主不阻塞等待——业务帧不因握手未回而挂起）。
         if let Some(frame) = init {
-            let stdin_init = Arc::clone(&stdin);
-            tokio::spawn(async move {
-                write_message(&stdin_init, &frame).await;
-            });
+            // 在句柄发布给 query/tool 前写入，防首个业务帧抢在目录握手前到达。
+            let line = serde_json::to_string(&frame)
+                .map_err(|_| PluginError::Io("初始化帧序列化失败".into()))?;
+            let mut pipe = stdin.pipe.lock().await;
+            write_frame(&mut *pipe, &stdin.valid, line).await?;
         }
 
         // stdout reader:区分普通查询响应、HTTP 请求、tool-call 结果。
@@ -669,7 +670,7 @@ impl PluginHandle {
                 runtime_type,
                 proxy,
                 init,
-            )?;
+            ).await?;
             *guard = Some(Arc::new(process));
         }
         Ok(Arc::clone(guard.as_ref().unwrap()))

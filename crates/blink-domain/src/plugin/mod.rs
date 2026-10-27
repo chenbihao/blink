@@ -37,7 +37,8 @@ pub use dataset::{
 pub use direction::{SUPPORTED_TARGETS, lang_display_name, resolve_display_target};
 pub use engine::PluginEngine;
 pub use install::{
-    InstallError, PluginInstaller, UninstallOutcome, compare_versions, current_platform_tag,
+    InstallError, InstallOutcome, PluginInstaller, RollbackPlan, UninstallOutcome,
+    compare_versions, current_platform_tag,
 };
 pub use manifest::{
     ArgHint, DatasetDef, HostCompat, LocalizableText, ManifestContextWhen, ManifestSurfaceHint,

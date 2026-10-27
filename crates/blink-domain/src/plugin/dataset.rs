@@ -280,30 +280,68 @@ impl DatasetInstaller {
         // 2. 文件完整性：逐文件大小 + sha256（损坏包拒绝，不进挂载目录）
         verify_files(pkg_dir, &manifest)?;
 
-        // 3. 提交版本目录（同版本重装先弃旧内容；rename 原子）
+        // 3. 提交版本目录（隔离交换）：目标已占（同版本重装）先把旧内容原子
+        //    挪进本 op 的 staging 弃置区，不直接删除——交换失败整体恢复，
+        //    不留半删状态；挪不动（插件仍持旧 DB 句柄）则干净报错。
         let target = self.storage.dataset_version_dir(
             &manifest.plugin_id,
             &manifest.dataset_id,
             &manifest.version,
         );
+        let stash = pkg_dir
+            .parent()
+            .map(|p| p.join("old"))
+            .unwrap_or_else(|| self.storage.staging_dir(&next_op_id()).join("old"));
+        let mut quarantined = false;
         if target.exists() {
-            let _ = std::fs::remove_dir_all(&target);
+            std::fs::rename(&target, &stash).map_err(|e| {
+                DatasetError::Io(format!(
+                    "旧版本数据目录无法隔离（{}；插件可能仍持有旧数据集句柄，请稍后重试）: {e}",
+                    target.display()
+                ))
+            })?;
+            quarantined = true;
         }
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent).map_err(|e| DatasetError::Io(e.to_string()))?;
         }
-        std::fs::rename(pkg_dir, &target).map_err(|e| {
-            DatasetError::Io(format!("提交数据包目录失败（{}）: {e}", target.display()))
-        })?;
+        if let Err(e) = std::fs::rename(pkg_dir, &target) {
+            if quarantined
+                && let Err(restore_err) = std::fs::rename(&stash, &target)
+            {
+                tracing::error!(
+                    stash = %stash.display(),
+                    error = %restore_err,
+                    "隔离内容恢复失败（下次启动 recover 兜底）"
+                );
+            }
+            return Err(DatasetError::Io(format!(
+                "提交数据包目录失败（{}）: {e}",
+                target.display()
+            )));
+        }
 
-        // 4. active.json 指针切换 = 提交点（此前任何失败不影响旧有效版本）
+        // 4. active.json 指针切换 = 提交点（此前任何失败不影响旧有效版本）。
+        //    指针写失败时把隔离的旧内容放回原位——否则随 op staging 清理丢失。
         let active_path = self
             .storage
             .dataset_active_path(&manifest.plugin_id, &manifest.dataset_id);
-        write_active_pointer(&active_path, &manifest.version)?;
+        if let Err(e) = write_active_pointer(&active_path, &manifest.version) {
+            if quarantined {
+                let _ = std::fs::remove_dir_all(&target);
+                if let Err(restore_err) = std::fs::rename(&stash, &target) {
+                    tracing::error!(
+                        stash = %stash.display(),
+                        error = %restore_err,
+                        "指针失败后隔离内容恢复失败（下次启动 recover 兜底）"
+                    );
+                }
+            }
+            return Err(e);
+        }
 
-        // 5. registry 记录（覆盖同 key 旧版本记录）
-        let mut registry = self.storage.load_registry()?;
+        // 5. registry 记录（覆盖同 key 旧版本记录；update_registry 与插件
+        //    安装器等 registry 写方进程内串行，不丢整文件更新）
         let record = DatasetRecord {
             plugin_id: manifest.plugin_id.clone(),
             dataset_id: manifest.dataset_id.clone(),
@@ -318,8 +356,14 @@ impl DatasetInstaller {
             content_sha256: manifest.content_sha256.clone(),
             pending_paths: vec![],
         };
-        registry.datasets.insert(record_key(&manifest.plugin_id, &manifest.dataset_id), record.clone());
-        self.storage.save_registry(&registry)?;
+        self.storage
+            .update_registry(|registry| -> Result<(), DatasetError> {
+                registry
+                    .datasets
+                    .insert(record_key(&manifest.plugin_id, &manifest.dataset_id), record.clone());
+                Ok(())
+            })
+            .map_err(DatasetError::from)??;
 
         // 6. 清旧版本目录（best-effort：插件可能仍持有旧 DB 句柄，删不掉
         //    留作孤儿，由 recover 按 active 指针重试）
@@ -345,43 +389,45 @@ impl DatasetInstaller {
         dataset_id: &str,
     ) -> Result<UninstallDatasetOutcome, DatasetError> {
         let _guard = self.op_lock.lock().unwrap();
-        let mut registry = self.storage.load_registry()?;
-        let key = record_key(plugin_id, dataset_id);
-        if !registry.datasets.contains_key(&key) {
-            // 文件系统可能仍有挂载（自愈前的孤儿）——即使无记录也尝试删目录，
-            // 但结果如实报告（不谎报"未安装就没文件"）。
-            let dir = self.storage.dataset_dir(plugin_id, dataset_id);
-            let failed = self.storage.delete_paths_best_effort(&[dir]);
-            if failed.is_empty() {
-                return Ok(UninstallDatasetOutcome::Removed);
-            }
-            return Ok(UninstallDatasetOutcome::RemovedPendingFiles { pending_paths: failed });
-        }
+        self.storage
+            .update_registry(|registry| -> Result<UninstallDatasetOutcome, DatasetError> {
+                let key = record_key(plugin_id, dataset_id);
+                if !registry.datasets.contains_key(&key) {
+                    // 文件系统可能仍有挂载（自愈前的孤儿）——即使无记录也尝试删目录，
+                    // 但结果如实报告（不谎报"未安装就没文件"）。
+                    let dir = self.storage.dataset_dir(plugin_id, dataset_id);
+                    let failed = self.storage.delete_paths_best_effort(&[dir]);
+                    if failed.is_empty() {
+                        return Ok(UninstallDatasetOutcome::Removed);
+                    }
+                    return Ok(UninstallDatasetOutcome::RemovedPendingFiles { pending_paths: failed });
+                }
 
-        let mut to_delete: Vec<PathBuf> = vec![self.storage.dataset_dir(plugin_id, dataset_id)];
-        let rec = registry.datasets.get_mut(&key).expect("上方已确认存在");
-        to_delete.extend(rec.pending_paths.iter().map(PathBuf::from));
-        let failed = self.storage.delete_paths_best_effort(&to_delete);
-        if failed.is_empty() {
-            registry.datasets.remove(&key);
-            self.storage.save_registry(&registry)?;
-            tracing::info!(plugin = plugin_id, dataset = dataset_id, "数据包已卸载");
-            Ok(UninstallDatasetOutcome::Removed)
-        } else {
-            rec.state = InstallState::PendingRemove;
-            rec.pending_paths = failed
-                .iter()
-                .map(|p| p.to_string_lossy().into_owned())
-                .collect();
-            self.storage.save_registry(&registry)?;
-            tracing::warn!(
-                plugin = plugin_id,
-                dataset = dataset_id,
-                count = failed.len(),
-                "数据包卸载部分文件被占用，标记待清理"
-            );
-            Ok(UninstallDatasetOutcome::RemovedPendingFiles { pending_paths: failed })
-        }
+                let mut to_delete: Vec<PathBuf> =
+                    vec![self.storage.dataset_dir(plugin_id, dataset_id)];
+                let rec = registry.datasets.get_mut(&key).expect("上方已确认存在");
+                to_delete.extend(rec.pending_paths.iter().map(PathBuf::from));
+                let failed = self.storage.delete_paths_best_effort(&to_delete);
+                if failed.is_empty() {
+                    registry.datasets.remove(&key);
+                    tracing::info!(plugin = plugin_id, dataset = dataset_id, "数据包已卸载");
+                    Ok(UninstallDatasetOutcome::Removed)
+                } else {
+                    rec.state = InstallState::PendingRemove;
+                    rec.pending_paths = failed
+                        .iter()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .collect();
+                    tracing::warn!(
+                        plugin = plugin_id,
+                        dataset = dataset_id,
+                        count = failed.len(),
+                        "数据包卸载部分文件被占用，标记待清理"
+                    );
+                    Ok(UninstallDatasetOutcome::RemovedPendingFiles { pending_paths: failed })
+                }
+            })
+            .map_err(DatasetError::from)?
     }
 
     /// 列出全部数据包记录（展示用）。
@@ -395,104 +441,116 @@ impl DatasetInstaller {
     }
 
     /// 启动恢复：重试 PendingRemove、清孤儿版本目录、自愈无记录的已挂载数据集。
+    /// registry 变更走 update_registry（与安装/卸载写方串行）。
     pub fn recover(&self) -> DatasetRecoveryReport {
-        let mut report = DatasetRecoveryReport::default();
-        let Ok(mut registry) = self.storage.load_registry() else {
-            return report;
-        };
+        let outcome = self
+            .storage
+            .update_registry(|registry| -> Result<DatasetRecoveryReport, ()> {
+                let mut report = DatasetRecoveryReport::default();
 
-        // 1. PendingRemove 重试删除
-        let keys: Vec<String> = registry.datasets.keys().cloned().collect();
-        for key in keys {
-            let Some(rec) = registry.datasets.get(&key).cloned() else {
-                continue;
-            };
-            if rec.state != InstallState::PendingRemove {
-                continue;
-            }
-            let mut to_delete: Vec<PathBuf> = rec
-                .pending_paths
-                .iter()
-                .map(PathBuf::from)
-                .collect();
-            to_delete.push(self.storage.dataset_dir(&rec.plugin_id, &rec.dataset_id));
-            let failed = self.storage.delete_paths_best_effort(&to_delete);
-            if failed.is_empty() {
-                registry.datasets.remove(&key);
-                report.pending_removed += 1;
-            } else if let Some(r) = registry.datasets.get_mut(&key) {
-                r.pending_paths = failed
-                    .iter()
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .collect();
-                report.still_pending += failed.len();
-            }
-        }
+                // 1. PendingRemove 重试删除
+                let keys: Vec<String> = registry.datasets.keys().cloned().collect();
+                for key in keys {
+                    let Some(rec) = registry.datasets.get(&key).cloned() else {
+                        continue;
+                    };
+                    if rec.state != InstallState::PendingRemove {
+                        continue;
+                    }
+                    let mut to_delete: Vec<PathBuf> = rec
+                        .pending_paths
+                        .iter()
+                        .map(PathBuf::from)
+                        .collect();
+                    to_delete.push(self.storage.dataset_dir(&rec.plugin_id, &rec.dataset_id));
+                    let failed = self.storage.delete_paths_best_effort(&to_delete);
+                    if failed.is_empty() {
+                        registry.datasets.remove(&key);
+                        report.pending_removed += 1;
+                    } else if let Some(r) = registry.datasets.get_mut(&key) {
+                        r.pending_paths = failed
+                            .iter()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .collect();
+                        report.still_pending += failed.len();
+                    }
+                }
 
-        // 2+3. 遍历挂载目录：清非 active 版本的孤儿目录；无记录但 active
-        //     有效的自愈重建（提交点在 active.json 之后、registry 之前崩溃）。
-        let Ok(pids) = std::fs::read_dir(self.storage.root().join("datasets")) else {
-            let _ = self.storage.save_registry(&registry);
-            return report;
-        };
-        for pid_entry in pids.flatten() {
-            let pid = pid_entry.file_name().to_string_lossy().into_owned();
-            let Ok(dids) = std::fs::read_dir(pid_entry.path()) else {
-                continue;
-            };
-            for did_entry in dids.flatten() {
-                let did = did_entry.file_name().to_string_lossy().into_owned();
-                let dir = did_entry.path();
-                match resolve_active_at(&dir) {
-                    ActiveVersion::Mounted(active_v) => {
-                        report.orphan_dirs_cleaned += clean_stale_versions(&dir, &active_v);
-                        let key = record_key(&pid, &did);
-                        if !registry.datasets.contains_key(&key)
-                            && let Ok(manifest) =
-                                read_dataset_manifest(&dir.join(&active_v).join("dataset.json"))
-                        {
-                            registry.datasets.insert(
-                                key,
-                                DatasetRecord {
-                                    plugin_id: pid.clone(),
-                                    dataset_id: did.clone(),
-                                    version: active_v,
-                                    format_version: manifest.format_version,
-                                    source: InstallSource::LocalDev {
-                                        origin: "recovered（安装记录提交点崩溃后自愈）".into(),
-                                    },
-                                    installed_at: 0,
-                                    state: InstallState::Active,
-                                    content_sha256: manifest.content_sha256,
-                                    pending_paths: vec![],
-                                },
-                            );
-                            report.adopted += 1;
-                        }
-                    }
-                    ActiveVersion::Corrupt => {
-                        // 指针损坏：不动文件（插件运行时按 corrupt 如实报错，
-                        // 重装走 install 覆盖路径），恢复不越权猜测。
-                    }
-                    ActiveVersion::NotMounted => {
-                        // 有目录但无指针 = active.json 写入前崩溃 → 整目录可弃。
-                        let failed = self.storage.delete_paths_best_effort(&[dir.clone()]);
-                        if failed.is_empty() {
-                            report.orphan_dirs_cleaned += 1;
+                // 2+3. 遍历挂载目录：清非 active 版本的孤儿目录；无记录但 active
+                //     有效的自愈重建（提交点在 active.json 之后、registry 之前崩溃）。
+                if let Ok(pids) = std::fs::read_dir(self.storage.root().join("datasets")) {
+                    for pid_entry in pids.flatten() {
+                        let pid = pid_entry.file_name().to_string_lossy().into_owned();
+                        let Ok(dids) = std::fs::read_dir(pid_entry.path()) else {
+                            continue;
+                        };
+                        for did_entry in dids.flatten() {
+                            let did = did_entry.file_name().to_string_lossy().into_owned();
+                            let dir = did_entry.path();
+                            match resolve_active_at(&dir) {
+                                ActiveVersion::Mounted(active_v) => {
+                                    report.orphan_dirs_cleaned +=
+                                        clean_stale_versions(&dir, &active_v);
+                                    let key = record_key(&pid, &did);
+                                    if !registry.datasets.contains_key(&key)
+                                        && let Ok(manifest) = read_dataset_manifest(
+                                            &dir.join(&active_v).join("dataset.json"),
+                                        )
+                                    {
+                                        registry.datasets.insert(
+                                            key,
+                                            DatasetRecord {
+                                                plugin_id: pid.clone(),
+                                                dataset_id: did.clone(),
+                                                version: active_v,
+                                                format_version: manifest.format_version,
+                                                source: InstallSource::LocalDev {
+                                                    origin: "recovered（安装记录提交点崩溃后自愈）".into(),
+                                                },
+                                                installed_at: 0,
+                                                state: InstallState::Active,
+                                                content_sha256: manifest.content_sha256,
+                                                pending_paths: vec![],
+                                            },
+                                        );
+                                        report.adopted += 1;
+                                    }
+                                }
+                                ActiveVersion::Corrupt => {
+                                    // 指针损坏：不动文件（插件运行时按 corrupt 如实报错，
+                                    // 重装走 install 覆盖路径），恢复不越权猜测。
+                                }
+                                ActiveVersion::NotMounted => {
+                                    // 有目录但无指针 = active.json 写入前崩溃 → 整目录可弃。
+                                    let failed =
+                                        self.storage.delete_paths_best_effort(&[dir.clone()]);
+                                    if failed.is_empty() {
+                                        report.orphan_dirs_cleaned += 1;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
+                Ok(report)
+            });
+        match outcome {
+            Err(_) => {
+                tracing::warn!("数据包恢复期间读取/写入安装记录失败，跳过记录级恢复");
+                DatasetRecoveryReport::default()
             }
+            Ok(Ok(report)) => {
+                if report.pending_removed > 0
+                    || report.orphan_dirs_cleaned > 0
+                    || report.adopted > 0
+                    || report.still_pending > 0
+                {
+                    tracing::info!(?report, "数据包存储恢复完成");
+                }
+                report
+            }
+            Ok(Err(())) => unreachable!("恢复闭包不返回 Err"),
         }
-        let _ = self.storage.save_registry(&registry);
-        if report.pending_removed > 0
-            || report.orphan_dirs_cleaned > 0
-            || report.adopted > 0
-            || report.still_pending > 0
-        {
-            tracing::info!(?report, "数据包存储恢复完成");
-        }
-        report
     }
 }
 
@@ -590,10 +648,7 @@ fn validate_manifest_shape(m: &DatasetManifest) -> Result<(), DatasetError> {
 
 /// 版本目录名字符集（同时用于 active.json 指针校验）。
 fn valid_version_charset(v: &str) -> bool {
-    !v.is_empty()
-        && v.len() <= 32
-        && v.chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+    v.len() <= 32 && super::contract::valid_package_version(v)
 }
 
 /// 逐文件核验大小 + sha256。
@@ -637,16 +692,11 @@ fn write_active_pointer(path: &Path, version: &str) -> Result<(), DatasetError> 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| DatasetError::Io(e.to_string()))?;
     }
-    let tmp = path.with_extension("json.tmp");
     let body = serde_json::to_string(&ActivePointer {
         version: version.to_string(),
     })
     .map_err(|e| DatasetError::Io(e.to_string()))?;
-    std::fs::write(&tmp, body).map_err(|e| DatasetError::Io(e.to_string()))?;
-    if path.exists() {
-        let _ = std::fs::remove_file(path);
-    }
-    std::fs::rename(&tmp, path).map_err(|e| {
+    blink_infra::utils::fs::atomic_write_bytes(path, body.as_bytes()).map_err(|e| {
         DatasetError::Io(format!("切换 active.json 失败（{}）: {e}", path.display()))
     })?;
     Ok(())
@@ -683,12 +733,23 @@ mod tests {
 
     /// 构造一个最小合法数据包目录。
     fn write_pkg(dir: &Path, plugin_id: &str, dataset_id: &str, version: &str) {
+        write_pkg_with_payload(dir, plugin_id, dataset_id, version, b"sqlite-bytes-v1")
+    }
+
+    /// 指定载荷内容的数据包（区分同版本重装的新旧内容）。
+    fn write_pkg_with_payload(
+        dir: &Path,
+        plugin_id: &str,
+        dataset_id: &str,
+        version: &str,
+        payload: &[u8],
+    ) {
         std::fs::create_dir_all(dir).unwrap();
-        std::fs::write(dir.join("dict.db"), b"sqlite-bytes-v1").unwrap();
+        std::fs::write(dir.join("dict.db"), payload).unwrap();
         let sha = {
             use sha2::Digest;
             let mut h = sha2::Sha256::new();
-            h.update(b"sqlite-bytes-v1");
+            h.update(payload);
             format!("{:x}", h.finalize())
         };
         std::fs::write(
@@ -701,7 +762,7 @@ mod tests {
                 "source": {"name": "ECDICT", "license": "MIT"},
                 "content_sha256": "deadbeef",
                 "counts": {"entries": 1},
-                "files": {"dict.db": {"sha256": sha, "bytes": 15}},
+                "files": {"dict.db": {"sha256": sha, "bytes": payload.len()}},
             })
             .to_string(),
         )
@@ -800,6 +861,35 @@ mod tests {
             .exists());
         // 记录覆盖为唯一活动版本
         assert_eq!(inst.list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn same_version_reinstall_swaps_atomically() {
+        // 同版本重装：旧内容隔离交换（不先删除）；新内容就位、记录唯一。
+        let tmp = tempfile::tempdir().unwrap();
+        let inst = installer(tmp.path());
+        write_pkg_with_payload(&tmp.path().join("p1"), "p.x", "d", "1.0.0", b"OLD-CONTENT");
+        inst.install_dir(&tmp.path().join("p1")).unwrap();
+
+        write_pkg_with_payload(&tmp.path().join("p2"), "p.x", "d", "1.0.0", b"NEW-CONTENT");
+        let record = inst.install_dir(&tmp.path().join("p2")).unwrap();
+        assert_eq!(record.version, "1.0.0");
+        let target = inst.storage().dataset_version_dir("p.x", "d", "1.0.0");
+        assert_eq!(
+            std::fs::read(target.join("dict.db")).unwrap(),
+            b"NEW-CONTENT".to_vec()
+        );
+        // 记录唯一、active 指针有效。
+        assert_eq!(inst.list().unwrap().len(), 1);
+        assert_eq!(
+            resolve_active_at(&inst.storage().dataset_dir("p.x", "d")),
+            ActiveVersion::Mounted("1.0.0".into())
+        );
+        // op staging 已随安装收尾清掉（隔离内容不残留）。
+        let staging = inst.storage().root().join("staging");
+        assert!(std::fs::read_dir(&staging)
+            .map(|mut it| it.next().is_none())
+            .unwrap_or(true));
     }
 
     #[test]

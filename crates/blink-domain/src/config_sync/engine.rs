@@ -186,7 +186,7 @@ impl SyncEngine {
 
         let mut merged = merge_items(&base, &local_view, &remote_items);
         merged.apply_resolutions(&[]);
-        merged.validate_references();
+        merged.validate_references(&local_view, &remote_items);
 
         if !merged.conflicts.is_empty() {
             let plan_id = plan_fingerprint(&merged.merged, &raw, head_info.head.revision);
@@ -199,6 +199,7 @@ impl SyncEngine {
             state.pending_plan = Some(PendingPlan {
                 plan_id: plan_id.clone(),
                 target_revision: head_info.head.revision + 1,
+                remote_sha256: head_info.head.sha256.clone(),
                 frozen_raw: raw.shards.clone(),
                 frozen_prompts: raw.prompts.clone(),
                 merged: merged.merged.clone(),
@@ -225,8 +226,9 @@ impl SyncEngine {
         remote_items: ItemMap,
     ) -> Result<SyncRunOutcome, SyncError> {
         let pending = state.pending_plan.clone().ok_or(SyncError::StalePlan)?;
-        if let Some(expect) = &ctx.plan_id
-            && expect != &pending.plan_id
+        if ctx.plan_id.as_ref() != Some(&pending.plan_id)
+            || pending.target_revision != head_info.head.revision.saturating_add(1)
+            || pending.remote_sha256 != head_info.head.sha256
         {
             return Err(SyncError::StalePlan);
         }
@@ -242,12 +244,13 @@ impl SyncEngine {
         let base = state.baseline_items();
         let mut merged = merge_items(&base, &local_view, &remote_items);
         merged.apply_resolutions(&ctx.resolutions);
-        merged.validate_references();
+        merged.validate_references(&local_view, &remote_items);
         if !merged.conflicts.is_empty() {
             let plan_id = plan_fingerprint(&merged.merged, &raw, head_info.head.revision);
             state.pending_plan = Some(PendingPlan {
                 plan_id: plan_id.clone(),
                 target_revision: head_info.head.revision + 1,
+                remote_sha256: head_info.head.sha256.clone(),
                 frozen_raw: raw.shards.clone(),
                 frozen_prompts: raw.prompts.clone(),
                 merged: merged.merged.clone(),
@@ -309,13 +312,13 @@ impl SyncEngine {
             let candidate = SyncHead {
                 format_version: SNAPSHOT_FORMAT_VERSION,
                 revision: target_rev,
-                snapshot: snapshot_name(target_rev),
+                snapshot: snapshot_name(target_rev, &digest),
                 sha256: digest.clone(),
                 device_id: state.device_id.clone(),
                 updated_at: now(),
             };
             ctx.store.put_snapshot(&candidate.snapshot, &bytes).await?;
-            let mut etag_used = head_info.etag.clone();
+            let etag_used = head_info.etag.clone();
             let mut committed = false;
             for _ in 0..3 {
                 match ctx
@@ -345,7 +348,15 @@ impl SyncEngine {
                             committed = true;
                             break;
                         }
-                        etag_used = current.and_then(|i| i.etag);
+                        // 只能重试原先读取的版本；新 ETag 代表另一设备的新内容，
+                        // 不能把它拿来授权旧候选覆盖。
+                        if current.as_ref() != Some(&head_info) {
+                            state.pending_plan = None;
+                            state.save(state_path)?;
+                            return Err(SyncError::RemoteConflict {
+                                message: "远端已被其他设备更新，请重新同步".into(),
+                            });
+                        }
                         continue;
                     }
                     Err(e) => return Err(e),
@@ -363,6 +374,12 @@ impl SyncEngine {
 
         // 本地应用（失败项转覆盖，不回滚远端）。覆盖记录的 local_value 用
         // 未替换的实际本机值——与 substitute_overrides 的失效判定同源。
+        let current_raw = ctx.env.read_raw().await?;
+        if current_raw.shards != raw.shards || current_raw.prompts != raw.prompts {
+            state.pending_plan = None;
+            state.save(state_path)?;
+            return Err(SyncError::StalePlan);
+        }
         let has_applicable = !applicable.is_empty();
         let outcomes = ctx.env.apply_ops(applicable).await;
         let mut summary = summarize(&merged, &local_view, &remote_items, ctx.env);
@@ -436,6 +453,10 @@ impl SyncEngine {
         let state_path = env.state_dir().join("state.json");
         let mut state = load_or_new(&state_path)?;
         let head = store.read_head().await?;
+        if let Some(info) = &head {
+            // 显式初始化也不允许旧客户端覆盖未来格式。
+            read_remote_snapshot(store, info).await?;
+        }
 
         let (merged, base_rev) = match direction {
             InitDirection::Upload => {
@@ -509,7 +530,7 @@ impl SyncEngine {
         let new_head = SyncHead {
             format_version: SNAPSHOT_FORMAT_VERSION,
             revision: base_rev,
-            snapshot: snapshot_name(base_rev),
+            snapshot: snapshot_name(base_rev, &digest),
             sha256: digest,
             device_id: state.device_id.clone(),
             updated_at: now(),
@@ -551,14 +572,129 @@ impl SyncEngine {
         })
     }
 
-    /// 清空本机覆盖记录（用户修复阻塞项后重试应用共享值）。
-    pub async fn reset_overrides(env: &dyn SyncLocalEnv) -> Result<usize, SyncError> {
+    /// 重试应用共享值（用户修复阻塞项后调用）：对仍有效的本机覆盖重新执行
+    /// 应用管线。成功项清除记录；仍失败项保留（原因更新）；用户已显式修改
+    /// 的失效记录直接清除——本机新意图交给下次同步正常合并。
+    ///
+    /// 只清记录不重放是错的：清掉后 L 视角变回本机旧值，下次同步会走
+    /// 「远端未动 → 采本机」把旧值反向上传、覆盖共享值。
+    pub async fn reset_overrides(
+        env: &dyn SyncLocalEnv,
+    ) -> Result<ResetOverridesReport, SyncError> {
         let state_path = env.state_dir().join("state.json");
         let mut state = load_or_new(&state_path)?;
-        let count = state.overrides.len();
-        state.overrides.clear();
+        if state.overrides.is_empty() {
+            return Ok(ResetOverridesReport::default());
+        }
+        let raw = env.read_raw().await?;
+        let local_actual = items_from_raw(&raw)?;
+
+        // 重放目标 = 实际本机值 + 仍有效覆盖替换为共享值（失效判定与
+        // substitute_overrides 同源：本机值仍等于记录值才有效）。以本机值
+        // 为底而不是基线，保证不误伤用户其他未同步的本机修改。
+        let mut replay = local_actual.clone();
+        let mut valid_items: Vec<String> = Vec::new();
+        let mut expired = 0usize;
+        for entry in state.overrides.clone() {
+            let current = local_actual.get(&entry.item);
+            let still = match (current, &entry.local_value) {
+                (Some(c), Some(lv)) => c == lv,
+                (None, None) => true,
+                _ => false,
+            };
+            if !still {
+                expired += 1;
+                continue;
+            }
+            match &entry.shared_value {
+                Some(v) => {
+                    replay.insert(entry.item.clone(), v.clone());
+                }
+                None => {
+                    replay.remove(&entry.item);
+                }
+            }
+            valid_items.push(entry.item.clone());
+        }
+        // 失效记录清除（用户显式修改过，覆盖已无意义）。
+        state.overrides.retain(|o| valid_items.contains(&o.item));
+
+        let ops = build_apply_ops(&replay, &raw, &local_actual)?;
+        // 未安装插件的分片不重放（与 do_commit 同口径），其覆盖记录一并清除。
+        let (applicable, deferred): (Vec<ApplyOp>, Vec<ApplyOp>) = ops
+            .into_iter()
+            .partition(|op| match op {
+                ApplyOp::PluginConfig { plugin_id, .. } => env.plugin_installed(plugin_id),
+                _ => true,
+            });
+        let outcomes = env.apply_ops(applicable).await;
+
+        let mut report = ResetOverridesReport {
+            expired,
+            retried: valid_items.len(),
+            ..Default::default()
+        };
+        let mut done_items: Vec<String> =
+            deferred.iter().flat_map(|op| op_items_of(op)).collect();
+        for outcome in &outcomes {
+            match &outcome.error {
+                None => done_items.extend(outcome.items.iter().cloned()),
+                Some(err) => {
+                    for item in &outcome.items {
+                        // 保留记录并更新失败原因（重放未改动本机值，快照不变）。
+                        if let Some(existing) =
+                            state.overrides.iter_mut().find(|o| o.item == *item)
+                        {
+                            existing.reason = err.clone();
+                            existing.at = now();
+                        } else {
+                            state.overrides.push(LocalOverride {
+                                item: item.clone(),
+                                shared_value: replay.get(item).cloned(),
+                                local_value: local_actual.get(item).cloned(),
+                                reason: err.clone(),
+                                at: now(),
+                            });
+                        }
+                        report.still_overridden += 1;
+                    }
+                }
+            }
+        }
+        state.overrides.retain(|o| !done_items.contains(&o.item));
+        report.reapplied = done_items.len();
         state.save(&state_path)?;
-        Ok(count)
+        tracing::info!(
+            retried = report.retried,
+            reapplied = report.reapplied,
+            still_overridden = report.still_overridden,
+            expired = report.expired,
+            "本机覆盖重置完成（重试应用共享值）"
+        );
+        Ok(report)
+    }
+}
+
+/// 重置本机覆盖的结果。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct ResetOverridesReport {
+    /// 重试应用的覆盖项数（仍有效的记录）。
+    pub retried: usize,
+    /// 成功重新应用共享值并清除记录的项数。
+    pub reapplied: usize,
+    /// 重试仍失败、保留覆盖记录的项数。
+    pub still_overridden: usize,
+    /// 用户已显式修改（覆盖自然失效）而被清除的记录数。
+    pub expired: usize,
+}
+
+/// 单条应用操作覆盖的 item key（deferred 分片的记录清除判定用）。
+fn op_items_of(op: &ApplyOp) -> Vec<String> {
+    match op {
+        ApplyOp::SetConfig { items, .. } | ApplyOp::PluginConfig { items, .. } => items.clone(),
+        ApplyOp::PromptUpsert { item, .. } | ApplyOp::PromptDelete { item, .. } => {
+            vec![item.clone()]
+        }
     }
 }
 
@@ -584,6 +720,11 @@ async fn read_remote_snapshot(
     store: &dyn SyncStore,
     head: &HeadInfo,
 ) -> Result<(ItemMap, HeadInfo), SyncError> {
+    if head.head.format_version > SNAPSHOT_FORMAT_VERSION {
+        return Err(SyncError::SchemaTooNew {
+            format_version: head.head.format_version,
+        });
+    }
     let bytes = store.read_snapshot(&head.head.snapshot).await?;
     if snapshot_digest(&bytes) != head.head.sha256 {
         return Err(SyncError::CorruptRemote {
@@ -794,6 +935,7 @@ mod tests {
         snapshots: Mutex<Map<String, Vec<u8>>>,
         etag_counter: Mutex<u64>,
         fail_head_once: Mutex<bool>,
+        replace_head_on_network_error: Mutex<Option<(SyncHead, Vec<u8>)>>,
     }
 
     impl MockStore {
@@ -801,7 +943,7 @@ mod tests {
             let snap = PortableSnapshot::new("remote-device", items);
             let bytes = snap.to_bytes().unwrap();
             let digest = snapshot_digest(&bytes);
-            let name = snapshot_name(revision);
+            let name = snapshot_name(revision, &digest);
             let head = SyncHead {
                 format_version: SNAPSHOT_FORMAT_VERSION,
                 revision,
@@ -817,6 +959,7 @@ mod tests {
                 snapshots: Mutex::new(snapshots),
                 etag_counter: Mutex::new(1),
                 fail_head_once: Mutex::new(false),
+                replace_head_on_network_error: Mutex::new(None),
             }
         }
 
@@ -826,7 +969,7 @@ mod tests {
             let snap = PortableSnapshot::new("remote", items);
             let bytes = snap.to_bytes().unwrap();
             let digest = snapshot_digest(&bytes);
-            let name = snapshot_name(rev);
+            let name = snapshot_name(rev, &digest);
             self.snapshots.lock().unwrap().insert(name.clone(), bytes);
             let etag = self.head.lock().unwrap().as_ref().and_then(|(_, e)| e.clone());
             self.put_head_conditional(
@@ -879,6 +1022,11 @@ mod tests {
             etag: Option<&str>,
             head: &SyncHead,
         ) -> Result<(), SyncError> {
+            if let Some((new_head, bytes)) = self.replace_head_on_network_error.lock().unwrap().take() {
+                self.snapshots.lock().unwrap().insert(new_head.snapshot.clone(), bytes);
+                *self.head.lock().unwrap() = Some((new_head, Some("concurrent-etag".into())));
+                return Err(SyncError::Network { message: "模拟响应丢失期间其他设备提交".into() });
+            }
             if *self.fail_head_once.lock().unwrap() {
                 *self.fail_head_once.lock().unwrap() = false;
                 return Err(SyncError::RemoteConflict {
@@ -910,6 +1058,8 @@ mod tests {
         apply_results: Mutex<Vec<Option<String>>>,
         installed: Mutex<Vec<String>>,
         secrets: Vec<String>,
+        /// apply_ops 收到的操作序列（断言重放内容用）。
+        recorded_ops: Mutex<Vec<ApplyOp>>,
     }
 
     impl MockEnv {
@@ -920,6 +1070,7 @@ mod tests {
                 apply_results: Mutex::new(vec![]),
                 installed: Mutex::new(vec![]),
                 secrets: vec![],
+                recorded_ops: Mutex::new(vec![]),
             }
         }
         fn raw(shards: Vec<(&str, serde_json::Value)>) -> RawLocal {
@@ -949,6 +1100,7 @@ mod tests {
             Ok(self.raw.lock().unwrap().clone())
         }
         async fn apply_ops(&self, ops: Vec<ApplyOp>) -> Vec<AppliedItemOutcome> {
+            self.recorded_ops.lock().unwrap().extend(ops.clone());
             let results = self.apply_results.lock().unwrap().clone();
             ops.into_iter()
                 .enumerate()
@@ -1212,6 +1364,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_resolution_cannot_overwrite_new_remote_revision() {
+        let dir = temp_dir("remote-stale");
+        let env = MockEnv::new(&dir, MockEnv::raw(vec![appearance_shard("auto")]));
+        let store = MockStore::with_head(items(full_appearance("auto")), 1);
+        SyncEngine::initialize(&store, &env, InitDirection::Download).await.unwrap();
+        env.set_theme("dark");
+        store.push_remote(items(full_appearance("light"))).await;
+        let SyncRunOutcome::AwaitingResolution(plan) = SyncEngine::run(run(&store, &env, vec![], None)).await.unwrap() else {
+            panic!("expected conflict");
+        };
+        store.push_remote(items(full_appearance("solarized"))).await;
+        let err = SyncEngine::run(run(&store, &env, vec![Resolution {
+            key: "app.appearance#theme".into(), choice: ResolutionChoice::Local,
+        }], Some(plan.plan_id))).await.unwrap_err();
+        assert_eq!(err, SyncError::StalePlan);
+        let head = store.read_head().await.unwrap().unwrap();
+        assert_eq!(head.head.revision, 3);
+        let (remote, _) = read_remote_snapshot(&store, &head).await.unwrap();
+        assert_eq!(remote["app.appearance#theme"], json!("solarized"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn uncertain_write_does_not_retry_with_another_devices_etag() {
+        let dir = temp_dir("retry-race");
+        let env = MockEnv::new(&dir, MockEnv::raw(vec![appearance_shard("auto")]));
+        let store = MockStore::with_head(items(full_appearance("auto")), 1);
+        SyncEngine::initialize(&store, &env, InitDirection::Download).await.unwrap();
+        env.set_theme("dark");
+        let competing = MockStore::with_head(items(full_appearance("light")), 2);
+        let info = competing.read_head().await.unwrap().unwrap();
+        let bytes = competing.read_snapshot(&info.head.snapshot).await.unwrap();
+        *store.replace_head_on_network_error.lock().unwrap() = Some((info.head.clone(), bytes));
+        let error = SyncEngine::run(run(&store, &env, vec![], None)).await.unwrap_err();
+        assert!(matches!(error, SyncError::RemoteConflict { .. }));
+        assert_eq!(store.read_head().await.unwrap().unwrap().head, info.head);
+        let (remote, _) = read_remote_snapshot(&store, &info).await.unwrap();
+        assert_eq!(remote["app.appearance#theme"], json!("light"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
     async fn apply_failure_becomes_override_and_not_uploaded() {
         let dir = temp_dir("override");
         let env = MockEnv::new(&dir, MockEnv::raw(vec![appearance_shard("auto")]));
@@ -1363,6 +1557,103 @@ mod tests {
         let state = SyncState::load(&dir.join("state.json")).unwrap();
         assert_eq!(state.baseline.as_ref().unwrap().revision, 4);
         assert_eq!(state.overrides.len(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 前置：制造一条覆盖记录（应用失败的 theme：共享 dark / 本机 auto）。
+    async fn setup_override(
+        tag: &str,
+    ) -> (PathBuf, MockEnv, MockStore) {
+        let dir = temp_dir(tag);
+        let env = MockEnv::new(&dir, MockEnv::raw(vec![appearance_shard("auto")]));
+        let store = MockStore::with_head(items(vec![("app.appearance#theme", json!("auto"))]), 1);
+        SyncEngine::initialize(&store, &env, InitDirection::Download)
+            .await
+            .unwrap();
+        store.push_remote(items(full_appearance("dark"))).await;
+        *env.apply_results.lock().unwrap() = vec![Some("热键校验失败：与 Chord 冲突".into())];
+        let out = SyncEngine::run(run(&store, &env, vec![], None))
+            .await
+            .unwrap();
+        assert!(matches!(out, SyncRunOutcome::Done(_)));
+        let state = SyncState::load(&dir.join("state.json")).unwrap();
+        assert_eq!(state.overrides.len(), 1);
+        (dir, env, store)
+    }
+
+    #[tokio::test]
+    async fn reset_overrides_replays_shared_value_instead_of_clearing_only() {
+        let (dir, env, store) = setup_override("reset-ok").await;
+
+        // 用户修复阻塞项 → 重置 = 重试应用共享值（不是只清记录）。
+        *env.apply_results.lock().unwrap() = vec![None];
+        let report = SyncEngine::reset_overrides(&env).await.unwrap();
+        assert_eq!(report.retried, 1);
+        assert_eq!(report.reapplied, 1);
+        assert_eq!(report.still_overridden, 0);
+        let state = SyncState::load(&dir.join("state.json")).unwrap();
+        assert!(state.overrides.is_empty());
+        // 重放操作携带共享值 dark（不是本机旧值 auto）。
+        let ops = env.recorded_ops.lock().unwrap();
+        let carried_dark = ops.iter().any(|op| match op {
+            ApplyOp::SetConfig { key, value, .. } if key == "general_config" => {
+                value.get("theme") == Some(&json!("dark"))
+            }
+            _ => false,
+        });
+        assert!(carried_dark, "重放操作必须携带共享值: {ops:?}");
+        drop(ops);
+
+        // 应用已生效（模拟 set_config 写入）→ 再同步空跑，不把旧本机值上传。
+        env.set_theme("dark");
+        let out = SyncEngine::run(run(&store, &env, vec![], None))
+            .await
+            .unwrap();
+        assert!(matches!(out, SyncRunOutcome::UpToDate { revision: 2 }));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn reset_overrides_keeps_still_failing_overrides() {
+        let (dir, env, _store) = setup_override("reset-fail").await;
+
+        // 阻塞项没修好 → 重放仍失败：记录保留、原因更新。
+        let report = SyncEngine::reset_overrides(&env).await.unwrap();
+        assert_eq!(report.retried, 1);
+        assert_eq!(report.reapplied, 0);
+        assert_eq!(report.still_overridden, 1);
+        let state = SyncState::load(&dir.join("state.json")).unwrap();
+        assert_eq!(state.overrides.len(), 1);
+        assert_eq!(state.overrides[0].shared_value, Some(json!("dark")));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn reset_overrides_expires_user_edited_and_lets_new_intent_flow() {
+        let (dir, env, store) = setup_override("reset-expired").await;
+
+        // 用户在覆盖期间显式改了本机值 → 覆盖自然失效：记录清除、不重放。
+        env.set_theme("solarized");
+        env.recorded_ops.lock().unwrap().clear();
+        let report = SyncEngine::reset_overrides(&env).await.unwrap();
+        assert_eq!(report.expired, 1);
+        assert_eq!(report.retried, 0);
+        assert!(env.recorded_ops.lock().unwrap().is_empty());
+        let state = SyncState::load(&dir.join("state.json")).unwrap();
+        assert!(state.overrides.is_empty());
+
+        // 新意图走正常同步链路上传（不被覆盖记录压制）。
+        let out = SyncEngine::run(run(&store, &env, vec![], None))
+            .await
+            .unwrap();
+        assert!(matches!(out, SyncRunOutcome::Done(_)));
+        let head = store.read_head().await.unwrap().unwrap();
+        let bytes = store.read_snapshot(&head.head.snapshot).await.unwrap();
+        let snap = PortableSnapshot::from_bytes(&bytes).unwrap();
+        assert_eq!(
+            snap.items.get("app.appearance#theme"),
+            Some(&json!("solarized"))
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

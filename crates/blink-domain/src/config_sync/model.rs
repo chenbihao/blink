@@ -102,9 +102,9 @@ pub fn snapshot_digest(bytes: &[u8]) -> String {
     s
 }
 
-/// 快照文件名：`<rev>.json`。
-pub fn snapshot_name(revision: u64) -> String {
-    format!("{revision}.json")
+/// revision 相同的并发候选也不能相互覆盖。
+pub fn snapshot_name(revision: u64, digest: &str) -> String {
+    format!("{revision}-{digest}.json")
 }
 
 fn chrono_like_now() -> i64 {
@@ -146,5 +146,12 @@ mod tests {
             PortableSnapshot::from_bytes(b"not json"),
             Err(SnapshotFormatError::Parse(_))
         ));
+    }
+
+    #[test]
+    fn same_revision_candidates_have_distinct_names() {
+        let a = snapshot_digest(b"device a");
+        let b = snapshot_digest(b"device b");
+        assert_ne!(snapshot_name(2, &a), snapshot_name(2, &b));
     }
 }

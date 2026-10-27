@@ -62,6 +62,7 @@ pub(crate) struct ActiveRecording {
 
 /// GIF 服务（managed state）。
 pub struct GifService {
+    start_lock: Mutex<()>,
     pub(crate) recording: Mutex<Option<ActiveRecording>>,
     pub(crate) timelines: Mutex<HashMap<String, Timeline>>,
     pub(crate) exports: Mutex<HashMap<String, Arc<AtomicBool>>>,
@@ -78,6 +79,7 @@ impl Default for GifService {
 impl GifService {
     pub fn new() -> Self {
         Self {
+            start_lock: Mutex::new(()),
             recording: Mutex::new(None),
             timelines: Mutex::new(HashMap::new()),
             exports: Mutex::new(HashMap::new()),
@@ -233,6 +235,8 @@ pub fn start_recording(
         return Err(GifServiceError::InvalidFps);
     }
     let service = app.state::<Arc<GifService>>();
+    let _starting = service.start_lock.try_lock()
+        .map_err(|_| GifServiceError::AlreadyRecording)?;
     {
         let rec = service.recording.lock().unwrap_or_else(|e| e.into_inner());
         if rec.is_some() {
@@ -361,6 +365,7 @@ fn finalize_after_stop(
     outcome: Option<CaptureOutcome>,
 ) {
     let service = app.state::<Arc<GifService>>();
+    let _finalizing = service.start_lock.lock().unwrap_or_else(|e| e.into_inner());
     // 清活跃录制（同一会话才清）
     {
         let mut rec = service.recording.lock().unwrap_or_else(|e| e.into_inner());
@@ -383,8 +388,7 @@ fn finalize_after_stop(
     // 正常停止：读取定稿素材，构建时间轴
     match SpoolReader::open(&root, session_id) {
         Ok(reader) => {
-            let fps = reader.meta.fps;
-            let durs = infra_gif::finalize_durations(&reader.timestamps(), fps);
+            let durs = reader.durations();
             let timeline = Timeline::from_durations(durs);
             let frames = timeline.frame_count();
             service

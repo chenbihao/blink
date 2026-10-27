@@ -314,7 +314,13 @@ function bindEvents(container) {
                         break;
                     case "test-conn": {
                         status("#sync-conn-status", t("sync.conn.testing"), false);
-                        const result = await invoke("test_sync_connection");
+                        // 表单直测：传输入框当前值（密码空时后端回退已存密码），
+                        // 保存前即可验证；后端在值为空时回退已保存设置。
+                        const result = await invoke("test_sync_connection", {
+                            url: field("sync_url") || null,
+                            username: field("sync_username") || null,
+                            password: container.querySelector('.plugin-field[data-key="sync_password"]')?.value || null,
+                        });
                         if (result.status === "ok") {
                             status("#sync-conn-status", t("sync.conn.ok", {revision: result.head_revision ?? 0}), false);
                         } else {
@@ -388,7 +394,13 @@ function bindEvents(container) {
                         : err.code === "sync_schema_too_new"
                             ? t("sync.err.schema_too_new")
                             : err.message;
-                const target = action.startsWith("conflict") ? "#sync-conflict-status" : "#sync-run-status";
+                // 错误必须回显到触发它的那张卡：此前一律落到同步卡状态行，
+                // 连接卡的「正在连接…」永不更新（保存前测试表现为无失败提示）。
+                const target = action.startsWith("conflict")
+                    ? "#sync-conflict-status"
+                    : ["save-conn", "test-conn", "clear-password"].includes(action)
+                        ? "#sync-conn-status"
+                        : "#sync-run-status";
                 status(target, message, true);
             }
         });

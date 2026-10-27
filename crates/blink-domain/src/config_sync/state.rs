@@ -51,6 +51,8 @@ pub struct PendingPlan {
     pub plan_id: String,
     /// 目标 head revision（远端当前 + 1）。
     pub target_revision: u64,
+    #[serde(default)]
+    pub remote_sha256: String,
     /// 冻结的本机原始分片 JSON（提交前复核；变化即 StalePlan）。
     pub frozen_raw: BTreeMap<String, serde_json::Value>,
     /// 冻结的提示词库行投影。
@@ -116,16 +118,7 @@ impl SyncState {
         let bytes = serde_json::to_vec_pretty(self).map_err(|e| SyncError::Io {
             message: format!("同步状态序列化失败: {e}"),
         })?;
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, &bytes).map_err(|e| SyncError::Io {
-            message: format!("写入同步状态失败: {e}"),
-        })?;
-        // Windows rename 目标存在时失败——先移除再 rename（崩溃窗口由下次
-        // save/load 兜底；状态文件仅是缓存性真源，损坏可重建基线）。
-        if path.exists() && std::fs::remove_file(path).is_err() {
-            // 删除失败（占用）→ 尝试直接 rename 覆盖。
-        }
-        std::fs::rename(&tmp, path).map_err(|e| SyncError::Io {
+        blink_infra::utils::fs::atomic_write_bytes(path, &bytes).map_err(|e| SyncError::Io {
             message: format!("同步状态落盘失败: {e}"),
         })?;
         Ok(())

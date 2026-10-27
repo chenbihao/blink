@@ -33,6 +33,28 @@ const PAGE_INVOKE_DEADLINE: std::time::Duration = std::time::Duration::from_secs
 /// 页面剪贴板写入的单次上限（有界 IPC，spec-backend §7.4 精神）。
 const PAGE_CLIPBOARD_MAX_BYTES: usize = 1 << 20;
 
+/// 所有应用命令在分派前统一检查，新增宿主命令不会默认向插件开放。
+pub(crate) fn command_allowed(label: &str, command: &str) -> bool {
+    !label.starts_with("plugin-") || matches!(command,
+        "plugin_page_ready" | "plugin_page_invoke" | "plugin_page_get_settings"
+        | "plugin_page_clipboard" | "plugin_page_close")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::command_allowed;
+
+    #[test]
+    fn plugin_commands_are_default_deny() {
+        for command in ["set_config", "reset_config", "clear_plugin_secret", "run_builtin_action", "gif_start_recording", "future_host_command"] {
+            assert!(!command_allowed("plugin-builtin-ip", command));
+            assert!(command_allowed("settings", command));
+        }
+        assert!(command_allowed("plugin-builtin-ip", "plugin_page_ready"));
+        assert!(!command_allowed("plugin-builtin-ip", "plugin_page_unrestricted"));
+    }
+}
+
 /// 插件窗口守卫：插件页面不得调用的宿主命令在入口处拒绝。
 ///
 /// 适用：安装/卸载插件包、写插件配置等生态敏感命令——页面内容是"插件资产"，
@@ -70,16 +92,17 @@ pub async fn plugin_page_ready(
     app: tauri::AppHandle,
     window: tauri::WebviewWindow,
     plugin_id: String,
+    on_payload: tauri::ipc::Channel<serde_json::Value>,
 ) -> Result<serde_json::Value, CommandError> {
     let surface = plugin_surface::surface_state(&app);
     let engine = app.state::<Arc<PluginEngine>>().inner().clone();
     plugin_surface::page_session(&surface, &app, &window, &engine, &plugin_id)
         .map_err(|e| CommandError::new("permission_denied", e, false))?;
 
-    let payload = plugin_surface::take_ready_payload(&surface, window.label());
     let pool = app.state::<crate::infra::data::DbPools>().config.clone();
     let appearance =
         crate::app::config::ConfigStore::get::<crate::app::config::AppearanceConfig>(&pool).await;
+    let payload = plugin_surface::take_ready_payload(&surface, window.label(), on_payload);
     Ok(serde_json::json!({
         "payload": payload,
         "context": {
@@ -316,6 +339,7 @@ pub async fn get_plugin_surface_status(
                 .collect();
             serde_json::json!({
                 "plugin_id": handle.id(),
+                "dev_mode": cfg!(debug_assertions),
                 "version": manifest.version,
                 "pages": manifest.pages.iter().map(|p| serde_json::json!({
                     "id": p.id, "entry": p.entry,

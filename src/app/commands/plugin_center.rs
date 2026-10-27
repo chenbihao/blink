@@ -54,6 +54,7 @@ struct CachedCatalog {
 
 /// get_plugin_catalog 的返回（目录 + 元信息，前端渲染"获取"视图用）。
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CatalogResponse {
     pub catalog: PluginCatalog,
     /// true = 端点不可达，返回的是磁盘缓存回放（展示降级标记）。
@@ -242,15 +243,15 @@ pub async fn install_plugin_from_catalog(
     .map_err(|e| CommandError::new("internal", format!("安装任务失败: {e}"), true));
     // 下载暂存（含大 zip）先于错误分支清理——不等启动 recover 兜底
     cleanup_download_staging(&zip_path);
-    let record = match joined {
-        Ok(Ok(record)) => record,
+    let outcome = match joined {
+        Ok(Ok(outcome)) => outcome,
         Ok(Err(e)) => return Err(finish_with_install_error(&app, "plugin", &pid, e)),
         Err(join_err) => return Err(join_err),
     };
 
-    crate::app::commands::publish_installed_plugin(&app, &record).await?;
+    crate::app::commands::publish_installed_plugin(&app, &outcome).await?;
     emit_progress(&app, "plugin", &plugin_id, "done", entry.asset.bytes, entry.asset.bytes);
-    Ok(record)
+    Ok(outcome.record)
 }
 
 /// 从官方目录安装数据包（词库）。安装提交后插件进程按 active.json 指针
@@ -501,4 +502,20 @@ fn now_nanos() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catalog_response_exposes_the_frontend_dev_mode_field() {
+        let response = CatalogResponse {
+            catalog: PluginCatalog { format_version: 1, generated_at: String::new(), plugins: vec![], datasets: vec![] },
+            stale: false, endpoint: String::new(), dev_mode: false,
+        };
+        let json = serde_json::to_value(response).unwrap();
+        assert_eq!(json["devMode"], false);
+        assert!(json.get("dev_mode").is_none());
+    }
 }

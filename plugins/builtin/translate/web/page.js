@@ -83,6 +83,7 @@
   }
 
   function translateDebounced() {
+    ++epoch; // 输入已变，防抖期间也不能接收上一文本的结果。
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(translateNow, 500);
   }

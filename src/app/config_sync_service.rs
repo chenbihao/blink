@@ -8,8 +8,8 @@
 use std::path::PathBuf;
 
 use blink_domain::config_sync::{
-    portable, ApplyOp, AppliedItemOutcome, RawLocal, SyncError, SyncLocalEnv,
-    WebDavClient, WebDavConfig,
+    portable, webdav::normalize_root_url, ApplyOp, AppliedItemOutcome, RawLocal, SyncError,
+    SyncLocalEnv, WebDavClient, WebDavConfig,
 };
 use blink_domain::config::SyncSettingsConfig;
 use blink_infra::data::prompt_library;
@@ -82,6 +82,30 @@ pub async fn build_client(pool: &sqlx::SqlitePool) -> Result<WebDavClient, SyncE
     })
 }
 
+/// 从表单当前值构建 WebDAV 客户端——「测试连接」在保存前直测输入框内容。
+/// 密码为空/缺省时回退已存密码（与保存语义一致：留空保持不变；密码原样
+/// 使用不 trim——空格可能是密码的一部分，与 `save_password` 保持同语义）。
+pub async fn build_client_from(
+    url: &str,
+    username: &str,
+    password: Option<&str>,
+) -> Result<WebDavClient, SyncError> {
+    let root = normalize_root_url(url)?;
+    let username = username.trim();
+    if username.is_empty() {
+        return Err(SyncError::NotConfigured);
+    }
+    let password = match password.filter(|s| !s.is_empty()) {
+        Some(pw) => pw.to_string(),
+        None => load_password()?.ok_or(SyncError::NotConfigured)?,
+    };
+    WebDavClient::new(WebDavConfig {
+        root,
+        username: username.to_string(),
+        password,
+    })
+}
+
 /// bin 侧 `SyncLocalEnv` 实现。
 pub struct AppSyncEnv {
     app: tauri::AppHandle,
@@ -98,6 +122,12 @@ impl AppSyncEnv {
             .config
             .clone()
     }
+
+    /// 提示词库表在 **AI 库**（`init_ai_schema` 建表，命令层同池）——
+    /// 不能与 config KV 共用 `pools_config`，否则 `no such table`。
+    fn pools_ai(&self) -> sqlx::SqlitePool {
+        self.app.state::<blink_infra::data::DbPools>().ai.clone()
+    }
 }
 
 #[async_trait::async_trait]
@@ -107,7 +137,7 @@ impl SyncLocalEnv for AppSyncEnv {
     }
 
     async fn read_raw(&self) -> Result<RawLocal, SyncError> {
-        portable::read_raw_local(&self.pools_config()).await
+        portable::read_raw_local(&self.pools_config(), &self.pools_ai()).await
     }
 
     async fn apply_ops(&self, ops: Vec<ApplyOp>) -> Vec<AppliedItemOutcome> {
@@ -194,9 +224,7 @@ async fn execute_op(
             apply_prompt_upsert(app, id, row).await
         }
         ApplyOp::PromptDelete { id, .. } => {
-            let pool = &app
-                .state::<blink_infra::data::DbPools>()
-                .config;
+            let pool = &app.state::<blink_infra::data::DbPools>().ai;
             prompt_library::delete(pool, id)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -218,7 +246,7 @@ async fn apply_prompt_upsert(
         .or(row.get("override_content").and_then(|v| v.as_str()))
         .unwrap_or("");
     blink_domain::prompt_library::validate_entry(name, effective).map_err(|e| format!("提示词条目 {id} 无效: {e}"))?;
-    let pool = &app.state::<blink_infra::data::DbPools>().config;
+    let pool = &app.state::<blink_infra::data::DbPools>().ai;
     prompt_library::upsert_sync(
         pool,
         id,

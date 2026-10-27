@@ -59,6 +59,8 @@ pub enum ContractError {
     DuplicatePage { plugin: String, id: String },
     #[error("插件 {plugin} 的数据包 id 非法: {id:?}（允许 [a-z0-9-]，长度 1..=64）")]
     InvalidDatasetId { plugin: String, id: String },
+    #[error("插件 {plugin} 的版本号不是安全目录名: {version:?}")]
+    InvalidVersion { plugin: String, version: String },
 }
 
 /// 单个插件的冻结契约。
@@ -94,6 +96,9 @@ impl PluginContract {
     /// 用户目录安装的即使 manifest 自称 builtin 也按非 builtin 校验（不授保留命名空间）。
     pub fn from_manifest_checked(m: &PluginManifest, trusted_builtin: bool) -> Result<Self, ContractError> {
         validate_plugin_id(&m.id)?;
+        if !valid_package_version(&m.version) {
+            return Err(ContractError::InvalidVersion { plugin: m.id.clone(), version: m.version.clone() });
+        }
         let needs_process = m.needs_process();
         if needs_process && m.runtime.exec.trim().is_empty() {
             return Err(ContractError::MissingExec {
@@ -173,6 +178,14 @@ pub fn validate_plugin_id(id: &str) -> Result<(), ContractError> {
             max: ID_MAX_LEN,
         })
     }
+}
+
+/// 包版本参与目录拼接，必须是单个普通路径段，不能解释为当前/父目录。
+pub(super) fn valid_package_version(version: &str) -> bool {
+    !version.is_empty() && version.len() <= 64
+        && version.as_bytes()[0].is_ascii_alphanumeric()
+        && !version.ends_with('.')
+        && version.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
 }
 
 /// 非随包来源不得占用 `builtin.` 保留命名空间。
@@ -318,6 +331,16 @@ mod tests {
         let c = PluginContract::from_manifest(&m).unwrap();
         assert_eq!(c.tool_ids, vec!["a_b_lookup".to_string()]);
         assert!(c.needs_process && c.has_query);
+    }
+
+    #[test]
+    fn package_versions_cannot_escape_the_version_directory() {
+        for version in [".", "..", "...", "1.", "../outside", "C:/outside", "1/2", "1\\2", ""] {
+            let mut manifest = manifest_base("extra.demo", "p.exe");
+            manifest.version = version.into();
+            assert!(matches!(PluginContract::from_manifest(&manifest), Err(ContractError::InvalidVersion { .. })));
+        }
+        assert!(valid_package_version("1.0.0-beta.1"));
     }
 
     #[test]

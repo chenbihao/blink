@@ -17,6 +17,11 @@
 //! 执行等决策点必须重新读盘，不得缓存跨进程使用的记录快照。无跨进程
 //! 文件锁——写入冲突按 last-writer-wins，由"决策点重读"限制影响面。
 //!
+//! **进程内写互斥**：插件安装器与数据包安装器各有自己的 op_lock（只串行
+//! 自身操作），但二者共写同一份 registry.json——各自 load→modify→save 会
+//! 互相整文件覆盖丢记录。所有 registry 修改必须走 [`PluginStorage::update_registry`]，
+//! 进程级锁把 load→modify→save 串行成原子窗口。
+//!
 //! 业务规则（来源校验/兼容性/状态机）在 domain/plugin/install.rs；
 //! 本模块只管布局、IO 与恢复原语。
 
@@ -25,8 +30,12 @@ pub mod pages;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 
 use serde::{Deserialize, Serialize};
+
+/// registry 读改写的进程级互斥（见模块头「进程内写互斥」）。
+static REGISTRY_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 /// 安装记录文件名（root 下）。
 const REGISTRY_FILE: &str = "registry.json";
@@ -262,25 +271,39 @@ impl PluginStorage {
             detail: e.to_string(),
         })?;
         let path = self.registry_path();
-        let tmp = path.with_extension("json.tmp");
         let body = serde_json::to_string_pretty(registry).map_err(|e| {
             PluginStorageError::Io {
                 path: path.clone(),
                 detail: e.to_string(),
             }
         })?;
-        std::fs::write(&tmp, body).map_err(|e| PluginStorageError::Io {
-            path: tmp.clone(),
-            detail: e.to_string(),
-        })?;
-        if path.exists() {
-            let _ = std::fs::remove_file(&path);
-        }
-        std::fs::rename(&tmp, &path).map_err(|e| PluginStorageError::Io {
+        crate::utils::fs::atomic_write_bytes(&path, body.as_bytes()).map_err(|e| PluginStorageError::Io {
             path: path.clone(),
             detail: e.to_string(),
         })?;
         Ok(())
+    }
+
+    /// 串行读改写：load → mutate →（mutate 成功才）save。进程级锁覆盖
+    /// load→modify→save 的完整窗口，消除插件/数据包两个安装器并发提交时
+    /// 整文件覆盖导致的丢记录。mutate 返回 Err（如互斥否决、文件交换失败）
+    /// 则 registry 不落盘，调用方状态不受影响。
+    ///
+    /// 返回外层 Err = 存储失败（读/写 registry 本身）；内层 Result = mutate
+    /// 自身结果（Err 时未保存）。
+    pub fn update_registry<T, E>(
+        &self,
+        mutate: impl FnOnce(&mut InstallRegistry) -> Result<T, E>,
+    ) -> Result<Result<T, E>, PluginStorageError> {
+        let _guard = REGISTRY_WRITE_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut registry = self.load_registry()?;
+        let outcome = mutate(&mut registry);
+        if outcome.is_ok() {
+            self.save_registry(&registry)?;
+        }
+        Ok(outcome)
     }
 
     /// 启动恢复：清空 staging（暂存内容不保证提交，整体可弃）。
@@ -457,6 +480,106 @@ mod tests {
                 .join("dictionary-basic")
                 .join("active.json")
         );
+    }
+
+    #[test]
+    fn update_registry_serializes_concurrent_writers() {
+        // 插件记录与数据包记录由两条线程并发读改写同一份 registry——
+        // update_registry 的进程级锁必须保证两侧更新都不丢。
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = PluginStorage::new(tmp.path().to_path_buf());
+        storage.ensure_layout().unwrap();
+        let mut base = InstallRegistry::new();
+        base.records.insert(
+            "seed.plugin".into(),
+            InstallRecord {
+                plugin_id: "seed.plugin".into(),
+                version: "1.0.0".into(),
+                source: InstallSource::LocalDev { origin: String::new() },
+                installed_at: 0,
+                state: InstallState::Active,
+                sha256: None,
+                manifest_schema_version: 1,
+                protocol_version: 2,
+                pending_paths: vec![],
+            },
+        );
+        storage.save_registry(&base).unwrap();
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let mut handles = Vec::new();
+        for i in 0..8 {
+            let storage = PluginStorage::new(tmp.path().to_path_buf());
+            let barrier = barrier.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                storage
+                    .update_registry(|reg| -> Result<(), ()> {
+                        if i % 2 == 0 {
+                            reg.records.insert(
+                                format!("plugin.{i}"),
+                                InstallRecord {
+                                    plugin_id: format!("plugin.{i}"),
+                                    version: "1.0.0".into(),
+                                    source: InstallSource::LocalDev { origin: String::new() },
+                                    installed_at: i,
+                                    state: InstallState::Active,
+                                    sha256: None,
+                                    manifest_schema_version: 1,
+                                    protocol_version: 2,
+                                    pending_paths: vec![],
+                                },
+                            );
+                        } else {
+                            reg.datasets.insert(
+                                format!("p/d{i}"),
+                                DatasetRecord {
+                                    plugin_id: "p".into(),
+                                    dataset_id: format!("d{i}"),
+                                    version: "1.0.0".into(),
+                                    format_version: 1,
+                                    source: InstallSource::LocalDev { origin: String::new() },
+                                    installed_at: i,
+                                    state: InstallState::Active,
+                                    content_sha256: None,
+                                    pending_paths: vec![],
+                                },
+                            );
+                        }
+                        Ok(())
+                    })
+                    .unwrap()
+                    .unwrap();
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        let reg = storage.load_registry().unwrap();
+        // 初始 1 条 + 4 条插件 + 4 条数据集，一个不丢。
+        assert_eq!(reg.records.len(), 5);
+        assert_eq!(reg.datasets.len(), 4);
+    }
+
+    #[test]
+    fn update_registry_mutation_error_leaves_registry_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = PluginStorage::new(tmp.path().to_path_buf());
+        storage.ensure_layout().unwrap();
+        let mut base = InstallRegistry::new();
+        base.format_version = 1;
+        storage.save_registry(&base).unwrap();
+
+        let veto = "PendingRemoveBusy";
+        let outcome: Result<(), &str> = Err(veto);
+        let result = storage
+            .update_registry(|reg: &mut InstallRegistry| -> Result<(), &str> {
+                reg.format_version = 99; // 即使改了也不得落盘
+                outcome
+            })
+            .unwrap();
+        assert_eq!(result.unwrap_err(), veto);
+        assert_eq!(storage.load_registry().unwrap().format_version, 1);
     }
 
     #[test]

@@ -2056,6 +2056,9 @@ fn compute_allowlist_fingerprint(
     for id in effective {
         id.hash(&mut hasher);
     }
+    if let Some(registry) = registry {
+        registry.owner_epoch().hash(&mut hasher);
+    }
     hasher.finish()
 }
 
@@ -2160,7 +2163,7 @@ mod tests {
                 unreachable!()
             }
         }
-        reg.register(Arc::new(Cap1)).unwrap();
+        reg.register_owned("plugin:test", Arc::new(Cap1)).unwrap();
 
         let mut set = std::collections::HashSet::new();
         set.insert("alive_cap".to_string());
@@ -2170,8 +2173,14 @@ mod tests {
         only_alive.insert("alive_cap".to_string());
         assert_eq!(
             compute_allowlist_fingerprint(&set, Some(&reg)),
-            compute_allowlist_fingerprint(&only_alive, None)
+            compute_allowlist_fingerprint(&only_alive, Some(&reg))
         );
+        let before = compute_allowlist_fingerprint(&set, Some(&reg));
+        let old_adapter = reg.get("alive_cap").unwrap();
+        reg.revoke_owner("plugin:test");
+        reg.register_owned("plugin:test", Arc::new(Cap1)).unwrap();
+        assert_ne!(compute_allowlist_fingerprint(&set, Some(&reg)), before);
+        drop(old_adapter);
     }
 
     #[test]

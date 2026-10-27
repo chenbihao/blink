@@ -19,6 +19,7 @@ let pluginWrites = 0;
 const weatherEditors = new Map();
 let pluginConfigListener = false;
 let pendingPluginReload = false;
+let pendingSurfaceReload = false;
 const renderedPlugins = new Map();
 // 0.28.2：插件窗口面状态（get_plugin_surface_status → pages/readiness/install），
 // 与 get_plugins 同轮拉取；拉取失败静默降级（无窗口行的旧展示）。
@@ -82,7 +83,8 @@ export function initPluginsTab() {
 /**
  * 加载插件列表
  */
-async function loadPlugins(force = false) {
+async function loadPlugins(force = false, refreshSurface = false) {
+    pendingSurfaceReload ||= refreshSurface;
     const revision = ++pluginsLoadRevision;
     const container = document.getElementById("plugins-container");
     if (!container) return;
@@ -122,7 +124,7 @@ async function loadPlugins(force = false) {
         return;
     }
     if (!Array.isArray(plugins)) plugins = [];
-    if (!force && renderedPlugins.size === plugins.length && plugins.every(plugin =>
+    if (!force && !pendingSurfaceReload && renderedPlugins.size === plugins.length && plugins.every(plugin =>
         renderedPlugins.get(plugin.id)?.revision === plugin.revision)) {
         pendingPluginReload = false;
         return;
@@ -145,6 +147,7 @@ async function loadPlugins(force = false) {
         return;
     }
     pendingPluginReload = false;
+    pendingSurfaceReload = false;
     for (const editor of weatherEditors.values()) editor.dispose();
     weatherEditors.clear();
     renderedPlugins.clear();
@@ -178,7 +181,7 @@ function renderPluginCard(plugin) {
         plugin,
         surfaceStatus.get(plugin.id),
         catalogState?.catalog,
-        catalogState?.devMode !== false,
+        catalogState?.devMode === true || surfaceStatus.get(plugin.id)?.dev_mode === true,
     );
 
     const configSection = hasFields
@@ -263,9 +266,14 @@ async function loadCatalog(force = false) {
         catalogState = res;
     } catch (error) {
         if (revision !== catalogRevision) return;
-        catalogState = {catalog: null, stale: false, devMode: true, error: commandErrorText(error, t("plugin.catalog_unavailable"))};
+        catalogState = {catalog: null, stale: false, devMode: catalogState?.devMode === true, error: commandErrorText(error, t("plugin.catalog_unavailable"))};
     }
-    if (revision === catalogRevision) renderCatalog();
+    if (revision === catalogRevision) {
+        renderCatalog();
+        // 目录与插件列表并行返回；目录就绪后让数据包按钮切换到下载源。
+        // 常规刷新保留正在编辑的配置草稿。
+        await loadPlugins(false, true);
+    }
 }
 
 function renderCatalog() {
@@ -393,13 +401,13 @@ function bindCatalogProgress() {
  * blockers（kind=dataset_corrupt/dataset_outdated 的 field 命中该数据包）。
  *
  * 0.28.5：官方目录有该数据包条目时主安装按钮走目录下载（data-catalog）；
- * dev 模式（默认 true，测试两参调用兼容）追加"本地 zip"按钮；生产模式且
+ * 已确认的 dev 模式追加明确的"本地包"按钮；生产模式或目录尚未就绪且
  * 目录无条目时提示目录不可用（官方词库必在目录，此为降级路径）。
  *
  * 导出供测试（纯字符串渲染，无 DOM 依赖）；surface 参数为
  * get_plugin_surface_status 的对应行（缺省不渲染）。
  */
-export function renderDatasetsSection(plugin, surface, catalog = null, devMode = true) {
+export function renderDatasetsSection(plugin, surface, catalog = null, devMode = false) {
     const datasets = surface?.datasets || [];
     if (!datasets.length) return "";
     const readiness = surface?.readiness || {};
@@ -429,12 +437,10 @@ export function renderDatasetsSection(plugin, surface, catalog = null, devMode =
         const buttons = [];
         if (catEntry) {
             buttons.push(`<button class="btn-small plugin-dataset-install" data-dataset="${escapeAttr(ds.id)}" data-catalog="1" data-progress-id="${escapeAttr(`${plugin.id}/${ds.id}`)}">${iconHTML("download")} ${installed ? t("plugin.dataset_update") : t("plugin.dataset_install")}</button>`);
-        } else if (devMode) {
-            buttons.push(`<button class="btn-small plugin-dataset-install" data-dataset="${escapeAttr(ds.id)}">${iconHTML("download")} ${installed ? t("plugin.dataset_update") : t("plugin.dataset_install")}</button>`);
         } else {
             buttons.push(`<span class="plugin-dataset-status plugin-catalog-stale" title="${escapeAttr(t("plugin.catalog_unavailable"))}">${t("plugin.dataset_no_source")}</span>`);
         }
-        if (devMode && catEntry) {
+        if (devMode) {
             buttons.push(`<button class="btn-small plugin-dataset-install-local" data-dataset="${escapeAttr(ds.id)}" title="${escapeAttr(t("plugin.dataset_local_hint"))}">${iconHTML("folder-open")} ${t("plugin.dataset_local")}</button>`);
         }
         if (installed && state !== "pending_remove") {
@@ -958,12 +964,12 @@ export function bindPluginCardEvents(plugin) {
         }
     }));
     // 0.28.5：数据包安装/更新。data-catalog=1 → 官方目录下载（主通道）；
-    // 无标记 / -local 后缀 → dev 本地 zip（仅开发模式出现，生产由后端门禁兜底）
+    // -local 后缀 → dev 本地 zip（仅开发模式出现，生产由后端门禁兜底）
     card.querySelectorAll(".plugin-dataset-install[data-catalog='1']").forEach(button => button.addEventListener("click", () => {
         installFromCatalog(button, "dataset",
             {pluginId: id, datasetId: button.dataset.dataset}, `${id}/${button.dataset.dataset}`);
     }));
-    card.querySelectorAll(".plugin-dataset-install:not([data-catalog='1']), .plugin-dataset-install-local").forEach(button => button.addEventListener("click", async () => {
+    card.querySelectorAll(".plugin-dataset-install-local").forEach(button => button.addEventListener("click", async () => {
         button.disabled = true;
         try {
             const path = await openDialog({

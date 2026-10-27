@@ -294,6 +294,7 @@ async function query(word) {
 let debounceTimer = 0;
 
 input.addEventListener("input", () => {
+    ++epoch;
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => void query(input.value.trim()), 250);
 });

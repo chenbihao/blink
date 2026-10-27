@@ -207,11 +207,15 @@ pub fn export_gif(
         let _ = fs::remove_file(&tmp_path);
         return Err(ExportError::VerifyFailed(e));
     }
-    // 原子提交：tmp → 目标（overwrite 时先删旧文件）。
-    if out_path.exists() {
-        fs::remove_file(out_path)?;
+    // 原子提交时复核不覆盖语义，编码期间新建的目标文件也必须保留。
+    let commit = crate::utils::fs::commit_file(&tmp_path, out_path, opts.overwrite);
+    if let Err(error) = commit {
+        let _ = fs::remove_file(&tmp_path);
+        if !opts.overwrite && error.kind() == std::io::ErrorKind::AlreadyExists {
+            return Err(ExportError::FileExists(out_path.to_path_buf()));
+        }
+        return Err(ExportError::Io(error));
     }
-    fs::rename(&tmp_path, out_path)?;
     let bytes = fs::metadata(out_path).map(|m| m.len()).unwrap_or(0);
     Ok(ExportStats {
         width: out_w,
@@ -499,6 +503,35 @@ pub fn resize_bgra(src: &[u8], src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -
     out
 }
 
+/// 把 **RGBA** 像素编码为 PNG 字节（无通道交换）。
+///
+/// 与 `platform::screenshot::encode_png`（**BGRA** 输入、内部逐行 R↔B swap）
+/// 是两个不同契约，不可混用：`resize_bgra` 的输出已是 RGBA，预览/缩略图
+/// 路径再走 screenshot 版会被二次交换，R/B 对调（黄↔蓝互换）。
+pub fn encode_png_rgba(pixels: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
+    let stride = (width as usize) * 4;
+    if pixels.len() != stride * (height as usize) {
+        return Err(format!(
+            "像素长度与尺寸不符: {} vs {}",
+            pixels.len(),
+            stride * height as usize
+        ));
+    }
+    let mut buf = Vec::with_capacity(stride * (height as usize) + 4096);
+    {
+        let mut encoder = png::Encoder::new(&mut buf, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_compression(png::Compression::Fast);
+        encoder.set_filter(png::FilterType::NoFilter);
+        let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
+        let mut stream = writer.stream_writer().map_err(|e| e.to_string())?;
+        std::io::Write::write_all(&mut stream, pixels).map_err(|e| e.to_string())?;
+        std::io::Write::flush(&mut stream).map_err(|e| e.to_string())?;
+    }
+    Ok(buf)
+}
+
 fn total_delay_cs(plan: &EncodePlan) -> u64 {
     plan.frames.iter().map(|f| f.delay_cs as u64).sum()
 }
@@ -777,6 +810,21 @@ mod tests {
     }
 
     #[test]
+    fn file_created_while_encoding_is_not_overwritten() {
+        let frames = vec![synth_frame(8, 8, 20, false)];
+        let (root, id) = build_session(8, 8, &frames, &[0]);
+        let reader = SpoolReader::open(root.path(), &id).unwrap();
+        let plan = plan_from(&frames, 8, 8, &[10]);
+        let out = root.path().join("raced.gif");
+        let error = export_gif(&reader, &plan, &ExportOptions::default(), &out, &AtomicBool::new(false), &|_, _, _| {
+            std::fs::write(&out, b"another task's file").unwrap();
+        }).unwrap_err();
+        assert!(matches!(error, ExportError::FileExists(_)));
+        assert_eq!(std::fs::read(&out).unwrap(), b"another task's file");
+        assert!(!out.with_extension("gif.tmp").exists());
+    }
+
+    #[test]
     fn cancelled_export_leaves_no_artifact() {
         let frames: Vec<Vec<u8>> = (0..40)
             .map(|i| synth_frame(64, 64, (i * 3 % 200) as u8, i % 2 == 0))
@@ -853,6 +901,28 @@ mod tests {
         let buf = &frame.buffer;
         let (r, g, b) = (buf[0], buf[1], buf[2]);
         assert!(r > 200 && g < 60 && b < 60, "应为红色，实为 R={r} G={g} B={b}");
+    }
+
+    #[test]
+    fn preview_png_keeps_rgba_channel_order() {
+        // 纯黄 BGRA（B=0,G=255,R=255）——若被二次 R↔B 交换会解码成纯蓝。
+        // 覆盖预览链路：resize_bgra 两条路径（同尺寸直转 / box 缩放）+ PNG 编码。
+        let yellow_bgra: Vec<u8> = [0u8, 255, 255, 255].repeat(64); // 8x8
+        for (label, rgba, w, h) in [
+            ("同尺寸", resize_bgra(&yellow_bgra, 8, 8, 8, 8), 8u32, 8u32),
+            ("缩放", resize_bgra(&yellow_bgra, 8, 8, 4, 4), 4, 4),
+        ] {
+            let png = encode_png_rgba(&rgba, w, h).unwrap();
+            let img = image::load_from_memory(&png).unwrap().to_rgba8();
+            assert_eq!(img.dimensions(), (w, h), "{label} 路径尺寸不符");
+            for px in img.pixels() {
+                assert_eq!(
+                    (px.0[0], px.0[1], px.0[2]),
+                    (255, 255, 0),
+                    "{label} 路径黄色被交换成蓝色"
+                );
+            }
+        }
     }
 
     #[test]

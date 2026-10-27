@@ -403,6 +403,15 @@ pub fn format_hint(s: &str) -> String {
     format!("{first4}••••{last4}")
 }
 
+/// 严格全掩码提示——密码类秘密专用(如 WebDAV 密码)。
+///
+/// 与 [`format_hint`](API key 语义,首尾各 4 字符辅助辨认"是哪把 key")不同:
+/// 密码不是要被辨认的标识符,不允许任何字符泄漏;固定 8 个 `•` 也不暴露
+/// 长度信息。参数仅为统一 hint 接口签名,内容不参与计算。
+pub fn format_hint_strict(_s: &str) -> String {
+    "••••••••".to_string()
+}
+
 // ── 测试 ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -573,5 +582,17 @@ mod tests {
     fn format_hint_unicode_boundary_safe() {
         // 12 个字符 > 8,前后各 4
         assert_eq!(format_hint("秘密密钥测试数据值1234"), "秘密密钥••••1234");
+    }
+
+    #[test]
+    fn format_hint_strict_never_leaks_chars_or_length() {
+        assert_eq!(format_hint_strict("p@ssw0rd-long-secret"), "••••••••");
+        assert_eq!(format_hint_strict("短"), "••••••••");
+        assert_eq!(format_hint_strict(""), "••••••••");
+        // 任意两把密码的 hint 不可区分(不泄漏长度/字符)。
+        assert_eq!(
+            format_hint_strict("aaaaaaaaaa"),
+            format_hint_strict("b")
+        );
     }
 }

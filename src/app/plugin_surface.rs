@@ -7,7 +7,7 @@
 //!   以**调用窗口的 label** 反查会话——插件页面无法冒用其他 plugin_id（旧窗口/
 //!   其他窗口直构造越权 IPC 被拒）；
 //! - 初始 payload ready/pull：建窗时暂存，页面加载完成后 `plugin_page_ready` 取走；
-//!   复用窗口的新 payload 走 `blink://plugin-page-payload` 事件（未 ready 时落回
+//!   复用窗口的新 payload 走会话 Channel（未 ready 时落回
 //!   pending，不丢失）；
 //! - 关闭 = 隐藏保留会话（prevent_close + hide，应用退出放行）；禁用/更新/卸载
 //!   由生命周期钩子调 [`close_plugin_windows`] 真销毁（撤销旧页面会话）；
@@ -19,13 +19,12 @@
 //! §3.2「重启默认不保存翻译正文」）。
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
-use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
 use blink_infra::platform::window;
 
-use crate::domain::event_names::EventNames;
 use crate::domain::plugin::{PluginEngine, PluginHandle};
 
 /// 同类插件窗口数量预算（含隐藏保活的复用窗口）。
@@ -41,7 +40,7 @@ struct PluginPageSession {
     page_id: String,
     handle: Arc<PluginHandle>,
     pending_payload: Option<serde_json::Value>,
-    ready: bool,
+    payload_channel: Option<tauri::ipc::Channel<serde_json::Value>>,
     opened_at: std::time::Instant,
 }
 
@@ -49,11 +48,24 @@ struct PluginPageSession {
 #[derive(Default)]
 pub struct PluginSurface {
     sessions: Mutex<HashMap<String, PluginPageSession>>,
+    open_locks: Mutex<HashMap<String, Weak<Mutex<()>>>>,
+    reservation_lock: Mutex<()>,
 }
 
 impl PluginSurface {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn open_lock(&self, label: &str) -> Arc<Mutex<()>> {
+        let mut locks = self.open_locks.lock().unwrap_or_else(|e| e.into_inner());
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(label).and_then(Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(Mutex::new(()));
+        locks.insert(label.to_string(), Arc::downgrade(&lock));
+        lock
     }
 
     fn with_sessions<R>(&self, f: impl FnOnce(&mut HashMap<String, PluginPageSession>) -> R) -> R {
@@ -87,28 +99,28 @@ impl PluginSurface {
         })
     }
 
-    /// 页面 ready：取走初始 payload（只发一次；后续 payload 走事件）。
-    fn take_ready_payload(&self, label: &str) -> Option<serde_json::Value> {
+    /// 页面 ready：取走初始 payload，后续仅通过本会话的 Channel 交付。
+    fn take_ready_payload(&self, label: &str, channel: tauri::ipc::Channel<serde_json::Value>) -> Option<serde_json::Value> {
         self.with_sessions(|sessions| {
             let s = sessions.get_mut(label)?;
-            s.ready = true;
+            s.payload_channel = Some(channel);
             s.pending_payload.take()
         })
     }
 
-    /// 复用窗口的新 payload：ready 即发事件，未 ready 落 pending（保留最新）。
-    fn deliver_payload(&self, app: &AppHandle, label: &str, payload: serde_json::Value) {
-        let ready = self.with_sessions(|sessions| {
+    /// 复用窗口的新 payload：就绪即交付，未 ready 落 pending（保留最新）。
+    fn deliver_payload(&self, label: &str, payload: serde_json::Value) {
+        self.with_sessions(|sessions| {
             let Some(s) = sessions.get_mut(label) else {
-                return false;
+                return;
             };
             s.pending_payload = Some(payload.clone());
-            s.ready
+            if let Some(channel) = &s.payload_channel
+                && channel.send(payload).is_ok()
+            {
+                s.pending_payload = None;
+            }
         });
-        if ready {
-            // 定向 emit（只投递给本插件窗口；Emitter::emit 是全局广播）
-            let _ = app.emit_to(label, EventNames::PLUGIN_PAGE_PAYLOAD, payload);
-        }
     }
 
     /// 关闭（销毁）某插件的全部窗口并清会话。禁用/更新/卸载钩子调用。
@@ -224,17 +236,19 @@ pub fn open_plugin_page(
 
     let label = plugin_window_label(plugin_id);
     let surface = app.state::<Arc<PluginSurface>>().inner().clone();
+    let opening = surface.open_lock(&label);
+    let _opening = opening.lock().unwrap_or_else(|e| e.into_inner());
 
     // 复用路径：窗口存在且会话归属一致、句柄仍活跃
     if let Some(win) = app.get_webview_window(&label) {
         let reuse = match surface.session(app, &label) {
-            Some((owner, _, session_handle)) => {
+            Some((owner, current_page, session_handle)) => {
                 if owner != plugin_id {
                     return Err(format!(
                         "窗口 label 冲突：{label} 已被插件 {owner} 占用"
                     ));
                 }
-                if !engine.is_active_handle(plugin_id, &session_handle) {
+                if current_page != page_id || !engine.is_active_handle(plugin_id, &session_handle) {
                     // 更新/替换后旧句柄失活——关旧窗重建（撤销旧页面会话）
                     tracing::info!(plugin = %plugin_id, "插件窗口句柄已失活，关闭重建");
                     let _ = win.destroy();
@@ -253,8 +267,13 @@ pub fn open_plugin_page(
             }
         };
         if reuse {
+            surface.with_sessions(|sessions| {
+                if let Some(session) = sessions.get_mut(&label) {
+                    session.opened_at = std::time::Instant::now();
+                }
+            });
             if let Some(payload) = payload {
-                surface.deliver_payload(app, &label, payload);
+                surface.deliver_payload(&label, payload);
             }
             let _ = win.unminimize();
             win.show().map_err(|e| format!("显示插件窗口失败: {e}"))?;
@@ -264,8 +283,6 @@ pub fn open_plugin_page(
             return Ok(());
         }
     }
-
-    surface.enforce_budget(app)?;
 
     // 会话先占位后建窗：label 冲突/建窗失败都清理，不留半套状态
     let plugin_segment = encode_path_segment(plugin_id);
@@ -310,7 +327,35 @@ pub fn open_plugin_page(
         });
         builder.build()
     };
-    let (win, _created) = window::get_or_create_window(app, &label, build)?;
+    // build 期间前端就可能发 ready；必须先建立权威会话，失败再清理。
+    let active_handle = handle.clone();
+    {
+        // 全局锁仅保护预算预留；各 label 的 build 仍可并行。
+        let _reservation = surface.reservation_lock.lock().unwrap_or_else(|e| e.into_inner());
+        surface.enforce_budget(app)?;
+        surface.with_sessions(|sessions| {
+            sessions.insert(label.clone(), PluginPageSession {
+                plugin_id: plugin_id.to_string(),
+                page_id: page_id.clone(),
+                handle,
+                pending_payload: payload,
+                payload_channel: None,
+                opened_at: std::time::Instant::now(),
+            });
+        });
+    }
+    let (win, _created) = match window::get_or_create_window(app, &label, build) {
+        Ok(created) => created,
+        Err(error) => {
+            surface.with_sessions(|sessions| { sessions.remove(&label); });
+            return Err(error);
+        }
+    };
+    if !engine.is_active_handle(plugin_id, &active_handle) || !engine.is_enabled(plugin_id) {
+        let _ = win.destroy();
+        surface.with_sessions(|sessions| { sessions.remove(&label); });
+        return Err("插件已更新、禁用或卸载，请重新打开".into());
+    }
 
     // 关闭 = 隐藏保留（应用退出放行，与 sticky 复用模式一致）
     {
@@ -333,19 +378,6 @@ pub fn open_plugin_page(
         window::enable_rounded_corners(hwnd);
     }
 
-    surface.with_sessions(|sessions| {
-        sessions.insert(
-            label.clone(),
-            PluginPageSession {
-                plugin_id: plugin_id.to_string(),
-                page_id: page_id.clone(),
-                handle,
-                pending_payload: payload,
-                ready: false,
-                opened_at: std::time::Instant::now(),
-            },
-        );
-    });
     tracing::info!(plugin = %plugin_id, page = %page_id, label = %label, "插件窗口已创建");
     Ok(())
 }
@@ -361,8 +393,9 @@ pub fn close_plugin_windows(app: &AppHandle, plugin_id: &str) {
 pub(crate) fn take_ready_payload(
     surface: &PluginSurface,
     label: &str,
+    channel: tauri::ipc::Channel<serde_json::Value>,
 ) -> Option<serde_json::Value> {
-    surface.take_ready_payload(label)
+    surface.take_ready_payload(label, channel)
 }
 
 /// 校验调用窗口身份并返回 (plugin_id, page_id, handle)——plugin_ui 全部页面

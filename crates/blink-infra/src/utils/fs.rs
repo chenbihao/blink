@@ -35,7 +35,7 @@ pub fn atomic_write_bytes(path: &Path, content: &[u8]) -> io::Result<(u64, i64)>
         io::Write::flush(&mut file)?;
     }
 
-    replace_via_rename(&tmp_path, path)?;
+    commit_file(&tmp_path, path, true)?;
 
     file_identity(path)
         .ok_or_else(|| io::Error::other("写入后读取文件身份失败"))
@@ -53,8 +53,9 @@ pub fn file_identity(path: &Path) -> Option<(u64, i64)> {
     Some((meta.len(), mtime_ms))
 }
 
+/// 提交同目录临时文件。overwrite=false 时目标已存在即失败，避免检查后竞态。
 #[cfg(windows)]
-fn replace_via_rename(tmp: &Path, target: &Path) -> io::Result<()> {
+pub fn commit_file(tmp: &Path, target: &Path, overwrite: bool) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::Storage::FileSystem::{
         MOVE_FILE_FLAGS, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
@@ -67,7 +68,7 @@ fn replace_via_rename(tmp: &Path, target: &Path) -> io::Result<()> {
             .chain(std::iter::once(0))
             .collect()
     };
-    let flags = MOVE_FILE_FLAGS(MOVEFILE_REPLACE_EXISTING.0 | MOVEFILE_WRITE_THROUGH.0);
+    let flags = MOVE_FILE_FLAGS(MOVEFILE_WRITE_THROUGH.0 | if overwrite { MOVEFILE_REPLACE_EXISTING.0 } else { 0 });
 
     // MoveFileExW 偶发"拒绝访问 (0x80070005)"——杀软实时扫描或并发短暂占用
     // 文件句柄，属暂态错误，有限次重试即可恢复（对齐 local_engine 先例）。
@@ -87,7 +88,7 @@ fn replace_via_rename(tmp: &Path, target: &Path) -> io::Result<()> {
                     && attempt + 1 < MAX_RETRIES;
                 if !transient {
                     let _ = std::fs::remove_file(tmp);
-                    return Err(io::Error::other(e));
+                    return Err(io::Error::from_raw_os_error((e.code().0 as u32 & 0xffff) as i32));
                 }
                 tracing::debug!(
                     attempt = attempt + 1,
@@ -102,8 +103,13 @@ fn replace_via_rename(tmp: &Path, target: &Path) -> io::Result<()> {
 }
 
 #[cfg(not(windows))]
-fn replace_via_rename(tmp: &Path, target: &Path) -> io::Result<()> {
-    std::fs::rename(tmp, target)
+pub fn commit_file(tmp: &Path, target: &Path, overwrite: bool) -> io::Result<()> {
+    if overwrite {
+        std::fs::rename(tmp, target)
+    } else {
+        std::fs::hard_link(tmp, target)?;
+        std::fs::remove_file(tmp)
+    }
 }
 
 #[cfg(test)]

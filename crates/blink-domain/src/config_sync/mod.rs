@@ -26,8 +26,8 @@ pub mod webdav;
 
 pub use diff::{ConflictKind, MergeConflict, Resolution, ResolutionChoice};
 pub use engine::{
-    InitDirection, SyncEngine, SyncLocalEnv, SyncPlan, SyncReport, SyncRunOutcome, SyncStore,
-    SyncSummaryEntry,
+    InitDirection, ResetOverridesReport, SyncEngine, SyncLocalEnv, SyncPlan, SyncReport,
+    SyncRunOutcome, SyncStore, SyncSummaryEntry,
 };
 pub use model::{
     snapshot_digest, HeadInfo, ItemMap, PortableSnapshot, SnapshotFormatError, SyncHead,
@@ -104,7 +104,7 @@ impl SyncError {
             Self::CorruptLocal { shard } => {
                 format!("本机配置分片 {shard} 已损坏，请先修复后再同步（不会当作空配置上传）")
             }
-            Self::StalePlan => "预览后本机配置已变化，请重新预览".to_string(),
+            Self::StalePlan => "同步期间本机或远端配置已变化，请重新同步".to_string(),
             Self::NeedsInit => "首次同步需要选择初始化方向".to_string(),
             Self::Io { message } => format!("本地读写失败：{message}"),
             Self::Unknown { message } => message.clone(),

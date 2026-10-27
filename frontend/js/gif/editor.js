@@ -7,7 +7,8 @@
 //!   （`gif_get_frames` ≤24 帧/批、串行队列防并发），无分页。
 //! - **预览播放**：setTimeout 链按帧 `durMs` 调度；空格启动先等当前帧
 //!   剩余时长（不丢帧节奏）；播放头前方预取窗口（+24 帧）后台解码，
-//!   缓存 miss 时保持上一帧画面不闪；播放头实时同步时间轴高亮并滚动跟随。
+//!   缓存 miss 时保持上一帧画面不闪；播放头实时同步时间轴高亮、滚动跟随
+//!   与帧时长输入框回显。
 //! - **预览清晰度**：解码宽度 = 预览显示区物理像素（clamp 到源宽），不在
 //!   显示时拉伸；预览缓存按字节预算淘汰。
 //! - 选中模型：`selectedSet`——单击单选、Ctrl 切换、Shift 范围；Delete/右键
@@ -73,6 +74,7 @@ const els = {
 /** 会话状态。 */
 const state = {
     sessionId: null,
+    epoch: 0,
     view: null,
     playIdx: 0,
     selectedSet: new Set(),
@@ -113,10 +115,13 @@ const state = {
 
 function requestDecode(sessionId, indices, maxW, cache, priority = false) {
     if (!indices.length) return;
-    const batch = {sessionId, indices, maxW, cache};
+    const batches = [];
+    for (let i = 0; i < indices.length; i += 24) {
+        batches.push({sessionId, indices: indices.slice(i, i + 24), maxW, cache, epoch: state.epoch});
+    }
     // priority（播放预取/当前预览）插队队首——后台顺序预载让位于交互
-    if (priority) state.pendingBatches.unshift(batch);
-    else state.pendingBatches.push(batch);
+    if (priority) state.pendingBatches.unshift(...batches);
+    else state.pendingBatches.push(...batches);
     pumpDecode();
 }
 
@@ -124,26 +129,38 @@ async function pumpDecode() {
     if (state.decoding) return;
     state.decoding = true;
     while (state.pendingBatches.length) {
-        const {sessionId, indices, maxW, cache} = state.pendingBatches.shift();
+        const {sessionId, indices, maxW, cache, epoch} = state.pendingBatches.shift();
         const missing = indices.filter(i => !cache.has(i) && i < (state.view?.frameCount ?? 0));
-        if (!missing.length || sessionId !== state.sessionId) continue;
+        if (!missing.length || sessionId !== state.sessionId || epoch !== state.epoch) continue;
         for (let i = 0; i < missing.length; i += 24) {
             const batch = missing.slice(i, i + 24);
             try {
                 const frames = await invoke('gif_get_frames', {sessionId, indices: batch, maxW});
+                if (epoch !== state.epoch) break;
                 for (const f of frames) {
                     if (cache === state.thumbCache) {
                         cache.set(f.index, `data:image/png;base64,${f.pngBase64}`);
                     } else {
                         const blob = await (await fetch(`data:image/png;base64,${f.pngBase64}`)).blob();
-                        cache.set(f.index, await createImageBitmap(blob));
-                        state.previewBytes += f.width * f.height * 4;
+                        const bmp = await createImageBitmap(blob);
+                        if (epoch !== state.epoch) {
+                            bmp.close();
+                            break;
+                        }
+                        const old = cache.get(f.index);
+                        if (old) {
+                            state.previewBytes -= old.width * old.height * 4;
+                            old.close();
+                        }
+                        cache.set(f.index, bmp);
+                        state.previewBytes += bmp.width * bmp.height * 4;
                     }
+                    evictPreviewCache();
                 }
             } catch (err) {
                 console.error('[gif-editor] 帧解码失败', err);
             }
-            if (sessionId !== state.sessionId) break; // 会话已切换：丢弃过期批次
+            if (epoch !== state.epoch) break;
         }
         evictPreviewCache();
         refreshLiveThumbs();
@@ -168,6 +185,7 @@ function evictPreviewCache() {
         const size = bmp.width * bmp.height * 4;
         state.previewCache.delete(idx);
         bytes -= size;
+        bmp.close();
     }
     state.previewBytes = bytes;
 }
@@ -391,6 +409,7 @@ function playTick() {
     renderPreview();
     prefetchAhead();
     syncPlayhead(playToSrc(view, step.cursor));
+    syncDurInput();
     // 漂移补偿：按绝对时刻累计（playDue），setTimeout 只补差值——渲染耗时
     // 与 setTimeout 惰性不再逐帧累积，长会话播放不越播越慢
     const now = performance.now();
@@ -539,7 +558,9 @@ async function restoreSelected() {
 
 async function loadSession(sessionId) {
     if (!sessionId) return;
+    const epoch = ++state.epoch;
     state.sessionId = sessionId;
+    state.view = null;
     state.playIdx = 0;
     state.selectedSet.clear();
     state.anchor = null;
@@ -548,6 +569,7 @@ async function loadSession(sessionId) {
     cancelAnimationFrame(state.progressRaf);
     state.progressRaf = 0;
     state.thumbCache.clear();
+    for (const bmp of state.previewCache.values()) bmp.close();
     state.previewCache.clear();
     state.previewBytes = 0;
     state.pendingBatches.length = 0;
@@ -555,7 +577,9 @@ async function loadSession(sessionId) {
     state.liveThumbs.clear();
     els.stripScroll.scrollLeft = 0;
     state.frameShownAt = performance.now();
-    state.view = await invoke('gif_get_session', {sessionId});
+    const view = await invoke('gif_get_session', {sessionId});
+    if (epoch !== state.epoch) return;
+    state.view = view;
     state.durBySrc = effectiveDurMap(state.view);
     buildDurPrefix(state.view);
     const m = state.view.meta;
@@ -629,6 +653,7 @@ els.stopBannerClose?.addEventListener('click', () => {
 
 async function edit(command) {
     if (!state.sessionId) return;
+    const epoch = state.epoch;
     const srcAnchor = currentPlaySrc();
     let view;
     try {
@@ -638,6 +663,7 @@ async function edit(command) {
         showHint(`操作失败：${normalizeError(err).message}`);
         return;
     }
+    if (epoch !== state.epoch || view.revision < (state.view?.revision ?? 0)) return;
     state.view = view;
     state.durBySrc = effectiveDurMap(view);
     buildDurPrefix(view);
@@ -694,6 +720,24 @@ function progressLoop() {
     state.progressRaf = requestAnimationFrame(progressLoop);
 }
 
+/** 帧时长输入框回显：跟随选中集（播放/步进时选中集即播放头所在帧）。
+ *  单选显示该帧有效时长；多选留空（placeholder 提示批量）。
+ *  输入框聚焦时跳过写入——播放不因输入暂停，不能清掉用户正在输入的值。 */
+function syncDurInput() {
+    const view = state.view;
+    if (!view || !els.durInput) return;
+    if (document.activeElement === els.durInput) return;
+    const sel = [...state.selectedSet].filter(i => i < (view.frameCount ?? 0));
+    if (sel.length === 1) {
+        const f = (view.frames || []).find(x => x.srcIdx === sel[0]);
+        els.durInput.value = f ? String(f.durMs) : '';
+        els.durInput.placeholder = '—';
+    } else {
+        els.durInput.value = '';
+        els.durInput.placeholder = sel.length > 1 ? `${sel.length} 帧` : '选中帧后设置';
+    }
+}
+
 function renderControls() {
     const view = state.view;
     if (!view) return;
@@ -701,19 +745,9 @@ function renderControls() {
     els.redo.disabled = !view.canRedo;
     els.speed.value = String(view.speed);
     els.loop.value = view.loopCount == null ? '' : String(view.loopCount);
-    // 帧时长回显：单选显示该帧有效时长；多选留空（placeholder 提示批量）
-    const sel = [...state.selectedSet].filter(i => i < (view.frameCount ?? 0));
-    if (sel.length === 1) {
-        const f = (view.frames || []).find(x => x.srcIdx === sel[0]);
-        if (els.durInput) {
-            els.durInput.value = f ? String(f.durMs) : '';
-            els.durInput.placeholder = '—';
-        }
-    } else if (els.durInput) {
-        els.durInput.value = '';
-        els.durInput.placeholder = sel.length > 1 ? `${sel.length} 帧` : '选中帧后设置';
-    }
+    syncDurInput();
     // 删除按钮：选中集合里没有可删帧时禁用（已删帧右键恢复）
+    const sel = [...state.selectedSet].filter(i => i < (view.frameCount ?? 0));
     const deletedSet = new Set(view.deleted || []);
     const deletable = sel.some(i => !deletedSet.has(i));
     if (els.btnDelete) els.btnDelete.disabled = !deletable && sel.length > 0;
@@ -740,6 +774,7 @@ function stepFrame(dir) {
     }
     renderPreview();
     if (src != null) syncPlayhead(src);
+    syncDurInput();
 }
 
 document.addEventListener('keydown', ev => {

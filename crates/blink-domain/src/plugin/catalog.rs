@@ -199,10 +199,7 @@ fn validate_asset(asset: &CatalogAsset) -> Result<(), String> {
 
 /// 版本字符集（与 dataset.rs `valid_version_charset` 同一套：目录先行拒绝）。
 fn valid_version(v: &str) -> bool {
-    !v.is_empty()
-        && v.len() <= 64
-        && v.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+    super::contract::valid_package_version(v)
 }
 
 /// dataset_id 字符集（与 dataset.rs 安装期校验同一套：[a-z0-9-]）。

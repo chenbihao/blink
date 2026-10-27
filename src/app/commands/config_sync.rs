@@ -6,8 +6,8 @@
 //! `config_sync_service` 的互斥锁与 `SyncEngine` 状态机。
 
 use blink_domain::config_sync::{
-    engine::SyncRunContext, webdav::normalize_root_url, InitDirection, Resolution, SyncEngine,
-    SyncError, SyncPlan, SyncReport, SyncRunOutcome,
+    engine::SyncRunContext, webdav::normalize_root_url, InitDirection, Resolution,
+    ResetOverridesReport, SyncEngine, SyncError, SyncPlan, SyncReport, SyncRunOutcome,
 };
 use blink_domain::config::SyncSettingsConfig;
 use serde::Serialize;
@@ -18,16 +18,24 @@ use crate::app::command_error::CommandError;
 use crate::app::config_sync_service as service;
 
 fn sync_err(e: SyncError) -> CommandError {
+    // 集中落日志：同步命令失败此前只回传前端、控制台无痕，排障只能靠复现。
+    // NotConfigured 是用户输入未完成的预期状态（保存前测试），降为 debug。
+    if matches!(e, SyncError::NotConfigured) {
+        tracing::debug!(code = e.code(), "同步命令返回未配置（预期状态）");
+    } else {
+        tracing::warn!(code = e.code(), "配置同步命令失败: {}", e.message());
+    }
     CommandError::new(e.code(), e.message(), e.retryable())
 }
 
-/// 设置视图（密码只回掩码/有无）。
+/// 设置视图（密码只回有无 + 全掩码占位，不泄漏任何字符/长度）。
 #[derive(Debug, Clone, Serialize)]
 pub struct SyncSettingsView {
     pub url: String,
     pub username: String,
     pub has_password: bool,
-    /// 明文掩码（如 `a***f`），无密码为空。
+    /// 全掩码占位（`••••••••`）——WebDAV 密码与 API key 不同，不允许
+    /// 首尾字符泄漏；无密码为空。
     pub password_hint: String,
     pub is_http: bool,
     pub last_sync: Option<blink_domain::config::LastSyncRecord>,
@@ -56,7 +64,7 @@ pub async fn get_sync_settings(
         username: settings.username,
         has_password: password.is_some(),
         password_hint: password
-            .map(|p| blink_infra::platform::secret::format_hint(&p))
+            .map(|p| blink_infra::platform::secret::format_hint_strict(&p))
             .unwrap_or_default(),
         is_http,
         last_sync: settings.last_sync,
@@ -114,9 +122,26 @@ pub enum TestConnectionView {
 #[tauri::command]
 pub async fn test_sync_connection(
     app: tauri::AppHandle,
+    // 表单直测参数：提供非空 url+username 时用输入框当前值（密码空回退
+    // 已存密码），保存前即可测；缺省/为空回退已保存设置。
+    url: Option<String>,
+    username: Option<String>,
+    password: Option<String>,
 ) -> Result<TestConnectionView, CommandError> {
-    let pool = &app.state::<blink_infra::data::DbPools>().config;
-    let client = service::build_client(pool).await.map_err(sync_err)?;
+    let form_ready = url.as_deref().is_some_and(|u| !u.trim().is_empty())
+        && username.as_deref().is_some_and(|u| !u.trim().is_empty());
+    let client = if form_ready {
+        service::build_client_from(
+            url.as_deref().unwrap_or_default(),
+            username.as_deref().unwrap_or_default(),
+            password.as_deref(),
+        )
+        .await
+        .map_err(sync_err)?
+    } else {
+        let pool = &app.state::<blink_infra::data::DbPools>().config;
+        service::build_client(pool).await.map_err(sync_err)?
+    };
     let head = client.test_connection().await.map_err(sync_err)?;
     match head {
         Some(info) => Ok(TestConnectionView::Ok {
@@ -223,9 +248,9 @@ pub async fn sync_initialize(
 pub async fn reset_sync_overrides(
     app: tauri::AppHandle,
     window: tauri::WebviewWindow,
-) -> Result<u32, CommandError> {
+) -> Result<ResetOverridesReport, CommandError> {
     super::plugin_ui::reject_plugin_window(&window)?;
     let env = service::AppSyncEnv::new(&app);
-    SyncEngine::reset_overrides(&env).await.map_err(sync_err) .map(|c| c as u32)
+    SyncEngine::reset_overrides(&env).await.map_err(sync_err)
 }
 

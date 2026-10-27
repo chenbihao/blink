@@ -144,8 +144,10 @@ impl MergeResult {
     }
 
     /// 合并后跨字段引用校验：三档指派 → provider/model 存在性。
-    /// 断裂时提升为关联冲突（偏向提示用户选择保留本机或远端）。
-    pub fn validate_references(&mut self) {
+    /// 断裂时提升为关联冲突，候选取两侧该档位的原值（缺侧 = 删除语义），
+    /// 裁决可整侧选择——不能只给个 hint 让两种选择都退化成删档位。
+    /// hint 指明缺失的供应商/模型，提示用户连同上游 provider 冲突一起裁决。
+    pub fn validate_references(&mut self, local: &ItemMap, remote: &ItemMap) {
         let provider_ids: Vec<String> = self
             .merged
             .keys()
@@ -168,13 +170,20 @@ impl MergeResult {
                 .and_then(|m| m.as_array())
                 .is_some_and(|arr| arr.iter().any(|m| m.get("id").and_then(|x| x.as_str()) == Some(mid)));
             if !provider_ids.iter().any(|p| p == pid) || !model_ok {
+                let missing = if !provider_ids.iter().any(|p| p == pid) {
+                    format!("供应商 {pid} 不在合并结果中")
+                } else {
+                    format!("模型 {mid} 不在供应商 {pid} 的模型列表中")
+                };
                 broken.push(MergeConflict {
                     key: key.clone(),
                     kind: ConflictKind::Reference,
                     base: None,
-                    local: None,
-                    remote: None,
-                    hint: Some(format!("档位 {tier} 指向的供应商/模型不在合并结果中")),
+                    local: local.get(&key).cloned(),
+                    remote: remote.get(&key).cloned(),
+                    hint: Some(format!(
+                        "档位 {tier} 指向的{missing}；请连同相关供应商冲突一并选择保留一侧"
+                    )),
                 });
             }
         }
@@ -302,7 +311,7 @@ mod tests {
             local_taken: 0,
             remote_taken: 0,
         };
-        r.validate_references();
+        r.validate_references(&ItemMap::new(), &ItemMap::new());
         assert!(r
             .conflicts
             .iter()
@@ -318,8 +327,42 @@ mod tests {
             local_taken: 0,
             remote_taken: 0,
         };
-        r2.validate_references();
+        r2.validate_references(&ItemMap::new(), &ItemMap::new());
         assert!(r2.conflicts.is_empty());
+    }
+
+    #[test]
+    fn reference_conflict_carries_both_sides_and_resolves_by_choice() {
+        // 场景：远端删除了 provider p1，本机 tier_main 仍指向 p1；
+        // 用户对 provider 冲突选了远端（删除）→ 档位断裂提升为关联冲突。
+        // 候选必须是两侧档位原值，裁决选侧才有意义（不退化成删档位）。
+        let local_tier = json!({"provider_id": "p1", "model_id": "m1"});
+        let remote_tier = json!({"provider_id": "p2", "model_id": "m2"});
+        let mut r = MergeResult {
+            merged: map(vec![
+                ("app.ai#providers/p2", json!({"id": "p2", "kind": "openai_compatible", "models": [{"id": "m2"}]})),
+                ("app.ai#tier_main", local_tier.clone()),
+            ]),
+            conflicts: vec![],
+            local_taken: 0,
+            remote_taken: 0,
+        };
+        let local = map(vec![("app.ai#tier_main", local_tier.clone())]);
+        let remote = map(vec![("app.ai#tier_main", remote_tier.clone())]);
+        r.validate_references(&local, &remote);
+        let conflict = r.conflicts.iter().find(|c| c.kind == ConflictKind::Reference).unwrap();
+        assert_eq!(conflict.local, Some(local_tier));
+        assert_eq!(conflict.remote, Some(remote_tier.clone()));
+
+        // 选远端 → merged 取远端档位（指向仍存在的 p2），不再是删除。
+        r.apply_resolutions(&[Resolution {
+            key: "app.ai#tier_main".into(),
+            choice: ResolutionChoice::Remote,
+        }]);
+        assert_eq!(r.merged.get("app.ai#tier_main"), Some(&remote_tier));
+        // 恢复合法引用后复验不再报冲突。
+        r.validate_references(&local, &remote);
+        assert!(r.conflicts.iter().all(|c| c.kind != ConflictKind::Reference));
     }
 
     #[test]

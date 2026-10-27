@@ -54,6 +54,7 @@ pub struct PluginRuntimePublisher {
     engine: Arc<PluginEngine>,
     cap_registry: Arc<CapabilityRegistry>,
     router: Arc<RuleRouter>,
+    publish_lock: tokio::sync::Mutex<()>,
 }
 
 impl PluginRuntimePublisher {
@@ -66,6 +67,7 @@ impl PluginRuntimePublisher {
             engine,
             cap_registry,
             router,
+            publish_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -74,6 +76,7 @@ impl PluginRuntimePublisher {
     /// 调用方给出**最终想要的全部插件**（builtin + 有效安装，含未变更项）；
     /// 发布器与当前快照 diff，只动变化的 owner/路由。
     pub async fn publish(&self, target: Vec<Arc<PluginHandle>>) -> Result<PublishReport, PublishError> {
+        let _guard = self.publish_lock.lock().await;
         // 1. 契约集合校验：目标集合内部 + 对既有非插件 capability 与已占用关键词
         let contracts: Vec<PluginContract> = target
             .iter()
@@ -95,6 +98,11 @@ impl PluginRuntimePublisher {
         contract::validate_contract_set(&contracts, &existing_tools, &HashMap::new())?;
 
         let current = self.engine.plugin_set();
+
+        // 新插件的默认启用态必须先就绪，能力与路由使用同一配置快照。
+        for handle in &target {
+            self.engine.ensure_config_for(handle).await;
+        }
 
         // 2. 能力出口：撤销被移除/被替换插件的 owner 条目，注册新 tool。
         //    句柄 Arc 同一（未变更插件）则跳过——避免无谓的能力空窗，
@@ -123,13 +131,17 @@ impl PluginRuntimePublisher {
         let mut registered_tools = 0usize;
         for handle in &target {
             let manifest = handle.manifest();
-            if manifest.tools.is_empty() {
+            if !self.engine.is_enabled(handle.id()) || manifest.tools.is_empty() {
                 continue;
             }
             let owner = owner_for(&manifest.id);
-            let mut ids: Vec<String> = Vec::new();
+            let registered = self.cap_registry.ids_owned_by(&owner);
             for tool_def in &manifest.tools {
                 let id = super::plugin_tool_id(handle.id(), &tool_def.name);
+                // 未变化句柄保留原 adapter；重新启用时已撤销的条目仍需补注册。
+                if registered.contains(&id) {
+                    continue;
+                }
                 let adapter = PluginCapabilityAdapter::new(handle.clone(), tool_def);
                 if self
                     .cap_registry
@@ -140,7 +152,6 @@ impl PluginRuntimePublisher {
                     let _ = self.cap_registry.revoke_owner(&owner);
                     return Err(PublishError::CapabilityIdTaken { id });
                 }
-                ids.push(id);
                 registered_tools += 1;
             }
         }
@@ -161,12 +172,6 @@ impl PluginRuntimePublisher {
             let config = self.engine.get_config(id).unwrap_or_default();
             let effective = config.effective_triggers(&handle.manifest().triggers);
             self.router.reload_plugin_triggers(id, &effective);
-        }
-        // 新插件补默认配置（发布前 configs 可能没有它的记录）
-        for handle in &target {
-            if self.engine.get_config(handle.id()).is_none() {
-                self.engine.ensure_config_for(handle).await;
-            }
         }
 
         // 5. 旧句柄有界排空：reset（杀进程）使在途调用立即以"进程退出"失败
@@ -201,9 +206,12 @@ impl PluginRuntimePublisher {
     pub async fn sync_enabled(&self, plugin_id: &str, enabled: bool) -> Vec<String> {
         if enabled {
             let set = self.engine.plugin_set();
-            let _ = self.publish(set.plugins.clone()).await;
+            if let Err(error) = self.publish(set.plugins.clone()).await {
+                tracing::error!(plugin = %plugin_id, %error, "启用插件时发布能力失败");
+            }
             return Vec::new();
         }
+        let _guard = self.publish_lock.lock().await;
         let revoked = self.cap_registry.revoke_owner(&owner_for(plugin_id));
         self.router.remove_plugin_rules(plugin_id);
         tracing::info!(plugin = %plugin_id, revoked = revoked.len(), "插件已禁用：能力出口与路由已撤销");
@@ -212,6 +220,7 @@ impl PluginRuntimePublisher {
 
     /// 撤销单个插件（禁用联动用；卸载/更新走 `publish` 全量目标态）。
     pub async fn revoke_plugin(&self, plugin_id: &str) -> PublishReport {
+        let _guard = self.publish_lock.lock().await;
         let revoked = self.cap_registry.revoke_owner(&owner_for(plugin_id));
         self.router.remove_plugin_rules(plugin_id);
         self.router.set_plugin_args_hints(plugin_id, Vec::new());
@@ -338,6 +347,38 @@ mod tests {
 
         publisher.publish(vec![]).await.unwrap();
         assert!(!engine.is_active_handle("extra.demo", &old_handle));
+    }
+
+    #[tokio::test]
+    async fn unchanged_plugins_keep_adapters_when_publishing_another_plugin() {
+        let (engine, publisher) = wiring().await;
+        let initial_count = publisher.cap_registry.len();
+        let first = handle("extra.first", &["run"], &[]);
+        publisher.publish(vec![first.clone()]).await.unwrap();
+        let adapter = publisher.cap_registry.get("extra_first_run").unwrap();
+        let report = publisher
+            .publish(vec![first.clone(), handle("extra.second", &["run"], &[])])
+            .await
+            .unwrap();
+        assert_eq!(report.registered_tools, 1);
+        assert!(report.revoked_tool_ids.is_empty());
+        assert!(Arc::ptr_eq(&adapter, &publisher.cap_registry.get("extra_first_run").unwrap()));
+        assert!(engine.is_active_handle("extra.first", &first));
+        let report = publisher.publish(engine.all_plugins()).await.unwrap();
+        assert_eq!(report.registered_tools, 0);
+        assert_eq!(publisher.cap_registry.len(), initial_count + 2);
+    }
+
+    #[tokio::test]
+    async fn default_disabled_plugin_does_not_publish_tools() {
+        let (engine, publisher) = wiring().await;
+        let mut manifest = handle("extra.disabled", &["run"], &["disabled"]).manifest().clone();
+        manifest.default_enabled = false;
+        let disabled = Arc::new(PluginHandle::new(Arc::new(manifest), std::env::temp_dir(), None));
+        let report = publisher.publish(vec![disabled]).await.unwrap();
+        assert_eq!(report.registered_tools, 0);
+        assert!(!engine.is_enabled("extra.disabled"));
+        assert!(publisher.cap_registry.get("extra_disabled_run").is_none());
     }
 
     #[tokio::test]

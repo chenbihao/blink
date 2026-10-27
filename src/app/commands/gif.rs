@@ -50,8 +50,7 @@ fn ensure_timeline(service: &Arc<GifService>, reader: &SpoolReader, session_id: 
     timelines
         .entry(session_id.to_string())
         .or_insert_with(|| {
-            let durs =
-                infra_gif::finalize_durations(&reader.timestamps(), reader.meta.fps);
+            let durs = reader.durations();
             blink_domain::gif::Timeline::from_durations(durs)
         });
 }
@@ -261,7 +260,7 @@ pub struct GifFramePng {
 /// 按需解码帧（缩略图/预览）：BGRA → 等比缩放（max_w）→ PNG base64。
 /// 单次上限 24 帧（分页加载；原始帧不整段驻前端内存）。
 #[tauri::command]
-pub fn gif_get_frames(
+pub async fn gif_get_frames(
     app: AppHandle,
     session_id: String,
     indices: Vec<u32>,
@@ -274,30 +273,36 @@ pub fn gif_get_frames(
             false,
         ));
     }
-    let (reader, _service) = with_session(&app, &session_id)?;
-    let (sw, sh) = (reader.meta.region.w, reader.meta.region.h);
-    let max_w = max_w.unwrap_or(240).clamp(80, 4096);
-    let scale = if sw > max_w { max_w as f64 / sw as f64 } else { 1.0 };
-    let (dw, dh) = (
-        ((sw as f64 * scale).round() as u32).max(1),
-        ((sh as f64 * scale).round() as u32).max(1),
-    );
-    let mut out = Vec::with_capacity(indices.len());
-    for idx in indices {
-        let bgra = reader.read_frame(idx).map_err(|e| {
-            CommandError::new("gif_frame", e.to_string(), false)
-        })?;
-        let rgba = infra_gif::encode::resize_bgra(&bgra, sw, sh, dw, dh);
-        let png = blink_infra::platform::screenshot::encode_png(&rgba, dw, dh)
-            .map_err(|e| CommandError::new("gif_png", e, false))?;
-        out.push(GifFramePng {
-            index: idx,
-            width: dw,
-            height: dh,
-            png_base64: base64::engine::general_purpose::STANDARD.encode(png),
-        });
-    }
-    Ok(out)
+    tauri::async_runtime::spawn_blocking(move || {
+        let (reader, _service) = with_session(&app, &session_id)?;
+        let (sw, sh) = (reader.meta.region.w, reader.meta.region.h);
+        let max_w = max_w.unwrap_or(240).clamp(80, 4096);
+        let scale = if sw > max_w { max_w as f64 / sw as f64 } else { 1.0 };
+        let (dw, dh) = (
+            ((sw as f64 * scale).round() as u32).max(1),
+            ((sh as f64 * scale).round() as u32).max(1),
+        );
+        let mut out = Vec::with_capacity(indices.len());
+        for idx in indices {
+            let bgra = reader.read_frame(idx).map_err(|e| {
+                CommandError::new("gif_frame", e.to_string(), false)
+            })?;
+            // resize_bgra 输出已是 RGBA；screenshot::encode_png 契约是 BGRA 输入
+            // （内部再 R↔B swap），此处必须用无交换的 encode_png_rgba
+            let rgba = infra_gif::encode::resize_bgra(&bgra, sw, sh, dw, dh);
+            let png = infra_gif::encode::encode_png_rgba(&rgba, dw, dh)
+                .map_err(|e| CommandError::new("gif_png", e, false))?;
+            out.push(GifFramePng {
+                index: idx,
+                width: dw,
+                height: dh,
+                png_base64: base64::engine::general_purpose::STANDARD.encode(png),
+            });
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| CommandError::new("gif_frame", format!("帧解码任务失败: {e}"), true))?
 }
 
 /// 应用编辑命令（trim/delete/speed/hold/loop/reset + undo/redo 栈操作）。
@@ -370,11 +375,13 @@ pub async fn gif_export(
         overwrite: overwrite.unwrap_or(false),
     };
     let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    service
-        .exports
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(session_id.clone(), Arc::clone(&cancel));
+    {
+        let mut exports = service.exports.lock().unwrap_or_else(|e| e.into_inner());
+        if exports.contains_key(&session_id) {
+            return Err(CommandError::new("gif_export_busy", "该会话正在导出，请等待完成或取消", true));
+        }
+        exports.insert(session_id.clone(), Arc::clone(&cancel));
+    }
     // reader 跨线程：SpoolReader 只含路径与索引（Send）
     let app2 = app.clone();
     let sid = session_id.clone();

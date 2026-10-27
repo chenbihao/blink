@@ -25,7 +25,7 @@ use base64::Engine;
 use http::Method;
 use serde::{Deserialize, Serialize};
 
-use super::engine::{is_precondition_failed, SyncStore, PRECONDITION_FAILED};
+use super::engine::{SyncStore, PRECONDITION_FAILED};
 use super::model::{HeadInfo, SyncHead};
 use super::SyncError;
 
@@ -58,30 +58,28 @@ pub fn normalize_root_url(input: &str) -> Result<String, SyncError> {
     } else {
         format!("https://{trimmed}")
     };
-    let Some((scheme, rest)) = with_scheme.split_once("://") else {
-        return Err(SyncError::NotConfigured);
-    };
-    if scheme != "http" && scheme != "https" {
+    let mut url = reqwest::Url::parse(&with_scheme).map_err(|_| SyncError::NotConfigured)?;
+    if !matches!(url.scheme(), "http" | "https") {
         return Err(SyncError::Network {
-            message: format!("不支持的协议 {scheme}://，请使用 https:// 地址"),
+            message: "请使用 http:// 或 https:// 地址".into(),
         });
     }
-    if !rest.contains('.') {
+    if url.host_str().is_none() || !url.username().is_empty() || url.password().is_some()
+        || url.query().is_some() || url.fragment().is_some()
+    {
         return Err(SyncError::NotConfigured);
     }
-    let path_trimmed = rest.trim_end_matches('/');
+    let path_trimmed = url.path().trim_end_matches('/');
     let already_blink = path_trimmed
         .rsplit('/')
         .next()
         .is_some_and(|last| last.eq_ignore_ascii_case("blink"));
-    let mut root = format!("{scheme}://{path_trimmed}/");
+    let mut path = format!("{path_trimmed}/");
     if !already_blink {
-        root.push_str("blink/");
+        path.push_str("blink/");
     }
-    if reqwest::Url::parse(&root).is_err() {
-        return Err(SyncError::NotConfigured);
-    }
-    Ok(root)
+    url.set_path(&path);
+    Ok(url.to_string())
 }
 
 /// WebDAV 客户端。布局：`<root>`（= blink/）下 `head.json` + `snapshots/`。
@@ -105,10 +103,13 @@ impl WebDavClient {
             .host_str()
             .ok_or(SyncError::NotConfigured)?
             .to_string();
+        let port = url.port_or_known_default();
         // 同 host HTTPS 才跟随重定向；非预期跨域重定向不转发认证（stop）。
         let redirect = reqwest::redirect::Policy::custom(move |attempt| {
             if attempt.url().scheme() == "https"
                 && attempt.url().host_str() == Some(host.as_str())
+                && attempt.url().port_or_known_default() == port
+                && attempt.previous().len() < 5
             {
                 attempt.follow()
             } else {
@@ -254,9 +255,12 @@ impl SyncStore for WebDavClient {
                 Method::PUT,
                 self.url(&format!("snapshots/{name}")),
                 Some(bytes.to_vec()),
-                vec![("Content-Type", "application/json".into())],
+                vec![("Content-Type", "application/json".into()), ("If-None-Match", "*".into())],
             )
             .await?;
+        if resp.status().as_u16() == 412 && self.read_snapshot(name).await? == bytes {
+            return Ok(());
+        }
         if !resp.status().is_success() {
             return Err(map_status(resp.status(), "上传快照"));
         }
@@ -317,7 +321,11 @@ fn validate_snapshot_name(name: &str) -> Result<(), SyncError> {
         && !name.contains('/')
         && name
             .strip_suffix(".json")
-            .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()));
+            .is_some_and(|stem| {
+                let (digits, digest) = stem.split_once('-').map_or((stem, None), |(r, d)| (r, Some(d)));
+                !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+                    && digest.is_none_or(|d| d.len() == 64 && d.bytes().all(|b| b.is_ascii_hexdigit()))
+            });
     if valid {
         Ok(())
     } else {
@@ -351,6 +359,7 @@ fn map_status(status: reqwest::StatusCode, what: &str) -> SyncError {
 }
 
 fn map_reqwest_err(e: reqwest::Error) -> SyncError {
+    let e = e.without_url();
     if e.is_timeout() {
         SyncError::Network {
             message: "连接超时".into(),
@@ -366,19 +375,23 @@ fn map_reqwest_err(e: reqwest::Error) -> SyncError {
     }
 }
 
-async fn read_bounded(resp: reqwest::Response) -> Result<Vec<u8>, SyncError> {
-    let bytes = resp.bytes().await.map_err(map_reqwest_err)?;
-    if bytes.len() > MAX_BODY_BYTES {
-        return Err(SyncError::CorruptRemote {
-            message: format!("响应体超过 {} 上限", MAX_BODY_BYTES),
-        });
+async fn read_bounded(mut resp: reqwest::Response) -> Result<Vec<u8>, SyncError> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(map_reqwest_err)? {
+        if bytes.len().saturating_add(chunk.len()) > MAX_BODY_BYTES {
+            return Err(SyncError::CorruptRemote {
+                message: format!("响应体超过 {} 上限", MAX_BODY_BYTES),
+            });
+        }
+        bytes.extend_from_slice(&chunk);
     }
-    Ok(bytes.to_vec())
+    Ok(bytes)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::engine::is_precondition_failed;
 
     #[test]
     fn normalize_appends_blink_once() {
@@ -411,6 +424,9 @@ mod tests {
         );
         assert!(normalize_root_url("").is_err());
         assert!(normalize_root_url("not a url").is_err());
+        assert_eq!(normalize_root_url("http://localhost:8080/dav").unwrap(), "http://localhost:8080/dav/blink/");
+        assert!(normalize_root_url("https://dav.example.com/dav?token=secret").is_err());
+        assert!(normalize_root_url("https://u:p@dav.example.com/dav").is_err());
         assert!(matches!(
             normalize_root_url("ftp://dav.example.com"),
             Err(SyncError::Network { .. })
@@ -433,6 +449,8 @@ mod tests {
         assert!(validate_snapshot_name("3.txt").is_err());
         assert!(validate_snapshot_name("../head.json").is_err());
         assert!(validate_snapshot_name(".json").is_err());
+        assert!(validate_snapshot_name(&format!("3-{}.json", "a".repeat(64))).is_ok());
+        assert!(validate_snapshot_name("3-invalid.json").is_err());
     }
 
     /// 极简 HTTP 桩：单连接单请求，返回预置响应字节。

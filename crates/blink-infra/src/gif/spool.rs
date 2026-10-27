@@ -194,6 +194,14 @@ impl SpoolWriter {
     }
 
     /// 停止定稿：flush、写时长表（时间戳 + 末帧时长）、state=stopped。
+    pub fn finalize_at(mut self, stop_reason: &str, elapsed_ms: u64) -> Result<SessionMeta, SpoolError> {
+        if let Some(last_ts) = self.ts.last() {
+            self.meta.last_dur_ms = elapsed_ms.saturating_sub(*last_ts).clamp(1, u32::MAX as u64) as u32;
+        }
+        self.finalize(stop_reason)
+    }
+
+    /// 无完整停止时钟的调用方保留元数据中的末帧兜底时长。
     pub fn finalize(mut self, stop_reason: &str) -> Result<SessionMeta, SpoolError> {
         self.bin.flush()?;
         self.idx.flush()?;
@@ -219,14 +227,8 @@ fn session_dir(root: &Path, id: &str) -> PathBuf {
 }
 
 fn write_session_json(dir: &Path, meta: &SessionMeta) -> Result<(), SpoolError> {
-    let tmp = dir.join("session.json.tmp");
     let final_path = dir.join("session.json");
-    fs::write(&tmp, serde_json::to_vec_pretty(meta)?)?;
-    // 原子提交：tmp → final rename（Windows 上目标存在时先移除）。
-    if final_path.exists() {
-        fs::remove_file(&final_path)?;
-    }
-    fs::rename(&tmp, &final_path)?;
+    crate::utils::fs::atomic_write_bytes(&final_path, &serde_json::to_vec_pretty(meta)?)?;
     Ok(())
 }
 
@@ -287,6 +289,14 @@ impl SpoolReader {
             return self.meta.ts_ms.clone();
         }
         self.index.iter().map(|e| e.t).collect()
+    }
+
+    pub fn durations(&self) -> Vec<u32> {
+        let mut durations = super::overload::finalize_durations(&self.timestamps(), self.meta.fps);
+        if let Some(last) = durations.last_mut() {
+            *last = self.meta.last_dur_ms.max(1);
+        }
+        durations
     }
 
     /// 按需解码单帧（随机访问；校验长度）。

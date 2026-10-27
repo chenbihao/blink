@@ -19,7 +19,7 @@ mod managed_runtime;
 mod mcp;
 mod plugin;
 mod plugin_center;
-mod plugin_ui;
+pub(crate) mod plugin_ui;
 mod prompt_library;
 mod script_interpreter;
 mod search;

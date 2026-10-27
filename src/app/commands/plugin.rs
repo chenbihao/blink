@@ -65,12 +65,14 @@ pub(crate) fn reject_production_local_install() -> Result<(), CommandError> {
 }
 
 /// 安装提交后的运行时发布编排（本地包与插件中心两条安装命令共用，0.28.5 提取）：
-/// 构造新句柄 → 发布目标集合（同 id 替换 = 更新）→ 撤销旧 tool 待确认 →
-/// 关闭旧代次窗口（0.28.2：旧代次窗口不继承新实现）。
+/// 构造新句柄 → 发布目标集合（同 id 替换 = 更新）→ 成功则收尾清旧版本目录与
+/// 隔离弃置区（finalize_publish）→ 失败则自动回滚到旧版本（rollback_publish；
+/// 首装无可回滚时保持"重启后生效"）→ 撤销旧 tool 待确认 → 关闭旧代次窗口。
 pub(crate) async fn publish_installed_plugin(
     app: &tauri::AppHandle,
-    record: &blink_infra::plugin_storage::InstallRecord,
+    outcome: &crate::domain::plugin::InstallOutcome,
 ) -> Result<(), CommandError> {
+    let record = &outcome.record;
     let installer = app
         .state::<std::sync::Arc<crate::domain::plugin::PluginInstaller>>()
         .inner()
@@ -89,13 +91,52 @@ pub(crate) async fn publish_installed_plugin(
     let mut target = engine.all_plugins();
     target.retain(|h| h.id() != record.plugin_id);
     target.push(new_handle);
-    let report = publisher.publish(target).await.map_err(|e| {
-        CommandError::new(
-            "publish_failed",
-            format!("安装已提交但发布失败（重启后生效）: {e}"),
-            true,
-        )
-    })?;
+    let report = match publisher.publish(target).await {
+        Ok(report) => report,
+        Err(e) => {
+            // 发布失败 → 回滚安装：旧版本记录与目录恢复（IO 挪 blocking 线程）。
+            let installer_io = installer.clone();
+            let outcome_owned = outcome.clone();
+            let reason = e.to_string();
+            let rolled_back = tauri::async_runtime::spawn_blocking(move || {
+                installer_io.rollback_publish(&outcome_owned, &reason)
+            })
+            .await
+            .map_err(|e| CommandError::new("internal", format!("回滚任务失败: {e}"), true))?
+            .map_err(|e| {
+                CommandError::new(
+                    "rollback_failed",
+                    format!("发布失败且回滚失败（请重启后检查插件状态）: {e}"),
+                    true,
+                )
+            })?;
+            return match rolled_back {
+                Some(old) => Err(CommandError::new(
+                    "publish_failed",
+                    format!(
+                        "发布失败，已回滚到旧版本 {}（重启后如仍异常请重装）: {e}",
+                        old.version
+                    ),
+                    true,
+                )),
+                None => Err(CommandError::new(
+                    "publish_failed",
+                    format!("安装已提交但发布失败（重启后生效）: {e}"),
+                    true,
+                )),
+            };
+        }
+    };
+    // 发布成功 → 收尾：清旧版本目录与隔离弃置区（IO 挪 blocking 线程；
+    // 失败只留孤儿/待清理债务，不影响已发布状态）。
+    {
+        let installer_io = installer.clone();
+        let outcome_owned = outcome.clone();
+        let _ = tauri::async_runtime::spawn_blocking(move || {
+            installer_io.finalize_publish(&outcome_owned)
+        })
+        .await;
+    }
     // 旧代次 tool 的待确认/会话信任一并失效
     if let Some(pc) = app.try_state::<std::sync::Arc<crate::domain::ai::tool_adapter::PendingConfirms>>() {
         pc.cancel_for_tools(&report.revoked_tool_ids).await;
@@ -139,7 +180,7 @@ pub async fn install_plugin_package(
     // 归档 IO 隔离到 blocking 线程（spec-backend §一）
     let installer_for_io = installer.clone();
     let src_for_io = src.clone();
-    let record = tauri::async_runtime::spawn_blocking(move || {
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
         if src_for_io.is_dir() {
             installer_for_io.install_dir(&src_for_io)
         } else {
@@ -152,8 +193,8 @@ pub async fn install_plugin_package(
         CommandError::new("install_failed", format!("插件安装失败: {e}"), false)
     })?;
 
-    publish_installed_plugin(&app, &record).await?;
-    Ok(record)
+    publish_installed_plugin(&app, &outcome).await?;
+    Ok(outcome.record)
 }
 
 /// 卸载插件（0.28.1）。`keep_data=true` 保留用户数据目录。

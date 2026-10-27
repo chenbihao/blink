@@ -47,6 +47,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force target | Out-Null
           Invoke-WebRequest -Uri 'https://github.com/skywind3000/ECDICT/releases/download/1.0.28/ecdict_csv.7z' -OutFile target/ecdict_csv.7z
           7z x target/ecdict_csv.7z -otarget\ecdict -y
           $csv = Get-ChildItem target\ecdict -Recurse -Filter ecdict.csv | Select-Object -First 1
@@ -75,6 +76,7 @@ jobs:
             > 哈希核验：目录条目内含每个资产的 sha256/bytes；应用端安装时逐项校验。
           draft: false
           prerelease: false
+          make_latest: false
           overwrite_files: true
           files: |
             target/plugin-dist/blink-plugins-catalog.json

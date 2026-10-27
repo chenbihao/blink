@@ -18,20 +18,23 @@
 //!
 //! - 外观/交互/搜索偏好：appearance{theme,language,window_opacity}、app.search 全部、
 //!   app.suggestion 全部、app.disable 三个列表。
-//! - 快捷键与入口：app.hotkey 全部、app.chord（开关 + bindings.* 六键）。
+//! - 快捷键与入口：app.hotkey 全部、app.chord 两个开关 + bindings.* 六键。
 //! - 插件：全部 `plugin:{id}` 分片的 enabled/settings/custom_triggers/
 //!   disabled_default_triggers（revision 留本机做并发控制；settings 中的密钥在
 //!   SQLite 本就只存空串占位，秘密实体在 CM，天然不漫游）。插件分片**删除不传播**
 //!   ——卸载是本机安装状态，另一台保留设置为待应用（phase「未装插件先保留」）。
-//! - AI 与用户配置资产：app.ai 标量 + chat_config.* + providers 按条目（**剔除
-//!   secret_ref**——CM 引用不漫游，应用时保留本机已有引用，不清空本机密钥）；
-//!   提示词库表按行（内置行 content 随版本提供不漫游，仅同步 name/覆盖正文/
-//!   排序/隐藏）。
+//! - AI 与用户配置资产：app.ai 标量白名单（enabled/min_query_len/三档/
+//!   slo_hard_timeout_ms/ai_tool_result_feedback）+ chat_config.* + providers
+//!   按条目（**剔除 secret_ref**——CM 引用不漫游，应用时保留本机已有引用，
+//!   不清空本机密钥）；提示词库表按行（内置行 content 随版本提供不漫游，
+//!   仅同步 name/覆盖正文/排序/隐藏）。legacy 兼容字段与其他新增字段留本机。
 //! - 超链/自定义搜索：app.weblinks 按条目 id + 顺序；app.bookmarks 整分片。
 //!
 //! 留本机：auto_start/log_level/ai_http_body_log/onboarding_version、network、
 //! stt:config、app.update、app.ai_permission、ai.capability_access、
 //! screenshot:config、context:config、engine:*、clipboard:config、历史/剪贴板内容。
+//! hotkey/search/suggestion/disable/bookmarks 规格明确「整分片」逐字段；chord 与
+//! app.ai 走字段白名单——新增字段不进白名单即不漫游，防止未来本机字段静默进快照。
 //!
 //! ## 应用路由
 //!
@@ -123,6 +126,23 @@ const FIXED_SHARDS: &[&str] = &[
 /// onboarding_version 留本机）。
 const APPEARANCE_PORTABLE: &[&str] = &["theme", "language", "window_opacity"];
 
+/// app.chord 可漫游字段：两个开关 + bindings.*（规格 §3.5「开关 + 六键」；
+/// 未来新增的 chord 字段默认留本机，进快照前须显式加白）。
+const CHORD_PORTABLE: &[&str] = &["chord_enabled", "chord_hint_visible"];
+
+/// app.ai 标量字段白名单（providers/chat_config 由条目/子键路径单独处理；
+/// legacy 兼容字段 direct_execute_safe_actions/streaming 运行时不消费、
+/// 不漫游；未来新增标量默认留本机，进快照前须显式加白）。
+const AI_SCALAR_PORTABLE: &[&str] = &[
+    "enabled",
+    "min_query_len",
+    "tier_ultra_light",
+    "tier_light",
+    "tier_main",
+    "slo_hard_timeout_ms",
+    "ai_tool_result_feedback",
+];
+
 /// 需要进入合并前「集合语义归一」（排序去重）的 item key 后缀。
 fn is_set_item(key: &str) -> bool {
     key == "app.disable#disabled_builtin_actions"
@@ -159,7 +179,15 @@ pub(crate) fn normalize_item(key: &str, value: &Value) -> Value {
 /// 读取本机原始投影：固定分片 raw JSON（缺失按类型默认值）、全部 plugin:{id}
 /// 分片、提示词库全表。损坏分片（JSON 解析失败）报错不静默默认——
 /// 「损坏配置不被默认成空配置上传」。
-pub async fn read_raw_local(pool: &sqlx::SqlitePool) -> Result<RawLocal, SyncError> {
+///
+/// 双池：config KV 走 `pool`；提示词库表在 **AI 库**（`prompt_pool`，
+/// 0.27.5 建表于 `init_ai_schema`）。表缺失（如库文件被外部重建）时幂等
+/// 补建后重读一次——schema 缺失不阻断同步；其余 DB 错误仍报错，避免把
+/// 读失败的库静默当成空视角（会被三方合并误判为本机批量删除）。
+pub async fn read_raw_local(
+    pool: &sqlx::SqlitePool,
+    prompt_pool: &sqlx::SqlitePool,
+) -> Result<RawLocal, SyncError> {
     let mut raw = RawLocal::default();
     let all = blink_infra::data::history::get_all_config(pool).await;
     for &kv in FIXED_SHARDS {
@@ -178,15 +206,38 @@ pub async fn read_raw_local(pool: &sqlx::SqlitePool) -> Result<RawLocal, SyncErr
         }
     }
     // 提示词库行投影。
-    for row in blink_infra::data::prompt_library::list(pool, None)
-        .await
-        .map_err(|e| SyncError::Io {
-            message: format!("读取提示词库失败: {e}"),
-        })?
-    {
+    for row in list_prompts(prompt_pool).await? {
         raw.prompts.insert(row.id.clone(), prompt_row_item(&row));
     }
     Ok(raw)
+}
+
+/// 读提示词库全表；`no such table` → 幂等建表后重读一次。
+async fn list_prompts(
+    prompt_pool: &sqlx::SqlitePool,
+) -> Result<Vec<blink_infra::data::prompt_library::PromptLibraryRow>, SyncError> {
+    use blink_infra::data::prompt_library::{PromptStoreError, init_db, list};
+    match list(prompt_pool, None).await {
+        Ok(rows) => Ok(rows),
+        Err(e) => {
+            let no_such_table =
+                matches!(&e, PromptStoreError::Db(msg) if msg.contains("no such table"));
+            if no_such_table {
+                tracing::warn!("提示词库表缺失，同步读取前幂等补建");
+                init_db(prompt_pool)
+                    .await
+                    .map_err(|e| SyncError::Io {
+                        message: format!("初始化提示词库表失败: {e}"),
+                    })?;
+                list(prompt_pool, None).await
+            } else {
+                Err(e)
+            }
+        }
+    }
+    .map_err(|e| SyncError::Io {
+        message: format!("读取提示词库失败: {e}"),
+    })
 }
 
 fn parse_shard(kv: &str, raw: &str) -> Result<Value, SyncError> {
@@ -254,15 +305,12 @@ pub fn items_from_raw(raw: &RawLocal) -> Result<ItemMap, SyncError> {
                 }
             }
             "app.chord" => {
-                for (field, fv) in obj {
-                    if field == "bindings" {
-                        if let Some(bindings) = fv.as_object() {
-                            for (sub, sv) in bindings {
-                                items.insert(format!("{kv}#bindings.{sub}"), sv.clone());
-                            }
-                        }
-                    } else {
-                        items.insert(format!("{kv}#{field}"), fv.clone());
+                for field in CHORD_PORTABLE {
+                    copy_field(&mut items, kv, obj, field);
+                }
+                if let Some(bindings) = obj.get("bindings").and_then(|v| v.as_object()) {
+                    for (sub, sv) in bindings {
+                        items.insert(format!("{kv}#bindings.{sub}"), sv.clone());
                     }
                 }
             }
@@ -271,21 +319,13 @@ pub fn items_from_raw(raw: &RawLocal) -> Result<ItemMap, SyncError> {
                 // seeded 是迁移标记，留本机。
             }
             "app.ai" => {
-                for (field, fv) in obj {
-                    match field.as_str() {
-                        "providers" => {
-                            copy_entries(&mut items, kv, "providers", obj.get("providers"));
-                        }
-                        "chat_config" => {
-                            if let Some(chat) = fv.as_object() {
-                                for (sub, sv) in chat {
-                                    items.insert(format!("{kv}#chat_config.{sub}"), sv.clone());
-                                }
-                            }
-                        }
-                        _ => {
-                            items.insert(format!("{kv}#{field}"), fv.clone());
-                        }
+                for field in AI_SCALAR_PORTABLE {
+                    copy_field(&mut items, kv, obj, field);
+                }
+                copy_entries(&mut items, kv, "providers", obj.get("providers"));
+                if let Some(chat) = obj.get("chat_config").and_then(|v| v.as_object()) {
+                    for (sub, sv) in chat {
+                        items.insert(format!("{kv}#chat_config.{sub}"), sv.clone());
                     }
                 }
             }
@@ -352,9 +392,12 @@ fn strip_provider_secret_ref(value: Value) -> Value {
     value
 }
 
-/// 提取本机 item map（池读取 + 投影）。
-pub async fn extract_local_items(pool: &sqlx::SqlitePool) -> Result<ItemMap, SyncError> {
-    let raw = read_raw_local(pool).await?;
+/// 提取本机 item map（池读取 + 投影；双池语义同 [`read_raw_local`]）。
+pub async fn extract_local_items(
+    pool: &sqlx::SqlitePool,
+    prompt_pool: &sqlx::SqlitePool,
+) -> Result<ItemMap, SyncError> {
+    let raw = read_raw_local(pool, prompt_pool).await?;
     items_from_raw(&raw)
 }
 
@@ -430,9 +473,11 @@ pub fn build_apply_ops(
             ),
             "app.ai" => build_ai_op(merged, raw, items, &mut ops),
             other => {
-                return Err(SyncError::Unknown {
-                    message: format!("未知分片 {other} 进入应用合成"),
-                })
+                // 未知命名空间（同 format_version 内新版客户端新增的整分片）：
+                // 保留在 merged 中随快照转发，不在本机应用（PreservedUnknown
+                // 摘要已覆盖）。此处到达的一定是未知分片——9 个固定分片与
+                // plugin:*/prompt_library 均已在上方匹配。
+                tracing::debug!(shard = %other, "未知分片保留转发，跳过本机应用");
             }
         }
     }
@@ -906,6 +951,65 @@ mod tests {
     }
 
     #[test]
+    fn chord_and_ai_whitelists_keep_local_only_fields_out() {
+        // chord：只取开关 + bindings.*；其余字段（含未来本机字段）不进快照。
+        let raw = raw_with(
+            vec![
+                (
+                    "app.chord",
+                    json!({"chord_enabled": false, "chord_hint_visible": true,
+                        "bindings": {"clipboard": "c+b"},
+                        "device_profile": "laptop"}),
+                ),
+                (
+                    "app.ai",
+                    json!({"enabled": true, "min_query_len": 4, "streaming": false,
+                        "direct_execute_safe_actions": true,
+                        "local_cache_dir": "D:/cache", "providers": []}),
+                ),
+            ],
+            vec![],
+        );
+        let items = items_from_raw(&raw).unwrap();
+        assert_eq!(items.get("app.chord#chord_enabled"), Some(&json!(false)));
+        assert_eq!(items.get("app.chord#bindings.clipboard"), Some(&json!("c+b")));
+        assert!(items.get("app.chord#device_profile").is_none());
+        // ai：白名单标量进快照；legacy 兼容字段与未知字段留本机。
+        assert_eq!(items.get("app.ai#enabled"), Some(&json!(true)));
+        assert_eq!(items.get("app.ai#min_query_len"), Some(&json!(4)));
+        assert!(items.get("app.ai#streaming").is_none());
+        assert!(items.get("app.ai#direct_execute_safe_actions").is_none());
+        assert!(items.get("app.ai#local_cache_dir").is_none());
+    }
+
+    #[test]
+    fn unknown_shard_items_are_forwarded_without_local_ops() {
+        // 同 format_version 内新版客户端写入的未知分片：合并不丢、不报错、
+        // 不产生本机应用操作（保留转发）。
+        let raw = raw_with(
+            vec![(
+                "app.appearance",
+                json!({"theme": "auto", "language": "zh", "window_opacity": 1.0}),
+            )],
+            vec![],
+        );
+        let local = items_from_raw(&raw).unwrap();
+        let mut merged = local.clone();
+        merged.insert("app.future#new_field".into(), json!(true));
+        merged.insert("app.appearance#theme".into(), json!("dark"));
+
+        let ops = build_apply_ops(&merged, &raw, &local).unwrap();
+        // 已知分片照常产出；未知分片不产生操作、也不中断合成。
+        assert!(ops
+            .iter()
+            .any(|op| matches!(op, ApplyOp::SetConfig { key, .. } if key == "general_config")));
+        assert!(ops.iter().all(|op| match op {
+            ApplyOp::SetConfig { shard, .. } => shard != "app.future",
+            _ => true,
+        }));
+    }
+
+    #[test]
     fn shard_of_item_variants() {
         assert_eq!(shard_of_item("app.appearance#theme"), "app.appearance");
         assert_eq!(shard_of_item("app.chord#bindings.chat"), "app.chord");
@@ -917,6 +1021,58 @@ mod tests {
             shard_of_item("prompt_library#entry/x"),
             PROMPT_SHARD
         );
+    }
+
+    #[tokio::test]
+    async fn read_raw_local_recovers_missing_prompt_table() {
+        // 双池：config 库（config 表）+ AI 库（**不预建** prompt_library 表，
+        // 模拟库文件被外部重建后的 schema 缺失）。
+        async fn temp_pool() -> sqlx::SqlitePool {
+            let dir = std::env::temp_dir().join(format!(
+                "blink-portable-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .subsec_nanos()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let options = sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(dir.join("test.db"))
+                .create_if_missing(true);
+            let pool = sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(options)
+                .await
+                .unwrap();
+            pool
+        }
+        let config_pool = temp_pool().await;
+        let ai_pool = temp_pool().await;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL DEFAULT 0)",
+        )
+        .execute(&config_pool)
+        .await
+        .unwrap();
+
+        // 表缺失不阻断：幂等补建后读到空投影。
+        let raw = read_raw_local(&config_pool, &ai_pool).await.unwrap();
+        assert!(raw.prompts.is_empty());
+        assert!(raw.shards.contains_key("app.appearance"));
+        // 补建后表已可写（后续同步应用提示词行不再失败）。
+        blink_infra::data::prompt_library::insert(
+            &ai_pool,
+            "custom_x",
+            "名",
+            "正文",
+            blink_infra::data::prompt_library::PromptScope::Chat,
+            1,
+        )
+        .await
+        .unwrap();
+        let raw = read_raw_local(&config_pool, &ai_pool).await.unwrap();
+        assert!(raw.prompts.contains_key("custom_x"));
     }
 
     #[test]

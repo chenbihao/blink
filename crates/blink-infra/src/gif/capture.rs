@@ -86,7 +86,10 @@ impl CaptureCtl {
     /// 下发指令（多次下发时后者覆盖前者；Start/Pause 语义由阶段保证）。
     pub fn command(&self, cmd: CaptureCommand) {
         if let Ok(mut inner) = self.inner.lock() {
-            inner.pending = Some(cmd);
+            // 倒计时的迟到 Start 不能覆盖已经下发的 Stop。
+            if inner.pending != Some(CaptureCommand::Stop) {
+                inner.pending = Some(cmd);
+            }
         }
         self.cv.notify_all();
     }
@@ -180,8 +183,7 @@ struct StopContext {
     duplicates_merged: u32,
     peak_queued: u32,
     capture_cost_ms: u64,
-    /// 采集线程计算的有效时长（含末帧兜底）。
-    ts_ms: Vec<u64>,
+    elapsed_ms: u64,
 }
 
 /// 启动录制流水线。
@@ -193,8 +195,11 @@ pub fn spawn_pipeline(
     mut source: impl FrameSource + Send + 'static,
     mut writer: SpoolWriter,
     fps: u32,
-    budget: RecordingBudget,
+    mut budget: RecordingBudget,
 ) -> (Arc<CaptureCtl>, Receiver<CaptureOutcome>) {
+    // 大选区仍遵守字节预算，不能让 32 帧队列膨胀到数百 MB。
+    budget.queue_frame_cap = budget.queue_frame_cap.max(1)
+        .min(((64 << 20) / source.frame_bytes().max(1)).max(1));
     let ctl = Arc::new(CaptureCtl::new());
     let (tx, rx) = std::sync::mpsc::sync_channel::<(u64, Vec<u8>)>(budget.queue_frame_cap.max(1));
     let (outcome_tx, outcome_rx) = std::sync::mpsc::channel::<CaptureOutcome>();
@@ -208,9 +213,7 @@ pub fn spawn_pipeline(
             .name("gif-compress".into())
             .spawn(move || {
                 while let Ok((ts, frame)) = rx.recv() {
-                    if !ctl.is_running() {
-                        break;
-                    }
+                    // running=false 只停止采集；已入队帧必须继续写完。
                     match writer.append_frame(ts, &frame) {
                         Ok(n) => {
                             ctl.spool_bytes.fetch_add(n, Ordering::SeqCst);
@@ -218,6 +221,7 @@ pub fn spawn_pipeline(
                         Err(e) => {
                             tracing::error!(error = %e, "GIF 素材写盘失败，停止录制");
                             ctl.running.store(false, Ordering::SeqCst);
+                            ctl.command(CaptureCommand::Stop);
                             break;
                         }
                     }
@@ -232,7 +236,7 @@ pub fn spawn_pipeline(
                         c.duplicates_merged,
                         c.peak_queued,
                         c.capture_cost_ms,
-                        c.ts_ms,
+                        c.elapsed_ms,
                     ),
                     None => (
                         // 采集线程异常退出（如 panic）：按采集失败定稿，保留已写素材
@@ -241,18 +245,14 @@ pub fn spawn_pipeline(
                         0,
                         0,
                         0,
-                        Vec::new(),
+                        0,
                     ),
                 };
                 let frames = writer.frame_count();
                 let spool_bytes = writer.spool_bytes();
-                // 有效时长表：优先采集线程收集的时间戳；空则回退 writer 索引。
-                let ts_final: Vec<u64> = if ts.is_empty() {
-                    writer_meta_ts(&mut writer)
-                } else {
-                    ts
-                };
-                let _ = writer.finalize(&reason_label(reason));
+                if let Err(error) = writer.finalize_at(&reason_label(reason), ts) {
+                    tracing::error!(%error, "GIF 素材定稿失败（保留已写入素材）");
+                }
                 ctl.set_phase("done");
                 let _ = outcome_tx.send(CaptureOutcome {
                     stop_reason: reason,
@@ -263,7 +263,6 @@ pub fn spawn_pipeline(
                     overloaded,
                     capture_cost_ms: cost,
                 });
-                let _ = ts_final; // 已随 writer.ts 由 finalize 写入 session.json
             })
             .expect("spawn gif-compress 线程");
     }
@@ -281,7 +280,6 @@ pub fn spawn_pipeline(
                 let mut overloaded = false;
                 let mut capture_cost_ms = 0u64;
                 let mut last_frame: Option<Vec<u8>> = None;
-                let mut ts_ms: Vec<u64> = Vec::new();
                 #[allow(unused_assignments)] // None 占位在阶段 1 必被覆盖（effective_ms 只在录制循环调用）
                 let mut start: Option<Instant> = None;
                 let mut paused_total = Duration::ZERO;
@@ -313,7 +311,7 @@ pub fn spawn_pipeline(
                                 duplicates_merged: 0,
                                 peak_queued: 0,
                                 capture_cost_ms: 0,
-                                ts_ms: Vec::new(),
+                                elapsed_ms: 0,
                             });
                             return;
                         }
@@ -421,18 +419,19 @@ pub fn spawn_pipeline(
                         }
                     }
                     if !duplicate {
+                        // 必须先计数再发送，消费线程可能在 try_send 返回前完成。
+                        ctl.queued_inc();
                         match tx.try_send((ts, frame)) {
-                            Ok(()) => {
-                                ctl.queued_inc();
-                                ts_ms.push(ts);
-                            }
+                            Ok(()) => {}
                             Err(TrySendError::Full(_)) => {
+                                ctl.queued_dec();
                                 // 决策与入队间的并发兜底：按过载停止
                                 stop_reason = StopReason::Overload;
                                 overloaded = true;
                                 break 'recording;
                             }
                             Err(TrySendError::Disconnected(_)) => {
+                                ctl.queued_dec();
                                 break 'recording;
                             }
                         }
@@ -449,7 +448,7 @@ pub fn spawn_pipeline(
                     duplicates_merged: ctl.duplicates_merged.load(Ordering::SeqCst) as u32,
                     peak_queued: ctl.peak_queued.load(Ordering::SeqCst) as u32,
                     capture_cost_ms,
-                    ts_ms,
+                    elapsed_ms: effective_ms(Instant::now(), start, paused_total, pause_started),
                 });
                 drop(tx);
             })
@@ -457,11 +456,6 @@ pub fn spawn_pipeline(
     }
 
     (ctl, outcome_rx)
-}
-
-fn writer_meta_ts(_writer: &SpoolWriter) -> Vec<u64> {
-    // SpoolWriter 索引时间戳不可直接读（测试场景 ctx.ts 为空即无帧）。
-    Vec::new()
 }
 
 fn reason_label(r: StopReason) -> String {
@@ -611,6 +605,7 @@ mod tests {
         assert_eq!(outcome.frames, 1, "静止画面只落盘 1 帧");
         let reader = SpoolReader::open(&root, &w_id(&root)).unwrap();
         assert_eq!(reader.frame_count(), 1);
+        assert!(reader.durations()[0] >= 250, "静止画面的末帧必须保留整段停留时长");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -708,7 +703,8 @@ mod tests {
         ctl.command(CaptureCommand::Start);
         let outcome = wait_outcome(&rx, 5000);
         assert_eq!(outcome.stop_reason, StopReason::BudgetExhausted);
-        assert!(outcome.frames <= 6, "预算帧数达限即停（+1 竞态余量）");
+        assert_eq!(outcome.frames, 4, "停止前已入队的四帧必须全部排空");
+        assert_eq!(ctl.queue_len(), 0);
         assert!(!ctl.is_running(), "停止后无后台采集");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -741,9 +737,17 @@ mod tests {
         ctl.command(CaptureCommand::Start);
         let outcome = wait_outcome(&rx, 5000);
         assert_eq!(outcome.stop_reason, StopReason::CaptureFailed);
-        assert!(outcome.frames >= 1, "失败前素材保留");
+        assert_eq!(outcome.frames, 2, "失败前入队素材完整保留");
         let reader = SpoolReader::open(&root, &w_id(&root)).unwrap();
         assert_eq!(reader.frame_count(), outcome.frames);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn late_start_cannot_replace_stop() {
+        let ctl = CaptureCtl::new();
+        ctl.command(CaptureCommand::Stop);
+        ctl.command(CaptureCommand::Start);
+        assert_eq!(ctl.try_take_command(), Some(CaptureCommand::Stop));
     }
 }

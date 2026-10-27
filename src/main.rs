@@ -1941,7 +1941,7 @@ fn setup_app(app: &mut tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error:
 
 // 所有命令仍由同一个 handler 注册；独立函数便于复用未变化的检查结果。
 fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
-    tauri::generate_handler![
+    let handler: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
         app::commands::hide_window,
         app::commands::hide_settings_window,
         app::commands::search_apps,
@@ -2402,5 +2402,17 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
         app::commands::delete_engine_model,
         app::commands::repair_engine_model,
         app::commands::cancel_model_operation,
-    ]
+    ];
+    move |invoke: tauri::ipc::Invoke<tauri::Wry>| {
+        if !app::commands::plugin_ui::command_allowed(
+            invoke.message.webview_ref().label(),
+            invoke.message.command(),
+        ) {
+            invoke.resolver.reject(app::command_error::CommandError::new(
+                "permission_denied", "插件页面不得调用该命令", false,
+            ));
+            return true;
+        }
+        handler(invoke)
+    }
 }

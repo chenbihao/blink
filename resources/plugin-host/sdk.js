@@ -31,14 +31,28 @@
   }
   var invoke = TAU.core.invoke;
 
-  function BlinkSDK() {}
+  function BlinkSDK() { this.payloadHandlers = []; }
   BlinkSDK.prototype.pluginId = null;
 
   /** 声明页面归属并完成就绪握手；返回初始 payload 与 {language, theme}。 */
   BlinkSDK.prototype.init = function (pluginId) {
     var self = this;
     self.pluginId = String(pluginId);
-    return invoke("plugin_page_ready", { pluginId: self.pluginId }).then(function (res) {
+    var initializing = true;
+    var pending;
+    var hasPending = false;
+    self.payloadChannel = new TAU.core.Channel();
+    self.payloadChannel.onmessage = function (payload) {
+      if (initializing) {
+        pending = payload;
+        hasPending = true;
+        return;
+      }
+      self.payloadHandlers.slice().forEach(function (cb) { cb(payload); });
+    };
+    return invoke("plugin_page_ready", { pluginId: self.pluginId, onPayload: self.payloadChannel }).then(function (res) {
+      initializing = false;
+      if (hasPending) res.payload = pending;
       var theme = res && res.context && res.context.theme;
       if (theme && document.head) {
         var link = document.createElement("link");
@@ -79,8 +93,11 @@
 
   /** 订阅宿主推送的唤起载荷（复用窗口再次打开时的新 payload）。 */
   BlinkSDK.prototype.onPayload = function (cb) {
-    return TAU.event.listen("blink://plugin-page-payload", function (e) {
-      cb(e.payload);
+    var handlers = this.payloadHandlers;
+    handlers.push(cb);
+    return Promise.resolve(function () {
+      var index = handlers.indexOf(cb);
+      if (index >= 0) handlers.splice(index, 1);
     });
   };
 
