@@ -42,6 +42,8 @@
 
   var epoch = 0;            // 请求代次：旧响应丢弃
   var debounceTimer = 0;
+  var defaultTarget = "auto"; // 已保存默认（空唤起重置回退值）
+  var defaultEngine = "ali";
 
   function fillSelect(sel, pairs, value) {
     sel.innerHTML = "";
@@ -106,8 +108,10 @@
       if (ctx && ctx.context && String(ctx.context.language).indexOf("zh") !== 0) i18n = en;
       return window.Blink.settings().then(function (settings) {
         settings = settings || {};
-        fillSelect(targetSel, i18n.targets, settings.target_lang || "auto");
-        fillSelect(engineSel, i18n.engines, settings.default_engine || "ali");
+        defaultTarget = settings.target_lang || "auto";
+        defaultEngine = settings.default_engine || "ali";
+        fillSelect(targetSel, i18n.targets, defaultTarget);
+        fillSelect(engineSel, i18n.engines, defaultEngine);
         // 唤起载荷：主窗带入的待翻译文本
         var payloadText = ctx && ctx.payload && ctx.payload.text;
         if (payloadText) {
@@ -118,6 +122,20 @@
         }
       });
     });
+  }
+
+  /** 空唤起重置（0.28.10）：每次打开窗口都是新查询——清输入/译文/状态，
+   * 方向与引擎回已保存默认（0.28.3 会话语义：重开回默认，不回写设置）。 */
+  function resetSession() {
+    ++epoch; // 丢弃在途响应
+    clearTimeout(debounceTimer);
+    input.value = "";
+    output.value = "";
+    statusEl.textContent = "";
+    descEl.textContent = "";
+    targetSel.value = defaultTarget;
+    engineSel.value = defaultEngine;
+    input.focus();
   }
 
   input.addEventListener("input", translateDebounced);
@@ -145,12 +163,14 @@
     if (e.key === "Escape") window.Blink.close();
   });
 
-  // 复用窗口再次唤起：新载荷替换输入并立即翻译
+  // 复用窗口再次唤起：带载荷预填并立即翻译；空唤起（null）重置为新查询
   window.Blink.onPayload(function (payload) {
-    if (payload && typeof payload.text === "string") {
+    if (payload && typeof payload.text === "string" && payload.text) {
       input.value = payload.text;
       input.scrollTop = input.scrollHeight;
       translateNow();
+    } else {
+      resetSession();
     }
   });
 

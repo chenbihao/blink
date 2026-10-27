@@ -6,7 +6,8 @@
 //!   词库升级换版本目录（新文件），旧句柄继续读旧文件（Windows 文件语义），
 //!   `reload_if_changed()` 检测指针变化后原子换连接——不原地覆盖使用中的 DB。
 //! - 基础快查纯 SQL（LIKE 前缀 + 频率排序），无额外脚本解释器依赖；
-//! - 拼写候选：编辑距离 ≤2 的常见词，量有界（候选池 ≤ 60 词、输出 ≤ 4 条）。
+//! - 拼写候选：编辑距离 ≤2 的常见词，量有界（候选池限定同首字母 + 词长邻域
+//!   内词频前 LIMIT_SPELL_POOL 词，输出 ≤ 4 条）。
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -22,8 +23,9 @@ pub const ETY_DATASET_ID: &str = "dictionary-etymology";
 pub const LIMIT_RESULTS: usize = 8;
 /// 前缀候选扫描上限。
 const LIMIT_PREFIX_SCAN: usize = 20;
-/// 拼写候选池上限（编辑距离候选只在高频词里找）。
-const LIMIT_SPELL_POOL: usize = 60;
+/// 拼写候选池上限（同首字母 + 词长邻域内按词频取前 N；邻域由编辑距离 ≤2
+/// 的必要条件「词长差 ≤2」圈定，保证真实拼错的中频词也能进池）。
+const LIMIT_SPELL_POOL: usize = 1000;
 
 /// 词库加载状态。
 #[derive(Debug, Clone, PartialEq)]
@@ -552,45 +554,64 @@ fn spell_candidates(conn: &Connection, key: &str) -> Result<Vec<Candidate>, Stri
     if !(3..=24).contains(&word_len) || !word.chars().all(|c| c.is_ascii_lowercase()) {
         return Ok(Vec::new());
     }
-    // 高频池：rank 前 60（freq 有值的热词），编辑距离 ≤2
+    // 高频池：同首字母 + 词长邻域（编辑距离 ≤2 ⇒ 词长差 ≤2），按词频取前
+    // LIMIT_SPELL_POOL。全库前 60 超高频词池召回不了中频词的真实拼错
+    // （helo→hello、monogmay→monogamy），邻域池在索引面（idx_entries_word
+    // 前缀范围 + idx_entries_freq 排序）上仍是几千行量级的有界扫描。
+    let pattern = format!("{}%", word.chars().next().expect("门槛已保证非空"));
     let mut stmt = conn
         .prepare(
             "SELECT word, translation, freq FROM entries
-             WHERE word != '' ORDER BY freq LIMIT ?1",
+             WHERE word LIKE ?1 ESCAPE '\\' AND length(word) BETWEEN ?2 AND ?3
+             ORDER BY freq LIMIT ?4",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
-        .query_map([LIMIT_SPELL_POOL as i64], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, i64>(2)?,
-            ))
-        })
+        .query_map(
+            rusqlite::params![
+                pattern,
+                word_len.saturating_sub(2) as i64,
+                (word_len + 2) as i64,
+                LIMIT_SPELL_POOL as i64
+            ],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            },
+        )
         .map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
+    let mut hits: Vec<(usize, i64, String, String)> = Vec::new();
     for row in rows.filter_map(|r| r.ok()) {
-        if edit_distance_within(word, &row.0, 2) {
-            out.push(Candidate {
-                word: row.0,
-                translation: row.1,
-                kind: "spell",
-                freq: row.2,
-            });
-            if out.len() >= 4 {
-                break;
-            }
+        if let Some(dist) = edit_distance_at_most(word, &row.0, 2) {
+            hits.push((dist, row.2, row.0, row.1));
         }
     }
-    Ok(out)
+    // 距离优先：dist 1 的 apple 比 dist 2 的 apply 更可能是 aple 的目标词——
+    // 纯词频序会在凑满 4 条时让更常用的 dist 2 词挤掉 dist 1 词。同距离内
+    // 再按词频（更常用优先）。池 ≤ LIMIT_SPELL_POOL，全量收集后排序代价可忽略。
+    hits.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    Ok(hits
+        .into_iter()
+        .take(4)
+        .map(|(_dist, freq, word, translation)| Candidate {
+            word,
+            translation,
+            kind: "spell",
+            freq,
+        })
+        .collect())
 }
 
-/// 限定上限的编辑距离判定（early-exit；候选词长度差 > max 直接 false）。
-fn edit_distance_within(a: &str, b: &str, max: usize) -> bool {
+/// 限定上限的编辑距离（early-exit；候选词长度差 > max 直接 None）。
+/// 命中返回 Some(实际距离)，供调用方按距离分级排序。
+fn edit_distance_at_most(a: &str, b: &str, max: usize) -> Option<usize> {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
     if a.len().abs_diff(b.len()) > max {
-        return false;
+        return None;
     }
     let mut prev: Vec<usize> = (0..=b.len()).collect();
     let mut curr = vec![0usize; b.len() + 1];
@@ -603,11 +624,11 @@ fn edit_distance_within(a: &str, b: &str, max: usize) -> bool {
             row_min = row_min.min(curr[j + 1]);
         }
         if row_min > max {
-            return false;
+            return None;
         }
         std::mem::swap(&mut prev, &mut curr);
     }
-    prev[b.len()] <= max
+    (prev[b.len()] <= max).then_some(prev[b.len()])
 }
 
 #[cfg(test)]
@@ -628,6 +649,7 @@ mod tests {
                 &["went", "went", "", "go 的过去式", "", "", "", "", "0", "0", "0:go/1:p", "", ""],
                 &["application", "ˌæplɪˈkeɪʃn", "n. request", "n. 申请, 应用", "n:100", "3", "0", "cet4", "500", "400", "", "", ""],
                 &["monogamy", "məˈnɒɡəmi", "n. one spouse", "n. 一夫一妻制", "n:100", "0", "0", "gre", "700", "600", "", "", ""],
+                &["axe", "æks", "n. tool", "n. 斧\\nv. 削减", "n:100", "0", "0", "zk gk", "100", "90", "", "", ""],
             ],
         );
         let out = build_basic_dataset(&csv, &BuildOptions::default(), &tmp.join("out")).unwrap();
@@ -711,6 +733,37 @@ mod tests {
     }
 
     #[test]
+    fn spell_pool_letter_and_length_window() {
+        let (svc, _tmp) = service_with_fixture();
+
+        // 中频词拼写错误可召回：monogmay → monogamy（编辑距离 2，同首字母
+        // 长度段内）——旧的全库前 60 高频池召回不了这种词
+        let (_, cands) = svc.lookup("monogmay").unwrap();
+        assert!(
+            cands.iter().any(|c| c.word == "monogamy" && c.kind == "spell"),
+            "monogmay 应给出 monogamy 拼写建议: {cands:?}"
+        );
+
+        // 长度窗排除：aple（词长 4，窗 2-6）的拼写池不含 11 字母的
+        // application；前缀候选也不匹配（aple ≠ appl 前缀）
+        let (_, cands) = svc.lookup("aple").unwrap();
+        assert!(
+            !cands.iter().any(|c| c.word == "application"),
+            "aple 不应给 application 候选: {cands:?}"
+        );
+
+        // 距离优先于词频：aple 的候选中 dist 1 的 apple（freq 900）排在
+        // dist 2 但更高频的 axe（freq 90）之前
+        let (_, cands) = svc.lookup("aple").unwrap();
+        let i_apple = cands.iter().position(|c| c.word == "apple").unwrap();
+        let i_axe = cands.iter().position(|c| c.word == "axe").unwrap();
+        assert!(
+            i_apple < i_axe,
+            "距离 1 的 apple 应排在距离 2 的 axe 之前: {cands:?}"
+        );
+    }
+
+    #[test]
     fn reverse_zh_and_states() {
         let (svc, tmp) = service_with_fixture();
 
@@ -786,9 +839,9 @@ mod tests {
 
     #[test]
     fn edit_distance_bounds() {
-        assert!(edit_distance_within("aple", "apple", 1));
-        assert!(!edit_distance_within("aple", "apple", 0));
-        assert!(edit_distance_within("recieve", "receive", 2));
-        assert!(!edit_distance_within("abcdefgh", "abcd", 2));
+        assert_eq!(edit_distance_at_most("aple", "apple", 1), Some(1));
+        assert_eq!(edit_distance_at_most("aple", "apple", 0), None);
+        assert_eq!(edit_distance_at_most("recieve", "receive", 2), Some(2));
+        assert_eq!(edit_distance_at_most("abcdefgh", "abcd", 2), None);
     }
 }

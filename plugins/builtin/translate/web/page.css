@@ -29,6 +29,12 @@ body {
   gap: 8px;
 }
 
+/* 方向组（目标语言 + 互换）靠左是主操作；引擎是低频配置，推到右侧独立分组 */
+.sel-engine {
+  margin-left: auto;
+  color: var(--text-dim, #a6adc8);
+}
+
 .sel {
   font: inherit;
   color: var(--text, #cdd6f4);

@@ -1636,6 +1636,7 @@ export const en = {
     "hint.copy": "Copy result",
     "hint.route": "Query",
     "hint.settings": "Open settings",
+    "hint.open_plugin_page": "Open plugin window",
     "hint.paste_to_input": "Paste / Copy",
     "hint.fallback": "Run",
     "hint.enter": "{{key:Enter}} {label}",

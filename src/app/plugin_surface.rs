@@ -7,8 +7,8 @@
 //!   以**调用窗口的 label** 反查会话——插件页面无法冒用其他 plugin_id（旧窗口/
 //!   其他窗口直构造越权 IPC 被拒）；
 //! - 初始 payload ready/pull：建窗时暂存，页面加载完成后 `plugin_page_ready` 取走；
-//!   复用窗口的新 payload 走会话 Channel（未 ready 时落回
-//!   pending，不丢失）；
+//!   复用窗口的唤起载荷走会话 Channel（未 ready 时落回 pending，不丢失）；
+//!   每次唤起必派发一次——无载荷时派发 null（空唤起，页面重置为新会话）；
 //! - 关闭 = 隐藏保留会话（prevent_close + hide，应用退出放行）；禁用/更新/卸载
 //!   由生命周期钩子调 [`close_plugin_windows`] 真销毁（撤销旧页面会话）；
 //! - 窗口预算 [`MAX_PLUGIN_WINDOWS`]：超出时优先回收隐藏且最久未开的窗口，
@@ -272,9 +272,9 @@ pub fn open_plugin_page(
                     session.opened_at = std::time::Instant::now();
                 }
             });
-            if let Some(payload) = payload {
-                surface.deliver_payload(&label, payload);
-            }
+            // 0.28.10：每次唤起都派发一次载荷——有 payload 即预填，无 payload
+            // 派发 null（空唤起信号，页面据此重置为新会话，不遗留旧查询文本）。
+            surface.deliver_payload(&label, payload.unwrap_or(serde_json::Value::Null));
             let _ = win.unminimize();
             win.show().map_err(|e| format!("显示插件窗口失败: {e}"))?;
             window::clamp_to_work_area(&win);

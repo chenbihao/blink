@@ -1629,6 +1629,7 @@ export const zh = {
     "hint.copy": "复制结果",
     "hint.route": "查询",
     "hint.settings": "打开设置",
+    "hint.open_plugin_page": "打开插件窗口",
     "hint.paste_to_input": "上屏/复制",
     "hint.fallback": "执行",
     "hint.enter": "{{key:Enter}} {label}",

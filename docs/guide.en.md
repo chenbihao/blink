@@ -340,10 +340,11 @@ The "Thinking" button next to the input renders according to the **current model
 | `查词 hello` / `dict hello` | Look up the offline English–Chinese dictionary (senses, phonetics, forms, phrases) |
 | `查词 苹果` | Reverse lookup: Chinese term → English candidates (basic coverage, frequency-ordered) |
 | Click "Open page" on the plugin's settings card | Open the dictionary window for continuous lookup and full details |
+| Press `Enter` on a bare `查词` / `dict` keyword | Opens the dictionary window directly (works for any plugin keyword) |
 
 **Common operations**: The word database must be installed before first use — under **Settings → Plugins → Dictionary → Datasets**, click "Install" to download in one click (the basic dictionary is required; the etymology pack is optional and adds roots/affixes). "Online install unavailable" means the official catalog cannot be fetched right now (not yet published, or network unreachable) — retry via the refresh button in the "Plugin Center" area above. Dev builds (debug) additionally offer a "Local package" button to install from a zip manually.
 
-**Tips**: In the dictionary window, `Enter` queries immediately and `Esc` hides the window (the session is kept and restored on reopen). Unknown words show near-match candidates you can click to query. Entries offer one-click "Copy senses" / "Copy word". Everything works offline — no AI-generated definitions; if the dictionary does not contain it, we say so.
+**Tips**: In the dictionary window, `Enter` queries immediately and `Esc` hides the window; every reopen starts a fresh query. While typing, unknown words instantly get candidates — typos surface the closest spellings first (e.g. `aple` offers `apple`), and clicking a candidate queries it directly. Double-click an English word in the results (a sense line, an example) to pop a small lookup card beside it; `Esc` or clicking blank space closes it, and the card links to the full entry. Entries offer one-click "Copy senses" / "Copy word". Everything works offline — no AI-generated definitions; if the dictionary does not contain it, we say so.
 
 ---
 

@@ -117,9 +117,6 @@ fn handle_query(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     let q = query.trim();
-    if q.is_empty() {
-        return vec![info_item("输入要查的单词或中文词", "")];
-    }
 
     match service.state() {
         DictState::NoDirs | DictState::NotInstalled => {

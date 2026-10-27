@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "builtin.dictionary",
   "name": { "zh": "离线词典", "en": "Dictionary" },
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": { "zh": "离线英汉词典与基础汉英反查：词形/短语/详情与可选词源，断网可用", "en": "Offline English-Chinese dictionary with basic reverse lookup, forms, phrases and optional etymology" },
   "builtin": true,
   "default_enabled": true,

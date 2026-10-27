@@ -990,6 +990,24 @@ impl SearchService {
         self.plugin_engine.get_empty_arg_hint(id, &lang)
     }
 
+    /// 0.28.10：空参数 hint 条目的开窗动作——插件声明独立页面（pages）时回车经
+    /// `open_plugin_page` 内置动作开窗（page_id 缺省 = manifest 首个页面），复用
+    /// 0.28.2 窗口编排与 0.28.4 `PluginAction::OpenPage` 的宿主投影通道；无 pages
+    /// 返回 None（纯展示）。Takeover / Mixed 两路合成点共用。readiness 不做门禁
+    /// （0.28.2 判例：未就绪仍可打开，页面自显修复引导）。
+    fn empty_arg_open_page_action(&self, plugin_id: &str) -> Option<Action> {
+        self.plugin_engine.supports_pages(plugin_id).then(|| Action {
+            kind: ActionKind::Run,
+            run_id: Some("open_plugin_page".to_string()),
+            run_arg: Some(serde_json::json!({
+                "plugin_id": plugin_id,
+            })),
+            // statusbar 显示「Enter 打开插件窗口」；i18n 缺键回退原串（hints.js）
+            hint: Some("hint.open_plugin_page".to_string()),
+            ..Action::default()
+        })
+    }
+
     /// Takeover executor（0.8.6 §8.2.1）：插件独占返回区。
     /// `q` 为 trim 后的原始查询——用于 args.hints 引导项还原触发 keyword。
     fn exec_takeover(
@@ -1005,6 +1023,7 @@ impl SearchService {
                 &plugin_id,
                 &self.display_name(&plugin_id),
                 hint_text,
+                self.empty_arg_open_page_action(&plugin_id),
             )];
         }
         // 0.26.17：args.hints 引导项——arg 为空（参数发现）或为某 hint 的严格
@@ -1138,7 +1157,12 @@ impl SearchService {
             .filter_map(|c| match self.empty_arg_hint(&c.plugin_id, &c.arg) {
                 Some(hint_text) => {
                     tracing::debug!(plugin = %c.plugin_id, surface = ?c.surface, "empty_arg_hint 命中 Mixed 候选，跳过插件查询");
-                    let mut entry = empty_arg_hint_entry(&c.plugin_id, &self.display_name(&c.plugin_id), hint_text);
+                    let mut entry = empty_arg_hint_entry(
+                        &c.plugin_id,
+                        &self.display_name(&c.plugin_id),
+                        hint_text,
+                        self.empty_arg_open_page_action(&c.plugin_id),
+                    );
                     entry.score = placeholder_score(matches!(c.surface, Surface::Priority));
                     hint_entries.push(entry);
                     None
@@ -1536,12 +1560,16 @@ fn placeholder_entry(plugin_id: &str, display_name: &str) -> AppEntry {
 /// 空参数引导项（0.8.1）：manifest 声明了 `empty_arg_hint` 且用户 arg 为空时，
 /// 框架合成的静态展示项。相比 placeholder：
 /// - `is_placeholder = false`（不是"查询中"，不会被 async 增量替换）
-/// - `action = Action::default()` 前端点击/回车无操作（`lnk_path` 空 = 无路径可开）
 /// - `name` 即引导文案（"输入文本开始翻译"），`description` 承载插件显示名
-///
-/// 前端 `results.js` 现有渲染分支 (`Action.kind=Open` + `lnk_path` 空 → 纯展示) 天然支持，
-/// 无需前端改动。
-fn empty_arg_hint_entry(plugin_id: &str, display_name: &str, hint: String) -> AppEntry {
+/// - 0.28.10：`action = Some(Run open_plugin_page)`（插件声明 pages 时）——回车
+///   打开该插件独立窗口，主窗随 `run_builtin_action` 收尾隐藏；无 pages 插件
+///   保持 `actions` 为空的纯展示（前端 `Action.kind=Open` + `lnk_path` 空 → 无操作）
+fn empty_arg_hint_entry(
+    plugin_id: &str,
+    display_name: &str,
+    hint: String,
+    action: Option<Action>,
+) -> AppEntry {
     AppEntry {
         name: hint,
         pinyin_name: String::new(),
@@ -1553,7 +1581,7 @@ fn empty_arg_hint_entry(plugin_id: &str, display_name: &str, hint: String) -> Ap
         is_error: false,
         source: plugin_id.to_string(),
         description: Some(display_name.to_string()),
-        actions: vec![],
+        actions: action.into_iter().collect(),
         ..Default::default()
     }
 }
@@ -1775,6 +1803,82 @@ mod tests {
             assert_eq!(response.entries.len(), 1, "{query}");
             assert!(response.entries[0].is_placeholder);
         }
+    }
+
+    /// 0.28.10：声明 `empty_arg_hint` 的插件空参数条目可执行化——有 pages 时
+    /// 回车经 `open_plugin_page` 内置动作开窗（Run 动作 wire 契约同
+    /// `PluginAction::OpenPage` 宿主投影）；无 pages 保持纯展示。
+    #[tokio::test]
+    async fn empty_arg_hint_with_pages_yields_open_page_action() {
+        struct Events;
+        impl EventPort for Events {
+            fn emit(&self, _: &str, _: serde_json::Value) -> Result<(), String> { Ok(()) }
+            fn emit_to(&self, _: &str, _: &str, _: serde_json::Value) -> Result<(), String> { Ok(()) }
+        }
+        let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1)
+            .connect("sqlite::memory:").await.unwrap();
+        sqlx::query("CREATE TABLE history (lnk_path TEXT, hit_count INTEGER, last_used_at INTEGER)")
+            .execute(&pool).await.unwrap();
+        let translate: crate::plugin::PluginManifest = serde_json::from_str(r#"{
+            "schema_version":1,"id":"builtin.translate","name":"翻译","version":"0",
+            "runtime":{"exec":"never-start.exe",
+                "empty_arg_hint":{"zh":"输入文本开始翻译","en":"Type text to translate"}},
+            "triggers":[{"type":"keyword","keyword":"翻译"}],
+            "pages":[{"id":"main","entry":"index.html"}]
+        }"#).unwrap();
+        let echo: crate::plugin::PluginManifest = serde_json::from_str(r#"{
+            "schema_version":1,"id":"example.echo","name":"Echo","version":"0",
+            "runtime":{"exec":"never-start.exe",
+                "empty_arg_hint":{"zh":"输入任意文本回显","en":"Type text to echo"}},
+            "triggers":[{"type":"keyword","keyword":"echo"}]
+        }"#).unwrap();
+        let plugins = vec![
+            Arc::new(crate::plugin::PluginHandle::new(
+                Arc::new(translate), std::path::PathBuf::new(), None)),
+            Arc::new(crate::plugin::PluginHandle::new(
+                Arc::new(echo), std::path::PathBuf::new(), None)),
+        ];
+        let router = Arc::new(crate::intent::RuleRouter::new(true));
+        for (pid, kw) in [("builtin.translate", "翻译"), ("example.echo", "echo")] {
+            router.add_keyword_rule(
+                pid.into(), kw.into(),
+                crate::intent::Surface::Auto, crate::intent::SurfaceView::List,
+            );
+        }
+        let service = SearchService::new(
+            Arc::new(Events), pool.clone(), vec![],
+            Arc::new(PluginEngine::new(plugins, pool, None)),
+            router, Arc::new(RwLock::new(SuggestionRuntimeConfig::default())),
+            SuggestionCoordinator::new(),
+            Arc::new(RwLock::new(None)), Arc::new(RwLock::new(vec![])), Arc::new(RwLock::new(vec![])),
+        );
+
+        // ① 有 pages：空参数（含尾空格折叠）单条目，Run 动作开本插件窗口
+        for query in ["翻译", "翻译 "] {
+            let response = service.search(query, 1).await;
+            assert_eq!(response.entries.len(), 1, "{query}");
+            let entry = &response.entries[0];
+            assert!(!entry.is_placeholder);
+            assert_eq!(entry.name, "输入文本开始翻译", "{query}");
+            let json = serde_json::to_value(&response).unwrap();
+            assert_eq!(json["entries"][0]["actions"][0]["kind"], "run", "{query}");
+            assert_eq!(json["entries"][0]["actions"][0]["runId"], "open_plugin_page", "{query}");
+            assert_eq!(json["entries"][0]["actions"][0]["runArg"]["plugin_id"], "builtin.translate", "{query}");
+            assert_eq!(json["entries"][0]["actions"][0]["hint"], "hint.open_plugin_page", "{query}");
+        }
+
+        // ② 无 pages：空参数条目保持纯展示（无动作）
+        let response = service.search("echo", 2).await;
+        assert_eq!(response.entries.len(), 1);
+        assert!(!response.entries[0].is_placeholder);
+        assert_eq!(response.entries[0].name, "输入任意文本回显");
+        let json = serde_json::to_value(&response).unwrap();
+        assert!(json["entries"][0]["actions"].as_array().unwrap().is_empty());
+
+        // ③ 带参：empty_arg_hint 不拦截，插件查询照常（占位项）
+        let response = service.search("翻译 hello", 3).await;
+        assert_eq!(response.entries.len(), 1);
+        assert!(response.entries[0].is_placeholder);
     }
 
     fn item(id: &str, score: f32, source: &str) -> SearchItem {

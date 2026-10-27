@@ -664,6 +664,12 @@ impl PluginEngine {
         })
     }
 
+    /// 插件是否声明了独立页面（0.28.10 空参数回车开窗判定）。
+    /// 与 `get_empty_arg_hint` 同为 manifest 只读快照，供搜索热路径同步调用。
+    pub fn supports_pages(&self, id: &str) -> bool {
+        self.find_plugin(id).is_some_and(|p| p.manifest().supports_pages())
+    }
+
     /// 更新全局代理配置 + 重置所有插件进程(保存后调用)。
     /// 下次 query 自动用新 env 重启，用户零感知热更新。
     pub async fn update_global_proxy(&self, proxy: Option<(String, String)>) {

@@ -86,7 +86,7 @@
     });
   };
 
-  /** 隐藏本窗口（会话保留，重开恢复草稿）。 */
+  /** 隐藏本窗口（每次唤起宿主都会派发一次载荷：带载荷预填，null 为空唤起重置新查询）。 */
   BlinkSDK.prototype.close = function () {
     return invoke("plugin_page_close", { pluginId: this.pluginId });
   };

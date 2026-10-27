@@ -231,7 +231,140 @@ function renderStateMessage(message, hint) {
     return nf;
 }
 
+// ── 双击取词悬浮提示 ──────────────────────────────────────────────────────────
+// 结果区的英文义项/例句里双击选词 → 词旁浮卡速查。复用 dictionary_lookup，
+// 竞态用独立 tipEpoch（主查询发起即令其失效），不与主 epoch 混用。
+
+const TIP_WORD_RE = /^[A-Za-z][A-Za-z'-]{1,39}$/;
+let tipEl = null;
+let tipEpoch = 0;
+
+function hideTip() {
+    ++tipEpoch;
+    if (tipEl) {
+        tipEl.remove();
+        tipEl = null;
+    }
+}
+
+/** 浮卡贴位：选区下方 6px，溢出视口翻转到上方，左右留 8px 边距。 */
+function positionTip(tip, rect) {
+    const margin = 8;
+    const left = Math.min(Math.max(rect.left, margin), window.innerWidth - tip.offsetWidth - margin);
+    let top = rect.bottom + 6;
+    if (top + tip.offsetHeight > window.innerHeight - margin) {
+        top = Math.max(margin, rect.top - tip.offsetHeight - 6);
+    }
+    tip.style.left = `${Math.round(left)}px`;
+    tip.style.top = `${Math.round(top)}px`;
+}
+
+function renderTipBody(node, myEpoch) {
+    if (!tipEl || myEpoch !== tipEpoch) return;
+    tipEl.replaceChildren(node);
+}
+
+function renderTipError(message, myEpoch) {
+    renderTipBody(el("div", "dict-tip-sense", `查询失败：${truncate(message, 40)}`), myEpoch);
+    // 插件并发=1，主查询在途时会「插件忙」——短暂展示后自动收起
+    setTimeout(() => {
+        if (myEpoch === tipEpoch) hideTip();
+    }, 2000);
+}
+
+function buildTipEntry(entry) {
+    const box = el("div", "dict-tip-box");
+    const head = el("div", "dict-tip-head");
+    head.appendChild(el("span", "dict-tip-word", entry.display || entry.word));
+    if (entry.phonetic) head.appendChild(el("span", "dict-tip-phonetic", `/${entry.phonetic}/`));
+    box.appendChild(head);
+
+    // 中文释义优先，无/不足回退英文义项（英文例句里的词常无中文行）
+    let lines = senseLines(entry.translation).slice(0, 3);
+    if (!lines.length) lines = senseLines(entry.definition).slice(0, 3);
+    for (const line of lines) box.appendChild(el("div", "dict-tip-sense", truncate(line, 48)));
+
+    const actions = el("div", "dict-tip-actions");
+    const fullBtn = el("button", "dict-tip-btn", "完整词条");
+    fullBtn.addEventListener("click", () => {
+        input.value = entry.display || entry.word;
+        void query(input.value); // query() 首行即 hideTip()
+    });
+    actions.appendChild(fullBtn);
+    const copyBtn = el("button", "dict-tip-btn", "复制");
+    copyBtn.addEventListener("click", async () => {
+        try {
+            await Blink.copy(lines.join("\n"));
+            copyBtn.textContent = "已复制";
+            setTimeout(() => (copyBtn.textContent = "复制"), 1500);
+        } catch (e) {
+            console.error("copy failed:", e);
+        }
+    });
+    actions.appendChild(copyBtn);
+    box.appendChild(actions);
+    return box;
+}
+
+function buildTipCandidates(word, candidates) {
+    const box = el("div", "dict-tip-box");
+    box.appendChild(el("div", "dict-tip-head", `「${word}」未收录`));
+    const list = (candidates ?? []).slice(0, 3);
+    if (!list.length) {
+        box.appendChild(el("div", "dict-tip-sense", "词库中没有这个词"));
+        return box;
+    }
+    for (const c of list) {
+        const row = el("div", "dict-tip-candidate");
+        row.appendChild(el("span", "dict-tip-word", c.word));
+        row.appendChild(el("span", "dict-tip-sense", truncate(c.translation, 24)));
+        row.addEventListener("click", () => {
+            input.value = c.word;
+            void query(c.word);
+        });
+        box.appendChild(row);
+    }
+    return box;
+}
+
+async function showTipForSelection(sel) {
+    const text = sel.toString().trim();
+    if (!TIP_WORD_RE.test(text) || !sel.rangeCount) return;
+    const rect = sel.getRangeAt(0).getBoundingClientRect();
+    if (!rect || (!rect.width && !rect.height)) return;
+
+    const myEpoch = ++tipEpoch;
+    tipEl?.remove();
+    tipEl = el("div", "dict-tip");
+    tipEl.appendChild(el("div", "dict-tip-sense", "查询中…"));
+    document.body.appendChild(tipEl);
+    positionTip(tipEl, rect);
+
+    let r;
+    try {
+        r = await Blink.invoke("dictionary_lookup", { word: text });
+    } catch (e) {
+        renderTipError(e?.message || String(e), myEpoch);
+        return;
+    }
+    if (myEpoch !== tipEpoch) return; // 已关闭或被新浮卡取代
+    const data = Array.isArray(r?.items) && r.items.length ? r.items[0].data : null;
+    if (!r?.ok || !data) {
+        renderTipError(r?.error || "未知错误", myEpoch);
+        return;
+    }
+    if (data.status === "not_found") {
+        renderTipBody(buildTipCandidates(text, data.candidates), myEpoch);
+    } else if (data.status) {
+        renderTipBody(el("div", "dict-tip-sense", "词库未安装或损坏，请在设置页处理"), myEpoch);
+    } else {
+        renderTipBody(buildTipEntry(data), myEpoch);
+    }
+    if (tipEl) positionTip(tipEl, rect); // 内容到位后尺寸变化，重新贴位
+}
+
 async function query(word) {
+    hideTip(); // 主查询发起即收起浮卡并令其在途响应失效
     const myEpoch = ++epoch;
     currentWord = word;
     clearBtn.hidden = !word;
@@ -303,6 +436,7 @@ let debounceTimer = 0;
 
 input.addEventListener("input", () => {
     ++epoch;
+    hideTip();
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => void query(input.value.trim()), 250);
 });
@@ -313,9 +447,27 @@ input.addEventListener("keydown", (e) => {
         clearTimeout(debounceTimer);
         void query(input.value.trim());
     } else if (e.key === "Escape") {
-        Blink.close();
+        if (tipEl) hideTip(); // 浮卡在时 Esc 先关浮卡，不隐藏窗口
+        else Blink.close();
     }
 });
+
+// 双击取词：输入框与浮卡自身不触发；双击自然选中整词，读选区判定
+document.addEventListener("dblclick", (e) => {
+    if (e.target.closest("#dict-input") || e.target.closest(".dict-tip")) return;
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed) return;
+    void showTipForSelection(sel);
+});
+
+// 浮卡关闭途径：卡外按下 / Esc / 页面任意滚动（capture 兼容结果区自身滚动）
+document.addEventListener("pointerdown", (e) => {
+    if (tipEl && !e.target.closest(".dict-tip")) hideTip();
+}, true);
+document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && tipEl) hideTip();
+});
+window.addEventListener("scroll", hideTip, { passive: true, capture: true });
 
 clearBtn.addEventListener("click", () => {
     input.value = "";
@@ -338,9 +490,23 @@ Blink.init("builtin.dictionary").then(ctx => {
     input.focus();
 });
 
+/** 空唤起重置（0.28.10）：每次打开窗口都是新查询——回初始空态，不遗留旧词。 */
+function resetSession() {
+    ++epoch; // 丢弃在途响应
+    hideTip();
+    input.value = "";
+    clearBtn.hidden = true;
+    body.replaceChildren(emptyState());
+    setStatus("");
+    input.focus();
+}
+
+// 复用窗口再次唤起：带载荷（待查词）预填查询；空唤起（null）重置为新查询
 Blink.onPayload((payload) => {
     if (payload?.word) {
         input.value = payload.word;
         void query(payload.word);
+    } else {
+        resetSession();
     }
 });
