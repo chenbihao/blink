@@ -39,6 +39,16 @@ function setStatus(text) {
     statusEl.textContent = text || "";
 }
 
+/** 初始/清空空态（含 Lucide 线性图标，与 index.html 静态结构同构）。 */
+const SEARCH_ICON_SVG = '<svg class="dict-empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>';
+
+function emptyState() {
+    const wrap = el("div", "dict-empty");
+    wrap.innerHTML = SEARCH_ICON_SVG;
+    wrap.appendChild(el("span", null, "输入要查的词"));
+    return wrap;
+}
+
 function renderEntry(entry, dictServiceDesc) {
     const wrap = el("div", "dict-entry");
 
@@ -153,7 +163,6 @@ function renderCandidates(word, candidates) {
         // 转翻译入口在主窗快查（Route 回写"翻译 xxx"）；页面提供复制原词。
         nf.appendChild(el("div", "dict-notfound-hint", `可在主窗输入「翻译 ${word}」显式转翻译，或检查拼写`));
         const btn = el("button", "dict-btn dict-btn-primary", "复制原词");
-        btn.style.marginTop = "10px";
         btn.addEventListener("click", async () => {
             try {
                 await Blink.copy(word);
@@ -187,7 +196,6 @@ function renderReverse(term, hits) {
         nf.appendChild(el("div", null, `「${term}」无对应词条`));
         nf.appendChild(el("div", "dict-notfound-hint", `基础汉英反查覆盖常用概念；长尾词可在主窗输入「翻译 ${term}」`));
         const btn = el("button", "dict-btn dict-btn-primary", "复制原词");
-        btn.style.marginTop = "10px";
         btn.addEventListener("click", async () => {
             try {
                 await Blink.copy(term);
@@ -228,7 +236,7 @@ async function query(word) {
     currentWord = word;
     clearBtn.hidden = !word;
     if (!word.trim()) {
-        body.replaceChildren(el("div", "dict-empty", "输入要查的词"));
+        body.replaceChildren(emptyState());
         setStatus("");
         return;
     }

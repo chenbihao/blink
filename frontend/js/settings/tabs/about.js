@@ -8,6 +8,7 @@
  * 0.25.10：新增一键更新（invoke install_update + UPDATE_INSTALL_PROGRESS 进度事件）
  * 0.25.19：更新日志多版本分组展示（跳版升级时从新到旧列出全部待更新版本）
  * 0.26.19：新增「开源与许可」声明入口（get_license_notices，含托管 Everything 官方 License.txt 全文）
+ * 0.28.9：新增「更新日志」按钮（recent_updates 最近发布列表，随时可看不依赖有新版本）
  */
 import {invoke, listen, normalizeError} from "../../shared/tauri.js";
 import {EVENTS} from "../../shared/event-names.js";
@@ -166,11 +167,15 @@ async function loadAboutInfo() {
  *   UPDATE_INSTALL_PROGRESS 事件（downloading → installing → 应用被
  *   安装器接管自动重启，即成功终点）；检查阶段失败走 invoke 错误，
  *   下载阶段失败走 failed 事件。
+ *
+ * 0.28.9 新增「更新日志」按钮：随时展开最近发布条目（含当前版本），
+ * 数据来自同一次 check_update 的 recent_updates，无额外请求。
  */
 function initCheckUpdate() {
     const btn = document.getElementById("about-check-update");
     const updateEl = document.getElementById("about-update");
     const notesEl = document.getElementById("about-release-notes");
+    const notesBtn = document.getElementById("about-view-notes");
     const installBtn = document.getElementById("about-install-update");
     const progressEl = document.getElementById("about-update-progress");
     const progressBar = document.getElementById("about-update-progress-bar");
@@ -216,6 +221,7 @@ function initCheckUpdate() {
     async function runCheck() {
         updateEl.hidden = false;
         updateEl.textContent = "…";
+        notesMode = null;
         if (notesEl) {
             notesEl.hidden = true;
             notesEl.innerHTML = "";
@@ -236,6 +242,26 @@ function initCheckUpdate() {
             await runCheck();
         } finally {
             btn.disabled = false;
+        }
+    });
+
+    // 「更新日志」入口（0.28.9）：展开/收起最近发布列表。本会话还没查过或
+    // 上次结果无可用数据时先补一次检查（与手动检查共用 runCheck），
+    // 其余情况零请求直接渲染 recent_updates。
+    notesBtn?.addEventListener("click", async () => {
+        if (notesMode === "recent" && notesEl && !notesEl.hidden) {
+            notesMode = null;
+            notesEl.hidden = true;
+            return;
+        }
+        notesBtn.disabled = true;
+        try {
+            // 本会话还没查过才补查；已有结果（含失败）直接如实展示，不重复打 API
+            if (!lastCheckResult) await runCheck();
+            if (notesEl) renderRecentNotes(notesEl, lastCheckResult);
+            notesMode = "recent";
+        } finally {
+            notesBtn.disabled = false;
         }
     });
 
@@ -277,6 +303,15 @@ function initCheckUpdate() {
 const AUTO_CHECK_MIN_INTERVAL_MS = 60 * 1000;
 let lastAutoCheckAt = 0;
 
+/** 最近一次 check_update 原始结果（null = 本会话还没查过；供「更新日志」复用）。 */
+let lastCheckResult = null;
+
+/**
+ * 日志区当前展示模式：null = 收起；"pending" = 检查发现更新后的待更新版本
+ * 分组；"recent" = 「更新日志」按钮展开的最近发布列表。
+ */
+let notesMode = null;
+
 /**
  * 关于 tab 激活钩子（settings/index.js tab 切换回调；设置页窗口预热后 init
  * 也会执行，故不能在 initAboutTab 里直接检查——那等于应用启动即查）。
@@ -307,11 +342,13 @@ function renderCheckResult(r) {
     const installBtn = document.getElementById("about-install-update");
     const progressEl = document.getElementById("about-update-progress");
     if (!updateEl) return;
+    lastCheckResult = r;
     updateEl.hidden = false;
     // 0.27.4：镜像降级（主站不可达、镜像判出版本）时追加说明，如实标注
     const degradedHint = r.degraded ? t("about.update.degraded") : "";
     if (r.error) {
         updateEl.textContent = friendlyUpdateError(r.error);
+        notesMode = null;
     } else if (r.has_update) {
         // .external-link + data-url 走统一外链委托（外部浏览器打开）；
         // .about-update-link 套用项目统一超链样式（accent 色）
@@ -321,8 +358,10 @@ function renderCheckResult(r) {
         updateEl.innerHTML = `新版本 ${r.latest_version} 可用${degradedHint}${link}`;
         if (installBtn) installBtn.hidden = false;
         renderUpdateNotes(notesEl, r);
+        notesMode = "pending";
     } else {
         updateEl.textContent = `已是最新版本（${r.current_version}）${degradedHint}`;
+        notesMode = null;
     }
     if (!r.has_update) {
         if (notesEl) notesEl.hidden = true;
@@ -381,32 +420,86 @@ function renderUpdateNotes(notesEl, r) {
     notesEl.innerHTML = "";
     const multi = updates.length > 1;
     for (const u of updates) {
-        const section = document.createElement("div");
-        section.className = "release-notes-version";
-        if (multi) {
-            const head = document.createElement("div");
-            head.className = "release-notes-version-head";
-            const tag = document.createElement("span");
-            tag.className = "release-notes-version-tag";
-            tag.textContent = `v${u.version}`;
-            head.appendChild(tag);
-            if (u.release_url) {
-                // .external-link + data-url 走统一外链委托（外部浏览器打开）
-                const link = document.createElement("a");
-                link.href = "#";
-                link.className = "external-link about-update-link";
-                link.dataset.url = u.release_url;
-                link.textContent = "查看";
-                head.appendChild(link);
-            }
-            section.appendChild(head);
-        }
-        const body = document.createElement("div");
-        section.appendChild(body);
-        renderMarkdown(u.notes || "", {container: body});
-        notesEl.appendChild(section);
+        appendNotesSection(notesEl, u, {showTag: multi});
     }
     notesEl.hidden = false;
+}
+
+/**
+ * 「更新日志」视图（0.28.9）：渲染最近发布条目列表。
+ * 数据源 recent_updates（含当前版本与更早版本）；旧响应兜底 pending updates /
+ * 单条 release_notes。每版都带版本号标签（与 pending 视图不同——此处没有
+ * 「新版本 x 可用」的上下文，版本号必须自含），当前版本追加「（当前）」。
+ */
+function renderRecentNotes(notesEl, r) {
+    if (!notesEl) return;
+    notesEl.innerHTML = "";
+    if (!r) {
+        // invoke 本身抛错（罕见；命令侧错误通常走 r.error）——如实报检查失败
+        notesEl.textContent = t("about.update.failed");
+        notesEl.hidden = false;
+        return;
+    }
+    if (r.error) {
+        notesEl.textContent = friendlyUpdateError(r.error);
+        notesEl.hidden = false;
+        return;
+    }
+    const recent = recentEntries(r);
+    if (!recent.length) {
+        notesEl.textContent = r.degraded ? t("about.update.degraded") : t("about.update.no_notes");
+        notesEl.hidden = false;
+        return;
+    }
+    for (const u of recent) {
+        appendNotesSection(notesEl, u, {showTag: true, currentVersion: r.current_version});
+    }
+    notesEl.hidden = false;
+}
+
+/** recent 视图的数据源：recent_updates → pending updates → 单条 release_notes。 */
+function recentEntries(r) {
+    if (Array.isArray(r.recent_updates) && r.recent_updates.length) return r.recent_updates;
+    if (Array.isArray(r.updates) && r.updates.length) return r.updates;
+    if ((r.release_notes || "").trim()) {
+        return [{version: r.latest_version, notes: r.release_notes, release_url: r.release_url}];
+    }
+    return [];
+}
+
+/**
+ * 追加单个版本的日志分组（两个视图共用）。
+ * @param {object} opts
+ * @param {boolean} opts.showTag - 展示版本号标签行（recent 视图恒真）
+ * @param {string} [opts.currentVersion] - 命中时标签追加「（当前）」
+ */
+function appendNotesSection(notesEl, u, {showTag, currentVersion} = {}) {
+    const section = document.createElement("div");
+    section.className = "release-notes-version";
+    if (showTag) {
+        const head = document.createElement("div");
+        head.className = "release-notes-version-head";
+        const tag = document.createElement("span");
+        tag.className = "release-notes-version-tag";
+        const isCurrent = currentVersion && u.version === currentVersion;
+        tag.textContent = isCurrent ? `v${u.version}${t("about.update.current_tag")}` : `v${u.version}`;
+        if (isCurrent) tag.classList.add("release-notes-version-tag-current");
+        head.appendChild(tag);
+        if (u.release_url) {
+            // .external-link + data-url 走统一外链委托（外部浏览器打开）
+            const link = document.createElement("a");
+            link.href = "#";
+            link.className = "external-link about-update-link";
+            link.dataset.url = u.release_url;
+            link.textContent = "查看";
+            head.appendChild(link);
+        }
+        section.appendChild(head);
+    }
+    const body = document.createElement("div");
+    section.appendChild(body);
+    renderMarkdown(u.notes || "", {container: body});
+    notesEl.appendChild(section);
 }
 
 /**

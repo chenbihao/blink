@@ -83,13 +83,6 @@ impl GdiFrameSource {
             cursor_cache: HashMap::new(),
         }
     }
-
-    fn region_origin(&self) -> (i32, i32) {
-        self.pos
-            .as_ref()
-            .and_then(|p| p.lock().ok().map(|g| *g))
-            .unwrap_or((0, 0))
-    }
 }
 
 impl FrameSource for GdiFrameSource {

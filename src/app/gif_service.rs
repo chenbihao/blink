@@ -202,6 +202,7 @@ pub enum GifServiceError {
     InvalidFps,
     #[error("会话不存在: {0}")]
     SessionNotFound(String),
+    #[allow(dead_code)] // 仅 #[cfg(not(windows))] 分支构造，Windows 构建下不产生
     #[error("当前平台不支持 GIF 采集")]
     UnsupportedPlatform,
     #[error("素材读写失败: {0}")]

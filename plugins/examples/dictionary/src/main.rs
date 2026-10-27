@@ -100,7 +100,10 @@ fn run_service() {
 
 fn write_frame<W: Write>(out: &mut W, frame: &PluginToCore) -> std::io::Result<()> {
     serde_json::to_writer(&mut *out, frame).map_err(std::io::Error::other)?;
-    out.write_all(b"\n")
+    out.write_all(b"\n")?;
+    // BufWriter 不 flush 则帧滞留 8KB 缓冲，宿主读到超时（0.28.4 起 stdio
+    // 全链路因此恒超时）。JSONL 协议按行应答，每帧必须立刻冲刷。
+    out.flush()
 }
 
 /// 主窗快查（Takeover）→ 条目列表。

@@ -419,6 +419,7 @@ pub async fn confirm_chat_action(
 #[tauri::command]
 pub async fn open_settings_tab(app: tauri::AppHandle, tab: String) -> Result<(), String> {
     // 0.12.8: 白名单校验——eval 字符串拼接存在注入风险
+    // 0.28.9: 移除 "sync"——配置同步已合入 storage tab（无既有调用方传 sync）
     const ALLOWED_TABS: &[&str] = &[
         "general",
         "engines",
@@ -431,7 +432,6 @@ pub async fn open_settings_tab(app: tauri::AppHandle, tab: String) -> Result<(),
         "chord",
         "hotkey",
         "network",
-        "sync",
         "storage",
         "debug",
         "about",

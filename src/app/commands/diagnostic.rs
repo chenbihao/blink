@@ -285,6 +285,9 @@ pub(crate) struct UpdateCheckOutcome {
     pub release_notes: String,
     /// (version, notes, release_url)，从新到旧。
     pub updates: Vec<(String, String, String)>,
+    /// (version, notes, release_url)，从新到旧、不做版本比较的最近已发布条目
+    /// （含当前版本与更早版本），供「更新日志」入口展示。镜像降级/失败路径为空。
+    pub recent_updates: Vec<(String, String, String)>,
     /// Some(错误描述) = 网络失败 / API 异常；此时 has_update 恒 false。
     pub error: Option<String>,
     /// 0.27.4 §3.6：主链（GitHub API）不可达、镜像 latest.json 判出版本。
@@ -389,6 +392,8 @@ async fn check_via_github_api(
         .unwrap_or_default();
     // 0.25.19：全部待更新版本（> 当前版本，从新到旧），供前端分组展示
     let pending = collect_pending_updates(&releases, current);
+    // 0.28.9：最近已发布条目（含当前版本），供「更新日志」入口随时可看
+    let recent = collect_recent_updates(&releases, RECENT_UPDATES_LIMIT);
 
     let has_update = crate::app::update_reminder::version_gt(&latest, current);
     if has_update {
@@ -404,6 +409,7 @@ async fn check_via_github_api(
         release_url,
         release_notes,
         updates: pending,
+        recent_updates: recent,
         error: None,
         degraded: false,
     })
@@ -455,6 +461,7 @@ async fn check_via_mirror_latest(
             release_url: format!("https://github.com/{repo_path}/releases/latest"),
             release_notes: String::new(),
             updates: Vec::new(),
+            recent_updates: Vec::new(),
             error: None,
             degraded: false, // 由调用方统一置位
         });
@@ -471,6 +478,7 @@ fn error_outcome(current: &str, error: String) -> UpdateCheckOutcome {
         release_url: String::new(),
         release_notes: String::new(),
         updates: Vec::new(),
+        recent_updates: Vec::new(),
         error: Some(error),
         degraded: false,
     }
@@ -483,8 +491,10 @@ const UPDATE_CHECK_BUDGET: std::time::Duration = std::time::Duration::from_secs(
 ///
 /// 返回 JSON：
 /// - 成功：`{ has_update, current_version, latest_version, release_url,
-///   release_notes, updates: [{version, notes, release_url}] }`
-///   （updates 从新到旧，可能为空数组）
+///   release_notes, updates: [{version, notes, release_url}],
+///   recent_updates: [{version, notes, release_url}] }`
+///   （updates 为待更新版本；recent_updates 为最近若干已发布版本——含当前
+///   版本与更早版本，供「更新日志」入口展示；两者均从新到旧，可为空数组）
 /// - 网络失败：`{ has_update: false, current_version, error: "..." }`
 ///
 /// 0.26.20：网络与解析逻辑提取为 [`perform_update_check`]（与后台静默检查共用）；
@@ -532,6 +542,14 @@ fn outcome_to_json(outcome: &UpdateCheckOutcome) -> serde_json::Value {
                 "release_url": url,
             }))
             .collect::<Vec<_>>(),
+        "recent_updates": outcome.recent_updates
+            .iter()
+            .map(|(version, notes, url)| serde_json::json!({
+                "version": version,
+                "notes": notes,
+                "release_url": url,
+            }))
+            .collect::<Vec<_>>(),
     })
 }
 
@@ -554,6 +572,30 @@ fn collect_pending_updates(
             let url = r["html_url"].as_str().unwrap_or("").to_string();
             Some((version.to_string(), notes, url))
         })
+        .collect()
+}
+
+/// 「更新日志」入口展示的最近发布条目数（GitHub 单次拉 per_page=10，
+/// 取其非 prerelease 子集的前 5 条足够看「最近更新了什么」）。
+const RECENT_UPDATES_LIMIT: usize = 5;
+
+/// 从 release 数组取最近已发布条目（0.28.9）：不做版本比较（当前版本与更早
+/// 版本都在内），跳过 prerelease，每条经 `extract_changelog` 过滤模板，
+/// 保持 GitHub 返回的时间倒序（新→旧），最多 `limit` 条。
+fn collect_recent_updates(
+    releases: &[serde_json::Value],
+    limit: usize,
+) -> Vec<(String, String, String)> {
+    releases
+        .iter()
+        .filter(|r| !r["prerelease"].as_bool().unwrap_or(false))
+        .filter_map(|r| {
+            let version = r["tag_name"].as_str()?.trim_start_matches('v');
+            let notes = extract_changelog(r["body"].as_str().unwrap_or(""));
+            let url = r["html_url"].as_str().unwrap_or("").to_string();
+            Some((version.to_string(), notes, url))
+        })
+        .take(limit)
         .collect()
 }
 
@@ -1167,7 +1209,7 @@ pub async fn show_theme_debug_cmd(app: tauri::AppHandle) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{collect_pending_updates, extract_changelog};
+    use super::{collect_pending_updates, collect_recent_updates, extract_changelog};
 
     /// release.yml 生成的完整模板形态（照抄 `.github/workflows/release.yml` 的 body 块）
     const TEMPLATE_BODY: &str = "## Blink v0.25.17\n\n### 下载\n- **MSI 安装包**（`.msi`）：标准 Windows 安装程序\n- **NSIS 安装包**（`-setup.exe`）：轻量安装程序\n\n> 首次运行未签名，Windows SmartScreen 可能拦截，点击「更多信息 → 仍要运行」即可。\n\n### 更新日志\n\n新增一键自动更新功能，优化浅色主题表现。\n\n调整快捷键支持单功能键。";
@@ -1230,6 +1272,35 @@ mod tests {
         ];
         assert!(collect_pending_updates(&releases, "0.25.18").is_empty());
         assert!(collect_pending_updates(&[], "0.25.18").is_empty());
+    }
+
+    /// 0.28.9：recent 不做版本比较——当前版本与更早版本都在内，跳过 prerelease，
+    /// 保持时间倒序，截断到 limit。
+    #[test]
+    fn recent_updates_includes_current_and_older_in_api_order() {
+        let releases = vec![
+            release_item("v0.25.20", false, "乙功能"),
+            release_item("v0.25.21-beta", true, "预发布不进列表"),
+            release_item("v0.25.19", false, "当前版本日志"),
+            release_item("v0.25.18", false, "更早版本"),
+        ];
+        let out = collect_recent_updates(&releases, 5);
+        let versions: Vec<&str> = out.iter().map(|(v, _, _)| v.as_str()).collect();
+        assert_eq!(versions, ["0.25.20", "0.25.19", "0.25.18"]);
+        assert!(out[1].1.contains("当前版本日志"));
+        assert!(!out[0].1.contains("MSI 安装包"), "模板段应被过滤");
+        assert!(out[2].2.ends_with("/tag/v0.25.18"));
+    }
+
+    /// 0.28.9：recent 截断到 limit（超出部分丢弃），空列表返回空。
+    #[test]
+    fn recent_updates_truncates_to_limit_and_handles_empty() {
+        let releases: Vec<serde_json::Value> = (0..8)
+            .map(|i| release_item(&format!("v0.25.{:02}", 30 - i), false, "x"))
+            .collect();
+        assert_eq!(collect_recent_updates(&releases, 5).len(), 5);
+        assert_eq!(collect_recent_updates(&releases, 5)[0].0, "0.25.30");
+        assert!(collect_recent_updates(&[], 5).is_empty());
     }
 
     // ── 0.27.4 主链/镜像降级（本地 TcpListener 桩，沿用 wire_tests 手法）──────
@@ -1317,6 +1388,10 @@ mod tests {
         assert_eq!(out.latest_version, "0.27.4");
         assert!(out.release_notes.contains("主链更新日志"));
         assert_eq!(out.updates.len(), 1, "只有 0.27.4 > 0.27.3");
+        // recent 含当前版本（0.27.3）且不做版本比较，跳过 prerelease
+        let recent_versions: Vec<&str> =
+            out.recent_updates.iter().map(|(v, _, _)| v.as_str()).collect();
+        assert_eq!(recent_versions, ["0.27.4", "0.27.3"]);
         assert!(!out.degraded);
         assert!(out.error.is_none());
     }

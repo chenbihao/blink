@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "builtin.ip",
   "name": "IP",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": {
     "zh": "显示本机 IP 与国内外出口，可选增强网络信息",
     "en": "Show local and domestic/international egress IPs, with optional network details"
@@ -281,12 +281,6 @@
         "test_ipv6",
         "ipify_v6"
       ]
-    }
-  ],
-  "pages": [
-    {
-      "id": "main",
-      "entry": "web/index.html"
     }
   ]
 }

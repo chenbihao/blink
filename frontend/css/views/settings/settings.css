@@ -422,6 +422,11 @@ body {
     color: var(--text);
 }
 
+/* 0.28.9：「更新日志」最近列表里当前版本的标识——主题强调色区分 */
+.release-notes-version-tag-current {
+    color: var(--accent);
+}
+
 /* 0.26.19：开源与许可声明展开区——正文断行（不套 .setting-row .value 的
    mono/break-all，那是版本号与路径的样式）；许可全文 pre 保留原文排版，
    高度有界可滚动；落地路径是磁盘位置，mono 展示合理 */
@@ -1093,13 +1098,38 @@ input[type="number"]::-webkit-outer-spin-button {
     color: var(--red);
 }
 
-/* ── 提示词库（0.27.5）────────────────────────────────────────── */
+.network-status-ok {
+    color: var(--green);
+}
+
+/* ── 提示词库（0.27.5；0.28.9 合入 ai-chat 卡：details 折叠 + 行式条目 + 编辑子面板）── */
+.prompt-library-details {
+    margin-top: var(--space-xs, 4px);
+}
+
+.prompt-library-details > summary {
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: var(--text-base);
+    font-weight: var(--weight-semibold);
+    padding: var(--space-xs, 6px) 0;
+}
+
+.prompt-library-details[open] > summary {
+    margin-bottom: var(--space-sm, 8px);
+}
+
+.prompt-library-details > summary:hover {
+    color: var(--accent);
+}
+
 .prompt-toolbar {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: var(--space-sm, 8px);
     flex-wrap: wrap;
+    margin-bottom: var(--space-sm, 8px);
 }
 
 .prompt-scope-filters {
@@ -1112,11 +1142,36 @@ input[type="number"]::-webkit-outer-spin-button {
     color: var(--accent);
 }
 
+/* 行式条目（替代原嵌套 extension-card）：名称 + 徽章一行，预览与操作在下 */
+.prompt-entry {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2xs, 4px);
+    padding: var(--space-sm, 8px) var(--space-md, 12px);
+    border: 1px solid var(--surface);
+    border-radius: var(--radius-md);
+}
+
+.prompt-entry + .prompt-entry {
+    margin-top: var(--space-xs, 4px);
+}
+
+.prompt-entry-head {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm, 8px);
+    flex-wrap: wrap;
+}
+
+.prompt-entry-name {
+    font-weight: var(--weight-semibold);
+}
+
 .prompt-badges {
     display: flex;
     gap: var(--space-xs, 4px);
     flex-wrap: wrap;
-    margin-top: var(--space-xs, 4px);
+    margin-top: 0;
 }
 
 .prompt-badge {
@@ -1139,7 +1194,7 @@ input[type="number"]::-webkit-outer-spin-button {
     opacity: 0.7;
 }
 
-.prompt-entry-hidden .extension-header h3 {
+.prompt-entry-hidden .prompt-entry-name {
     opacity: 0.55;
 }
 
@@ -1148,13 +1203,14 @@ input[type="number"]::-webkit-outer-spin-button {
     word-break: break-all;
     max-height: 3em;
     overflow: hidden;
+    margin: 0;
 }
 
 .prompt-actions {
     display: flex;
     gap: var(--space-xs, 4px);
     flex-wrap: wrap;
-    margin-top: var(--space-sm, 8px);
+    margin-top: var(--space-xs, 4px);
 }
 
 .prompt-danger {
@@ -1163,6 +1219,22 @@ input[type="number"]::-webkit-outer-spin-button {
 
 .prompt-content-readonly {
     opacity: 0.7;
+}
+
+/* 编辑子面板（新建/编辑共用）：浅底 + 左侧强调边，与列表条目区分 */
+.prompt-editor-panel {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xs, 4px);
+    margin-top: var(--space-sm, 8px);
+    padding: var(--space-md, 12px);
+    border: 1px solid var(--surface);
+    border-left: 3px solid var(--accent);
+    border-radius: var(--radius-md);
+}
+
+.prompt-editor-title {
+    font-weight: var(--weight-semibold);
 }
 
 .version-badge {

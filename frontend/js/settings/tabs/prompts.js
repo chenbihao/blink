@@ -1,8 +1,11 @@
 /**
- * 提示词库 Tab（0.27.5）
+ * 提示词库（0.27.5；0.28.9 从独立 tab 合入 AI 对话设置面板）
  *
  * 可复用指令资产：内置条目（整理/精简/中英互译，随版本默认内容 + 可覆盖）、
  * 自建条目（chat / editor 作用域）。Chat 插入与编辑器预设（0.27.6）共用。
+ *
+ * 宿主结构：ai-chat 面板「提示词库」卡的 details 折叠区内（#prompts-container）。
+ * 条目为行式列表（非嵌套卡），编辑器为卡内子面板——避免 extension-card 套卡。
  *
  * 后端命令：prompt_library_list / upsert / delete / reset / reorder；
  * 变更经 blink://prompt-library-changed 广播（多窗口同步刷新）。
@@ -97,7 +100,7 @@ export function describePromptError(code, message) {
 
 /**
  * 整表渲染。
- * @param {boolean} [includeEditor] - false 时保留现有编辑卡 DOM（节点摘下
+ * @param {boolean} [includeEditor] - false 时保留现有编辑面板 DOM（节点摘下
  *        再挂回，用户输入与按钮监听不丢），仅重建工具栏与列表
  */
 function render(includeEditor = true) {
@@ -108,6 +111,13 @@ function render(includeEditor = true) {
     container.innerHTML = renderToolbar() + renderList() + (includeEditor ? renderEditor() : "");
     if (editorEl) container.appendChild(editorEl);
     bindEvents(container, editorEl);
+    updateSummary(entries.length);
+}
+
+/** 折叠区摘要带条目数（details 宿主在 ai-chat 卡内，跨渲染保持文案新鲜）。 */
+function updateSummary(count) {
+    const summary = document.querySelector("#prompt-library-details summary");
+    if (summary) summary.textContent = t("prompts.card.summary_count", {count});
 }
 
 function renderToolbar() {
@@ -118,11 +128,9 @@ function renderToolbar() {
         })
         .join("");
     return `
-    <div class="extension-card">
-      <div class="extension-body prompt-toolbar">
-        <div class="prompt-scope-filters">${options}</div>
-        <button class="btn" id="prompt-new" type="button">${iconHTML("plus")} ${t("prompts.action.new")}</button>
-      </div>
+    <div class="prompt-toolbar">
+      <div class="prompt-scope-filters">${options}</div>
+      <button class="btn-small" id="prompt-new" type="button">${iconHTML("plus")} ${t("prompts.action.new")}</button>
     </div>`;
 }
 
@@ -158,17 +166,13 @@ function renderEntry(entry) {
     ].join("");
 
     return `
-    <div class="extension-card${entry.hidden ? " prompt-entry-hidden" : ""}" data-entry="${entry.id}">
-      <div class="extension-header">
-        <div class="extension-info">
-          <h3>${escapeHtml(entry.name)}</h3>
-          <div class="prompt-badges">${badges}</div>
-        </div>
+    <div class="prompt-entry${entry.hidden ? " prompt-entry-hidden" : ""}" data-entry="${entry.id}">
+      <div class="prompt-entry-head">
+        <span class="prompt-entry-name">${escapeHtml(entry.name)}</span>
+        <div class="prompt-badges">${badges}</div>
       </div>
-      <div class="extension-body">
-        <p class="extension-desc prompt-preview">${escapeHtml(previewText(entry))}</p>
-        <div class="prompt-actions">${actions}</div>
-      </div>
+      <p class="extension-desc prompt-preview">${escapeHtml(previewText(entry))}</p>
+      <div class="prompt-actions">${actions}</div>
     </div>`;
 }
 
@@ -216,24 +220,18 @@ function renderEditor() {
         </div>`;
 
     return `
-    <div class="extension-card prompt-editor-card" id="prompt-editor">
-      <div class="extension-header">
-        <div class="extension-info">
-          <h3>${isNew ? t("prompts.editor.new_title") : t("prompts.editor.title")}</h3>
-        </div>
+    <div class="prompt-editor-panel" id="prompt-editor">
+      <div class="prompt-editor-title">${isNew ? t("prompts.editor.new_title") : t("prompts.editor.title")}</div>
+      <div class="setting-row">
+        <label class="setting-label">${t("prompts.editor.name")}</label>
+        <input type="text" class="input-wide plugin-field" data-field="name" value="${escapeAttr(isNew ? "" : entry.name)}" placeholder="${t("prompts.editor.name_ph")}" />
       </div>
-      <div class="extension-body">
-        <div class="setting-row">
-          <label class="setting-label">${t("prompts.editor.name")}</label>
-          <input type="text" class="input-wide plugin-field" data-field="name" value="${escapeAttr(isNew ? "" : entry.name)}" placeholder="${t("prompts.editor.name_ph")}" />
-        </div>
-        ${scopeSelect}
-        ${bodyField}
-        <p class="extension-desc hidden" id="prompt-editor-error"></p>
-        <div class="prompt-actions">
-          <button class="btn" data-act="save" type="button">${t("prompts.action.save")}</button>
-          <button class="btn-small" data-act="cancel" type="button">${t("prompts.action.cancel")}</button>
-        </div>
+      ${scopeSelect}
+      ${bodyField}
+      <p class="extension-desc hidden" id="prompt-editor-error"></p>
+      <div class="prompt-actions">
+        <button class="btn" data-act="save" type="button">${t("prompts.action.save")}</button>
+        <button class="btn-small" data-act="cancel" type="button">${t("prompts.action.cancel")}</button>
       </div>
     </div>`;
 }

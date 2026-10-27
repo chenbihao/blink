@@ -679,18 +679,24 @@ function initVadDebug(config) {
 //
 // 录音时从后端 `get_coordinator_trace` 命令拉取当前生产会话的
 // RecognitionCoordinator 诊断快照，定期渲染到面板。
-// 不录音时显示空状态。面板始终可见（不 hidden），让用户知道功能存在。
+// 0.28.9：面板纳入开发者模式（data-developer-only 隐藏）——未开启时
+// 不轮询不打后端，开启后 3s 兜底检查内自动恢复。
 
 /**
  * 初始化协调器状态面板。
  *
- * 轮询策略：设置页可见 + 录音中时每 500ms 拉取一次 trace；
- * 不满足条件时显示空状态。
+ * 轮询策略：开发者模式开启 + 设置页可见 + 录音中时每 500ms 拉取一次 trace；
+ * 不满足条件时停止轮询。
  */
 async function initCoordinatorTrace(config) {
     const panel = document.getElementById("voice-coordinator-trace-panel");
     const body = document.getElementById("voice-coordinator-trace-body");
     if (!panel || !body) return;
+
+    // 开发者模式状态由 developer-mode.js 写在 <html data-developer-mode> 上，
+    // 动态读取（会话内可随时开/关），不缓存
+    const developerModeActive = () =>
+        document.documentElement.dataset.developerMode === "true";
 
     let polling = false;
     let pollTimer = null;
@@ -729,8 +735,13 @@ async function initCoordinatorTrace(config) {
         renderCoordinatorTrace(null, body, t);
     }
 
-    // 通过 is_voice_recording 判断录音状态，启动/停止轮询
+    // 通过 is_voice_recording 判断录音状态，启动/停止轮询；
+    // 面板随开发者模式隐藏时不轮询（3s 兜底检查会在开启后自动恢复）
     async function checkRecordingState() {
+        if (!developerModeActive()) {
+            stopPolling();
+            return;
+        }
         try {
             const recording = await invoke("is_voice_recording");
             if (recording) {
@@ -743,9 +754,11 @@ async function initCoordinatorTrace(config) {
         }
     }
 
-    // 监听录音状态变化事件
+    // 监听录音状态变化事件（仍以开发者模式为总开关）
     try {
-        await listen(EVENTS.VOICE_RECORDING_START, () => startPolling());
+        await listen(EVENTS.VOICE_RECORDING_START, () => {
+            if (developerModeActive()) startPolling();
+        });
         await listen(EVENTS.VOICE_RECORDING_END, () => stopPolling());
     } catch {
         // 事件监听失败时降级为定期检查

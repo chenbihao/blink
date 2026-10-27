@@ -37,7 +37,6 @@
             <button class="tab" data-i18n="tab.ai_providers" data-tab="ai-providers">AI 供应商</button>
             <button class="tab" data-i18n="tab.ai_chat" data-tab="ai-chat">AI 对话设置</button>
             <button class="tab" data-i18n="tab.ai_extensions" data-tab="ai-extensions">AI 工具与技能</button>
-            <button class="tab" data-i18n="tab.prompts" data-tab="prompts">提示词库</button>
         </div>
         <div class="sidebar-group">
             <span class="group-title" data-i18n="sidebar.group.interaction">感知与交互</span>
@@ -48,7 +47,6 @@
         <div class="sidebar-group">
             <span class="group-title" data-i18n="sidebar.group.other">其他</span>
             <button class="tab" data-i18n="tab.network" data-tab="network">网络</button>
-            <button class="tab" data-i18n="tab.sync" data-tab="sync">配置同步</button>
             <button class="tab" data-i18n="tab.debug" data-tab="debug">调试</button>
             <button class="tab" data-i18n="tab.storage" data-tab="storage">存储</button>
             <button class="tab" data-i18n="tab.about" data-tab="about">关于</button>
@@ -1174,6 +1172,30 @@
                 </div>
             </div>
 
+            <!-- 提示词库（0.28.9 从独立 tab 合入；details 折叠态收起管理列表，
+                 摘要显示条目数，展开后由 prompts.js 渲染 #prompts-container） -->
+            <div class="extension-card">
+                <div class="extension-header">
+                    <div class="extension-icon">
+                        <svg aria-hidden="true" class="icon">
+                            <use href="#icon-list"/>
+                        </svg>
+                    </div>
+                    <div class="extension-info">
+                        <h3 data-i18n="prompts.card.title">提示词库</h3>
+                        <p class="extension-desc" data-i18n="prompts.card.desc">保存常用指令：对话可插入，编辑器预设可直接使用</p>
+                    </div>
+                </div>
+                <div class="extension-body">
+                    <details class="prompt-library-details" id="prompt-library-details">
+                        <summary data-i18n="prompts.card.summary">管理提示词</summary>
+                        <div id="prompts-container">
+                            <!-- 由 JS 动态渲染 -->
+                        </div>
+                    </details>
+                </div>
+            </div>
+
         </div>
 
         <!-- ══ AI 工具与技能：Skill / MCP client / 工具授权 / MCP Server ════════ -->
@@ -2183,8 +2205,10 @@
                         </details>
                     </section>
 
-                    <!-- 0.23.9: 实时协调器状态面板（录音时从生产 Coordinator 拉取） -->
-                    <section class="voice-coordinator-trace-panel" id="voice-coordinator-trace-panel">
+                    <!-- 0.23.9: 实时协调器状态面板（录音时从生产 Coordinator 拉取）。
+                         0.28.9：纳入开发者模式——纯诊断内容，默认随 data-developer-only 隐藏 -->
+                    <section class="voice-coordinator-trace-panel" data-developer-only
+                             id="voice-coordinator-trace-panel">
                         <div class="voice-coordinator-trace-header">
                             <h4 class="voice-coordinator-trace-title" data-i18n="voice.local.vad_debug.coordinator_title">实时协调器状态</h4>
                             <span class="voice-coordinator-trace-hint" data-i18n="voice.local.vad_debug.coordinator_hint">录音时显示生产环境协调器的实时调度状态</span>
@@ -2589,16 +2613,8 @@
             </div>
         </div>
 
-        <!-- 提示词库（0.27.5）：可复用指令资产；Chat 插入 / 编辑器预设共用 -->
-        <div class="panel" id="prompts">
-            <h2 data-i18n="panel.prompts">提示词库</h2>
-            <p class="panel-lede" data-i18n="prompts.lede">保存常用指令，对话可插入、编辑器预设可直接使用。</p>
-            <div id="prompts-container">
-                <!-- 由 JS 动态渲染 -->
-            </div>
-        </div>
-
-        <!-- 网络（0.11.8：从原 tab 顺序第 5 位挪到 storage 之前，与存储归为"基础设施"组） -->
+        <!-- 网络（0.11.8：从原 tab 顺序第 5 位挪到 storage 之前，与存储归为"基础设施"组；
+             0.28.9：原「提示词库」与「配置同步」独立 panel 分别合入 ai-chat / storage） -->
         <div class="panel" id="network">
             <h2 data-i18n="panel.network">网络配置</h2>
             <p class="panel-lede" data-i18n="network.lede">HTTP / HTTPS 代理，本体与所有插件共用一份配置。</p>
@@ -2607,19 +2623,20 @@
             </div>
         </div>
 
-        <!-- 配置同步（0.28.6：固定范围 WebDAV） -->
-        <div class="panel" id="sync">
-            <h2 data-i18n="panel.sync">配置同步</h2>
-            <p class="panel-lede" data-i18n="sync.lede">通过 WebDAV 在多台设备间同步固定范围的偏好设置；密钥与本机专属配置不漫游。</p>
+        <!-- 存储（0.28.9：原「配置同步」独立 tab 合入本页顶部） -->
+        <div class="panel" id="storage">
+            <h2 data-i18n="panel.storage">存储</h2>
+            <p class="panel-lede" data-i18n="storage.lede">多设备配置同步，与数据库、历史记录的存储位置和清理操作。</p>
+
+            <!-- 配置同步（0.28.6：固定范围 WebDAV；0.28.9 合入存储页顶部，
+                 破坏性的完整清理仍收在页面末尾） -->
+            <div class="section-label" data-i18n="storage.sync.section">配置同步（多设备）</div>
             <div id="sync-container">
                 <!-- 由 JS 动态渲染 -->
             </div>
-        </div>
 
-        <!-- 存储 -->
-        <div class="panel" id="storage">
-            <h2 data-i18n="panel.storage">存储</h2>
-            <p class="panel-lede" data-i18n="storage.lede">数据库与历史记录的存储位置和清理操作。</p>
+            <!-- 0.28.9：本地数据分节标题——与上方同步节、页尾完整清理节对称 -->
+            <div class="section-label" data-i18n="storage.local.section">本地数据</div>
 
             <!-- 数据目录 -->
             <div class="setting-row">
@@ -2876,6 +2893,7 @@
                 <label class="setting-label" data-i18n="about.version.label">版本</label>
                 <button class="value about-version" id="about-version" type="button">—</button>
                 <button class="about-check-btn" data-i18n="about.update.check" id="about-check-update">检查更新</button>
+                <button class="about-check-btn" data-i18n="about.update.view_notes" id="about-view-notes" type="button">更新日志</button>
                 <button class="about-check-btn about-install-btn" data-i18n="about.update.install" id="about-install-update" hidden>一键更新</button>
                 <span class="about-update" hidden id="about-update"></span>
             </div>

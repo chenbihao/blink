@@ -4,14 +4,13 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>离线词典</title>
-    <link rel="stylesheet" href="/@host/theme.css">
     <link rel="stylesheet" href="page.css">
 </head>
 <body>
     <main class="dict-page">
         <header class="dict-header">
             <div class="dict-search">
-                <svg class="dict-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                <svg class="dict-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
                 <input id="dict-input" type="text" autocomplete="off" spellcheck="false"
                        placeholder="查英文单词 / 短语，或中文词反查">
                 <button id="dict-clear" class="dict-clear" title="清空" aria-label="清空" hidden>×</button>
@@ -19,12 +18,15 @@
         </header>
 
         <section id="dict-body" class="dict-body">
-            <div class="dict-empty" id="dict-empty">输入要查的词</div>
+            <div class="dict-empty" id="dict-empty">
+                <svg class="dict-empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                <span>输入要查的词</span>
+            </div>
         </section>
 
         <footer class="dict-footer">
             <span id="dict-status" class="dict-status"></span>
-            <span class="dict-hint">Enter 查询 · Esc 隐藏</span>
+            <span class="dict-hint"><kbd class="dict-kbd">Enter</kbd> 查询 · <kbd class="dict-kbd">Esc</kbd> 隐藏</span>
         </footer>
     </main>
     <script src="/@host/sdk.js"></script>

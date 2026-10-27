@@ -510,6 +510,7 @@ mod tests {
             release_url: String::new(),
             release_notes: String::new(),
             updates: Vec::new(),
+            recent_updates: Vec::new(),
             error: None,
             degraded: false,
         };

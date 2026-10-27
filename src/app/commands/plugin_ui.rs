@@ -107,7 +107,9 @@ pub async fn plugin_page_ready(
         "payload": payload,
         "context": {
             "language": appearance.language,
-            "theme": appearance.theme,
+            // auto 必须解析为具体主题名：SDK 直接拼 /@host/theme.css?name=X，
+            // 原样回传 auto 会因无 auto.css 恒 404
+            "theme": crate::app::commands::resolve_effective_theme(&appearance.theme),
         },
     }))
 }

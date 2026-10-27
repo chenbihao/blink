@@ -49,20 +49,7 @@ pub async fn show_context_menu(
     let theme = {
         let pool = &app.state::<crate::infra::data::DbPools>().config;
         let raw = crate::app::config::get_config(pool).await.theme;
-        if raw == "auto" {
-            let is_light = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
-                .open_subkey("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize")
-                .and_then(|k| k.get_value::<u32, _>("AppsUseLightTheme"))
-                .map(|v| v == 1)
-                .unwrap_or(false);
-            if is_light {
-                "light".to_string()
-            } else {
-                "dark".to_string()
-            }
-        } else {
-            raw
-        }
+        crate::app::commands::resolve_effective_theme(&raw)
     };
 
     if ACTIVE_MENU.lock().map_err(|e| e.to_string())?.as_ref()

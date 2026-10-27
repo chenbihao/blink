@@ -748,6 +748,9 @@ async function loadScreenshot() {
 
     // 配置读取与图像加载并行；失败时保留默认值。
     loadEditorConfig(true);
+    // 0.28.9：「问 AI」工具栏按钮随 ai.enabled 显隐——每次截图会话读取，
+    // 预热窗常驻也能拿到最新开关（与 chord chat 动作后端门禁同语义）
+    refreshAskAiVisibility();
 
     // 加载代际守卫
     const gen = ++ss._loadGen;
@@ -953,6 +956,19 @@ async function loadScreenshot() {
         ss.errorHint.classList.remove('hidden');
         ss.errorHint.classList.add('ss-toast-error');
     }
+}
+
+/**
+ * 0.28.9：「问 AI」按钮随 ai.enabled 显隐（app.ai 分片）。
+ * 读取失败保持当前显示——门禁失败不吞入口；每次截图会话调用（loadScreenshot）。
+ */
+function refreshAskAiVisibility() {
+    invoke('get_config_section', {key: 'app.ai'})
+        .then((cfg) => {
+            const btn = document.getElementById('btn-ask-ai');
+            if (btn) btn.classList.toggle('hidden', cfg?.enabled === false);
+        })
+        .catch((e) => console.debug('[screenshot] app.ai read failed', e));
 }
 
 function loadEditorConfig(includeCaptureHints) {

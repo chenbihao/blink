@@ -1,0 +1,16 @@
+/* ── 插件页面基础样式约定（宿主 /@host/theme.css 注入面组成部分）─────────
+   宿主对插件独立窗口的基础视觉约定：滚动条走宿主各窗口同套写法
+   （welcome-body / chat-messages / voice-overlay：thin + surface-2），
+   修复 WebView2 原生亮色滚动条在深色主题下的突兀感。
+   仅含跨插件通用约定，不限定具体插件选择器；插件自带样式仍可覆盖。 */
+
+html {
+    scrollbar-width: thin;
+    scrollbar-color: var(--surface-2) transparent;
+}
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--surface-2); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-faint); }
+::-webkit-scrollbar-corner { background: transparent; }

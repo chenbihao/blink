@@ -1,6 +1,29 @@
-/* ── 配置同步 Tab（0.28.6：固定范围 WebDAV）────────────────────────────────── */
+/* ── 配置同步（0.28.6：固定范围 WebDAV；0.28.8：同步流程合并单卡状态机；
+   0.28.9：独立 tab 合入存储页——选择器作用域从 #sync 面板改绑 #sync-container，随容器走；
+   连接卡+同步卡合并为一张卡，卡内子区以 .sync-subhead 分隔）── */
 
-#sync .sync-actions {
+/* 卡内子区标题：连接设置 / 手动同步。非首个子区带上边线与呼吸间距 */
+#sync-container .sync-subhead {
+    font-size: var(--text-sm);
+    font-weight: var(--weight-semibold);
+    color: var(--text-dim);
+    margin: 0 0 var(--space-xs, 4px);
+    padding-top: var(--space-md, 12px);
+    border-top: 1px solid var(--surface);
+}
+
+#sync-container .extension-body > .sync-subhead:first-child {
+    border-top: none;
+    padding-top: 0;
+}
+
+/* 报告态：报告区与常驻「立即同步」操作区的分隔 */
+#sync-container .sync-flow-divider {
+    border-top: 1px solid var(--surface);
+    margin: var(--space-sm, 8px) 0;
+}
+
+#sync-container .sync-actions {
     display: flex;
     flex-wrap: wrap;
     gap: var(--space-sm, 8px);
@@ -8,37 +31,37 @@
 }
 
 /* 按钮走全局组件类（btn-small / btn-primary）；.btn-primary 无全局 :disabled 样式，此处补齐 */
-#sync .sync-actions .btn-primary:disabled {
+#sync-container .sync-actions .btn-primary:disabled {
     opacity: 0.5;
     cursor: not-allowed;
 }
 
-#sync .sync-http-warning,
-#sync .sync-pending-hint {
+#sync-container .sync-http-warning,
+#sync-container .sync-pending-hint {
     color: var(--warning, #fab387);
 }
 
-#sync .sync-conflict-row {
+#sync-container .sync-conflict-row {
     border: 1px solid var(--surface);
     border-radius: var(--radius-sm);
     padding: var(--space-sm, 8px);
     margin-bottom: var(--space-sm, 8px);
 }
 
-#sync .sync-conflict-head {
+#sync-container .sync-conflict-head {
     display: flex;
     align-items: center;
     gap: var(--space-sm, 8px);
     flex-wrap: wrap;
 }
 
-#sync .sync-conflict-key {
+#sync-container .sync-conflict-key {
     font-size: var(--text-xs);
     color: var(--accent, var(--text));
     word-break: break-all;
 }
 
-#sync .sync-conflict-kind {
+#sync-container .sync-conflict-kind {
     font-size: var(--text-xs);
     padding: 1px 8px;
     border-radius: var(--radius-sm);
@@ -46,13 +69,13 @@
     color: var(--text-dim);
 }
 
-#sync .sync-conflict-hint {
+#sync-container .sync-conflict-hint {
     font-size: var(--text-xs);
     color: var(--warning, #fab387);
     margin: 4px 0;
 }
 
-#sync .sync-conflict-choices {
+#sync-container .sync-conflict-choices {
     display: grid;
     grid-template-columns: auto 1fr;
     gap: 4px var(--space-sm, 8px);
@@ -60,7 +83,7 @@
     margin-top: 6px;
 }
 
-#sync .sync-conflict-value {
+#sync-container .sync-conflict-value {
     margin: 0;
     padding: 4px 8px;
     background: var(--surface);
@@ -73,7 +96,7 @@
     overflow: hidden;
 }
 
-#sync .sync-report-row {
+#sync-container .sync-report-row {
     display: flex;
     align-items: baseline;
     gap: var(--space-sm, 8px);
@@ -81,17 +104,23 @@
     font-size: var(--text-sm);
 }
 
-#sync .sync-report-row .sync-report-label {
+#sync-container .sync-report-row .sync-report-label {
     flex-shrink: 0;
     color: var(--text);
 }
 
-#sync .sync-report-row .sync-report-detail {
+#sync-container .sync-report-row .sync-report-detail {
     color: var(--text-dim);
     word-break: break-all;
     font-size: var(--text-xs);
 }
 
-#sync .sync-report-row.sync-report-warn .sync-report-label {
+#sync-container .sync-report-row.sync-report-warn .sync-report-label {
     color: var(--warning, #fab387);
+}
+
+/* 报告底部备份脚注：弱化但可读（恢复路径提示，非每次都需要细看） */
+#sync-container .sync-backup-note {
+    opacity: 0.75;
+    word-break: break-all;
 }

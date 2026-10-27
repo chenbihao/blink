@@ -1,10 +1,12 @@
 /**
- * 配置同步 Tab（0.28.6：固定范围 WebDAV 同步）
+ * 配置同步（0.28.6：固定范围 WebDAV 同步；0.28.8：同步+动态流程合并单卡状态机；
+ * 0.28.9：从独立 tab 合入存储页顶部——宿主 #sync-container 位置变了，逻辑不变）
  *
  * 交互流：
  * - 连接设置三项（地址/用户名/密码）——密码只存本机凭据管理器，回显掩码；
- * - 测试连接 / 立即同步（冲突返回计划 → 逐项或批量裁决 → 提交）；
- * - 首次同步（无共同基线）显式选择初始化方向（上传本机 / 下载远端）；
+ * - 「配置同步」单卡状态机：idle（立即同步）/ 首次初始化 / 冲突裁决 / 同步报告。
+ *   首次与冲突进行中主按钮让位给该轮流程操作（可取消回 idle）；
+ *   报告态可收起，「立即同步」常驻可连续操作；
  * - 同步报告分组展示：已生效 / 本机覆盖 / 待装插件 / 待填密钥 / 保留的未知字段。
  */
 
@@ -45,25 +47,55 @@ function render() {
 // ── 渲染 ─────────────────────────────────────────────────────────────────────
 
 function renderAll() {
-    return `
-    ${renderConnectionCard()}
-    ${renderSyncCard()}
-    ${renderDynamicCard()}
-    `;
+    return renderSyncCard();
 }
 
-function renderConnectionCard() {
+/**
+ * 配置同步单卡（0.28.9：连接卡 + 同步卡合并——本质同一功能流）。
+ * 卡内两个子区：连接设置（三字段 + 保存/测试）与同步状态机
+ * （idle（立即同步）/ 首次初始化 / 冲突裁决 / 同步报告）。
+ * 头部恒显上次同步状态；首次/冲突进行中主按钮让位给该轮流程；
+ * 报告态报告与「立即同步」并存（分隔线隔开），可收起可连续同步。
+ */
+function renderSyncCard() {
     const s = state.settings || {url: "", username: "", has_password: false, password_hint: "", is_http: false};
+    const last = s.last_sync;
+    const pending = s.has_pending_conflicts;
+    const overrides = s.overrides || 0;
+    const view = state.lastView;
+
+    let flowHtml = "";
+    if (view?.outcome === "needs_init") flowHtml = renderInitBody(view);
+    else if (view?.outcome === "awaiting_resolution") flowHtml = renderConflictBody(view.plan);
+    else if (view?.outcome === "done") flowHtml = renderReportBody(view.report);
+    // up_to_date 与无视图都落 idle（up_to_date 由状态行回显）
+    const inFlow = view?.outcome === "needs_init" || view?.outcome === "awaiting_resolution";
+
+    const connActions = `
+        <div class="sync-actions">
+          <button class="btn-small" data-action="save-conn" ${state.busy ? "disabled" : ""}>${t("sync.conn.save")}</button>
+          <button class="btn-small" data-action="test-conn" ${state.busy ? "disabled" : ""}>${t("sync.conn.test")}</button>
+          ${s.has_password ? `<button class="btn-small btn-danger" data-action="clear-password" ${state.busy ? "disabled" : ""}>${t("sync.conn.clear_password")}</button>` : ""}
+        </div>`;
+
+    const idleActions = `
+        <div class="sync-actions">
+          <button class="btn-primary" data-action="run-sync" ${state.busy ? "disabled" : ""}>${state.busy ? t("sync.run.busy") : t("sync.run.now")}</button>
+          ${overrides > 0 ? `<button class="btn-small" data-action="reset-overrides" ${state.busy ? "disabled" : ""}>${t("sync.run.reset_overrides")}</button>` : ""}
+        </div>`;
+
     return `
     <div class="extension-card">
       <div class="extension-header">
-        <div class="extension-icon">${iconHTML("globe")}</div>
+        <div class="extension-icon">${iconHTML("refresh-cw")}</div>
         <div class="extension-info">
-          <h3>${t("sync.conn.title")}</h3>
-          <p class="extension-desc">${t("sync.conn.desc")}</p>
+          <h3>${t("sync.card.title")}</h3>
+          <p class="extension-desc">${t("sync.card.desc")}</p>
         </div>
       </div>
       <div class="extension-body">
+        <div class="sync-subhead">${t("sync.conn.title")}</div>
+        <p class="extension-desc">${t("sync.conn.desc")}</p>
         <div class="setting-row">
           <label class="setting-label">${t("sync.conn.url")}</label>
           <input type="text" class="input-wide plugin-field" data-key="sync_url"
@@ -79,40 +111,19 @@ function renderConnectionCard() {
           <input type="password" class="input-wide plugin-field" data-key="sync_password"
                  placeholder="${s.has_password ? t("sync.conn.password.saved", {hint: s.password_hint}) : t("sync.conn.password.ph")}" />
         </div>
-        <div class="sync-actions">
-          <button class="btn-small" data-action="save-conn" ${state.busy ? "disabled" : ""}>${t("sync.conn.save")}</button>
-          <button class="btn-small" data-action="test-conn" ${state.busy ? "disabled" : ""}>${t("sync.conn.test")}</button>
-          ${s.has_password ? `<button class="btn-small btn-danger" data-action="clear-password" ${state.busy ? "disabled" : ""}>${t("sync.conn.clear_password")}</button>` : ""}
-        </div>
+        ${connActions}
         <p class="network-status hidden" id="sync-conn-status"></p>
         ${s.is_http ? `<p class="extension-desc sync-http-warning">${iconHTML("triangle-alert")} ${t("sync.conn.http_warning")}</p>` : ""}
         <p class="extension-desc">${t("sync.conn.scope_note")}</p>
-      </div>
-    </div>`;
-}
 
-function renderSyncCard() {
-    const s = state.settings || {};
-    const last = s.last_sync;
-    const pending = s.has_pending_conflicts;
-    const overrides = s.overrides || 0;
-    return `
-    <div class="extension-card">
-      <div class="extension-header">
-        <div class="extension-icon">${iconHTML("refresh-cw")}</div>
-        <div class="extension-info">
-          <h3>${t("sync.run.title")}</h3>
-          <p class="extension-desc">${t("sync.run.desc")}</p>
-        </div>
-      </div>
-      <div class="extension-body">
-        <div class="sync-actions">
-          <button class="btn-primary" data-action="run-sync" ${state.busy ? "disabled" : ""}>${state.busy ? t("sync.run.busy") : t("sync.run.now")}</button>
-          ${overrides > 0 ? `<button class="btn-small" data-action="reset-overrides" ${state.busy ? "disabled" : ""}>${t("sync.run.reset_overrides")}</button>` : ""}
-        </div>
+        <div class="sync-subhead">${t("sync.run.title")}</div>
+        <p class="extension-desc">${t("sync.run.desc")}</p>
+        ${pending && !inFlow ? `<p class="extension-desc sync-pending-hint">${iconHTML("triangle-alert")} ${t("sync.run.pending_hint")}</p>` : ""}
+        <p class="extension-desc">${last ? renderLastSync(last) : t("sync.run.never")}</p>
+        ${flowHtml}
+        ${flowHtml && !inFlow ? `<div class="sync-flow-divider"></div>` : ""}
+        ${inFlow ? "" : idleActions}
         <p class="network-status hidden" id="sync-run-status"></p>
-        ${last ? `<p class="extension-desc">${renderLastSync(last)}</p>` : `<p class="extension-desc">${t("sync.run.never")}</p>`}
-        ${pending ? `<p class="extension-desc sync-pending-hint">${iconHTML("triangle-alert")} ${t("sync.run.pending_hint")}</p>` : ""}
       </div>
     </div>`;
 }
@@ -131,17 +142,8 @@ function renderLastSync(last) {
     });
 }
 
-/** 动态区：首次初始化 / 冲突裁决 / 同步报告 */
-function renderDynamicCard() {
-    const view = state.lastView;
-    if (!view) return "";
-    if (view.outcome === "needs_init") return renderInitCard(view);
-    if (view.outcome === "awaiting_resolution") return renderConflictCard(view.plan);
-    if (view.outcome === "done") return renderReportCard(view.report);
-    return "";
-}
-
-function renderInitCard(view) {
+/** 首次初始化（needs_init）：远端状态 + 方向选择，取消回 idle。 */
+function renderInitBody(view) {
     const remote = view.remote_revision != null
         ? t("sync.init.remote_found", {
             revision: view.remote_revision,
@@ -150,27 +152,19 @@ function renderInitCard(view) {
         })
         : t("sync.init.remote_empty");
     return `
-    <div class="extension-card sync-init-card">
-      <div class="extension-header">
-        <div class="extension-icon">${iconHTML("download")}</div>
-        <div class="extension-info">
-          <h3>${t("sync.init.title")}</h3>
-          <p class="extension-desc">${t("sync.init.desc")}</p>
-        </div>
-      </div>
-      <div class="extension-body">
+        <p class="extension-desc"><strong>${t("sync.init.title")}</strong> — ${t("sync.init.desc")}</p>
         <p class="extension-desc">${remote}</p>
         <p class="extension-desc">${t("sync.init.local_items", {count: view.local_items})}</p>
         <div class="sync-actions">
           <button class="btn-primary" data-action="init-upload" ${state.busy ? "disabled" : ""}>${t("sync.init.upload")}</button>
           <button class="btn-small" data-action="init-download" ${state.busy || view.remote_revision == null ? "disabled" : ""}>${t("sync.init.download")}</button>
+          <button class="btn-small" data-action="cancel-flow" ${state.busy ? "disabled" : ""}>${t("sync.flow.cancel")}</button>
         </div>
-        <p class="extension-desc">${t("sync.init.confirm_note")}</p>
-      </div>
-    </div>`;
+        <p class="extension-desc">${t("sync.init.confirm_note")}</p>`;
 }
 
-function renderConflictCard(plan) {
+/** 冲突裁决（awaiting_resolution）：逐项/批量选择 + 提交，取消回 idle。 */
+function renderConflictBody(plan) {
     const rows = plan.conflicts.map((c, i) => {
         const kindText = {
             value: t("sync.conflict.kind.value"),
@@ -195,27 +189,18 @@ function renderConflictCard(plan) {
         </div>`;
     }).join("");
     return `
-    <div class="extension-card sync-conflict-card">
-      <div class="extension-header">
-        <div class="extension-icon">${iconHTML("list-checks")}</div>
-        <div class="extension-info">
-          <h3>${t("sync.conflict.title", {count: plan.conflicts.length})}</h3>
-          <p class="extension-desc">${t("sync.conflict.desc")}</p>
-        </div>
-      </div>
-      <div class="extension-body">
+        <p class="extension-desc"><strong>${t("sync.conflict.title", {count: plan.conflicts.length})}</strong> — ${t("sync.conflict.desc")}</p>
         ${rows}
         <div class="sync-actions">
           <button class="btn-small" data-action="conflict-all-local">${t("sync.conflict.all_local")}</button>
           <button class="btn-small" data-action="conflict-all-remote">${t("sync.conflict.all_remote")}</button>
           <button class="btn-primary" data-action="conflict-commit" ${state.busy ? "disabled" : ""}>${t("sync.conflict.commit")}</button>
-        </div>
-        <p class="network-status hidden" id="sync-conflict-status"></p>
-      </div>
-    </div>`;
+          <button class="btn-small" data-action="cancel-flow" ${state.busy ? "disabled" : ""}>${t("sync.flow.cancel")}</button>
+        </div>`;
 }
 
-function renderReportCard(report) {
+/** 同步报告（done）：明细 + 收起；下方常驻「立即同步」可连续操作。 */
+function renderReportBody(report) {
     const counts = countSummary(report.summary || []);
     const entries = (report.summary || []).map((e) => {
         const row = (icon, label, detail, cls) => `
@@ -244,28 +229,23 @@ function renderReportCard(report) {
         }
     }).join("");
     return `
-    <div class="extension-card sync-report-card">
-      <div class="extension-header">
-        <div class="extension-icon">${iconHTML("bookmark-check")}</div>
-        <div class="extension-info">
-          <h3>${t("sync.report.title", {revision: report.revision})}</h3>
-          <p class="extension-desc">${t("sync.report.counts", {
+        ${report.degraded_cas ? `<p class="extension-desc sync-http-warning">${iconHTML("triangle-alert")} ${t("sync.report.degraded")}</p>` : ""}
+        <p class="extension-desc"><strong>${t("sync.report.title", {revision: report.revision})}</strong> · ${t("sync.report.counts", {
             remote: counts.appliedRemote, local: counts.appliedLocal, overridden: counts.overridden,
             plugins: counts.pendingPlugins, secrets: counts.pendingSecrets, unknown: counts.preservedUnknown,
-          })}</p>
-        </div>
-      </div>
-      <div class="extension-body">
-        ${report.degraded_cas ? `<p class="extension-desc sync-http-warning">${iconHTML("triangle-alert")} ${t("sync.report.degraded")}</p>` : ""}
+        })}</p>
         ${entries || `<p class="extension-desc">${t("sync.report.empty")}</p>`}
-      </div>
-    </div>`;
+        <div class="sync-actions">
+          <button class="btn-small" data-action="dismiss-report">${t("sync.report.dismiss")}</button>
+        </div>
+        ${report.backup ? `<p class="extension-desc sync-backup-note">${t("sync.report.backup", {file: report.backup})}</p>` : ""}`;
 }
 
 // ── 事件 ─────────────────────────────────────────────────────────────────────
 
 function bindEvents(container) {
-    const status = (id, message, isError) => {
+    // kind 三态：true=失败（红）/ "ok"=成功（绿）/ 其他=中性（进行中、已保存等）
+    const status = (id, message, kind) => {
         const el = container.querySelector(id);
         if (!el) return;
         if (!message) {
@@ -275,7 +255,8 @@ function bindEvents(container) {
         }
         el.classList.remove("hidden");
         el.textContent = message;
-        el.classList.toggle("network-status-error", isError === true);
+        el.classList.toggle("network-status-error", kind === true);
+        el.classList.toggle("network-status-ok", kind === "ok");
     };
 
     const field = (key) => container.querySelector(`.plugin-field[data-key="${key}"]`)?.value?.trim() || "";
@@ -322,9 +303,9 @@ function bindEvents(container) {
                             password: container.querySelector('.plugin-field[data-key="sync_password"]')?.value || null,
                         });
                         if (result.status === "ok") {
-                            status("#sync-conn-status", t("sync.conn.ok", {revision: result.head_revision ?? 0}), false);
+                            status("#sync-conn-status", t("sync.conn.ok", {revision: result.head_revision ?? 0}), "ok");
                         } else {
-                            status("#sync-conn-status", t("sync.conn.empty_server"), false);
+                            status("#sync-conn-status", t("sync.conn.empty_server"), "ok");
                         }
                         break;
                     }
@@ -332,7 +313,7 @@ function bindEvents(container) {
                     case "conflict-commit": {
                         const resolutions = action === "conflict-commit" ? collectResolutions(container) : [];
                         if (action === "conflict-commit" && resolutions == null) {
-                            status("#sync-conflict-status", t("sync.conflict.incomplete"), true);
+                            status("#sync-run-status", t("sync.conflict.incomplete"), true);
                             return;
                         }
                         setBusy(true);
@@ -376,6 +357,13 @@ function bindEvents(container) {
                         await refreshSettingsQuiet();
                         break;
                     }
+                    case "cancel-flow":
+                    case "dismiss-report": {
+                        // 放弃本轮首次/冲突流程（回 idle）或收起报告
+                        state.lastView = null;
+                        render();
+                        return;
+                    }
                     case "reset-overrides": {
                         await invoke("reset_sync_overrides");
                         await reloadSettings();
@@ -394,13 +382,11 @@ function bindEvents(container) {
                         : err.code === "sync_schema_too_new"
                             ? t("sync.err.schema_too_new")
                             : err.message;
-                // 错误必须回显到触发它的那张卡：此前一律落到同步卡状态行，
-                // 连接卡的「正在连接…」永不更新（保存前测试表现为无失败提示）。
-                const target = action.startsWith("conflict")
-                    ? "#sync-conflict-status"
-                    : ["save-conn", "test-conn", "clear-password"].includes(action)
-                        ? "#sync-conn-status"
-                        : "#sync-run-status";
+                // 0.28.8 单卡状态机后同步流程共用一个状态行：连接卡三操作回连接卡，
+                // 其余（同步/首次/冲突/报告）全落同步卡唯一状态行
+                const target = ["save-conn", "test-conn", "clear-password"].includes(action)
+                    ? "#sync-conn-status"
+                    : "#sync-run-status";
                 status(target, message, true);
             }
         });

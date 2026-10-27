@@ -548,20 +548,42 @@ fn serve_plugin_page_asset(
                         .chars()
                         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
                 {
-                    return not_found("theme 名非法");
+                    return not_found("主题名非法");
                 }
-                match app
-                    .asset_resolver()
-                    .get(format!("css/themes/{name}.css"))
-                {
-                    Some(asset) => tauri::http::Response::builder()
-                        .status(200)
-                        .header("Content-Type", "text/css; charset=utf-8")
-                        .header("Cache-Control", "no-store")
-                        .body(asset.bytes().to_vec())
-                        .unwrap(),
-                    None => not_found("主题资产不存在"),
+                // 主题资产缺失（配置值不在 themes/ 枚举内等）回落 dark——
+                // 宁可颜色不对也不让插件页整页裸奔
+                let name = if read_host_asset(app, &format!("css/themes/{name}.css")).is_some() {
+                    name.to_string()
+                } else {
+                    tracing::warn!(theme = %name, "主题资产缺失，插件页回落 dark");
+                    "dark".to_string()
+                };
+                // 注入面 = tokens 层（color/space/type/effect，形状排版跨主题恒定）
+                // + 插件页基础约定（滚动条等跨插件通用规则）
+                // + 主题文件（色彩覆盖）。插件页只消费语义 token 即自动获得与
+                // 宿主一致的完整变量面；tokens 层是纯语义变量，不依赖 vendor。
+                // 任一资产缺失按 404 处理（与旧单文件行为同口径，不半量注入）。
+                let mut body = String::new();
+                for asset_path in [
+                    "css/tokens/color.css",
+                    "css/tokens/space.css",
+                    "css/tokens/type.css",
+                    "css/tokens/effect.css",
+                    "css/base/plugin-page.css",
+                    &format!("css/themes/{name}.css"),
+                ] {
+                    match read_host_asset(app, asset_path) {
+                        Some(bytes) => body.push_str(&String::from_utf8_lossy(&bytes)),
+                        None => return not_found("主题资产不存在"),
+                    }
+                    body.push('\n');
                 }
+                tauri::http::Response::builder()
+                    .status(200)
+                    .header("Content-Type", "text/css; charset=utf-8")
+                    .header("Cache-Control", "no-store")
+                    .body(body.into_bytes())
+                    .unwrap()
             }
             _ => not_found("未知 @host 资源"),
         };
@@ -612,6 +634,23 @@ fn serve_plugin_page_asset(
         builder = builder.header("Content-Security-Policy", PLUGIN_PAGE_CSP);
     }
     builder.body(bytes).unwrap()
+}
+
+/// 读取 frontendDist 内的宿主 CSS 资产（`/@host/theme.css` 注入面用）。
+///
+/// 双路读取：release 走 `asset_resolver`（打包内嵌资产）；dev 模式下
+/// `asset_resolver` 不提供 frontendDist 资产（由 dev server 服务），此时从
+/// 编译期源码根的 `frontend/` 目录直读兜底——否则插件窗口主题在 dev 下
+/// 恒 404（0.28.4 起的实际行为），页面退化为无变量裸样式。
+/// `rel` 由调用方白名单给出（无用户输入拼接），磁盘路径不存在即 None。
+fn read_host_asset(app: &tauri::AppHandle, rel: &str) -> Option<Vec<u8>> {
+    if let Some(asset) = app.asset_resolver().get(rel.to_string()) {
+        return Some(asset.bytes().to_vec());
+    }
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("frontend")
+        .join(rel);
+    std::fs::read(path).ok()
 }
 
 /// 插件页面静态资源的 Content-Type（按扩展名；未知扩展回 text/plain）。

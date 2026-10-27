@@ -976,7 +976,7 @@
     flex-direction: column;
     padding: 4px;
     background: var(--surface);
-    border: 1px solid var(--border);
+    border: 1px solid var(--surface-2);
     border-radius: var(--radius-md);
     box-shadow: 0 8px 24px var(--shadow);
 }

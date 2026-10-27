@@ -1,16 +1,23 @@
-/* 离线词典插件页面（0.28.4）。主题变量来自宿主 /@host/theme.css；
-   仅消费其 token，不反向覆盖宿主样式。 */
+/* 离线词典插件页面（0.28.4，0.28.10 视觉统一）。
+   主题 + token 变量来自宿主 SDK init 后注入的 /@host/theme.css
+   （tokens 层 + 主题文件拼接）；本文件只消费语义 token，不反向覆盖宿主样式。
+   惯例对齐：边框 --surface-2（宿主主流）、圆角/字号/间距/字体全 token 化、
+   focus 态 accent + --ring-focus、按钮对齐 .btn-small、kbd 走 flat pill。 */
 
 * { box-sizing: border-box; }
 
 html, body {
     margin: 0;
     height: 100%;
-    background: var(--bg);
-    color: var(--text);
-    font-family: var(--font-sans, "Segoe UI", "Microsoft YaHei", sans-serif);
-    font-size: 14px;
+    /* 兜底 = dark 主题 bg：主题注入前防闪白；注入后被 var(--bg) 覆盖 */
+    background: var(--bg, #1e1e2e);
+    color: var(--text, #cdd6f4);
+    font-family: var(--font-sans, system-ui, "Segoe UI", "Microsoft YaHei", sans-serif);
+    font-size: var(--text-base, 13px);
 }
+
+/* 中文容器防御性禁斜体（spec-frontend §3.4） */
+.dict-page { font-style: normal; }
 
 .dict-page {
     display: flex;
@@ -21,7 +28,7 @@ html, body {
 /* ── 搜索头 ─────────────────────────────────────────────── */
 
 .dict-header {
-    padding: 12px 16px 8px;
+    padding: var(--space-md) var(--space-lg) var(--space-sm);
 }
 
 .dict-search {
@@ -32,7 +39,7 @@ html, body {
 
 .dict-search-icon {
     position: absolute;
-    left: 10px;
+    left: var(--space-sm);
     width: 16px;
     height: 16px;
     color: var(--text-dim);
@@ -41,101 +48,139 @@ html, body {
 
 #dict-input {
     width: 100%;
-    padding: 8px 30px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-md, 8px);
+    padding: var(--space-sm) 30px;
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-md, 10px);
     background: var(--surface);
     color: var(--text);
-    font-size: 15px;
+    font-size: var(--text-lg, 15px);
+    font-family: inherit;
     outline: none;
+    transition: border-color var(--transition-base), box-shadow var(--transition-base);
 }
+
+#dict-input::placeholder { color: var(--text-faint); }
 
 #dict-input:focus {
     border-color: var(--accent);
+    box-shadow: var(--ring-focus, 0 0 0 3px var(--accent-bg));
 }
 
 .dict-clear {
     position: absolute;
-    right: 6px;
+    right: var(--space-xs);
     border: none;
     background: none;
     color: var(--text-dim);
-    font-size: 16px;
+    font-size: var(--text-md);
+    line-height: 1;
     cursor: pointer;
-    padding: 2px 6px;
+    padding: var(--space-xs) var(--space-sm);
+    border-radius: var(--radius-sm);
+    transition: color var(--transition-base), background var(--transition-base);
 }
 
-.dict-clear:hover { color: var(--text); }
+.dict-clear:hover { color: var(--text); background: var(--surface-2); }
 
 /* ── 结果区 ─────────────────────────────────────────────── */
 
 .dict-body {
     flex: 1;
     overflow-y: auto;
-    padding: 4px 16px 12px;
+    padding: var(--space-sm) var(--space-lg) var(--space-lg);
 }
 
 .dict-empty, .dict-loading, .dict-error {
     color: var(--text-dim);
+    font-size: var(--text-md);
     text-align: center;
-    padding: 40px 0;
+    padding: var(--space-2xl) 0;
 }
 
-.dict-error { color: var(--red, #e5534b); }
+.dict-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-sm);
+}
 
-/* 词条卡 */
+.dict-empty-icon {
+    width: 32px;
+    height: 32px;
+    color: var(--text-faint);
+}
 
-.dict-entry { margin-top: 8px; }
+.dict-error { color: var(--red); }
+
+/* 词条卡：页面主卡（宿主大卡惯例 surface 底 + surface-2 边框 + radius-lg） */
+
+.dict-entry {
+    margin-top: var(--space-sm);
+    padding: var(--space-lg);
+    background: var(--surface);
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-lg, 16px);
+}
 
 .dict-entry-head {
     display: flex;
     align-items: baseline;
     flex-wrap: wrap;
-    gap: 8px;
+    gap: var(--space-xs) var(--space-sm);
 }
 
 .dict-entry-word {
-    font-size: 22px;
-    font-weight: 600;
+    font-size: var(--text-3xl, 20px);
+    font-weight: var(--weight-semibold);
+    line-height: var(--leading-tight);
 }
 
 .dict-entry-phonetic {
-    color: var(--text-dim);
+    color: var(--text-sub);
     font-family: var(--font-mono, Consolas, monospace);
+    font-size: var(--text-sm);
 }
 
-.dict-entry-badges { display: inline-flex; gap: 6px; }
+/* 徽标独立成行：词性/星级/牛津标签多时不与词目挤压 */
+.dict-entry-badges {
+    flex-basis: 100%;
+    display: inline-flex;
+    gap: var(--space-xs);
+    flex-wrap: wrap;
+}
 
 .dict-badge {
-    font-size: 11px;
-    padding: 1px 6px;
+    font-size: var(--text-xs);
+    line-height: var(--leading-none);
+    padding: 2px var(--space-sm);
     border-radius: var(--radius-sm, 4px);
-    border: 1px solid var(--border);
+    border: 1px solid var(--surface-2);
+    background: var(--surface);
     color: var(--text-dim);
 }
 
-.dict-badge-badge { color: var(--accent); border-color: var(--accent); }
+.dict-badge-badge { color: var(--accent); }
 
 .dict-lemma {
-    margin-top: 4px;
+    margin-top: var(--space-2xs);
     color: var(--text-dim);
-    font-size: 13px;
+    font-size: var(--text-sm);
 }
 
-.dict-section { margin-top: 14px; }
+.dict-section { margin-top: var(--space-md); }
 
 .dict-section-title {
-    font-size: 12px;
+    font-size: var(--text-xs);
+    font-weight: var(--weight-medium);
     color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    margin-bottom: 6px;
+    margin-bottom: var(--space-2xs);
 }
 
 .dict-sense {
-    padding: 4px 0 4px 12px;
-    border-left: 2px solid var(--surface);
-    line-height: 1.55;
+    padding: var(--space-2xs) 0 var(--space-2xs) var(--space-sm);
+    border-left: 2px solid var(--surface-2);
+    font-size: var(--text-md);
+    line-height: var(--leading-relaxed, 1.6);
     white-space: pre-wrap;
     word-break: break-word;
 }
@@ -143,71 +188,100 @@ html, body {
 .dict-forms {
     display: flex;
     flex-wrap: wrap;
-    gap: 6px;
+    gap: var(--space-xs);
 }
 
 .dict-form-chip {
-    font-size: 12px;
-    padding: 2px 8px;
+    font-size: var(--text-sm);
+    padding: 2px var(--space-sm);
     border-radius: var(--radius-sm, 4px);
     background: var(--surface);
-    border: 1px solid var(--border);
+    border: 1px solid var(--surface-2);
     color: var(--text);
 }
 
 .dict-form-chip span { color: var(--text-dim); }
 
+/* 词源卡：词条卡内嵌套，用 bg 底与 surface 主卡拉开层次 */
 .dict-ety-card {
-    padding: 8px 10px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-md, 8px);
-    margin-bottom: 6px;
-    background: var(--surface);
+    padding: var(--space-sm) var(--space-md);
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-md, 10px);
+    margin-bottom: var(--space-xs);
+    background: var(--bg);
 }
 
-.dict-ety-root { font-weight: 600; }
+.dict-ety-root { font-weight: var(--weight-semibold); }
 
-.dict-ety-meta { color: var(--text-dim); font-size: 12px; margin-left: 6px; }
+.dict-ety-meta { color: var(--text-dim); font-size: var(--text-sm); margin-left: var(--space-xs); }
 
 .dict-entry-actions {
     display: flex;
-    gap: 8px;
-    margin-top: 16px;
+    gap: var(--space-sm);
+    margin-top: var(--space-lg);
 }
+
+/* 按钮：对齐宿主 .btn-small（surface 底 / surface-2 边框 / radius-md） */
 
 .dict-btn {
-    border: 1px solid var(--border);
+    border: 1px solid var(--surface-2);
     background: var(--surface);
-    color: var(--text);
-    padding: 5px 14px;
-    border-radius: var(--radius-md, 8px);
-    font-size: 13px;
+    color: var(--text-sub);
+    padding: var(--space-xs) var(--space-lg);
+    border-radius: var(--radius-md, 10px);
+    font-size: var(--text-base);
+    font-family: inherit;
+    line-height: var(--leading-snug);
     cursor: pointer;
+    transition: all var(--transition-base);
 }
 
-.dict-btn:hover { border-color: var(--accent); color: var(--accent); }
-.dict-btn-primary { background: var(--accent); border-color: var(--accent); color: var(--bg); }
-.dict-btn-primary:hover { opacity: 0.9; color: var(--bg); }
+.dict-btn:hover {
+    background: var(--surface-2);
+    color: var(--text);
+    border-color: var(--surface-2);
+}
+
+.dict-btn-primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--on-accent, #fff);
+}
+
+.dict-btn-primary:hover {
+    background: var(--accent);
+    color: var(--on-accent, #fff);
+    opacity: var(--opacity-dim, 0.9);
+}
 
 /* 候选列表 */
 
 .dict-candidate {
     display: flex;
     justify-content: space-between;
-    gap: 12px;
-    padding: 7px 4px;
-    border-bottom: 1px solid var(--surface);
+    gap: var(--space-md);
+    padding: var(--space-sm) var(--space-2xs);
+    border-bottom: 1px solid var(--surface-2);
+    border-radius: var(--radius-xs, 2px);
     cursor: pointer;
     align-items: baseline;
+    transition: background var(--transition-base);
 }
+
+.dict-candidate:hover { background: var(--surface); }
+
+.dict-candidate:last-child { border-bottom: none; }
 
 .dict-candidate:hover .dict-candidate-word { color: var(--accent); }
 
-.dict-candidate-word { font-weight: 500; }
+.dict-candidate-word {
+    font-weight: var(--weight-medium);
+    transition: color var(--transition-base);
+}
 
 .dict-candidate-translation {
     color: var(--text-dim);
-    font-size: 12px;
+    font-size: var(--text-sm);
     text-align: right;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -215,28 +289,57 @@ html, body {
     max-width: 55%;
 }
 
-/* 未收录提示卡 */
+/* 未收录/状态提示卡 */
 
 .dict-notfound {
-    margin-top: 16px;
-    padding: 14px;
-    border: 1px dashed var(--border);
-    border-radius: var(--radius-md, 8px);
+    margin-top: var(--space-lg);
+    padding: var(--space-lg);
+    border: 1px dashed var(--surface-2);
+    border-radius: var(--radius-md, 10px);
     text-align: center;
+    font-size: var(--text-md);
 }
 
-.dict-notfound-hint { color: var(--text-dim); font-size: 12px; margin-top: 4px; }
+.dict-notfound-hint {
+    color: var(--text-dim);
+    font-size: var(--text-sm);
+    margin-top: var(--space-2xs);
+}
 
-/* ── 页脚 ───────────────────────────────────────────────── */
+.dict-notfound .dict-btn { margin-top: var(--space-sm); }
+
+/* ── 页脚（kbd 对齐宿主 flat filled pill）────────────────── */
 
 .dict-footer {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 6px 16px;
-    border-top: 1px solid var(--surface);
+    gap: var(--space-md);
+    padding: var(--space-xs) var(--space-lg);
+    border-top: 1px solid var(--surface-2);
     color: var(--text-dim);
-    font-size: 11px;
+    font-size: var(--text-xs);
 }
 
-.dict-status { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dict-status {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.dict-hint { white-space: nowrap; }
+
+.dict-kbd {
+    display: inline-block;
+    padding: 0.1em 0.4em;
+    min-width: 1.2em;
+    font-size: 0.9em;
+    font-family: var(--font-mono, Consolas, monospace);
+    font-weight: var(--weight-medium);
+    line-height: 1.2;
+    text-align: center;
+    color: var(--text);
+    background: var(--surface-2);
+    border-radius: var(--radius-sm, 4px);
+    white-space: nowrap;
+}

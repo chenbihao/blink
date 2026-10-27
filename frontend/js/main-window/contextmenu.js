@@ -130,6 +130,24 @@ const menuOwner = Date.now().toString(36) + '-' + Math.random().toString(36).sli
 /** Chord 动作缓存（shown 时预拉取，右键时同步读）。只含 semantic=tap 的动作。 */
 let cachedChordActions = [];
 
+/**
+ * 「问 AI」提示入口门禁缓存（0.28.9）：ai.enabled=false 时隐藏图片右键
+ * 「问 AI（图片）」——与 chord chat 动作后端门禁同语义（search.rs ai_enabled
+ * 过滤）。主窗常驻：shown 时预读 + ai_config 保存后刷新，右键构建菜单时
+ * 同步读；读取失败保持显示（门禁失败不吞入口）。
+ */
+let aiHintsEnabled = true;
+
+/** 拉取 ai.enabled 门禁并缓存（失败保持当前值）。 */
+async function refreshAiHintsEnabled() {
+    try {
+        const cfg = await invoke("get_config_section", {key: "app.ai"});
+        aiHintsEnabled = cfg?.enabled !== false;
+    } catch {
+        // 保持现状：读失败不改变入口可见性
+    }
+}
+
 /** 绑定全局右键事件（main.js 装配时调用一次）。 */
 export function init() {
     // 左键点击任何地方 → 关闭菜单
@@ -232,6 +250,13 @@ export function init() {
 
         // 主窗 shown 时预拉取 chord 动作，右键时同步读缓存（无延迟）
         listen(EVENTS.SHOWN, refreshChordActions);
+        // 「问 AI」门禁同策略预取；ai_config 保存后即时刷新（设置页改开关 →
+        // 主窗菜单同步）。注意 payload.key 是保存命令键 "ai_config"，
+        // 不是读取分片用的 "app.ai"
+        listen(EVENTS.SHOWN, refreshAiHintsEnabled);
+        listen(EVENTS.CONFIG_CHANGED, (event) => {
+            if (event.payload?.key === "ai_config") void refreshAiHintsEnabled();
+        });
         listen(EVENTS.HIDDEN, close);
     });
 }
@@ -668,20 +693,23 @@ function itemMenu(li, {selectedText = ""} = {}) {
             },
         });
         // 0.27.10：历史图片右键「问 AI」——签发本会话新 VisionImage 引用后经
-        // open_chat 草稿事务预填（不自动发送，不延长截图 SESSION，§8.5）
-        items.push({
-            label: t("menu.askAiImage"),
-            icon: "sparkles",
-            run: () => {
-                signClipboardHistoryImage(clipboardRef.id).then((signed) => {
-                    if (!signed?.ref) return;
-                    return runBuiltinAction("open_chat", {
-                        prefill: "",
-                        attachments: [{kind: "image", ref: signed.ref, display: signed.display}],
-                    });
-                }).catch((e) => showActionError("attachment_sign_clipboard_history_image", e));
-            },
-        });
+        // open_chat 草稿事务预填（不自动发送，不延长截图 SESSION，§8.5）；
+        // 0.28.9：ai.enabled=false 时隐藏（提示性入口门禁，与 chord chat 动作一致）
+        if (aiHintsEnabled) {
+            items.push({
+                label: t("menu.askAiImage"),
+                icon: "sparkles",
+                run: () => {
+                    signClipboardHistoryImage(clipboardRef.id).then((signed) => {
+                        if (!signed?.ref) return;
+                        return runBuiltinAction("open_chat", {
+                            prefill: "",
+                            attachments: [{kind: "image", ref: signed.ref, display: signed.display}],
+                        });
+                    }).catch((e) => showActionError("attachment_sign_clipboard_history_image", e));
+                },
+            });
+        }
         // 0.20.4：历史图片右键"编辑"——直接进入图片编辑器，不先覆盖剪贴板
         items.push({
             label: t("menu.editImage"),

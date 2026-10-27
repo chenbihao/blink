@@ -1,6 +1,6 @@
 {
   "lucideVersion": "1.25.0",
-  "generatedAt": "2026-10-26T11:51:26Z",
+  "generatedAt": "2026-10-27T13:38:30Z",
   "icons": [
     "aperture",
     "app-window",
@@ -14,8 +14,13 @@
     "calculator",
     "check",
     "chevron-down",
+    "chevron-left",
+    "chevron-right",
+    "chevrons-left",
+    "chevrons-right",
     "circle",
     "clipboard",
+    "clipboard-type",
     "cloud-sun",
     "code",
     "command",
@@ -95,10 +100,6 @@
     "video",
     "wrench",
     "x",
-    "zap",
-    "chevron-left",
-    "chevron-right",
-    "chevrons-left",
-    "chevrons-right"
+    "zap"
   ]
 }

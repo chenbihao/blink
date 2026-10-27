@@ -438,7 +438,7 @@ export function renderDatasetsSection(plugin, surface, catalog = null, devMode =
         if (catEntry) {
             buttons.push(`<button class="btn-small plugin-dataset-install" data-dataset="${escapeAttr(ds.id)}" data-catalog="1" data-progress-id="${escapeAttr(`${plugin.id}/${ds.id}`)}">${iconHTML("download")} ${installed ? t("plugin.dataset_update") : t("plugin.dataset_install")}</button>`);
         } else {
-            buttons.push(`<span class="plugin-dataset-status plugin-catalog-stale" title="${escapeAttr(t("plugin.catalog_unavailable"))}">${t("plugin.dataset_no_source")}</span>`);
+            buttons.push(`<span class="plugin-dataset-status plugin-catalog-stale" title="${escapeAttr(t("plugin.dataset_no_source_hint"))}">${t("plugin.dataset_no_source")}</span>`);
         }
         if (devMode) {
             buttons.push(`<button class="btn-small plugin-dataset-install-local" data-dataset="${escapeAttr(ds.id)}" title="${escapeAttr(t("plugin.dataset_local_hint"))}">${iconHTML("folder-open")} ${t("plugin.dataset_local")}</button>`);
