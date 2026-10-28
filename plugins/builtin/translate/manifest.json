@@ -2,7 +2,7 @@
   "schema_version": 1,
   "id": "builtin.translate",
   "name": { "zh": "翻译", "en": "Translate" },
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": { "zh": "多引擎文本翻译：腾讯翻译/阿里翻译/百度翻译/有道智云/DeepL", "en": "Multi-engine translation: Tencent / Alibaba / Baidu / Youdao / DeepL" },
   "builtin": true,
   "default_enabled": false,
@@ -37,7 +37,7 @@
             "type": "string",
             "description": "目标语言代码",
             "enum": ["zh", "en", "ja", "ko", "auto"],
-            "default": "zh"
+            "default": "auto"
           },
           "engine": {
             "type": "string",
@@ -98,13 +98,13 @@
       "type": "enum",
       "title": { "zh": "目标语言", "en": "Target language" },
       "options": [
-        { "value": "auto", "label": { "zh": "自动检测", "en": "Auto-detect" } },
+        { "value": "auto", "label": { "zh": "自动（中英互换）", "en": "Auto (Chinese–English)" } },
         { "value": "zh", "label": { "zh": "中文", "en": "Chinese" } },
         { "value": "en", "label": { "zh": "英文", "en": "English" } },
         { "value": "ja", "label": { "zh": "日文", "en": "Japanese" } },
         { "value": "ko", "label": { "zh": "韩文", "en": "Korean" } }
       ],
-      "default": "zh"
+      "default": "auto"
     },
     {
       "key": "default_engine",

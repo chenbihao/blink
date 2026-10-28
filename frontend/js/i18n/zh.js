@@ -1622,6 +1622,7 @@ export const zh = {
     "menu.edit": "编辑",
     "menu.pin": "钉图",
     "menu.pin_for": "置顶 {hours} 小时",
+    "menu.pin_for_days": "置顶 {days} 天",
     "menu.unpin": "取消置顶",
     "menu.editImage": "编辑图片",
     "menu.sticky": "钉为便签",

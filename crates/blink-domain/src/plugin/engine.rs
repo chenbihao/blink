@@ -43,6 +43,7 @@ pub struct PluginEngine {
     configs: Arc<RwLock<HashMap<String, crate::config::PluginConfig>>>,
     pool: SqlitePool,
     update_lock: tokio::sync::Mutex<()>,
+    secret_cache: super::secret_cache::PluginSecretCache,
     /// 全局代理(HTTP,HTTPS),进程启动时 env 注入;插件 ure/reqwest 原生读取。
     #[allow(dead_code)] // 保留用于未来插件代理配置
     global_proxy: Option<(String, String)>,
@@ -65,6 +66,7 @@ impl PluginEngine {
             configs: Arc::new(RwLock::new(HashMap::new())),
             pool,
             update_lock: tokio::sync::Mutex::new(()),
+            secret_cache: super::secret_cache::PluginSecretCache::default(),
             global_proxy,
             bootstrap_tx: RwLock::new(None),
         }
@@ -93,6 +95,7 @@ impl PluginEngine {
             generation,
             plugins: new_plugins,
         });
+        self.secret_cache.clear();
         (generation, retired)
     }
 
@@ -121,6 +124,7 @@ impl PluginEngine {
 
     /// 为单个插件初始化配置（发布新插件后调用；init_configs 的单插件版）。
     pub async fn ensure_config_for(&self, plugin: &Arc<PluginHandle>) {
+        let _guard = self.update_lock.lock().await;
         let id = plugin.id();
         if self.configs.read().unwrap().contains_key(id) {
             return;
@@ -140,6 +144,7 @@ impl PluginEngine {
                 default
             }
         };
+        let loaded = super::config_upgrade::translation_defaults(&self.pool, id, loaded).await;
         self.configs.write().unwrap().insert(id.to_string(), loaded);
     }
 
@@ -463,6 +468,7 @@ impl PluginEngine {
     /// 插件声明为 false）；默认 `settings` 走 `manifest.default_settings()`（无 schema 则 null）。
     /// main.rs 在构造后、注入 SearchService 前 `block_on` 调用。
     pub async fn init_configs(&self) {
+        let _guard = self.update_lock.lock().await;
         // 先完成全部 DB 读写，再短暂持锁合并——避免 RwLock guard 跨 await
         let mut loaded = HashMap::new();
         for plugin in &self.plugin_set().plugins {
@@ -493,6 +499,9 @@ impl PluginEngine {
                     loaded.insert(id.to_string(), default);
                 }
             }
+        }
+        for (id, config) in &mut loaded {
+            *config = super::config_upgrade::translation_defaults(&self.pool, id, config.clone()).await;
         }
         self.configs.write().unwrap().extend(loaded);
     }
@@ -545,6 +554,7 @@ impl PluginEngine {
             None => self.get_config(plugin_id).unwrap_or_default(),
         };
         if current.revision != config.revision {
+            self.secret_cache.invalidate(plugin_id);
             // 回填权威快照，让冲突后的设置页重读也能得到最新代次。
             self.configs
                 .write()
@@ -585,6 +595,8 @@ impl PluginEngine {
             .ok_or_else(|| "plugin_config_revision_exhausted".to_string())?;
         let serialized = serde_json::to_string(config)
             .map_err(|_| "plugin_config_serialize_failed".to_string())?;
+        // CM 写/回滚期间不得复用旧凭据；失败也由下次读取完整快照，不回填旧缓存。
+        self.secret_cache.invalidate(plugin_id);
         let secrets = super::secret_update::apply(store, plugin_id, secret_updates)?;
         let written = blink_infra::data::config::compare_set_config(
             &self.pool,
@@ -754,6 +766,7 @@ impl PluginEngine {
         if secret_keys.is_empty() {
             return 0;
         }
+        self.secret_cache.invalidate(plugin_id);
         #[cfg(target_os = "windows")]
         {
             use blink_infra::platform::secret::{SecretRef, SecretString, save_secret};
@@ -823,18 +836,14 @@ impl PluginEngine {
         }
         #[cfg(target_os = "windows")]
         {
-            use blink_infra::platform::secret::{SecretRef, load_secret};
-            let Some(obj) = settings.as_object_mut() else {
-                return (Some(settings), Some(revision));
-            };
-            for key in &secret_keys {
-                if let Ok(secret) = load_secret(&SecretRef::plugin(id, key)) {
-                    obj.insert(
-                        key.clone(),
-                        serde_json::Value::String(secret.expose().to_owned()),
-                    );
-                }
-            }
+            self.secret_cache.restore(
+                id,
+                revision,
+                self.plugin_set().generation,
+                &secret_keys,
+                &mut settings,
+                &super::secret_update::PlatformSecretStore,
+            );
         }
         #[cfg(not(target_os = "windows"))]
         let _ = &secret_keys;
@@ -896,6 +905,16 @@ impl PluginEngine {
                 .any(|k| k == field_key)
             {
                 return None;
+            }
+            if let Some(config) = self.get_config(plugin_id)
+                && let Some(hint) = self.secret_cache.hint(
+                    plugin_id,
+                    config.revision,
+                    self.plugin_set().generation,
+                    field_key,
+                )
+            {
+                return hint;
             }
             load_secret(&SecretRef::plugin(plugin_id, field_key))
                 .ok()

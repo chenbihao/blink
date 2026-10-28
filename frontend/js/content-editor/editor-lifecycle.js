@@ -29,6 +29,11 @@
  * @param {*} deps.draft - RecoveryDraft（flushVerified / markOrphaned / orphan /
  *   discardCurrent / discardIfBodyEquals）
  */
+export function canDiscardEmptyClipboard(session, text) {
+    return session.isActive && session.source?.kind === "clipboard_item"
+        && session.target?.kind === "clipboard_result" && !text.trim();
+}
+
 export class EditorLifecycle {
     constructor({session, adapter, draft, setEditingLocked}) {
         this._session = session;

@@ -703,24 +703,21 @@ fn format_image_subtitle(meta: &ClipboardImageListItem, lang: &str) -> String {
     )
 }
 
-/// 生成单行预览：换行符转为可见标记 ⏎（U+23CE），其余控制字符替换为空格，
-/// 压缩连续空白（⏎ 不被当作空白压缩），不按字符数追加省略号。
+/// 生成列表预览：保留归一化换行，供前端独立渲染弱化标记；其余控制字符变空格。
+/// 用户原文中的 ⏎ 保留为普通文字，不与生成标记混淆；省略由前端宽度决定。
 ///
-/// 视觉效果：`foo\nbar` → `foo ⏎ bar`，用户能从预览看出换行位置，
+/// 前端视觉效果：`foo\nbar` → `foo⏎bar`，用户能从预览看出换行位置，
 /// 同时保持单行布局不变。`\r\n` 视为一次换行（先归一化为 `\n`）。
 fn preview_line(raw: &str) -> String {
-    // ⏎ (U+23CE) — 换行可见标记
-    const NEWLINE_MARKER: char = '\u{23CE}';
-
     // 第一步：归一化 \r\n → \n，独立 \r → \n（统一换行表示）。
     let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
 
-    // 第二步：将换行符 \n 替换为 ⏎，其余控制字符替换为空格。
+    // 第二步：保留换行，其余控制字符替换为空格。
     let flat: String = normalized
         .chars()
         .map(|c| {
             if c == '\n' {
-                NEWLINE_MARKER
+                '\n'
             } else if c.is_control() {
                 ' '
             } else {
@@ -729,9 +726,8 @@ fn preview_line(raw: &str) -> String {
         })
         .collect();
 
-    // 第三步：压缩连续空白（仅空格），⏎ 不被当作空白压缩。
-    // ⏎ 两侧的空格各保留一个，视觉效果 `foo ⏎ bar`。
-    // 连续多个 ⏎（如原文本 \n\n）各自保留，因为每个代表一次换行。
+    // 第三步：只压缩空格，换行数量与用户原文中的 ⏎ 保持不变。
+    // 换行两侧已有空格各保留一个，连续换行数量不变。
     let mut out = String::with_capacity(flat.len());
     let mut prev_space = false;
     for c in flat.chars() {
@@ -745,7 +741,7 @@ fn preview_line(raw: &str) -> String {
             prev_space = false;
         }
     }
-    out.trim().to_string()
+    out.trim_matches(|c: char| c != '\n' && c.is_whitespace()).to_string()
 }
 
 /// 生成副行"N 分钟前 · M chars" / "N min ago · M chars"（0.8.5.1 §6.6 i18n）。
@@ -881,25 +877,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn preview_line_shows_newline_marker() {
-        // \n → ⏎（无额外空格时直接拼接）
-        assert_eq!(preview_line("hello\nworld"), "hello⏎world");
-        // \r\n 先归一化为 \n → 单个 ⏎，两侧原有空格压缩后各保留一个
-        // "  a\r\n  b  " → 归一化 "  a\n  b  " → 映射 "  a⏎  b  "
-        // → 压缩 " a⏎ b " → trim "a⏎ b"
-        assert_eq!(preview_line("  a\r\n  b  "), "a⏎ b");
-        // 纯 \r 归一化为 \n → 单个 ⏎
-        assert_eq!(preview_line("x\ry"), "x⏎y");
+    fn preview_line_normalizes_newlines_for_frontend_markers() {
+        // \n → \n（无额外空格时直接拼接）
+        assert_eq!(preview_line("hello\nworld"), "hello\nworld");
+        // \r\n 先归一化为 \n → 单个 \n，两侧原有空格压缩后各保留一个
+        // "  a\r\n  b  " → 归一化 "  a\n  b  " → 映射 "  a\n  b  "
+        // → 压缩 " a\n b " → trim "a\n b"
+        assert_eq!(preview_line("  a\r\n  b  "), "a\n b");
+        // 纯 \r 归一化为 \n → 单个 \n
+        assert_eq!(preview_line("x\ry"), "x\ny");
     }
 
     #[test]
     fn preview_line_multiple_newlines() {
-        // 连续换行各显示一个 ⏎（无空格时直接拼接）
-        assert_eq!(preview_line("a\n\nb"), "a⏎⏎b");
-        // \r\n\r\n → 归一化为 \n\n → 两个 ⏎
-        assert_eq!(preview_line("a\r\n\r\nb"), "a⏎⏎b");
+        // 连续换行各显示一个 \n（无空格时直接拼接）
+        assert_eq!(preview_line("a\n\nb"), "a\n\nb");
+        // \r\n\r\n → 归一化为 \n\n → 两个 \n
+        assert_eq!(preview_line("a\r\n\r\nb"), "a\n\nb");
         // 有空格时两侧各保留一个
-        assert_eq!(preview_line("a \n b"), "a ⏎ b");
+        assert_eq!(preview_line("a \n b"), "a \n b");
+    }
+
+    #[test]
+    fn preview_preserves_literal_marker_and_edge_newlines() {
+        assert_eq!(preview_line("  \n a⏎b\n  "), "\n a⏎b\n");
+        assert_eq!(preview_line("😀\r\n汉字"), "😀\n汉字");
     }
 
     #[test]

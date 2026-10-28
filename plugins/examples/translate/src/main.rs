@@ -234,6 +234,13 @@ fn auto_swap_lang(text: &str, target_lang: &str) -> String {
     }
 }
 
+/// 主窗/页面/tool 共用缺省策略：人工本次目标 > 已保存目标 > 自动互译。
+fn resolve_target_lang(settings: &Value, one_shot: Option<&str>) -> String {
+    one_shot.filter(|target| !target.is_empty())
+        .or_else(|| settings.get("target_lang").and_then(Value::as_str).filter(|target| !target.is_empty()))
+        .unwrap_or("auto").to_owned()
+}
+
 /// 清除文本中的 Unicode 私用区字符(U+E000..=U+F8FF)。
 ///
 /// 私用区字符可能来自 OCR 识别噪声或上游拼接残留,送翻译前必须清除,
@@ -472,13 +479,7 @@ fn handle_query<W: Write>(
         .to_string();
     // 0.28.3：尾部方向 token = 人工单次目标（优先于已保存设置，不回写配置）
     let (clean_query, one_shot) = parse_direction_token(&query);
-    let target_lang = one_shot.unwrap_or_else(|| {
-        settings
-            .get("target_lang")
-            .and_then(Value::as_str)
-            .unwrap_or("zh")
-            .to_string()
-    });
+    let target_lang = resolve_target_lang(&settings, one_shot.as_deref());
 
     let text = strip_private_use_chars(clean_query.trim());
     if text.is_empty() {
@@ -556,18 +557,7 @@ fn handle_tool_call<W: Write>(
     }
 
     // 优先级：调用参数（AI/页面的单次目标）> 已保存设置；均不回写配置
-    let mut target_lang = arguments
-        .get("target_lang")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    if target_lang.is_empty() {
-        target_lang = settings
-            .get("target_lang")
-            .and_then(Value::as_str)
-            .unwrap_or("zh")
-            .to_string();
-    }
+    let target_lang = resolve_target_lang(&settings, arguments.get("target_lang").and_then(Value::as_str));
     let fallback_order = parse_fallback_order(&settings);
 
     if tool_name == "translate_batch" {
@@ -1531,6 +1521,18 @@ mod tests {
     }
 
     // ── auto_swap_lang ───────────────────────────────────────────────────────
+
+    #[test]
+    fn default_auto_and_explicit_directions_share_one_policy() {
+        let empty = serde_json::json!({});
+        assert_eq!(auto_swap_lang("你好", &resolve_target_lang(&empty, None)), "en");
+        assert_eq!(auto_swap_lang("hello", &resolve_target_lang(&empty, None)), "zh");
+        let saved = serde_json::json!({"target_lang":"ko"});
+        assert_eq!(resolve_target_lang(&saved, None), "ko");
+        assert_eq!(resolve_target_lang(&saved, Some("ja")), "ja");
+        assert_eq!(resolve_target_lang(&saved, Some("auto")), "auto");
+        assert_eq!(resolve_target_lang(&serde_json::json!({"target_lang":""}), None), "auto");
+    }
 
     #[test]
     fn auto_swap_explicit_target_unchanged() {

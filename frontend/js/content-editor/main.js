@@ -52,7 +52,7 @@ import {
 } from "./recovery-draft.js";
 import {showRecoveryConflictDialog} from "./recovery-dialog.js";
 import {RecoveryCandidates, RecoveryConflictResolver} from "./recovery-candidates.js";
-import {EditorExit, EditorLifecycle} from "./editor-lifecycle.js";
+import {EditorExit, EditorLifecycle, canDiscardEmptyClipboard} from "./editor-lifecycle.js";
 import {fnv1a64Hex} from "./canonical-buffer.js";
 import {bindEditorContextMenu} from "./context-menu.js";
 
@@ -939,7 +939,8 @@ async function handleFileConflict() {
 async function handleCancel() {
     // 0.23.3：关闭前停听写（confirmed 已保留；未定稿 preview 按 §3.6 丢弃）
     if (voice.isBusy) await voice.stop();
-    if (session.isActive && adapter.isDirty()) {
+    const discardEmpty = session.isActive && canDiscardEmptyClipboard(session, adapter.getText());
+    if (session.isActive && adapter.isDirty() && !discardEmpty) {
         const choice = await choiceDialog(t("editor.unsavedWarning"), {
             kind: "warning",
             okLabel: t("editor.discard"),
@@ -978,17 +979,26 @@ async function handleCancel() {
         closeWindow();
         return;
     }
-    allowClose = true;
-    await transform.cancel({silent: true});
-    if (session.isActive) {
-        const ended = await lifecycle.endSession();
-        if (!ended.ok) {
-            allowClose = false;
-            reportEndError(ended.error);
-            return;
+    const closingRef = session.sessionRef, closingGeneration = session.generation;
+    if (discardEmpty) adapter.setInteractionLocked(true);
+    try {
+        await transform.cancel({silent: true});
+        // 等待期间换了会话或出现新正文，不按旧空白快照关闭。
+        if (discardEmpty && (session.sessionRef !== closingRef || session.generation !== closingGeneration
+            || !canDiscardEmptyClipboard(session, adapter.getText()))) return;
+        allowClose = true;
+        if (session.isActive) {
+            const ended = await lifecycle.endSession("abandoned", {clearDraft: discardEmpty});
+            if (!ended.ok) {
+                allowClose = false;
+                reportEndError(ended.error);
+                return;
+            }
         }
+        closeWindow();
+    } finally {
+        if (discardEmpty) adapter.setInteractionLocked(false);
     }
-    closeWindow();
 }
 
 /**

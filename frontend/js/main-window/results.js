@@ -772,7 +772,20 @@ function createItem(app, i) {
 
     const name = document.createElement("span");
     name.className = "item-name";
-    name.textContent = app.name;
+    if (clipboardRef?.kind === "text" && app.name.includes("\n")) {
+        for (const [index, part] of app.name.split("\n").entries()) {
+            if (index) {
+                const marker = document.createElement("span");
+                marker.className = "clipboard-newline";
+                marker.textContent = "⏎";
+                marker.setAttribute("aria-hidden", "true");
+                name.appendChild(marker);
+            }
+            name.appendChild(document.createTextNode(part));
+        }
+    } else {
+        name.textContent = app.name;
+    }
     body.appendChild(name);
 
     if (app.description) {

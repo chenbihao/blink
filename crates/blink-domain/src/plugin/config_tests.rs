@@ -16,6 +16,7 @@ struct MemoryState {
     reads: usize,
     writes: usize,
     fail_write_at: Option<usize>,
+    fail_reads: bool,
 }
 
 #[derive(Default)]
@@ -56,6 +57,7 @@ impl SecretStore for MemorySecretStore {
     fn read(&self, plugin_id: &str, key: &str) -> Result<Option<SecretString>, String> {
         let mut state = self.0.lock().unwrap();
         state.reads += 1;
+        if state.fail_reads { return Err("injected secret read failure".into()); }
         Ok(state
             .values
             .get(&(plugin_id.to_string(), key.to_string()))
@@ -494,4 +496,89 @@ async fn two_secret_fields_update_fails_together_and_rolls_back_both() {
         engine.get_config(PLUGIN_ID).unwrap().settings,
         json!({"qweather_api_key": "", "caiyun_app_secret": "", "default_city": "Osaka"})
     );
+}
+
+
+fn resolve_cached_for_test(engine: &PluginEngine, store: &MemorySecretStore) -> Value {
+    let config = engine.get_config(PLUGIN_ID).unwrap();
+    let mut settings = config.settings;
+    engine.secret_cache.restore(PLUGIN_ID, config.revision, engine.plugin_set().generation,
+        &engine.secret_field_keys(PLUGIN_ID), &mut settings, store);
+    settings
+}
+
+#[tokio::test]
+async fn plugin_secret_snapshot_reads_once_and_never_enters_public_config() {
+    let (engine, _) = setup_engine_with_secrets(Some(config(4, json!({"api_key":"", "optional_key":""}))),
+        true, &["api_key", "optional_key"]).await;
+    let store = MemorySecretStore::default();
+    store.seed(PLUGIN_ID, "api_key", "first-secret");
+    for _ in 0..8 {
+        let settings = resolve_cached_for_test(&engine, &store);
+        assert_eq!(settings["api_key"], "first-secret");
+        assert_eq!(settings["optional_key"], "");
+    }
+    assert_eq!(store.counts(), (2, 0), "configured and missing keys are each read once");
+    assert_eq!(engine.get_settings(PLUGIN_ID).unwrap()["api_key"], "");
+    assert!(engine.secret_cache.hint(PLUGIN_ID, 4, engine.plugin_set().generation, "api_key").unwrap().is_some());
+    assert_eq!(engine.secret_cache.hint(PLUGIN_ID, 4, engine.plugin_set().generation, "optional_key"), Some(None));
+    let reads = store.counts().0;
+    engine.replace_plugins(engine.all_plugins());
+    resolve_cached_for_test(&engine, &store);
+    assert_eq!(store.counts().0, reads + 2, "runtime publication invalidates the snapshot");
+}
+
+#[tokio::test]
+async fn credential_save_clear_disable_and_failed_update_invalidate_cache() {
+    let (engine, _) = setup_engine(Some(config(4, json!({"api_key":""}))), true).await;
+    let store = MemorySecretStore::default();
+    store.seed(PLUGIN_ID, "api_key", "old-secret");
+    assert_eq!(resolve_cached_for_test(&engine, &store)["api_key"], "old-secret");
+    let mut saved = config(4, json!({"api_key":"new-secret"}));
+    engine.update_config_with_store(PLUGIN_ID, &mut saved, &store, vec![]).await.unwrap();
+    assert_eq!(engine.secret_cache.hint(PLUGIN_ID, 4, engine.plugin_set().generation, "api_key"), None);
+    assert_eq!(resolve_cached_for_test(&engine, &store)["api_key"], "new-secret");
+    let mut cleared = config(5, json!({"api_key":""}));
+    engine.update_config_with_store(PLUGIN_ID, &mut cleared, &store,
+        vec![("api_key".into(), None)]).await.unwrap();
+    assert_eq!(resolve_cached_for_test(&engine, &store)["api_key"], "");
+    let mut disabled = config(6, json!({})); disabled.enabled = false;
+    engine.update_config_with_store(PLUGIN_ID, &mut disabled, &store, vec![]).await.unwrap();
+    assert_eq!(engine.secret_cache.hint(PLUGIN_ID, 6, engine.plugin_set().generation, "api_key"), None);
+
+    store.seed(PLUGIN_ID, "api_key", "restored-secret");
+    resolve_cached_for_test(&engine, &store);
+    store.fail_write_at(store.counts().1 + 1);
+    let mut failed = config(7, json!({"api_key":"must-not-survive"}));
+    assert!(engine.update_config_with_store(PLUGIN_ID, &mut failed, &store, vec![]).await.is_err());
+    assert_eq!(resolve_cached_for_test(&engine, &store)["api_key"], "restored-secret");
+}
+
+#[tokio::test]
+async fn failed_credential_read_is_retried_instead_of_cached_as_missing() {
+    let (engine, _) = setup_engine(Some(config(1, json!({"api_key":""}))), true).await;
+    let store = MemorySecretStore::default();
+    store.seed(PLUGIN_ID, "api_key", "available-after-retry");
+    store.0.lock().unwrap().fail_reads = true;
+    assert_eq!(resolve_cached_for_test(&engine, &store)["api_key"], "");
+    store.0.lock().unwrap().fail_reads = false;
+    assert_eq!(resolve_cached_for_test(&engine, &store)["api_key"], "available-after-retry");
+    let reads = store.counts().0;
+    resolve_cached_for_test(&engine, &store);
+    assert_eq!(store.counts().0, reads);
+}
+
+
+#[tokio::test]
+async fn manifest_secret_fields_are_part_of_the_cached_snapshot_identity() {
+    let (engine, _) = setup_engine(Some(config(1, json!({"api_key":""}))), true).await;
+    let store = MemorySecretStore::default();
+    store.seed(PLUGIN_ID, "api_key", "original");
+    store.seed(PLUGIN_ID, "new_field", "new-value");
+    resolve_cached_for_test(&engine, &store);
+    let mut settings = json!({});
+    engine.secret_cache.restore(PLUGIN_ID, 1, engine.plugin_set().generation,
+        &["api_key".into(), "new_field".into()], &mut settings, &store);
+    assert_eq!(settings["new_field"], "new-value");
+    assert_eq!(store.counts().0, 3, "a manifest change cannot reuse a different secret field set");
 }

@@ -89,6 +89,8 @@ Every Chord action can be remapped in Settings and promoted to a **global hotkey
 
 Hover over the **left third** of an entry to preview it: text shows its full content (scrollable; drag-select and press `Ctrl+C` to copy), and images show the original (**scroll to zoom around the pointer, drag after zooming, double-click to reset**). File images support PNG, JPG/JPEG, GIF, and WebP with animations playing; ordinary files show their full path, multi-file entries list their paths, and missing or unsupported items explain why. `Esc` closes the preview.
 
+List previews show line breaks as dimmed `⏎` markers; full-text previews and copying preserve real line breaks.
+
 Right-click inside the preview for that entry's menu: copy, edit, pin as a note, or delete for text; copy, pin, or edit for images; copy path list or delete for files, plus "Save as image entry" with follow-up pin/edit for single image files. Right-clicking a **single text or file entry** also detects open-style actions — a link offers "Open URL", and a local path offers "Open file / Open containing folder".
 
 Open with: `Alt+C` in the main window (or type 剩贴板 / `clip`). Text, images, and copied file paths are recorded in the background (**file content is never stored**; restricted sources such as network paths are saved as paths only).
@@ -100,7 +102,7 @@ Open with: `Alt+C` in the main window (or type 剩贴板 / `clip`). Text, images
 | Copy entry | Select one entry and press `Ctrl+C`; text/images also offer right-click "Copy" | Supports text, images, and files; paste copied files manually at the destination |
 | Paste out | `Enter` / double-click / `Alt+number` | Text is really pasted into the focused-before-summon window's input box (Blink's own windows like chat and sticky notes work too; falls back to copy when the target isn't an input box); images and files go to the clipboard for manual pasting |
 | Edit entry | `Alt+E` or right-click "Edit" | Opens the content editor; saving creates a new history entry. Editing a pinned entry moves the pin to the new content (the old entry drops back to normal ordering) |
-| Pin entry | Right-click any text/image/file entry | Four durations: pin for 1/6/12/24 hours. Pinned entries stay at the top (the most recently pinned first) with remaining time shown at the row's end, and are exempt from retention/count cleanup. Pin the same duration again to restart the timer and move the entry back to the top, or unpin; expired entries return to normal ordering. The clipboard list stays open after pinning |
+| Pin entry | Right-click any text/image/file entry | The original flat context menu offers pinning for 1, 3, or 7 days. Pinned entries stay at the top (the most recently pinned first) with remaining time shown at the row's end, and are exempt from retention/count cleanup. Pin the same duration again to restart the timer and move the entry back to the top, or unpin; expired entries return to normal ordering. The clipboard list stays open after pinning |
 | Delete entry | `Alt+D`, the context menu's delete options, or bare `Delete` (with empty input) | Shortcuts delete the selection, or the highlighted entry if none; the context menu lets you choose the scope |
 | Image entry menu | Right-click an image item | Pin to desktop, or open the image editor directly (without overwriting the clipboard) |
 | File entry | `Enter` / double-click / `Alt+number` / single-select `Ctrl+C` | Writes the whole path list back to the clipboard as files; press `Ctrl+V` in the target app to paste. Replays use **copy semantics**; expired paths still copy |
@@ -224,6 +226,8 @@ Create from: the screenshot toolbar "Pin", the OCR panel "Pin", or right-click "
 | More output | Top `⋯` menu | Save a copy, copy all, create a note, send to AI chat (prefills only, never sends), recover unsaved drafts |
 | Layered exit | `Esc` | In order: close menu → stop dictation → dismiss candidate card → close window (three-way dialog when there are unsaved changes) |
 
+When a clipboard editing session is cleared or contains only whitespace, `Esc` closes it and clears its draft without a save confirmation. Unsaved nonempty text, sticky notes, and file save targets still require confirmation.
+
 ---
 
 ## 7. AI chat
@@ -325,7 +329,7 @@ The "Thinking" button next to the input renders according to the **current model
 
 **Common operations**: Choose “Default engine” and “Target language” in Translate configuration, then expand the engine's credential group to register and enter credentials. Alibaba, Baidu, Tencent, Youdao and DeepL are supported. To switch engines automatically after a failure, enable “Allow fallback to other engines” and drag to reorder them; fallback is off by default.
 
-**Tips**: Set the target language to “Auto-detect” for quick Chinese–English translation: Chinese input becomes English, and other languages become Chinese. Variable names such as `helloWorld` and `hello_world` are split into words before translation.
+**Tips**: Main-window translation and the translation window default to “Auto (Chinese–English)” (the old Chinese default is upgraded to Auto once; fixed targets saved afterward still apply): Chinese input becomes English, and other languages become Chinese. Reopening the translation window resets its direction and engine to the defaults, including when text is supplied. Change the target for the current session, or use `translate hello -> ja` in the main window for a one-off Japanese target. Variable names such as `helloWorld` and `hello_world` are split into words before translation.
 
 ### IP lookup
 

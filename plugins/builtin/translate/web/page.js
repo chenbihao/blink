@@ -44,6 +44,7 @@
   var debounceTimer = 0;
   var defaultTarget = "auto"; // 已保存默认（空唤起重置回退值）
   var defaultEngine = "ali";
+  var ready = false, pendingPayload, hasPendingPayload = false;
 
   function fillSelect(sel, pairs, value) {
     sel.innerHTML = "";
@@ -112,14 +113,8 @@
         defaultEngine = settings.default_engine || "ali";
         fillSelect(targetSel, i18n.targets, defaultTarget);
         fillSelect(engineSel, i18n.engines, defaultEngine);
-        // 唤起载荷：主窗带入的待翻译文本
-        var payloadText = ctx && ctx.payload && ctx.payload.text;
-        if (payloadText) {
-          input.value = String(payloadText);
-          // 程序化整串写入后显式滚动跟随（spec-frontend §5.8）
-          input.scrollTop = input.scrollHeight;
-          translateNow();
-        }
+        ready = true;
+        startSession(hasPendingPayload ? pendingPayload : ctx && ctx.payload);
       });
     });
   }
@@ -136,6 +131,21 @@
     targetSel.value = defaultTarget;
     engineSel.value = defaultEngine;
     input.focus();
+  }
+
+  function startSession(payload) {
+    // 带文本与空唤起都先重置方向/引擎，不能沿用上次手动选择。
+    resetSession();
+    if (payload && typeof payload.text === "string" && payload.text) {
+      input.value = payload.text;
+      input.setSelectionRange(input.value.length, input.value.length);
+      input.scrollTop = input.scrollHeight;
+      // 人工本次方向优先；普通唤起遵循默认 auto / 已保存的固定目标。
+      if (i18n.targets.some(function (pair) { return pair[0] === payload.target_lang; })) {
+        targetSel.value = payload.target_lang;
+      }
+      translateNow();
+    }
   }
 
   input.addEventListener("input", translateDebounced);
@@ -165,13 +175,8 @@
 
   // 复用窗口再次唤起：带载荷预填并立即翻译；空唤起（null）重置为新查询
   window.Blink.onPayload(function (payload) {
-    if (payload && typeof payload.text === "string" && payload.text) {
-      input.value = payload.text;
-      input.scrollTop = input.scrollHeight;
-      translateNow();
-    } else {
-      resetSession();
-    }
+    if (!ready) { pendingPayload = payload; hasPendingPayload = true; return; }
+    startSession(payload);
   });
 
   init().catch(function (e) {

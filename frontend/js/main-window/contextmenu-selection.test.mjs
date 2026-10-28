@@ -250,11 +250,11 @@ test('文本预览复用单项菜单，选区只覆盖复制且不接管列表�
     const h = await setup([{kind: 'text', id: 'other'}, imageRef], {copyToClipboard: async text => copied.push(text)});
     const menu = h.openPreview(textRef, textActions, '所选片段\n');
     // 0.26.10：预览右键按所属单项处理——顶部注入「正在识别操作」智能组占位
-    // 0.26.16：文本项追加置顶四档（未置顶语境 → menu.pin_for）
+    // 0.26.16：文本项平铺置顶 1/3/7 天
     assert.deepEqual(menu.filter(item => !item.separator).map(item => item.label),
         ['menu.smart_loading', 'menu.copySelection', 'menu.edit', 'menu.sticky',
             'menu.sendTextToChat',
-            'menu.pin_for', 'menu.pin_for', 'menu.pin_for', 'menu.pin_for', 'menu.delete']);
+            'menu.pin_for_days', 'menu.pin_for_days', 'menu.pin_for_days', 'menu.delete']);
     assert.equal(menu[0].disabled, true, 'loading 项不可点击');
     assert.equal(menu.find(item => item.label === 'menu.copySelection').shortcut, 'Ctrl+C');
     assert.equal(h.prepared.length, 0, 'preview does not mutate the list selection');
@@ -290,10 +290,10 @@ test('图片预览复制、钉图、编辑与删除均使用原图单项身份',
     });
     for (const label of ['menu.copy', 'menu.pin', 'menu.editImage', 'menu.delete']) {
         const menu = h.openPreview(imageRef, imageActions);
-        // 0.26.16：图片项追加置顶四档（menu.editImage 与 menu.delete 之间）
+        // 0.26.16：图片项平铺置顶 1/3/7 天（menu.editImage 与 menu.delete 之间）
         assert.deepEqual(menu.filter(item => !item.separator).map(item => item.label),
             ['menu.copy', 'menu.pin', 'menu.askAiImage', 'menu.editImage',
-                'menu.pin_for', 'menu.pin_for', 'menu.pin_for', 'menu.pin_for', 'menu.delete']);
+                'menu.pin_for_days', 'menu.pin_for_days', 'menu.pin_for_days', 'menu.delete']);
         choose(h, menu, label);
         if (label === 'menu.copy') assert.equal(h.calls.at(-1).data.actions[0].runArg, imageRef.id);
         else if (label === 'menu.editImage') assert.deepEqual(edited, [imageRef.id]);
@@ -344,4 +344,22 @@ test('菜单存在时 Esc 只关闭菜单并释放预览', async () => {
     assert.equal(stopped && prevented, true);
     assert.equal(h.releases.length, 1);
     assert.equal(h.calls.length, 0);
+});
+
+
+test('原平铺菜单只提供置顶 1/3/7 天，按正确小时数提交', async () => {
+    const pinned = [];
+    const h = await setup([textRef], {pinClipboardEntries: async (...args) => pinned.push(args), queryEl: {focus() {}}});
+    h.clipboardMode.isActive = () => false;
+    for (const [index, hours] of [24, 72, 168].entries()) {
+        const menu = h.open();
+        const choices = menu.map((item, actionId) => ({...item, actionId})).filter(item => item.label === 'menu.pin_for_days');
+        assert.equal(choices.length, 3);
+        assert.equal(menu.some(item => item.children), false);
+        const choice = choices[index];
+        h.events.get('action')({payload: {actionId: choice.actionId, menuId: choice.menuId, generation: choice.generation}});
+        await Promise.resolve();
+        assert.equal(pinned.at(-1)[2], hours);
+        assert.deepEqual(pinned.at(-1)[1][0], textRef);
+    }
 });

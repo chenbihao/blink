@@ -103,6 +103,10 @@
     text-overflow: ellipsis;
 }
 
+#results li .clipboard-newline {
+    opacity: 0.55;
+}
+
 #results li .item-desc {
     font-size: var(--text-base);
     color: var(--text-dim);

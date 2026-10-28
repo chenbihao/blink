@@ -43,7 +43,7 @@
 > **铁则**：静态系统窗口在启动后异步预创建并隐藏（`visible:false`），首次 show 复用预创建的 webview；动态窗口遵循下述例外，不按数量全量预热。
 
 - **预热范围**：`chord-screenshot` / `context-menu` / `voice-overlay` / `chord-pin` / `chat` / `settings` / `content-editor` / `sticky-manager` — 8 个静态 label 窗口全部预热
-- **例外**：动态便签窗口（`sticky-{id}`）按需创建，沿用 prevent_close + hide。0.28 规划的独立插件窗口同样按需创建、重复唤起复用，不随安装数量全量预热，不默认每插件独立 WebView2 环境；插件窗口的关闭/空闲回收和草稿策略按 [0.28 §3.2](../phases/0.28-plugin-platform-and-tools.md) 落实。single-flight、ready 交接和焦点要求仍适用
+- **例外**：动态便签窗口（`sticky-{id}`）和独立插件窗口按需创建、重复唤起复用，关闭先隐藏；不随安装数量全量预热，不默认每插件独立 WebView2 环境。插件窗口须有数量/缓存预算，优先回收隐藏空闲窗，不抢关可见的未交付会话；唤起重置与草稿策略见 [0.28 §3.2](../phases/0.28-plugin-platform-and-tools.md)。single-flight、ready 交接和焦点要求仍适用
 - **时序**：预热在启动 3s 后异步执行（`preheat_secondary_windows`），不阻塞 Alt+Space 主链路
 - **创建 single-flight**：同一 label 的预热与用户唤起必须共用统一的 `get_or_create` 入口，并按 label 串行化“二次检查 + build”；禁止各路径独立执行 `get_webview_window().is_none() → build()`。并发调用只能有一个创建者，其余调用等待后复用同一窗口；创建失败必须释放创建态，允许后续重试
 - **锁粒度**：创建锁只覆盖同一 label 的“检查 + build”，不得跨 label 串行化全部窗口，也不得覆盖后续 `show` / `focus` / `emit`；预热不得持有 Alt+Space 主链路需要的全局锁
@@ -53,6 +53,8 @@
 - **窗口级初始化只执行一次**：`on_window_event`、系统菜单拦截、圆角等初始化必须收敛到统一创建成功钩子，或使用幂等 `ensure_*`；不得依赖“必定由预热创建”或“必定由用户路径创建”的分支假设
 - **settings 特殊初始化**：`strip_window_border` + `enable_rounded_corners` 必须纳入统一创建成功钩子或幂等 `ensure_*`，预热创建与用户 fallback 创建不得产生不同外观
 - **内存预算**：8 个预热窗口 + 动态便签，常驻内存 < 300MB（WebView2 每窗口 ~10-20MB）
+
+**插件主题注入**：宿主提供完整 tokens → 有效主题 → 公共页面基础样式；`auto` 须解析为实际主题，资产缺失须有明确失败/主题回退，禁止输出不存在的 auto.css。开发与发布模式分别验证资产可达性；页面与桥接权限边界见 spec-architecture §A7.5。
 
 **反例**：预热任务和 `show_chat_window` 分别先检查 `chat` 不存在、再各自 `build("chat")`。两次检查都可能通过，随后争用相同 label；若用户唤起还在串行热键 effect 循环中等待该建窗路径，后续 Alt+Space 会一起排队。
 

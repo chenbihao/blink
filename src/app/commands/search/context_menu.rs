@@ -4,6 +4,70 @@ use super::*;
 /// 会话与内容代次原子更新；旧协议 None 也必须与当前 None 严格匹配。
 static ACTIVE_MENU: std::sync::Mutex<Option<(String, Option<u64>)>> = std::sync::Mutex::new(None);
 
+/// CSS 菜单高度对应客户区，而 SetWindowPos 接受外框尺寸；保留当前非客户区差值。
+fn fitted_outer_height(outer: u32, client: u32, content_css: f64, viewport_css: f64) -> Option<u32> {
+    if client == 0
+        || outer < client
+        || !content_css.is_finite()
+        || !viewport_css.is_finite()
+        || !(1.0..=8192.0).contains(&content_css)
+        || !(1.0..=8192.0).contains(&viewport_css)
+    {
+        return None;
+    }
+    // 实际客户区 / CSS viewport 同时涵盖 DPI 与 WebView 缩放；物理像素向上取整防裁字。
+    let desired_client = (content_css * f64::from(client) / viewport_css).ceil() as u32;
+    (outer - client).checked_add(desired_client)
+}
+
+/// 菜单完成 layout 后仅校正高度，不重渲染、不抢焦点、不改变菜单宽度或外观。
+#[tauri::command]
+pub fn fit_context_menu_height(
+    app: tauri::AppHandle,
+    menu_id: String,
+    generation: Option<u64>,
+    content_height: f64,
+    viewport_height: f64,
+) -> Result<(), String> {
+    let active = ACTIVE_MENU.lock().map_err(|e| e.to_string())?;
+    if !matches_menu(active.as_ref(), Some(&menu_id), Some(generation)) {
+        return Ok(());
+    }
+    let win = app.get_webview_window("context-menu").ok_or("菜单窗口不存在")?;
+    if !win.is_visible().map_err(|e| e.to_string())? {
+        return Ok(());
+    }
+    let outer = win.outer_size().map_err(|e| e.to_string())?;
+    let client = win.inner_size().map_err(|e| e.to_string())?;
+    let height = fitted_outer_height(outer.height, client.height, content_height, viewport_height)
+        .ok_or("菜单测量尺寸无效")?;
+    if height == outer.height {
+        return Ok(());
+    }
+    let origin = win.outer_position().map_err(|e| e.to_string())?;
+    let scale = win.scale_factor().map_err(|e| e.to_string())?;
+    let (x, y, _, _) = crate::infra::platform::window::clamp_context_menu_at(
+        f64::from(outer.width) / scale,
+        f64::from(height) / scale,
+        Some((origin.x, origin.y)),
+    );
+    let hwnd = win.hwnd().map_err(|e| e.to_string())?;
+    crate::infra::platform::window::place_at_physical(
+        windows::Win32::Foundation::HWND(hwnd.0 as _),
+        x,
+        y,
+        outer.width,
+        height,
+    );
+    tracing::debug!(
+        content_height, viewport_height,
+        outer_height = outer.height, client_height = client.height,
+        fitted_outer_height = height,
+        "右键菜单实测高度校正"
+    );
+    Ok(())
+}
+
 /// 显示右键菜单独立窗口（突破主窗口边界裁剪）。
 /// 复用已有窗口：首次创建，后续 hide → 更新数据 → show，避免重复创建 WebView2 的开销。
 ///
@@ -287,7 +351,28 @@ pub async fn context_menu_action(
 
 #[cfg(test)]
 mod tests {
-    use super::matches_menu;
+    use super::{fitted_outer_height, matches_menu};
+
+    #[test]
+    fn measured_menu_height_preserves_native_frame() {
+        // 真机数据：外框 339 / 客户区 330，菜单 content 311 + padding 16 = 327。
+        assert_eq!(fitted_outer_height(339, 330, 327.0, 330.0), Some(336));
+        assert_eq!(fitted_outer_height(336, 327, 327.0, 327.0), Some(336));
+        // 150% DPI，以及未带非客户区的窗口；不足一个物理像素向上取整。
+        assert_eq!(fitted_outer_height(509, 495, 327.0, 330.0), Some(505));
+        assert_eq!(fitted_outer_height(330, 330, 327.25, 330.0), Some(328));
+        assert_eq!(fitted_outer_height(339, 330, 400.0, 330.0), Some(409));
+    }
+
+    #[test]
+    fn invalid_menu_measurements_are_rejected() {
+        for value in [0.0, -1.0, f64::NAN, f64::INFINITY, 100_000.0] {
+            assert_eq!(fitted_outer_height(339, 330, value, 330.0), None);
+            assert_eq!(fitted_outer_height(339, 330, 327.0, value), None);
+        }
+        assert_eq!(fitted_outer_height(8, 0, 327.0, 330.0), None);
+        assert_eq!(fitted_outer_height(320, 330, 327.0, 330.0), None);
+    }
 
     #[test]
     fn menu_click_requires_exact_session_and_generation() {

@@ -4,7 +4,7 @@
 >
 > **维护规则**：只保留尚未完成的方向；已立项内容迁入 `phases/`，已完成内容直接移出本文件。
 >
-> **当前判断**：**WebDAV 配置同步、轻量 GIF 录制与编辑**已于 2026-10-25 随插件页面/存储、语言工具和官方目录纳入 [0.28 插件专项](phases/0.28-plugin-platform-and-tools.md)，尚未实现，后续以 phase 为准。背单词仅记录记忆曲线与四六级等词包方向，不进 0.28。插件系统升级 [0.26](phases/0.26-plugin-system-upgrade.md) 已收尾；跨 Provider 深度思考与 OpenAI-compatible 方言适配已迁入 [0.27 §5.14–§5.15](phases/0.27-ai-interaction-enhancement.md)，以 §5.13 的 rig 0.45 升级为前置，三项仍为补充规划。RAG、向量数据库与记忆向量化继续保持远期观察。
+> **当前判断**：**WebDAV 配置同步、轻量 GIF 录制与编辑**已随 [0.28 插件专项](phases/0.28-plugin-platform-and-tools.md) 实现，并于 0.28.8 完成真机验收；本版后续追加批次的待验范围见 phase §六。背单词仅记录记忆曲线与四六级等词包方向，不进 0.28。插件系统升级 [0.26](phases/0.26-plugin-system-upgrade.md) 已收尾；跨 Provider 深度思考与 OpenAI-compatible 方言适配已迁入 [0.27 §5.14–§5.15](phases/0.27-ai-interaction-enhancement.md)，以 §5.13 的 rig 0.45 升级为前置，三项仍为补充规划。RAG、向量数据库与记忆向量化继续保持远期观察。
 
 ---
 
@@ -69,7 +69,7 @@
 
 ## 三、近期预选
 
-2026-10-22 纳入近期候选的 WebDAV 配置同步、轻量 GIF 录制与编辑，已于 2026-10-25 经用户确认进入 [0.28 插件专项](phases/0.28-plugin-platform-and-tools.md)，收敛为 0.28.1–0.28.8 八个子版本。同步采用固定可移植范围、地址/用户/密码与自动 blink 目录、三方合并/版本保护，首版不同步密钥、不另设端到端加密口令；GIF 聚焦短演示，录制时无损压缩素材、编辑后再编码成品。当前均为规划，资源/兼容性须在对应阶段验证，不代表已有可用功能。
+WebDAV 配置同步、轻量 GIF 录制与编辑已在 [0.28 插件专项](phases/0.28-plugin-platform-and-tools.md) 实现并完成 0.28.8 真机验收，不再列为近期候选；最终方案与维护入口见 phase §3.5/§3.6。
 
 ---
 

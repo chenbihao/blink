@@ -6,6 +6,7 @@
 mod bootstrap;
 mod capability;
 mod catalog;
+mod config_upgrade;
 mod contract;
 mod dataset;
 mod direction;
@@ -15,6 +16,7 @@ mod manifest;
 mod runtime;
 mod process;
 mod protocol;
+mod secret_cache;
 mod secret_update;
 mod weather_config;
 

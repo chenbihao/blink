@@ -71,6 +71,7 @@
             fragment.appendChild(row);
         });
         menuEl.replaceChildren(fragment);
+        scheduleHeightFit();
     }
 
     /** 后端复用窗口时通过 eval 直接调用此入口（emit 在隐藏态会被 WebView2 丢弃）。 */
@@ -82,6 +83,35 @@
     let isClickingItem = false;
     let displayedMenuId = '';
     let displayedGeneration = null;
+    let heightFrame = 0;
+    let renderRevision = 0;
+    let fittingHeight = false;
+    let heightDirty = false;
+
+    /** 初始估算只负责开窗；布局完成后测 border-box（已含 padding），不再另加余量。 */
+    function scheduleHeightFit() {
+        const revision = ++renderRevision;
+        cancelAnimationFrame(heightFrame);
+        const menuId = displayedMenuId, generation = displayedGeneration;
+        heightFrame = requestAnimationFrame(() => {
+            if (!menuId || revision !== renderRevision || menuId !== displayedMenuId) return;
+            const contentHeight = document.getElementById('menu').getBoundingClientRect().height;
+            const viewportHeight = window.visualViewport?.height || window.innerHeight;
+            if (contentHeight <= 0 || viewportHeight <= 0) return;
+            // 一次只允许一个原生 resize；上一轮落地后重新测 viewport，不能重复消费旧尺寸。
+            if (fittingHeight) { heightDirty = true; return; }
+            fittingHeight = true;
+            invoke('fit_context_menu_height', {menuId, generation, contentHeight, viewportHeight})
+                .catch(error => console.error('右键菜单高度校正失败:', error))
+                .finally(() => {
+                    fittingHeight = false;
+                    if (heightDirty) { heightDirty = false; scheduleHeightFit(); }
+                });
+        });
+    }
+    window.addEventListener('resize', scheduleHeightFit);
+    // 首帧样式/字体与后续内容变化都走同一测量；原生侧高度相同即 no-op。
+    if (window.ResizeObserver) new ResizeObserver(scheduleHeightFit).observe(document.getElementById('menu'));
 
     // Lucide sprite 按需注入（智能操作图标）；失败不阻塞菜单渲染
     ensureSpriteLoaded?.().catch?.(() => {});

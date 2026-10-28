@@ -300,7 +300,8 @@ function showPopupWindow(width, height, items) {
 }
 
 /**
- * 0.26.10：估算尺寸并弹出菜单（初始展示与智能组原地更新共用）。
+ * 估算尺寸并弹出菜单（初始展示与智能组原地更新共用）。
+ * 这只是首次外框尺寸；popup 按实测 CSS 高度与客户区差值校正，不能直接删掉 8px 余量。
  *
  * item: padding 8px * 2 + font 13px * line-height 1.5 ≈ 35.5px；
  * separator 9px；container padding 16px；缓冲量 8px（阴影呼吸位）。
@@ -587,8 +588,8 @@ const KIND_LABELS = {
     route: () => t("hint.route"),
 };
 
-/** 0.26.16：置顶档位（小时）——产品定案 1/6/12/24 四档平铺，不做永久置顶。 */
-const PIN_TTL_HOURS = [1, 6, 12, 24];
+/** 0.28.14：保留原平铺菜单，提供 1/3/7 天；执行统一按小时传递。 */
+const PIN_TTL_HOURS = [24, 72, 168];
 
 /** Capability 当前支持的置顶类型（ClipboardEntryKind 三变体）。 */
 const PINNABLE_KINDS = new Set(["text", "image", "file"]);
@@ -796,8 +797,8 @@ function itemMenu(li, {selectedText = ""} = {}) {
         }
     }
 
-    // 0.26.16：置顶——三类历史条目（文本/图片/文件）统一支持。档位文案恒为
-    // 「置顶 N 小时」：已置顶时再点同档位 = 从现在起重新计 N 小时（重置语义，
+    // 0.28.14：置顶——三类历史条目（文本/图片/文件）统一支持。档位文案恒为
+    // 「置顶 N 天」：已置顶时再点同档位 = 从现在起重新计时（重置语义，
     // 不用「续期」等换词——徽章剩余时间已表达当前状态，避免叠加/重置歧义）；
     // 已置顶条目额外提供「取消置顶」。执行走 pin_clipboard_entries 专用
     // command（列表管理入口，不隐藏主窗），完成后强制刷新列表排序。
@@ -808,7 +809,7 @@ function itemMenu(li, {selectedText = ""} = {}) {
         items.push({separator: true});
         for (const hours of PIN_TTL_HOURS) {
             items.push({
-                label: t("menu.pin_for", {hours}),
+                label: t("menu.pin_for_days", {days: hours / 24}),
                 run: () => pinEntry(clipboardRef, hours),
             });
         }

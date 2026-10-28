@@ -2236,6 +2236,7 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
         app::commands::hide_context_menu,
         app::commands::context_menu_action,
         app::commands::take_context_menu_payload,
+        app::commands::fit_context_menu_height,
         app::commands::script_interpreters_status,
         app::commands::install_script_interpreter,
         app::commands::uninstall_script_interpreter,

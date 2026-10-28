@@ -120,6 +120,15 @@ cargo test --workspace --exclude blink-plugin-ip --exclude blink-plugin-translat
 
 > 具体实现与回归入口见 [0.26 phase §七](../phases/0.26-plugin-system-upgrade.md)。
 
+### 4.6 插件安装与生命周期（强制）
+
+- 清单 schema、进程协议、宿主兼容范围、插件包与数据格式分别版本化；激活前校验身份、tool id/关键词碰撞及兼容性。v1 不接收 v2 初始化帧，新业务流程同时检查宿主版本与协商能力。
+- 安装/更新先暂存校验，再以安装记录或 active 指针原子切换；失败保留旧可用版，包回滚不等于用户数据回滚。发布/撤销须联动路由、能力注册、页面、配置及 AI/MCP 缓存，旧句柄和迟到确认执行前重新验证。
+- 卸载先持久化不可调用状态及数据保留/清除意图，再撤运行时与页面，最后清文件；撤销失败不得继续删文件。Windows 占用如实保留 PendingRemove 与待清理路径，重启按冻结意图恢复，不假报物理删除。
+- 协议 stdout 每帧写完整 JSONL 并 flush；直调单测不能代替真实 stdio 链路验证。连续崩溃须有重启预算/退避，缓存、等待者、旧进程 reader 与临时目录均须有界。
+
+> 页面/资源/数据集调用方约束见 [spec-architecture §A7.5](spec-architecture.md)；落地与踩坑见 [0.28 phase](../phases/0.28-plugin-platform-and-tools.md)。
+
 ---
 
 ## 五、事件名常量化（强制）
@@ -155,7 +164,7 @@ cargo test --workspace --exclude blink-plugin-ip --exclude blink-plugin-translat
 
 | 库 | 内容 |
 |---|---|
-| **`blink_config.db`** | 配置 KV。`config(key, value, updated_at)`——`AppConfig` 6 分片门面 + `AIConfig` 第7 + `SttConfig` 第8 + 各引擎/插件配置。**未来跨机同步只同步此库** |
+| **`blink_config.db`** | 配置 KV。`config(key, value, updated_at)`——`AppConfig` 6 分片门面 + `AIConfig` 第7 + `SttConfig` 第8 + 各引擎/插件配置。跨机同步按 §7.7 的可移植清单取值，不复制整库 |
 | **`blink_history.db`** | `history(lnk_path, hit_count, last_used_at)` 启动历史 + `clipboard_history(id, text, kind, hit_count, last_used_at)` 剪贴板历史 |
 | **`blink_ai.db`** | `ai_tool_audit` AI 工具审计（0.12.0 加 `cleanup_old` 30 天 + 行数上限 10000）+ `conversations` / `messages`（对话记忆持久化） |
 | **`blink_cache.db`** | `performance_metrics` 性能统计（高频写）+ `icon_cache` 图标缓存（BLOB） |
@@ -212,6 +221,16 @@ cargo test --workspace --exclude blink-plugin-ip --exclude blink-plugin-translat
 
 > 具体实现与回归入口见 [0.26 phase §七](../phases/0.26-plugin-system-upgrade.md)。
 
+### 7.7 跨设备配置同步（强制）
+
+- 同步范围由类型化可移植白名单定义，不按整库/原始 KV 遍历上传。秘密、凭据引用、设备路径、实际安装状态及 AI/MCP 授权不漫游；不复制任意 JSON/HTTP headers 或只靠字段名猜秘密。提示词等明确纳入的配置资产可跨库读取，历史、剪贴板、对话和插件用户数据不随配置同步。
+- 共享配置表示用户意图，本机设备覆盖须记录来源/原因且不反向上传。未装插件保留待应用设置，不自动安装或授权；缺失秘密字段不得清空已有本机密钥。未知兼容字段保留，不支持的高版本格式停止写入，禁止降级覆盖远端。
+- 基于共同基线、本机与远端做三方合并，缺项/删除语义明确；同值或独立修改可自动合并，同项异值、删除与修改、顺序及关联引用冲突须裁决。时间戳只用于展示，不决定覆盖顺序；预览后本机版本变化须重做计划。
+- 上传不可变候选后按强 ETag 条件更新 head，首次创建使用不存在前置条件；结果未知先重读判定是否已提交。无可靠条件写时如实降级，不承诺安全双向同步；远端已提交而本地应用失败时保留恢复状态，不强盖本机或回滚远端。
+- 本地应用复用既有校验/保存/副作用服务，预先备份并协调补偿，成功后才推进共同基线。数据库读取失败不得伪装成空配置，否则会被合并器解释为批量删除；恢复、历史和清理只触及本应用约定范围。
+
+> 固定字段清单与实现入口见 `crates/blink-domain/src/config_sync/portable.rs`；WebDAV 布局及本版取舍见 [0.28 phase §3.5](../phases/0.28-plugin-platform-and-tools.md)。
+
 ---
 
 ## 八、AI 工具审计日志约定
@@ -261,3 +280,5 @@ string_slice = "deny"  # 直接按字节切片字符串 → 编译失败
 - **创建与重连 single-flight**：同一逻辑资源的并发创建/重连只能有一个执行者，其余调用等待并复用结果；失败必须释放创建态，允许后续重试
 - **generation 隔离**：MCP client/server、外部进程和其他长驻资源的后台任务必须绑定 generation；旧 generation 的结果、清理和断线事件不得修改新实例
 - **缓存覆盖全部行为维度**：凡会改变工具集合、权限、系统提示词或执行模式的配置，必须进入缓存键或触发显式失效，禁止复用语义已过期的运行时对象
+
+**插件长任务**：握手不承载分钟级构建；begin 快速返回操作 id，以事件和可查询快照报告真实阶段/进度/取消能力。同一插件/数据集重复触发合并；取消状态持久到操作终态，窗口隐藏不丢进度，重启清理孤儿临时目录后可重试。下载、构建、队列、磁盘、时长与进程终止均有预算；不可仅凭压缩率或事件送达宣称完成，数据集提交与撤销遵循 spec-architecture §A7.5。

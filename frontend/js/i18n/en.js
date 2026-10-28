@@ -1629,6 +1629,7 @@ export const en = {
     "menu.edit": "Edit",
     "menu.pin": "Pin",
     "menu.pin_for": "Pin for {hours}h",
+    "menu.pin_for_days": "Pin for {days}d",
     "menu.unpin": "Unpin",
     "menu.editImage": "Edit Image",
     "menu.sticky": "Sticky",

@@ -298,3 +298,17 @@ test("exit: 应答 IPC 失败不上抛（后端超时自行放弃）", async () 
     await exit.handleRequest({requestId: "r10"}); // 不得 reject
     assert.equal(calls.resolves.length, 1);
 });
+
+test('空白剪贴板编辑可直接放弃并清理草稿，其他来源或文件目标仍需确认', async () => {
+    const {canDiscardEmptyClipboard} = await import('./editor-lifecycle.js');
+    const session = {isActive: true, source: {kind: 'clipboard_item'}, target: {kind: 'clipboard_result'}};
+    for (const body of ['', ' \t\r\n', '\u3000\u00a0']) assert.equal(canDiscardEmptyClipboard(session, body), true);
+    assert.equal(canDiscardEmptyClipboard(session, ' 有正文 '), false);
+    assert.equal(canDiscardEmptyClipboard({...session, isActive: false}, ''), false);
+    assert.equal(canDiscardEmptyClipboard({...session, source: {kind: 'sticky'}}, ''), false);
+    assert.equal(canDiscardEmptyClipboard({...session, target: {kind: 'confirmed_file'}}, ''), false);
+    const h = makeHarness({body: ' \n', dirty: true});
+    assert.deepEqual(await h.lifecycle.endSession('abandoned', {clearDraft: true}), {ok: true});
+    assert.deepEqual(h.calls.ends, ['abandoned']);
+    assert.equal(h.calls.discardCurrent, 1, '直接关闭必须清理本次恢复草稿');
+});
