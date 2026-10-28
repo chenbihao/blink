@@ -313,7 +313,7 @@ console.log('results 视口模型：page/step、流式追加、局部移除、�
     const h = setup();
     const name = h.context.createItem({...clip('newline'), name: '<b>原文⏎</b>\n第二行\n'}, 0).querySelector('.item-name');
     assert.deepEqual(name.children.map(node => [node.className || '', node.textContent]), [
-        ['', '<b>原文⏎</b>'], ['clipboard-newline', '⏎'], ['', '第二行'], ['clipboard-newline', '⏎'], ['', ''],
+        ['', '<b>原文⏎</b>'], ['clipboard-newline', '↵'], ['', '第二行'], ['clipboard-newline', '↵'], ['', ''],
     ], '只弱化生成的换行标记，原文符号与 HTML 文本原样保留');
     const literal = h.context.createItem({...clip('literal'), name: '原文⏎符号'}, 0).querySelector('.item-name');
     assert.equal(literal.textContent, '原文⏎符号');

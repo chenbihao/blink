@@ -83,6 +83,39 @@ pub fn init(level: &str) {
         .init();
 
     clean_old_logs(&dir);
+    install_panic_hook(dir);
+}
+
+/// release 使用 panic=abort，非阻塞日志队列来不及排空。
+/// panic 报告独立同步落盘，再保留默认 stderr hook 的行为。
+fn install_panic_hook(dir: PathBuf) {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let report = format!("{info}\n{}", std::backtrace::Backtrace::force_capture());
+        if let Err(error) = write_panic_report(&dir, &report) {
+            tracing::error!(%error, "panic report: 同步写入失败");
+        }
+        previous(info);
+    }));
+}
+
+fn write_panic_report(dir: &std::path::Path, report: &str) -> std::io::Result<()> {
+    let today = chrono::Local::now().format("%Y-%m-%d");
+    // 与异步 appender 分文件，避免 panic 时重入它持有的锁。
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(format!("blink.panic.{today}.log")))?;
+    let flush = file.try_clone()?;
+    let subscriber = tracing_subscriber::fmt()
+        .with_timer(LocalTimer)
+        .with_ansi(false)
+        .with_writer(Mutex::new(file))
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::error!(panic = %report, "unhandled panic");
+    });
+    flush.sync_all()
 }
 
 /// 运行时切换日志级别（设置页触发，立即生效）。
@@ -216,7 +249,26 @@ fn clean_old_logs(dir: &PathBuf) {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_level;
+    use super::{parse_level, write_panic_report};
+
+    #[test]
+    fn panic_report_is_written_synchronously_and_appended() {
+        let dir = tempfile::tempdir().unwrap();
+        write_panic_report(dir.path(), "首次启动失败 at src/main.rs:42").unwrap();
+        write_panic_report(dir.path(), "second panic").unwrap();
+        let files: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(files.len(), 1);
+        let content = std::fs::read_to_string(files[0].path()).unwrap();
+        assert!(
+            content.contains("首次启动失败 at src/main.rs:42"),
+            "{content}"
+        );
+        assert!(content.contains("second panic"), "{content}");
+        assert_eq!(content.matches("unhandled panic").count(), 2);
+    }
 
     #[test]
     fn parse_level_caps_third_party_noise() {

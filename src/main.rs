@@ -37,8 +37,13 @@ fn main() {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
 
-    // 初始化日志（尽早，默认 error；setup 读配置后 reload 到用户级别）
-    infra::utils::logging::init("error");
+    // 启动阶段保留诊断记录；进入消息循环后再恢复用户级别。
+    // 首装默认 error，否则同步 setup 卡住时连最后执行到哪一步都无法判断。
+    infra::utils::logging::init("info");
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        "startup: initializing Tauri"
+    );
 
     let context = tauri::generate_context!();
     #[cfg(windows)]
@@ -392,6 +397,19 @@ fn main() {
         .build(context)
         .expect("error while building tauri application")
         .run(|_app, event| {
+            if let tauri::RunEvent::Ready = &event {
+                let startup = _app.state::<StartupUi>();
+                tracing::info!("startup: event loop ready");
+                infra::utils::logging::update_level(&startup.log_level);
+                if startup.show_welcome {
+                    let app = _app.clone();
+                    // Windows 建 WebView 会同步等待消息循环；不要在同步 setup 中
+                    // 弹出仍依赖后续 managed state 的首装界面。
+                    tauri::async_runtime::spawn_blocking(move || {
+                        infra::platform::window::show_welcome_window(&app);
+                    });
+                }
+            }
             if let tauri::RunEvent::Exit = event {
                 // 0.16.11：标记应用正在退出——便签窗口的 CloseRequested handler
                 // 据此跳过 set_visible(false)，保证退出不把所有便签写成 hidden
@@ -675,15 +693,23 @@ fn asset_mime(rel: &str) -> &'static str {
     }
 }
 
+/// setup 只保存首启意图，Ready 后才创建依赖完整服务的欢迎页。
+struct StartupUi {
+    show_welcome: bool,
+    log_level: String,
+}
+
 // 保持独立的增量检查边界，避免 Builder / IPC 注册改动重算完整初始化函数。
 fn setup_app(app: &mut tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error::Error>> {
     // 启动总耗时（setup 结束时手动记录，因为 setup 在同步上下文，没有 runtime 句柄）
     let startup_start = std::time::Instant::now();
+    tracing::info!("startup: creating main window");
 
     #[cfg(windows)]
     infra::platform::window::create_main_window(app.handle())?;
 
     // 初始化 DB 四层拆分（0.12.0 §2.2）——config/history/ai/cache 各独立 pool
+    tracing::info!("startup: initializing database pools");
     let pools = tauri::async_runtime::block_on(infra::data::pools::init_all())
         .expect("failed to init db pools");
 
@@ -694,6 +720,7 @@ fn setup_app(app: &mut tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error:
 
     // 初始化配置（配置库）
     let config_start = std::time::Instant::now();
+    tracing::info!("startup: initializing configuration");
     tauri::async_runtime::block_on(app::config::init_config(&pools.config))
         .expect("failed to init config");
     // 记录配置加载耗时（缓存库）
@@ -709,8 +736,10 @@ fn setup_app(app: &mut tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error:
     // 读取应用配置(快照)（配置库）
     let app_config = tauri::async_runtime::block_on(app::config::get_config(&pools.config));
 
-    // 日志级别 reload 到配置值（init 时为默认 error）
-    infra::utils::logging::update_level(&app_config.log_level);
+    app.manage(StartupUi {
+        show_welcome: app_config.onboarding_version < crate::domain::config::ONBOARDING_VERSION,
+        log_level: app_config.log_level.clone(),
+    });
     // AI HTTP 请求/响应体日志开关 reload（0.21.16，默认关）
     infra::utils::http_log::set_body_log_enabled(app_config.ai_http_body_log);
 
@@ -774,13 +803,6 @@ fn setup_app(app: &mut tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error:
                 infra::platform::window::on_focused(*focused);
             }
         });
-    }
-
-    // 0.17.3：首次启动弹出独立引导窗口（主窗口照常 hide）。
-    // 0.22.13 版本号化：新引导发布时 ONBOARDING_VERSION 自增，
-    // 未看过最新版的老用户补看一次。
-    if app_config.onboarding_version < crate::domain::config::ONBOARDING_VERSION {
-        infra::platform::window::show_welcome_window(app.handle());
     }
 
     // 0.26.20 更新提醒状态：启动一次 DB 读，managed cell 供唤起路径盖章
@@ -851,6 +873,7 @@ fn setup_app(app: &mut tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error:
     };
     // 0.28.12：随包目录解析收敛到 commands::plugin::bundled_plugins_root（与
     // 卸载回退同一真源）。
+    tracing::info!("startup: initializing plugins");
     let plugins_dir = app::commands::bundled_plugins_root(&app.app_handle().clone());
     let plugins = domain::plugin::load_builtin_plugins(&plugins_dir, proxy.clone());
     // 0.25.20：dev 额外加载 examples 示例插件（echo-python / echo-node
@@ -1337,6 +1360,7 @@ fn setup_app(app: &mut tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error:
     // 0.28.2：插件独立窗口面（会话表 + 窗口编排入口；必须在任何插件窗口打开前管理）
     app.manage(std::sync::Arc::new(app::plugin_surface::PluginSurface::new()));
 
+    tracing::info!("startup: migrating credentials");
     // 0.17.11: CM→keyring 密钥迁移（一次性,幂等）
     // 必须在 AIConfig 读取前执行——AIConfig 加载会触发密钥读取,需先迁到 keyring 新命名。
     tauri::async_runtime::block_on(
@@ -1421,6 +1445,7 @@ fn setup_app(app: &mut tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error:
     let services = app::service::all_services();
     let svc_start = std::time::Instant::now();
     for svc in &services {
+        tracing::info!(service = svc.name(), "startup: starting service");
         if let Err(e) = tauri::async_runtime::block_on(svc.start(&ctx)) {
             tracing::error!(service = svc.name(), error = %e, "service start failed");
         }
@@ -1448,6 +1473,7 @@ fn setup_app(app: &mut tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error:
     // 0.13.0: McpClientManager 管理 MCP server 子进程生命周期，传入 ChatService
     // 供 ensure_provider() 拉 MCP tool 进对话窗口 tool 池。
     // 0.17.8: PendingConfirms 使用 with_persistence，注入 config_pool + AiPermissionConfig。
+    tracing::info!("startup: initializing chat service");
     let ai_permission_config = tauri::async_runtime::block_on(
         crate::domain::config::app_config::get_ai_permission_config(&pools.config),
     );
@@ -1552,6 +1578,7 @@ fn setup_app(app: &mut tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error:
     // - 0.22.4: 同时注册 paddleocr adapter + OcrCoordinator（OcrBackendRouter）
     // - 0.22.7.4: funasr 为 GGUF 常驻 worker 实现（ManagedBinary +
     //   StdioWorker），旧 Python/PyTorch 链路已删除
+    tracing::info!("startup: initializing local engines");
     let funasr_adapter = crate::app::local_engine::funasr::make_funasr_adapter();
     let paddleocr_adapter = crate::app::local_engine::paddleocr::make_paddleocr_adapter();
     let engine_registry =
@@ -2002,6 +2029,10 @@ fn setup_app(app: &mut tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error:
         });
     }
 
+    tracing::info!(
+        elapsed_ms = startup_start.elapsed().as_millis() as u64,
+        "startup: setup complete"
+    );
     Ok(())
 }
 

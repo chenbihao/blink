@@ -63,7 +63,7 @@
 | **0.25** | [0.25-domain-crate-split.md](./phases/0.25-domain-crate-split.md) | domain 拆 crate、快捷键设置、跨窗口配置同步、应用内一键更新、密钥命名重构与插件密钥接入、AI 代码块适配、编辑器 MD 根治、版本更新提示优化、脚本解释器托管分发；0.25.21–0.25.25 剪贴板管理器治理（上屏注入策略/类型筛选/批量上屏/唤起定位）；0.25.26 长图 pin 双击消失与拖动 DPI 修复；实机验收待验项见 phase 文档 §6.3 | 🚧 0.25.1–0.25.26 已实现 · 实机待验 |
 | **0.26** | [0.26-plugin-system-upgrade.md](./phases/0.26-plugin-system-upgrade.md) | 插件系统升级：天气/IP 与公共交互、剪贴板文件与预览、超链/书签与浏览器导入、托管 Everything、更新提醒；0.26.22 长截图连续采集重构与技术债清理 | ✅ 0.26.0–0.26.23 本版范围收尾；长截图用户实测流畅，未覆盖的实机验证边界见 phase §六 |
 | **0.27** | [0.27-ai-interaction-enhancement.md](./phases/0.27-ai-interaction-enhancement.md) | AI 交互增强（提示词库、编辑器预设、斜杠命令、附件/Vision、文件感知、代理与路由、IME 隔离）；补充 rig 0.45 升级、方言适配与跨 Provider 思考语义 | 🚧 0.27.1–0.27.15 实现完成（13/14/15 自动化回归通过，真实厂商实发/GUI 待手动）；收尾清单见 phase §六 |
-| **0.28** | [0.28-plugin-platform-and-tools.md](./phases/0.28-plugin-platform-and-tools.md) | 官方插件运行时/独立窗口与分发、翻译/离线词典及客户端自举、固定范围 WebDAV 同步、短 GIF 与体验收尾 | 🚧 实现基本收尾并已精简；0.28.1–0.28.11 已完成验收，0.28.12–0.28.14 真机/发布与资源待验范围见 phase §六 |
+| **0.28** | [0.28-plugin-platform-and-tools.md](./phases/0.28-plugin-platform-and-tools.md) | 官方插件运行时/独立窗口与分发、翻译/离线词典及客户端自举、固定范围 WebDAV 同步、短 GIF 与体验收尾 | ✅ 0.28.1–0.28.14 全部完成，2026-10-29 按用户确认收口 |
 
 > **非版本档案**：[roadmap.md](./roadmap.md)（近期优先、条件候选与远期观察；不预占版本号）；ADR-001（Agent 后端策略）已并入 [spec-architecture §A10](./specs/spec-architecture.md)。
 
@@ -97,7 +97,7 @@
 | 0.25.x | domain 拆 crate、快捷键设置与欢迎页优化、跨窗口配置同步、应用内一键更新、密钥命名重构与插件密钥接入、AI 代码块适配、编辑器 MD 根治、版本更新提示优化、脚本解释器托管分发；0.25.21 起剪贴板管理器治理（门控常量修复/一律 Ctrl+V 上屏/Tab 类型筛选/批量上屏/定位钳制） | 🚧 0.25.1–0.25.26 已实现（真实粘贴/类型筛选/批量上屏/鼠标兜底定位/全量验证优化/长图 pin 修复）（决策见 [phase 文档 §3.13](phases/0.25-domain-crate-split.md)），实机验收待验项见 [phase 文档 §6.3](phases/0.25-domain-crate-split.md) |
 | 0.26.x | 插件系统与公共交互升级；0.26.22 长截图连续采集重构与技术债清理 | ✅ 0.26.0–0.26.23 本版范围收尾；长截图用户实测流畅，未覆盖的实机验证边界见 phase §六（见 [phase 文档](phases/0.26-plugin-system-upgrade.md)） |
 | 0.27.x | AI 交互增强；0.27.13 rig 0.45 升级、0.27.14 方言接线、0.27.15 跨 Provider 思考语义 | 🚧 0.27.1–0.27.15 已实现并过自动化回归；真实厂商实发、GUI 复验、完整 IME/资源矩阵与文档收尾待做（见 [phase 文档 §六](phases/0.27-ai-interaction-enhancement.md)） |
-| 0.28 | 官方插件运行时/独立窗口与分发、翻译/词典客户端自举、WebDAV 同步、短 GIF 与体验收尾 | 🚧 0.28.1–0.28.14 已实现；0.28.1–0.28.11 已验收，后续真机/发布与资源待验范围见 [phase 文档 §六](phases/0.28-plugin-platform-and-tools.md) |
+| 0.28 | 官方插件运行时/独立窗口与分发、翻译/词典客户端自举、WebDAV 同步、短 GIF 与体验收尾 | ✅ 0.28.1–0.28.14 全部完成，完成范围与验证记录见 [phase 文档 §六](phases/0.28-plugin-platform-and-tools.md) |
 | 未立项 | 见 roadmap：subagent / proactivity / 词汇学习（记忆曲线与四六级等词包）/ 多类型 API（生图/TTS）/ 远期向量与 RAG 观察 | 🔮 候选池 |
 
 ---

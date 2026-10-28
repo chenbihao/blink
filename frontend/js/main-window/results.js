@@ -777,7 +777,7 @@ function createItem(app, i) {
             if (index) {
                 const marker = document.createElement("span");
                 marker.className = "clipboard-newline";
-                marker.textContent = "⏎";
+                marker.textContent = "↵";
                 marker.setAttribute("aria-hidden", "true");
                 name.appendChild(marker);
             }

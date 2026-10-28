@@ -293,7 +293,11 @@ async function loadCatalog(force = false) {
         catalogState = res;
     } catch (error) {
         if (revision !== catalogRevision) return;
-        catalogState = {catalog: null, stale: false, devMode: catalogState?.devMode === true, error: commandErrorText(error, t("plugin.catalog_unavailable"))};
+        console.warn("plugin center loading failed:", error);
+        catalogState = {
+            catalog: null, stale: false, devMode: catalogState?.devMode === true,
+            error: t(error?.code === "catalog_unavailable" ? "plugin.catalog_unavailable" : "plugin.catalog_load_failed"),
+        };
     }
     if (revision === catalogRevision) {
         renderCatalog();

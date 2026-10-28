@@ -202,11 +202,8 @@ pub async fn get_plugin_catalog(
             let Some((catalog, source)) = catalog else {
                 return Err(CommandError::new(
                     "catalog_unavailable",
-                    format!(
-                        "插件目录不可达且无本地缓存：{fetch_err}。\
-                         已安装插件不受影响；请检查网络后重试"
-                    ),
-                    false,
+                    "暂时无法连接插件中心，请检查网络或代理设置后重试。已安装插件可继续使用。",
+                    true,
                 ));
             };
             let stale = source != "local";

@@ -2063,7 +2063,7 @@ pub fn show_welcome_window(app: &AppHandle) {
     {
         Ok(w) => w,
         Err(e) => {
-            tracing::warn!(error = %e, "welcome window: 创建失败");
+            tracing::error!(error = %e, "welcome window: 创建失败");
             return;
         }
     };
