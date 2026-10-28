@@ -218,4 +218,12 @@ export const EVENTS = Object.freeze({
      *            received?, total?, error? }
      */
     PLUGIN_CENTER_PROGRESS: 'blink://plugin-center-progress',
+
+    /**
+     * 数据集自举进度（0.28.13）：payload 为 OpSnapshot
+     * { opId, pluginId, datasetId, phase: {kind, ...}, cancellable, trigger }。
+     * phase.kind ∈ starting / fetching_resource / plugin_stage / mounting /
+     * mounted / succeeded / failed / cancelled（真实阶段，无伪造百分比）。
+     */
+    PLUGIN_BOOTSTRAP_PROGRESS: 'blink://plugin-bootstrap-progress',
 });

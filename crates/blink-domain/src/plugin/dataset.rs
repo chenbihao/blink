@@ -148,6 +148,20 @@ pub fn resolve_active_at(dataset_dir: &Path) -> ActiveVersion {
     ActiveVersion::Mounted(ptr.version)
 }
 
+/// 自举冷路径的完整性核验；不能在每次搜索/readiness 热路径哈希词库。
+pub(super) fn verify_active_dataset(base: &Path, dataset_id: &str, version: &str) -> bool {
+    let dir = base.join(dataset_id).join(version);
+    read_dataset_manifest(&dir.join("dataset.json"))
+        .and_then(|m| {
+            validate_manifest_shape(&m)?;
+            if m.dataset_id != dataset_id || m.version != version {
+                return Err(DatasetError::InvalidManifest("活动数据集身份不符".into()));
+            }
+            verify_files(&dir, &m)
+        })
+        .is_ok()
+}
+
 /// 数据包安装器。与 PluginInstaller 同存储根、同 op 纪律；锁独立（插件安装
 /// 与数据包安装互不阻塞，二者写 registry 不同分片，last-writer-wins 由
 /// "决策点重读"约束——见 plugin_storage 模块注释）。
@@ -204,10 +218,8 @@ impl DatasetInstaller {
         expected_sha256: &str,
         catalog_url: &str,
     ) -> Result<DatasetRecord, DatasetError> {
-        self.install_catalog_zip_inner(zip_path, expected_sha256, || {
-            InstallSource::Official {
-                catalog_url: catalog_url.to_string(),
-            }
+        self.install_catalog_zip_inner(zip_path, expected_sha256, || InstallSource::Official {
+            catalog_url: catalog_url.to_string(),
         })
     }
 
@@ -224,10 +236,8 @@ impl DatasetInstaller {
                 "本地目录源安装仅开发模式可用".into(),
             ));
         }
-        self.install_catalog_zip_inner(zip_path, expected_sha256, || {
-            InstallSource::LocalDev {
-                origin: origin_dir.to_string(),
-            }
+        self.install_catalog_zip_inner(zip_path, expected_sha256, || InstallSource::LocalDev {
+            origin: origin_dir.to_string(),
         })
     }
 
@@ -295,6 +305,83 @@ impl DatasetInstaller {
         result
     }
 
+    /// 挂载客户端自举构建的数据集（0.28.13）——宿主自举管理器专用入口。
+    ///
+    /// 与 dev `install_dir` 的差别：
+    /// - **调用方校验前置**：dataset.json 的 plugin_id/dataset_id 必须与
+    ///   `expect` 相符（插件身份来自所属进程/活动句柄，不信消息自报）；
+    /// - **来源记 [`InstallSource::Managed`]**（派生来源，非 LocalDev/Official）；
+    /// - **PendingRemove 提交互斥**：所属插件已标记待卸载时拒绝挂载
+    ///   （卸载事务与迟到挂载在 registry 写锁内互斥，见 install.rs）。
+    pub fn install_managed_dir(
+        &self,
+        dir: &Path,
+        expect_plugin: &str,
+        expect_dataset: &str,
+        source: InstallSource,
+    ) -> Result<DatasetRecord, DatasetError> {
+        self.install_managed_dir_checked(dir, expect_plugin, expect_dataset, source, || Ok(()))
+    }
+
+    /// 所有重 IO 完成后、版本目录/active 指针变更前获取提交许可；许可保持到提交完成。
+    pub(crate) fn install_managed_dir_checked<G>(
+        &self,
+        dir: &Path,
+        expect_plugin: &str,
+        expect_dataset: &str,
+        source: InstallSource,
+        before_commit: impl FnOnce() -> Result<G, DatasetError>,
+    ) -> Result<DatasetRecord, DatasetError> {
+        let _guard = self.op_lock.lock().unwrap();
+        let manifest_path = dir.join("dataset.json");
+        if !manifest_path.is_file() {
+            return Err(DatasetError::InvalidManifest(
+                "构建输出根下缺少 dataset.json".into(),
+            ));
+        }
+        let manifest = read_dataset_manifest(&manifest_path)?;
+        if manifest.plugin_id != expect_plugin || manifest.dataset_id != expect_dataset {
+            return Err(DatasetError::InvalidManifest(format!(
+                "dataset.json 归属不符（期望 {expect_plugin}/{expect_dataset}，实际 {}/{})",
+                manifest.plugin_id, manifest.dataset_id
+            )));
+        }
+        // 尽早拒绝已待卸载插件；真正的提交互斥由 before_commit 持有生命周期许可。
+        let pending = self
+            .storage
+            .update_registry(|reg| -> Result<bool, ()> {
+                Ok(reg
+                    .records
+                    .get(expect_plugin)
+                    .is_some_and(|r| r.state == InstallState::PendingRemove))
+            })
+            .map_err(DatasetError::from)?
+            .unwrap_or(false);
+        if pending {
+            return Err(DatasetError::InvalidManifest(format!(
+                "插件 {expect_plugin} 正在卸载，拒绝挂载数据集"
+            )));
+        }
+        let staging = self.storage.staging_dir(&next_op_id());
+        let pkg_dir = staging.join("pkg");
+        let result = self.install_inner_checked(
+            |pkg| {
+                archive::copy_dir_bounded(dir, pkg, self.limits)
+                    .map_err(|e| DatasetError::Archive(e.to_string()))?;
+                let staged = read_dataset_manifest(&pkg.join("dataset.json"))?;
+                if staged.plugin_id != expect_plugin || staged.dataset_id != expect_dataset {
+                    return Err(DatasetError::InvalidManifest("暂存数据集归属不符".into()));
+                }
+                Ok(())
+            },
+            &pkg_dir,
+            source,
+            before_commit,
+        );
+        let _ = std::fs::remove_dir_all(&staging);
+        result
+    }
+
     /// 暂存就位后的公共路径：校验 dataset.json → 核验文件 → move 版本目录 →
     /// 切 active.json（提交点）→ 记录 → 清旧版本。
     fn install_inner(
@@ -302,6 +389,16 @@ impl DatasetInstaller {
         stage: impl FnOnce(&Path) -> Result<(), DatasetError>,
         pkg_dir: &Path,
         source: InstallSource,
+    ) -> Result<DatasetRecord, DatasetError> {
+        self.install_inner_checked(stage, pkg_dir, source, || Ok(()))
+    }
+
+    fn install_inner_checked<G>(
+        &self,
+        stage: impl FnOnce(&Path) -> Result<(), DatasetError>,
+        pkg_dir: &Path,
+        source: InstallSource,
+        before_commit: impl FnOnce() -> Result<G, DatasetError>,
     ) -> Result<DatasetRecord, DatasetError> {
         stage(pkg_dir)?;
 
@@ -311,6 +408,8 @@ impl DatasetInstaller {
 
         // 2. 文件完整性：逐文件大小 + sha256（损坏包拒绝，不进挂载目录）
         verify_files(pkg_dir, &manifest)?;
+
+        let _commit_permit = before_commit()?;
 
         // 3. 提交版本目录（隔离交换）：目标已占（同版本重装）先把旧内容原子
         //    挪进本 op 的 staging 弃置区，不直接删除——交换失败整体恢复，
@@ -422,18 +521,21 @@ impl DatasetInstaller {
     ) -> Result<UninstallDatasetOutcome, DatasetError> {
         let _guard = self.op_lock.lock().unwrap();
         self.storage
-            .update_registry(|registry| -> Result<UninstallDatasetOutcome, DatasetError> {
-                let key = record_key(plugin_id, dataset_id);
-                if !registry.datasets.contains_key(&key) {
-                    // 文件系统可能仍有挂载（自愈前的孤儿）——即使无记录也尝试删目录，
-                    // 但结果如实报告（不谎报"未安装就没文件"）。
-                    let dir = self.storage.dataset_dir(plugin_id, dataset_id);
-                    let failed = self.storage.delete_paths_best_effort(&[dir]);
-                    if failed.is_empty() {
-                        return Ok(UninstallDatasetOutcome::Removed);
+            .update_registry(
+                |registry| -> Result<UninstallDatasetOutcome, DatasetError> {
+                    let key = record_key(plugin_id, dataset_id);
+                    if !registry.datasets.contains_key(&key) {
+                        // 文件系统可能仍有挂载（自愈前的孤儿）——即使无记录也尝试删目录，
+                        // 但结果如实报告（不谎报"未安装就没文件"）。
+                        let dir = self.storage.dataset_dir(plugin_id, dataset_id);
+                        let failed = self.storage.delete_paths_best_effort(&[dir]);
+                        if failed.is_empty() {
+                            return Ok(UninstallDatasetOutcome::Removed);
+                        }
+                        return Ok(UninstallDatasetOutcome::RemovedPendingFiles {
+                            pending_paths: failed,
+                        });
                     }
-                    return Ok(UninstallDatasetOutcome::RemovedPendingFiles { pending_paths: failed });
-                }
 
                 let mut to_delete: Vec<PathBuf> =
                     vec![self.storage.dataset_dir(plugin_id, dataset_id)];
@@ -475,97 +577,96 @@ impl DatasetInstaller {
     /// 启动恢复：重试 PendingRemove、清孤儿版本目录、自愈无记录的已挂载数据集。
     /// registry 变更走 update_registry（与安装/卸载写方串行）。
     pub fn recover(&self) -> DatasetRecoveryReport {
-        let outcome = self
-            .storage
-            .update_registry(|registry| -> Result<DatasetRecoveryReport, ()> {
-                let mut report = DatasetRecoveryReport::default();
+        let outcome =
+            self.storage
+                .update_registry(|registry| -> Result<DatasetRecoveryReport, ()> {
+                    let mut report = DatasetRecoveryReport::default();
 
-                // 1. PendingRemove 重试删除
-                let keys: Vec<String> = registry.datasets.keys().cloned().collect();
-                for key in keys {
-                    let Some(rec) = registry.datasets.get(&key).cloned() else {
-                        continue;
-                    };
-                    if rec.state != InstallState::PendingRemove {
-                        continue;
-                    }
-                    let mut to_delete: Vec<PathBuf> = rec
-                        .pending_paths
-                        .iter()
-                        .map(PathBuf::from)
-                        .collect();
-                    to_delete.push(self.storage.dataset_dir(&rec.plugin_id, &rec.dataset_id));
-                    let failed = self.storage.delete_paths_best_effort(&to_delete);
-                    if failed.is_empty() {
-                        registry.datasets.remove(&key);
-                        report.pending_removed += 1;
-                    } else if let Some(r) = registry.datasets.get_mut(&key) {
-                        r.pending_paths = failed
-                            .iter()
-                            .map(|p| p.to_string_lossy().into_owned())
-                            .collect();
-                        report.still_pending += failed.len();
-                    }
-                }
-
-                // 2+3. 遍历挂载目录：清非 active 版本的孤儿目录；无记录但 active
-                //     有效的自愈重建（提交点在 active.json 之后、registry 之前崩溃）。
-                if let Ok(pids) = std::fs::read_dir(self.storage.root().join("datasets")) {
-                    for pid_entry in pids.flatten() {
-                        let pid = pid_entry.file_name().to_string_lossy().into_owned();
-                        let Ok(dids) = std::fs::read_dir(pid_entry.path()) else {
+                    // 1. PendingRemove 重试删除
+                    let keys: Vec<String> = registry.datasets.keys().cloned().collect();
+                    for key in keys {
+                        let Some(rec) = registry.datasets.get(&key).cloned() else {
                             continue;
                         };
-                        for did_entry in dids.flatten() {
-                            let did = did_entry.file_name().to_string_lossy().into_owned();
-                            let dir = did_entry.path();
-                            match resolve_active_at(&dir) {
-                                ActiveVersion::Mounted(active_v) => {
-                                    report.orphan_dirs_cleaned +=
-                                        clean_stale_versions(&dir, &active_v);
-                                    let key = record_key(&pid, &did);
-                                    if !registry.datasets.contains_key(&key)
-                                        && let Ok(manifest) = read_dataset_manifest(
-                                            &dir.join(&active_v).join("dataset.json"),
-                                        )
-                                    {
-                                        registry.datasets.insert(
-                                            key,
-                                            DatasetRecord {
-                                                plugin_id: pid.clone(),
-                                                dataset_id: did.clone(),
-                                                version: active_v,
-                                                format_version: manifest.format_version,
-                                                source: InstallSource::LocalDev {
-                                                    origin: "recovered（安装记录提交点崩溃后自愈）".into(),
+                        if rec.state != InstallState::PendingRemove {
+                            continue;
+                        }
+                        let mut to_delete: Vec<PathBuf> =
+                            rec.pending_paths.iter().map(PathBuf::from).collect();
+                        to_delete.push(self.storage.dataset_dir(&rec.plugin_id, &rec.dataset_id));
+                        let failed = self.storage.delete_paths_best_effort(&to_delete);
+                        if failed.is_empty() {
+                            registry.datasets.remove(&key);
+                            report.pending_removed += 1;
+                        } else if let Some(r) = registry.datasets.get_mut(&key) {
+                            r.pending_paths = failed
+                                .iter()
+                                .map(|p| p.to_string_lossy().into_owned())
+                                .collect();
+                            report.still_pending += failed.len();
+                        }
+                    }
+
+                    // 2+3. 遍历挂载目录：清非 active 版本的孤儿目录；无记录但 active
+                    //     有效的自愈重建（提交点在 active.json 之后、registry 之前崩溃）。
+                    if let Ok(pids) = std::fs::read_dir(self.storage.root().join("datasets")) {
+                        for pid_entry in pids.flatten() {
+                            let pid = pid_entry.file_name().to_string_lossy().into_owned();
+                            let Ok(dids) = std::fs::read_dir(pid_entry.path()) else {
+                                continue;
+                            };
+                            for did_entry in dids.flatten() {
+                                let did = did_entry.file_name().to_string_lossy().into_owned();
+                                let dir = did_entry.path();
+                                match resolve_active_at(&dir) {
+                                    ActiveVersion::Mounted(active_v) => {
+                                        report.orphan_dirs_cleaned +=
+                                            clean_stale_versions(&dir, &active_v);
+                                        let key = record_key(&pid, &did);
+                                        if !registry.datasets.contains_key(&key)
+                                            && let Ok(manifest) = read_dataset_manifest(
+                                                &dir.join(&active_v).join("dataset.json"),
+                                            )
+                                        {
+                                            registry.datasets.insert(
+                                                key,
+                                                DatasetRecord {
+                                                    plugin_id: pid.clone(),
+                                                    dataset_id: did.clone(),
+                                                    version: active_v,
+                                                    format_version: manifest.format_version,
+                                                    source: InstallSource::LocalDev {
+                                                        origin:
+                                                            "recovered（安装记录提交点崩溃后自愈）"
+                                                                .into(),
+                                                    },
+                                                    installed_at: 0,
+                                                    state: InstallState::Active,
+                                                    content_sha256: manifest.content_sha256,
+                                                    pending_paths: vec![],
                                                 },
-                                                installed_at: 0,
-                                                state: InstallState::Active,
-                                                content_sha256: manifest.content_sha256,
-                                                pending_paths: vec![],
-                                            },
-                                        );
-                                        report.adopted += 1;
+                                            );
+                                            report.adopted += 1;
+                                        }
                                     }
-                                }
-                                ActiveVersion::Corrupt => {
-                                    // 指针损坏：不动文件（插件运行时按 corrupt 如实报错，
-                                    // 重装走 install 覆盖路径），恢复不越权猜测。
-                                }
-                                ActiveVersion::NotMounted => {
-                                    // 有目录但无指针 = active.json 写入前崩溃 → 整目录可弃。
-                                    let failed =
-                                        self.storage.delete_paths_best_effort(&[dir.clone()]);
-                                    if failed.is_empty() {
-                                        report.orphan_dirs_cleaned += 1;
+                                    ActiveVersion::Corrupt => {
+                                        // 指针损坏：不动文件（插件运行时按 corrupt 如实报错，
+                                        // 重装走 install 覆盖路径），恢复不越权猜测。
+                                    }
+                                    ActiveVersion::NotMounted => {
+                                        // 有目录但无指针 = active.json 写入前崩溃 → 整目录可弃。
+                                        let failed =
+                                            self.storage.delete_paths_best_effort(&[dir.clone()]);
+                                        if failed.is_empty() {
+                                            report.orphan_dirs_cleaned += 1;
+                                        }
                                     }
                                 }
                             }
                         }
                     }
-                }
-                Ok(report)
-            });
+                    Ok(report)
+                });
         match outcome {
             Err(_) => {
                 tracing::warn!("数据包恢复期间读取/写入安装记录失败，跳过记录级恢复");
@@ -619,9 +720,8 @@ fn next_op_id() -> String {
 fn read_dataset_manifest(path: &Path) -> Result<DatasetManifest, DatasetError> {
     let raw = std::fs::read_to_string(path)
         .map_err(|e| DatasetError::Io(format!("读取 dataset.json 失败: {e}")))?;
-    let manifest: DatasetManifest = serde_json::from_str(&raw).map_err(|e| {
-        DatasetError::InvalidManifest(format!("dataset.json 解析失败: {e}"))
-    })?;
+    let manifest: DatasetManifest = serde_json::from_str(&raw)
+        .map_err(|e| DatasetError::InvalidManifest(format!("dataset.json 解析失败: {e}")))?;
     Ok(manifest)
 }
 
@@ -688,9 +788,8 @@ fn verify_files(pkg_root: &Path, m: &DatasetManifest) -> Result<(), DatasetError
     use sha2::Digest;
     for (name, entry) in &m.files {
         let path = pkg_root.join(name);
-        let meta = std::fs::metadata(&path).map_err(|e| {
-            DatasetError::Corrupt(format!("包内文件缺失 {name}: {e}"))
-        })?;
+        let meta = std::fs::metadata(&path)
+            .map_err(|e| DatasetError::Corrupt(format!("包内文件缺失 {name}: {e}")))?;
         if !meta.is_file() {
             return Err(DatasetError::Corrupt(format!(
                 "包内声明不是常规文件: {name}"

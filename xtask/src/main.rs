@@ -49,30 +49,28 @@ mod build_log;
 mod funasr_worker;
 mod pack;
 
-/// 自动发现所有 Rust 插件（扫描 plugins/examples/ 目录）。
+/// 自动发现 examples 中的 Rust 插件及 plugins/ 下的自包含插件。
 fn discover_rust_plugins() -> Vec<String> {
     let root = workspace_root();
-    let examples_dir = root.join("plugins").join("examples");
-
     let mut plugins = Vec::new();
-    match std::fs::read_dir(&examples_dir) {
-        Ok(entries) => {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    // 检查是否有 Cargo.toml（是 Rust 插件）
-                    if path.join("Cargo.toml").exists() {
+    for plugins_dir in [root.join("plugins/examples"), root.join("plugins")] {
+        match std::fs::read_dir(&plugins_dir) {
+            Ok(entries) => {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() && path.join("Cargo.toml").exists() {
                         if let Some(id) = path.file_name().and_then(|n| n.to_str()) {
                             plugins.push(id.to_string());
                         }
                     }
                 }
             }
+            Err(e) => panic!("扫描 {} 失败: {e}", plugins_dir.display()),
         }
-        Err(e) => panic!("扫描 plugins/examples/ 失败: {e}"),
     }
 
     plugins.sort(); // 保证顺序稳定
+    plugins.dedup();
     plugins
 }
 
@@ -134,7 +132,9 @@ fn step_advance(step: &mut Option<StepProgress>, title: &str) {
 
 /// 编译所有 Rust 插件。
 /// debug = true 时用 debug profile（供 `cargo xtask release --debug` 使用，DevTools 可用）。
-/// copy_to_bin = true 时才拷贝到 plugins/builtin/<id>/bin/（仅打包时需要）。
+/// copy_to_bin = true 时才拷贝 exe（仅打包时需要）：examples 例程进
+/// plugins/builtin/<id>/bin/，自包含线上插件（0.28.13 词典）进 plugins/<id>/bin/
+/// （manifest+web+bin 同目录，pack 从该目录打 zip）。
 /// step = Some 时每个插件占 release 总进度的一步（[k/N]），None 时打普通标题行。
 fn build_plugins(copy_to_bin: bool, debug: bool, step: &mut Option<StepProgress>) {
     let root = workspace_root();
@@ -168,7 +168,14 @@ fn build_plugins(copy_to_bin: bool, debug: bool, step: &mut Option<StepProgress>
         tracing::info!("  ✓ -> target/{profile}/{pkg}.exe");
 
         if copy_to_bin {
-            let dest_dir = builtin_dir.join(id).join("bin");
+            // 0.28.13：产物回拷目录随插件定位——examples 例程在 builtin/，
+            // 自包含线上插件（plugins/<id>/Cargo.toml）回自身目录的 bin/。
+            let plugin_root = builtin_dir.join(id);
+            let dest_dir = if plugin_root.is_dir() {
+                plugin_root.join("bin")
+            } else {
+                root.join("plugins").join(id).join("bin")
+            };
             std::fs::create_dir_all(&dest_dir)
                 .unwrap_or_else(|e| panic!("创建 {} 失败: {e}", dest_dir.display()));
             let dest = dest_dir.join(format!("{pkg}.exe"));
@@ -1433,7 +1440,7 @@ fn main() {
 //
 // 委托给 blink-plugin-dictionary 二进制的构建 CLI（同一份构建实现供发布
 // 流程与本地调试复用；xtask 只负责编译编排与参数透传）。用法见
-// plugins/examples/dictionary/DATASETS.md。
+// plugins/dictionary/DATASETS.md。
 
 mod dictionary;
 
@@ -1550,6 +1557,13 @@ fn lint_frontend() {
 
 #[cfg(test)]
 mod supply_chain_tests {
+    #[test]
+    fn rust_plugin_discovery_includes_examples_and_standalone_plugins() {
+        assert_eq!(
+            super::discover_rust_plugins(),
+            ["dictionary", "ip", "translate", "weather"]
+        );
+    }
     use std::path::{Path, PathBuf};
 
     struct TempWorkerDir(PathBuf);

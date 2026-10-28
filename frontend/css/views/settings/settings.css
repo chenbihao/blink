@@ -3183,31 +3183,6 @@ input.has-secret-hint::placeholder {
     border-color: var(--accent);
 }
 
-/* dev 目录源选择（0.28.12：仅开发模式渲染） */
-.plugin-catalog-dev-source {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-sm, 8px);
-    margin-left: auto;
-}
-
-.plugin-catalog-source-select {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    font-size: var(--text-xs);
-    color: var(--text-dim);
-}
-
-.plugin-catalog-source-mode {
-    font-size: var(--text-xs);
-    padding: 2px 6px;
-    border: 1px solid var(--surface);
-    border-radius: var(--radius-sm, 4px);
-    background: var(--surface-2);
-    color: var(--text);
-}
-
 /* 插件卡片安装管理行（0.28.12：版本/来源/卸载入口） */
 .plugin-install-row {
     display: flex;
@@ -3247,8 +3222,36 @@ input.has-secret-hint::placeholder {
 }
 
 .plugin-catalog-loading {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm, 8px);
     padding: 4px 0;
     margin: 0 0 var(--space-md, 16px);
+}
+
+.plugin-catalog-loading .icon,
+.plugin-bootstrap-live::before {
+    animation: plugin-loading-spin 1s linear infinite;
+}
+
+.plugin-bootstrap-live::before {
+    content: "";
+    display: inline-block;
+    width: 0.7em;
+    height: 0.7em;
+    margin-right: var(--space-xs, 4px);
+    border: 1px solid currentColor;
+    border-right-color: transparent;
+    border-radius: 50%;
+}
+
+@keyframes plugin-loading-spin {
+    to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .plugin-catalog-loading .icon,
+    .plugin-bootstrap-live::before { animation: none; }
 }
 
 /* ===== 数据包行（0.28.4：词库等本地数据集安装/卸载，插件卡片 body） ===== */
@@ -3291,4 +3294,18 @@ input.has-secret-hint::placeholder {
 
 .plugin-dataset-ready {
     color: var(--green);
+}
+
+/* 0.28.13：自举进行中徽标（真实阶段文案；不伪造进度条） */
+.plugin-bootstrap-live {
+    color: var(--accent);
+    border-color: var(--accent);
+}
+
+/* 0.28.13：本机构建来源标记 */
+.plugin-dataset-built {
+    font-style: normal;
+    font-size: var(--text-2xs, 10px);
+    color: var(--text-dim);
+    margin-left: 2px;
 }

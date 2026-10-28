@@ -147,6 +147,12 @@ impl DictionaryService {
         self.datasets_dir.lock().unwrap().clone()
     }
 
+    /// 同版本重建挂载前关闭 SQLite 句柄；调用方须阻止查询重新打开快照。
+    pub fn release_snapshots(&self) {
+        *self.basic.lock().unwrap() = None;
+        *self.ety_version.lock().unwrap() = None;
+    }
+
     /// 词库状态（readiness 对齐的进程内视角；工具返回的状态字段用它）。
     pub fn state(&self) -> DictState {
         let Some(base) = self.datasets_base() else {
@@ -516,23 +522,21 @@ fn fetch_etymology(conn: &Connection, word: &str) -> Result<Vec<EtymologyEntry>,
 }
 
 fn prefix_candidates(conn: &Connection, key: &str) -> Result<Vec<Candidate>, String> {
-    if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == ' ' || c == '-' || c == '\'') {
+    if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == ' ' || c == '-' || c == '\'') {
         return Ok(Vec::new()); // 含中文等 → 非英文前缀场景
     }
+    // entries.word 已归一为小写。用二进制前缀范围命中 idx_entries_word；
+    // LIKE 默认忽略 ASCII 大小写，会退化为按词频扫描全库直到凑满 LIMIT。
+    // 当前前缀只允许 ASCII，末字节 +1 即严格上界（包括 z/引号/空格）。
+    let mut upper = key.to_string();
+    let last = upper.pop().expect("非空 ASCII 前缀");
+    upper.push(char::from(last as u8 + 1));
     let mut stmt = conn
-        .prepare(
-            "SELECT word, translation, freq FROM entries
-             WHERE word LIKE ?1 ESCAPE '\\' AND word != ?2
-             ORDER BY freq, word LIMIT ?3",
-        )
+        .prepare(PREFIX_CANDIDATES_SQL)
         .map_err(|e| e.to_string())?;
-    let pattern = format!(
-        "{}%",
-        key.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
-    );
     let rows = stmt
         .query_map(
-            rusqlite::params![pattern, key, LIMIT_PREFIX_SCAN as i64],
+            rusqlite::params![key, upper, LIMIT_PREFIX_SCAN as i64],
             |r| {
                 Ok(Candidate {
                     word: r.get(0)?,
@@ -547,6 +551,10 @@ fn prefix_candidates(conn: &Connection, key: &str) -> Result<Vec<Candidate>, Str
     out.truncate(LIMIT_RESULTS);
     Ok(out)
 }
+
+const PREFIX_CANDIDATES_SQL: &str = "SELECT word, translation, freq FROM entries
+    WHERE word >= ?1 AND word < ?2 AND word != ?1
+    ORDER BY freq, word LIMIT ?3";
 
 fn spell_candidates(conn: &Connection, key: &str) -> Result<Vec<Candidate>, String> {
     let word = key.trim();
@@ -672,6 +680,26 @@ mod tests {
         let svc = DictionaryService::new();
         svc.set_datasets_dir(tmp.join("datasets"));
         (svc, tmp)
+    }
+
+    #[test]
+    fn prefix_candidates_use_word_index_and_keep_prefix_boundaries() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE entries(word TEXT, translation TEXT, freq INTEGER);
+            CREATE INDEX idx_entries_word ON entries(word);
+            CREATE INDEX idx_entries_freq ON entries(freq);
+            INSERT INTO entries VALUES ('z','',1), ('zoo','',4), ('zoom','',2), ('zy','',3),
+                ('a-b','',1), ('a-c','',1);").unwrap();
+        let hits = prefix_candidates(&conn, "z").unwrap();
+        assert_eq!(hits.iter().map(|c| c.word.as_str()).collect::<Vec<_>>(), ["zoom", "zy", "zoo"]);
+        assert_eq!(prefix_candidates(&conn, "a-").unwrap()[0].word, "a-b");
+        assert!(prefix_candidates(&conn, "").unwrap().is_empty());
+        assert!(prefix_candidates(&conn, "%").unwrap().is_empty());
+        assert!(prefix_candidates(&conn, "中文").unwrap().is_empty());
+        let mut statement = conn.prepare(&format!("EXPLAIN QUERY PLAN {PREFIX_CANDIDATES_SQL}")).unwrap();
+        let plans = statement.query_map(rusqlite::params!["dictio", "dictip", 20], |row| row.get::<_, String>(3))
+            .unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+        assert!(plans.iter().any(|plan| plan.contains("SEARCH entries USING INDEX idx_entries_word")), "{plans:?}");
     }
 
     #[test]

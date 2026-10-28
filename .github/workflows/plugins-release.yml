@@ -1,4 +1,4 @@
-# 官方插件目录发布（0.28.5）——手动触发的独立发布流水线。
+# 官方插件目录发布（0.28.5；0.28.13 词典线上化收窄）——手动触发的独立发布流水线。
 #
 # 与应用 Release（release.yml，tag v*）完全独立：
 # - 资产上传到固定 tag `plugins-catalog` 的 Release，端点 URL 恒定
@@ -6,8 +6,11 @@
 #   不参与 latest 指针竞争——插件/词库与应用版本各自独立（phase 0.28 §五.5）。
 # - 每次发布覆盖该 Release 的全部资产：目录与 zip 必须同批生成（sha256 一致），
 #   部分覆盖会造成目录引用过期哈希。
-# - 词库数据源在 CI 现场拉取（ECDICT release csv + raw wordroot.txt），
-#   构建可重复性由 dataset.json 的 content_sha256 保证（DATASETS.md）。
+#
+# 0.28.13：词库数据包不再由 CI 构建托管——不拉 ECDICT、不产数据集 zip/
+# catalog 条目（旧 1.0.28 `ecdict_csv.7z` 资产已不存在，该输入链路随之废弃）。
+# 词典安装后客户端按插件包内 bootstrap.json 的源锁定声明自举：拉源 →
+# 本机构建（质量样本门禁）→ 宿主挂载。本流程仅产插件 zip 与 catalog.json。
 #
 # 本地 `cargo xtask pack` 产物 ≠ 公开发布；以本工作流上传的 Release 资产为准。
 
@@ -42,23 +45,9 @@ jobs:
         with:
           workspaces: '.'
 
-      # ── 词库数据源（ECDICT）：release csv（7z）+ raw wordroot ──────────────
-      - name: Fetch ECDICT sources
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          New-Item -ItemType Directory -Force target | Out-Null
-          Invoke-WebRequest -Uri 'https://github.com/skywind3000/ECDICT/releases/download/1.0.28/ecdict_csv.7z' -OutFile target/ecdict_csv.7z
-          7z x target/ecdict_csv.7z -otarget\ecdict -y
-          $csv = Get-ChildItem target\ecdict -Recurse -Filter ecdict.csv | Select-Object -First 1
-          if (-not $csv) { throw 'ecdict.csv 未找到（7z 解压失败？）' }
-          Copy-Item $csv.FullName target/ecdict.csv
-          Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/skywind3000/ECDICT/master/wordroot.txt' -OutFile target/wordroot.txt
-          Write-Host "ecdict.csv: $((Get-Item target\ecdict.csv).Length) bytes; wordroot: $((Get-Item target\wordroot.txt).Length) bytes"
-
-      # ── 打包：编译插件 + 构建词库 + zip + catalog.json + 产物自校验 ──────────
-      - name: Pack plugins and datasets
-        run: cargo xtask pack --ecdict target/ecdict.csv --wordroot target/wordroot.txt
+      # ── 打包：编译插件 + zip + catalog.json + 产物自校验（无数据集）────────
+      - name: Pack plugins (catalog only)
+        run: cargo xtask pack
 
       # ── 上传：固定 tag Release 全量覆盖（目录与资产必须同批）────────────────
       - name: Upload catalog release assets
@@ -71,7 +60,9 @@ jobs:
 
             - `blink-plugins-catalog.json`：目录（应用端插件中心拉取的清单）
             - `builtin.*-<version>-windows-x86_64.zip`：官方插件包
-            - `dictionary-*.zip`：词库数据包
+            - 词库数据包自 0.28.13 起不再随目录分发：安装词典插件后由客户端
+              按源锁定声明自动下载源数据并在本机构建挂载（首次准备需联网，
+              之后离线可用）。
 
             > 哈希核验：目录条目内含每个资产的 sha256/bytes；应用端安装时逐项校验。
           draft: false

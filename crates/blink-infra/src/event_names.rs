@@ -302,6 +302,14 @@ impl EventNames {
     ///   `failed` 附用户可读 `error`。
     pub const PLUGIN_CENTER_PROGRESS: &str = "blink://plugin-center-progress";
 
+    // ── 数据集自举（0.28.13）──
+    /// 自举操作状态变化：payload 为 OpSnapshot
+    /// `{ opId, pluginId, datasetId, phase: {kind, ...}, cancellable, trigger }`。
+    /// phase.kind ∈ starting / fetching_resource（真实字节 received/total）/
+    /// plugin_stage（building 等）/ mounting / mounted / succeeded / failed /
+    /// cancelled——真实阶段，不伪造构建百分比。前端轮询兜底，不依赖事件。
+    pub const PLUGIN_BOOTSTRAP_PROGRESS: &str = "blink://plugin-bootstrap-progress";
+
     // ── GIF 短演示录制（0.28.7）──
     /// 录制状态广播（倒计时/录制中/暂停/停止）：payload
     /// `{ phase: "countdown"|"recording"|"paused"|"stopping"|"idle",

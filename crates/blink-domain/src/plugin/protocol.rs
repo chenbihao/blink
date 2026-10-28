@@ -22,7 +22,18 @@ use serde::{Deserialize, Serialize};
 ///   **v1 插件不得被强发不认识的帧**，宿主对 v1 保持完全旧行为。
 /// - v2：启动握手——宿主 spawn 后先发 `initialize`（声明宿主能力与数据目录），
 ///   插件回 `initialized`（声明实际协议版本）。manifest `protocol_version` 声明。
+///
+/// 0.28.13 在 v2 帧面追加数据集自举帧（`dataset_init`/`fetch_resource`/
+/// `install_dataset` 等）——协议版本不递增：旧 v2 插件不声明
+/// `dataset_init` 能力就永远收不到这些业务帧，与 v1 保护同构。
 pub const SUPPORTED_PROTOCOL_VERSION: u32 = 2;
+
+/// 宿主 initialize 能力：HTTP 代理执行（既有）。
+pub const CAPABILITY_HTTP_PROXY: &str = "http_proxy";
+/// 宿主 initialize 能力（0.28.13）：数据集自举——宿主可代插件下载源锁定
+/// 声明内的资源并挂载插件构建的数据集。插件侧在 manifest
+/// `capabilities` 声明同名能力后才收到 `dataset_init` 帧。
+pub const CAPABILITY_DATASET_INIT: &str = "dataset_init";
 
 /// core → 插件请求。`type` 标签区分 query/cancel/http_response。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +101,53 @@ pub enum PluginRequest {
         settings: Option<serde_json::Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         budget_ms: Option<u64>,
+    },
+    /// 数据集自举启动请求（0.28.13，握手后的独立操作）。
+    ///
+    /// 只发给 manifest `capabilities` 声明 `dataset_init` 且宿主支持该能力的
+    /// 插件；一次一个数据集（必备库与可选词源是独立操作，各自重试）。
+    /// 构建可达分钟级——本帧**不设应答 deadline**，完成以插件回
+    /// `init_result` 为准（进程退出/操作取消由宿主自举管理器兜底）。
+    #[serde(rename = "dataset_init")]
+    DatasetInit {
+        id: String,
+        /// 宿主自举操作 id（后续 fetch_resource/install_dataset/stage 均携带）。
+        op_id: String,
+        /// 目标数据集（必须在 manifest datasets 声明中）。
+        dataset_id: String,
+        /// 宿主为本次操作分配的工作目录（cache 下独立 op 目录，绝对路径）：
+        /// `resources/` 放宿主下载的源文件，插件自建 `build/` 放构建产物。
+        work_dir: String,
+    },
+    /// `fetch_resource` 的应答（成功）——资源已下载并通过源锁定 sha256 校验。
+    /// `path` 为 work_dir 下的**受限相对路径**（`resources/<resource_id>`）。
+    #[serde(rename = "resource_result")]
+    ResourceResult {
+        id: String,
+        op_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bytes: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sha256: Option<String>,
+        /// 源锁定声明的上游修订/许可（插件写进 dataset.json 溯源字段）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revision: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        license: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<PluginErrorPayload>,
+    },
+    /// `install_dataset` 的应答——数据集已过宿主校验并提交挂载（active.json 切换）。
+    #[serde(rename = "dataset_result")]
+    DatasetResult {
+        id: String,
+        op_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<PluginErrorPayload>,
     },
 }
 
@@ -181,6 +239,46 @@ pub enum PluginUpstreamMessage {
     /// core 的 `PluginCapabilityAdapter` 用 `ProjectionRule` 投影成 `CapabilityResult`。
     #[serde(rename = "raw_result")]
     RawResult(RawToolResult),
+    /// 数据集自举：插件请求宿主下载源锁定资源（0.28.13）。
+    ///
+    /// 宿主按**当前已校验插件版本随包的源锁定声明**（bootstrap.json）解析
+    /// URL/hash/bytes——运行时消息不能改写期望值；资源 id 不在声明中即拒绝。
+    #[serde(rename = "fetch_resource")]
+    FetchResource {
+        id: String,
+        op_id: String,
+        resource_id: String,
+    },
+    /// 数据集自举：插件请求宿主挂载本操作构建输出的数据集（0.28.13）。
+    ///
+    /// `source_dir` 是 work_dir 下的受限相对路径（宿主校验真实路径与链接
+    /// 边界，不接受任意文件系统路径）；dataset.json 的 plugin_id/dataset_id
+    /// 必须与进程身份及 manifest 声明相符。
+    #[serde(rename = "install_dataset")]
+    InstallDataset {
+        id: String,
+        op_id: String,
+        dataset_id: String,
+        source_dir: String,
+    },
+    /// 数据集自举：插件上报阶段（0.28.13，信息性——不伪造百分比）。
+    /// `stage` 为插件自定义短标签（如 "building"/"verifying"）。
+    #[serde(rename = "init_stage")]
+    InitStage {
+        op_id: String,
+        stage: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    /// 数据集自举：操作终态（0.28.13）。error 为 None 表示插件侧流程完成
+    /// （若 install_dataset 已成功挂载，宿主以挂载结果为准——迟到失败不回滚）。
+    #[serde(rename = "init_result")]
+    InitResult {
+        op_id: String,
+        dataset_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<PluginErrorPayload>,
+    },
 }
 
 /// 轨道 A 纯数据 tool 结果（0.14.3）——插件只吐纯 `data`，投影规则在 manifest。
@@ -835,6 +933,110 @@ mod tests {
                 assert_eq!(r.data.as_array().unwrap().len(), 2);
             }
             _ => panic!("应是 RawResult"),
+        }
+    }
+
+    // ── 0.28.13 数据集自举帧 ──────────────────────────────────────────────
+
+    #[test]
+    fn dataset_init_frame_serializes_with_type_tag() {
+        let req = PluginRequest::DatasetInit {
+            id: "init_1".into(),
+            op_id: "boot-1a".into(),
+            dataset_id: "dictionary-basic".into(),
+            work_dir: "D:/appdata/blink/plugins/cache/builtin.dictionary/ops/boot-1a".into(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"type\":\"dataset_init\""));
+        assert!(json.contains("\"op_id\":\"boot-1a\""));
+        assert!(json.contains("\"dataset_id\":\"dictionary-basic\""));
+        assert!(json.contains("\"work_dir\""));
+    }
+
+    #[test]
+    fn fetch_resource_and_install_dataset_upstream_roundtrip() {
+        let fetch: PluginUpstreamMessage = serde_json::from_str(
+            r#"{"type":"fetch_resource","id":"fr_1","op_id":"boot-1a","resource_id":"ecdict-csv"}"#,
+        )
+        .unwrap();
+        match fetch {
+            PluginUpstreamMessage::FetchResource { id, op_id, resource_id } => {
+                assert_eq!(id, "fr_1");
+                assert_eq!(op_id, "boot-1a");
+                assert_eq!(resource_id, "ecdict-csv");
+            }
+            _ => panic!("应是 FetchResource"),
+        }
+        let install: PluginUpstreamMessage = serde_json::from_str(
+            r#"{"type":"install_dataset","id":"di_1","op_id":"boot-1a","dataset_id":"dictionary-basic","source_dir":"build/dictionary-basic/1.1.0"}"#,
+        )
+        .unwrap();
+        match install {
+            PluginUpstreamMessage::InstallDataset { id, dataset_id, source_dir, .. } => {
+                assert_eq!(id, "di_1");
+                assert_eq!(dataset_id, "dictionary-basic");
+                assert_eq!(source_dir, "build/dictionary-basic/1.1.0");
+            }
+            _ => panic!("应是 InstallDataset"),
+        }
+    }
+
+    #[test]
+    fn resource_result_and_dataset_result_serialize_restricted_fields() {
+        let ok = PluginRequest::ResourceResult {
+            id: "fr_1".into(),
+            op_id: "boot-1a".into(),
+            path: Some("resources/ecdict-csv".into()),
+            bytes: Some(1024),
+            sha256: Some("a".repeat(64)),
+            revision: Some("8defb761".into()),
+            license: Some("MIT".into()),
+            error: None,
+        };
+        let json = serde_json::to_string(&ok).unwrap();
+        assert!(json.contains("\"type\":\"resource_result\""));
+        assert!(json.contains("resources/ecdict-csv"));
+        assert!(!json.contains("\"error\""));
+
+        let err = PluginRequest::DatasetResult {
+            id: "di_1".into(),
+            op_id: "boot-1a".into(),
+            version: None,
+            error: Some(PluginErrorPayload {
+                code: "path_escape".into(),
+                message: "source_dir 越界".into(),
+            }),
+        };
+        let json = serde_json::to_string(&err).unwrap();
+        assert!(json.contains("\"type\":\"dataset_result\""));
+        assert!(json.contains("path_escape"));
+    }
+
+    #[test]
+    fn init_stage_and_init_result_roundtrip() {
+        let stage: PluginUpstreamMessage = serde_json::from_str(
+            r#"{"type":"init_stage","op_id":"boot-1a","stage":"building"}"#,
+        )
+        .unwrap();
+        match stage {
+            PluginUpstreamMessage::InitStage { op_id, stage, note } => {
+                assert_eq!(op_id, "boot-1a");
+                assert_eq!(stage, "building");
+                assert!(note.is_none());
+            }
+            _ => panic!("应是 InitStage"),
+        }
+        let done: PluginUpstreamMessage = serde_json::from_str(
+            r#"{"type":"init_result","op_id":"boot-1a","dataset_id":"dictionary-basic"}"#,
+        )
+        .unwrap();
+        match done {
+            PluginUpstreamMessage::InitResult { op_id, dataset_id, error } => {
+                assert_eq!(op_id, "boot-1a");
+                assert_eq!(dataset_id, "dictionary-basic");
+                assert!(error.is_none());
+            }
+            _ => panic!("应是 InitResult"),
         }
     }
 }

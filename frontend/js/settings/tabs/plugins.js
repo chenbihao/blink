@@ -19,7 +19,6 @@ let pluginWrites = 0;
 const weatherEditors = new Map();
 let pluginConfigListener = false;
 let pendingPluginReload = false;
-let pendingSurfaceReload = false;
 const renderedPlugins = new Map();
 // 0.28.2：插件窗口面状态（get_plugin_surface_status → pages/readiness/install），
 // 与 get_plugins 同轮拉取；拉取失败静默降级（无窗口行的旧展示）。
@@ -32,17 +31,8 @@ let catalogProgressBound = false;
 // 进行中的目录安装（progressId → 无）：done/failed 时按 data-progress-id
 // 重查 DOM（loadPlugins 重渲染会重建按钮，不持引用）。
 const catalogPending = new Set();
-// 0.28.12 dev 目录源选择："auto"（在线→磁盘缓存→本地 pack 降级）或 "local"
-// （显式本地目录，优先于线上/缓存）。目录路径存 localStorage——生产构建
-// 前端隐藏入口、后端另有 dev 门禁，不落配置 DB。
-let catalogSourceMode = "auto";
-let catalogLocalDir = null;
-try {
-    catalogLocalDir = localStorage.getItem("blink.catalog.localDir");
-    if (localStorage.getItem("blink.catalog.sourceMode") === "local" && catalogLocalDir) {
-        catalogSourceMode = "local";
-    }
-} catch { /* localStorage 不可用时保持自动模式 */ }
+// 来源由宿主自动选择；本地开发回退的安装路径随目录快照返回。
+const sectionRefreshRevisions = new Map();
 
 /** LocalizableText 解析（目录条目 name/description）：字符串原样；对象按
  * lang → zh → 首个值取（与后端 manifest resolve 同语义）。 */
@@ -103,8 +93,7 @@ export function initPluginsTab() {
 /**
  * 加载插件列表
  */
-async function loadPlugins(force = false, refreshSurface = false) {
-    pendingSurfaceReload ||= refreshSurface;
+async function loadPlugins(force = false) {
     const revision = ++pluginsLoadRevision;
     const container = document.getElementById("plugins-container");
     if (!container) return;
@@ -144,7 +133,7 @@ async function loadPlugins(force = false, refreshSurface = false) {
         return;
     }
     if (!Array.isArray(plugins)) plugins = [];
-    if (!force && !pendingSurfaceReload && renderedPlugins.size === plugins.length && plugins.every(plugin =>
+    if (!force && renderedPlugins.size === plugins.length && plugins.every(plugin =>
         renderedPlugins.get(plugin.id)?.revision === plugin.revision)) {
         pendingPluginReload = false;
         return;
@@ -167,7 +156,6 @@ async function loadPlugins(force = false, refreshSurface = false) {
         return;
     }
     pendingPluginReload = false;
-    pendingSurfaceReload = false;
     for (const editor of weatherEditors.values()) editor.dispose();
     weatherEditors.clear();
     renderedPlugins.clear();
@@ -192,6 +180,7 @@ async function loadPlugins(force = false, refreshSurface = false) {
     container.innerHTML = plugins.map(renderPluginCard).join("") + pendingRows;
     for (const plugin of plugins) bindPluginCardEvents(plugin);
     initSortableLists();
+    if (catalogState) renderCatalog();
 }
 
 /**
@@ -236,7 +225,7 @@ function renderPluginCard(plugin) {
         headerRight,
         attrs: `data-plugin-id="${plugin.id}"`,
         classes: enabled ? "" : "is-disabled",
-        body: `${surfaceSection}${installSection}${datasetsSection}${configSection}`,
+        body: `<div data-plugin-surface>${surfaceSection}</div>${installSection}<div data-plugin-datasets>${datasetsSection}</div>${configSection}`,
     });
 }
 
@@ -288,17 +277,17 @@ export function compareVersions(a, b) {
 
 /**
  * 拉取官方目录（独立于插件列表：失败只降级目录区，不阻断已安装展示）。
- * 0.28.12：显式本地源（dev）时传 localDir——优先使用，失败如实展示不切回线上。
+ * 来源由宿主自动选择，保留实际来源供后续安装使用。
  */
 async function loadCatalog(force = false) {
     const revision = ++catalogRevision;
     const container = document.getElementById("plugin-catalog-container");
     if (!container) return;
-    container.innerHTML = `<p class="msg-muted plugin-catalog-loading">${t("plugin.catalog_loading")}</p>`;
+    container.innerHTML = renderCatalogLoading();
     try {
         const res = await invoke("get_plugin_catalog", {
             forceRefresh: force,
-            localDir: catalogSourceMode === "local" ? catalogLocalDir : null,
+            localDir: null,
         });
         if (revision !== catalogRevision) return;
         catalogState = res;
@@ -310,16 +299,12 @@ async function loadCatalog(force = false) {
         renderCatalog();
         // 目录与插件列表并行返回；目录就绪后让数据包按钮切换到下载源。
         // 常规刷新保留正在编辑的配置草稿。
-        await loadPlugins(false, true);
+        for (const plugin of renderedPlugins.values()) renderPluginSections(plugin);
     }
 }
 
-/** dev 目录源状态（0.28.12）：当前模式/目录写回 localStorage（仅 dev UI 用）。 */
-function persistCatalogSource() {
-    try {
-        localStorage.setItem("blink.catalog.sourceMode", catalogSourceMode);
-        if (catalogLocalDir) localStorage.setItem("blink.catalog.localDir", catalogLocalDir);
-    } catch { /* 私隐模式等场景忽略 */ }
+function renderCatalogLoading() {
+    return `<p class="msg-muted plugin-catalog-loading" role="status" aria-live="polite">${iconHTML("refresh-cw")} <span>${t("plugin.catalog_loading")}</span></p>`;
 }
 
 function renderCatalog() {
@@ -330,7 +315,7 @@ function renderCatalog() {
 }
 
 /**
- * 渲染插件中心目录区（0.28.5；0.28.12 升级为展示元数据卡片 + dev 源选择）。
+ * 渲染插件中心目录区（元数据卡片，来源由宿主自动选择）。
  * 导出为纯字符串函数供测试：
  * - state 为 get_plugin_catalog 的返回（catalog/stale/devMode/source）或 {error} 错误态；
  * - surfaceStatus 为 plugin_id → get_plugin_surface_status 行的 Map；
@@ -340,7 +325,7 @@ function renderCatalog() {
  *   名称回退 plugin_id、描述不显示、页面信息未知不显示"无页面"、channel 缺省 stable。
  */
 export function renderCatalogSection(state, surfaceStatusMap) {
-    if (!state) return `<p class="msg-muted plugin-catalog-loading">${t("plugin.catalog_loading")}</p>`;
+    if (!state) return renderCatalogLoading();
     if (state.error || !state.catalog) {
         return `<div class="plugin-catalog plugin-catalog-error">
           <span class="msg-error">${escapeHtml(state.error || t("plugin.catalog_unavailable"))}</span>
@@ -384,26 +369,11 @@ export function renderCatalogSection(state, surfaceStatusMap) {
         : state.source === "cache"
             ? `<span class="plugin-catalog-stale">${t("plugin.catalog_source_cache")}</span>`
             : "";
-    const devSource = state.devMode === true
-        ? `<span class="plugin-catalog-dev-source">
-             <label class="plugin-catalog-source-select">
-               ${t("plugin.catalog_dev_source")}
-               <select class="plugin-catalog-source-mode">
-                 <option value="auto" ${catalogSourceMode === "auto" ? "selected" : ""}>${t("plugin.catalog_dev_auto")}</option>
-                 <option value="local" ${catalogSourceMode === "local" ? "selected" : ""}>${t("plugin.catalog_dev_local")}</option>
-               </select>
-             </label>
-             ${catalogSourceMode === "local"
-                 ? `<button class="btn-small plugin-catalog-pick-dir" title="${escapeAttr(catalogLocalDir || t("plugin.catalog_dev_pick_dir"))}">${iconHTML("folder-open")} ${t("plugin.catalog_dev_pick_dir")}</button>`
-                 : ""}
-           </span>`
-        : "";
     return `<div class="plugin-catalog">
       <div class="plugin-catalog-head">
         <span class="trigger-label">${t("plugin.catalog_section")}</span>
         ${sourceBadge}
         ${state.stale && state.source !== "local" ? `<span class="plugin-catalog-stale">${t("plugin.catalog_stale")}</span>` : ""}
-        ${devSource}
         <button class="btn-small plugin-catalog-refresh">${iconHTML("refresh-cw")} ${t("plugin.catalog_refresh")}</button>
       </div>
       ${rows || `<p class="msg-muted">${t("plugin.catalog_empty")}</p>`}
@@ -421,41 +391,11 @@ function bindCatalogEvents(container) {
     container.querySelectorAll(".plugin-catalog-refresh").forEach((btn) =>
         btn.addEventListener("click", () => loadCatalog(true)));
     container.querySelectorAll(".plugin-catalog-install").forEach((btn) =>
-        btn.addEventListener("click", () => installFromCatalog(btn, "plugin", btn.dataset.pluginId)));
-    // 0.28.12 dev 源选择：自动 / 本地目录；本地模式需先选 pack 输出目录。
-    container.querySelectorAll(".plugin-catalog-source-mode").forEach((sel) =>
-        sel.addEventListener("change", async () => {
-            catalogSourceMode = sel.value;
-            if (catalogSourceMode === "local" && !catalogLocalDir) {
-                await pickCatalogLocalDir();
-                if (!catalogLocalDir) catalogSourceMode = "auto";
-            }
-            persistCatalogSource();
-            loadCatalog(false);
-        }));
-    container.querySelectorAll(".plugin-catalog-pick-dir").forEach((btn) =>
-        btn.addEventListener("click", async () => {
-            await pickCatalogLocalDir();
-            if (catalogLocalDir) loadCatalog(false);
-        }));
-}
-
-/** 选择本地 pack 输出目录（含 blink-plugins-catalog.json 的目录）。 */
-async function pickCatalogLocalDir() {
-    try {
-        const path = await openDialog({
-            title: t("plugin.catalog_dev_dir_title"),
-            multiple: false,
-            directory: true,
-        });
-        if (path) catalogLocalDir = path;
-    } catch (e) {
-        console.error("pickCatalogLocalDir failed:", e);
-    }
+        btn.addEventListener("click", () => installFromCatalog(btn, "plugin", {pluginId: btn.dataset.pluginId}, btn.dataset.pluginId)));
 }
 
 /** 目录安装入口（插件/数据包共用）：按钮置忙 → invoke → done/failed 由进度事件恢复。
- * 0.28.12：显式本地源模式下安装走同一本地目录（来源与目录快照一致）。 */
+ * dev 自动回退到本地产物时，安装沿用同一目录。 */
 async function installFromCatalog(button, kind, payload, progressId) {
     if (catalogPending.has(progressId)) return;
     catalogPending.add(progressId);
@@ -464,7 +404,9 @@ async function installFromCatalog(button, kind, payload, progressId) {
     button.innerHTML = t("plugin.catalog_downloading");
     try {
         const args = {...payload};
-        if (catalogSourceMode === "local" && catalogLocalDir) args.localDir = catalogLocalDir;
+        if (catalogState?.devMode === true && catalogState?.source === "local") {
+            args.localDir = catalogState.localDir;
+        }
         await invoke(kind === "plugin" ? "install_plugin_from_catalog" : "install_dataset_from_catalog", args);
         // done 事件负责恢复按钮与刷新；此处兜底（事件丢失时仍解锁）
         finishCatalogInstall(progressId, null);
@@ -475,7 +417,7 @@ async function installFromCatalog(button, kind, payload, progressId) {
 
 /** 安装结束：恢复按钮 + 刷新列表/目录（错误非空时提示）。 */
 function finishCatalogInstall(progressId, error) {
-    catalogPending.delete(progressId);
+    if (!catalogPending.delete(progressId)) return;
     const button = document.querySelector(`[data-progress-id="${CSS.escape(progressId)}"]`);
     if (button) {
         button.disabled = false;
@@ -509,6 +451,16 @@ function bindCatalogProgress() {
         } else if (p.phase === "failed") {
             finishCatalogInstall(p.id, p.error || t("plugin.catalog_install_failed"));
         }
+    });
+    // 每个插件单独合并刷新；仅请求该插件状态，不重建凭据/配置区。
+    const timers = new Map();
+    listen(EVENTS.PLUGIN_BOOTSTRAP_PROGRESS, ({payload}) => {
+        const id = payload?.plugin_id;
+        if (!id || !payload?.phase?.kind || timers.has(id)) return;
+        timers.set(id, setTimeout(() => {
+            timers.delete(id);
+            void refreshPluginSections(id);
+        }, 250));
     });
 }
 
@@ -563,12 +515,23 @@ export function renderDatasetsSection(plugin, surface, catalog = null, devMode =
     if (!datasets.length) return "";
     const readiness = surface?.readiness || {};
     const blockers = readiness.blockers || [];
+    // 0.28.13：自举能力（拉源→本机构建→挂载）。支持时优先走 prepare 入口；
+    // catalog 数据包条目（0.28.4 预构建词包）保留为退化通道——目录无该
+    // 数据集条目时（0.28.13 起 CI 不再产词包）自然只剩自举。
+    const bootstrap = surface?.bootstrap || { supported: false, ops: [] };
+    const opsByDataset = new Map(bootstrap.ops.map(op => [op.dataset_id, op]));
     const rows = datasets.map(ds => {
         const installed = ds.installed;
         const state = installed?.state;
+        const op = opsByDataset.get(ds.id);
+        const opLive = op && !["succeeded", "failed", "cancelled"].includes(op.phase?.kind);
         let badge;
         if (state === "pending_remove") {
             badge = `<span class="plugin-dataset-status msg-error">${t("plugin.dataset_pending_remove")}</span>`;
+        } else if (opLive) {
+            badge = `<span class="plugin-dataset-status plugin-bootstrap-live">${escapeHtml(bootstrapPhaseText(op))}</span>`;
+        } else if (op?.phase?.kind === "failed") {
+            badge = `<span class="plugin-dataset-status msg-error" title="${escapeAttr(op.phase.message || "")}">${escapeHtml(op.phase.code || "failed")}</span>`;
         } else if (installed) {
             const blocker = blockers.find(b =>
                 (b.kind === "dataset_corrupt" || b.kind === "dataset_outdated") && b.field === ds.id);
@@ -577,7 +540,7 @@ export function renderDatasetsSection(plugin, surface, catalog = null, devMode =
             } else if (blocker?.kind === "dataset_outdated") {
                 badge = `<span class="plugin-dataset-status msg-error">${t("plugin.dataset_outdated")}</span>`;
             } else {
-                badge = `<span class="plugin-dataset-status plugin-dataset-ready">v${escapeHtml(installed.version || "")}</span>`;
+                badge = `<span class="plugin-dataset-status plugin-dataset-ready">v${escapeHtml(installed.version || "")}${installed.source?.kind === "managed" ? ` <em class="plugin-dataset-built">${t("plugin.dataset_built_local")}</em>` : ""}</span>`;
             }
         } else {
             badge = `<span class="plugin-dataset-status">${ds.optional
@@ -586,7 +549,13 @@ export function renderDatasetsSection(plugin, surface, catalog = null, devMode =
         const catEntry = catalog?.datasets?.find(
             (d) => d.plugin_id === plugin.id && d.dataset_id === ds.id);
         const buttons = [];
-        if (catEntry) {
+        if (bootstrap.supported) {
+            if (opLive) {
+                buttons.push(`<button class="btn-small plugin-dataset-cancel" data-dataset="${escapeAttr(ds.id)}"${op.cancellable === false ? " disabled" : ""}>${t("plugin.dataset_cancel_prepare")}</button>`);
+            } else {
+                buttons.push(`<button class="btn-small plugin-dataset-prepare" data-dataset="${escapeAttr(ds.id)}">${iconHTML("download")} ${installed ? t("plugin.dataset_rebuild") : t("plugin.dataset_prepare")}</button>`);
+            }
+        } else if (catEntry) {
             buttons.push(`<button class="btn-small plugin-dataset-install" data-dataset="${escapeAttr(ds.id)}" data-catalog="1" data-progress-id="${escapeAttr(`${plugin.id}/${ds.id}`)}">${iconHTML("download")} ${installed ? t("plugin.dataset_update") : t("plugin.dataset_install")}</button>`);
         } else {
             buttons.push(`<span class="plugin-dataset-status plugin-catalog-stale" title="${escapeAttr(t("plugin.dataset_no_source_hint"))}">${t("plugin.dataset_no_source")}</span>`);
@@ -607,6 +576,30 @@ export function renderDatasetsSection(plugin, surface, catalog = null, devMode =
       <span class="trigger-label">${t("plugin.dataset_section")}</span>
       ${rows}
     </div>`;
+}
+
+/** 自举阶段文案（真实阶段直译，不伪造百分比；下载进度用真实字节）。 */
+function bootstrapPhaseText(op) {
+    const phase = op.phase || {};
+    switch (phase.kind) {
+        case "starting": return t("plugin.bootstrap_starting");
+        case "fetching_resource": {
+            const mb = (n) => ((n || 0) / (1024 * 1024)).toFixed(1);
+            return t("plugin.bootstrap_fetching", {0: `${mb(phase.received)}/${mb(phase.total)}`});
+        }
+        case "plugin_stage": {
+            const stages = {
+                "downloading-source": t("plugin.bootstrap_stage_download"),
+                building: t("plugin.bootstrap_stage_build"),
+                verifying: t("plugin.bootstrap_stage_verify"),
+                installing: t("plugin.bootstrap_stage_install"),
+            };
+            return stages[phase.stage] || phase.stage;
+        }
+        case "mounting": return t("plugin.bootstrap_stage_install");
+        case "mounted": return t("plugin.bootstrap_mounted");
+        default: return phase.kind || "";
+    }
 }
 
 /**
@@ -1016,6 +1009,125 @@ async function guideScriptRuntimeInstall(runtimeType) {
     }
 }
 
+/** 更新动态状态区域，保留配置、焦点、草稿和已读取的凭据提示。 */
+function renderPluginSections(plugin) {
+    const card = document.querySelector(`.extension-card[data-plugin-id="${plugin.id}"]`);
+    if (!card) return;
+    const surface = card.querySelector("[data-plugin-surface]");
+    const datasets = card.querySelector("[data-plugin-datasets]");
+    if (surface) surface.innerHTML = renderSurfaceSection(plugin);
+    if (datasets) datasets.innerHTML = renderDatasetsSection(plugin, surfaceStatus.get(plugin.id),
+        catalogState?.catalog, catalogState?.devMode === true || surfaceStatus.get(plugin.id)?.dev_mode === true);
+    bindPluginSectionEvents(plugin, card);
+}
+
+async function refreshPluginSections(id) {
+    const plugin = renderedPlugins.get(id);
+    if (!plugin) return;
+    const revision = (sectionRefreshRevisions.get(id) || 0) + 1;
+    sectionRefreshRevisions.set(id, revision);
+    try {
+        const rows = await invoke("get_plugin_surface_status", {pluginId: id});
+        if (sectionRefreshRevisions.get(id) !== revision || renderedPlugins.get(id) !== plugin) return;
+        const row = rows.find(row => row.plugin_id === id);
+        if (!row) return;
+        surfaceStatus.set(id, row);
+        renderPluginSections(plugin);
+    } catch (error) { console.error("refresh plugin sections failed:", error); }
+}
+
+function bindPluginSectionEvents(plugin, card) {
+    const id = plugin.id;
+    // 0.28.2：打开插件独立窗口（宿主入口；重复唤起后端复用同一窗口）
+    card.querySelectorAll(".plugin-open-window").forEach(button => button.addEventListener("click", async () => {
+        try {
+            await invoke("open_plugin_page", {pluginId: id, pageId: button.dataset.page || null});
+        } catch (error) {
+            flash(card, error?.message || String(error), true, 4000);
+        }
+    }));
+    // 0.28.5：数据包安装/更新。data-catalog=1 → 官方目录下载（主通道）；
+    // -local 后缀 → dev 本地 zip（仅开发模式出现，生产由后端门禁兜底）
+    card.querySelectorAll(".plugin-dataset-install[data-catalog='1']").forEach(button => button.addEventListener("click", () => {
+        installFromCatalog(button, "dataset",
+            {pluginId: id, datasetId: button.dataset.dataset}, `${id}/${button.dataset.dataset}`);
+    }));
+    // 0.28.13：自举准备（拉源→本机构建→挂载）。触发合并——重复点击/自动
+    // 触发同一数据集只有一个在途操作；进度经 PLUGIN_BOOTSTRAP_PROGRESS 事件
+    // 驱动刷新该插件的状态与数据包区域。
+    card.querySelectorAll(".plugin-dataset-prepare").forEach(button => button.addEventListener("click", async () => {
+        const datasetId = button.dataset.dataset;
+        button.disabled = true;
+        try {
+            const result = await invoke("prepare_plugin_dataset", {pluginId: id, datasetId});
+            if (result?.already_ready) {
+                flash(card, t("plugin.bootstrap_already_ready"), false, 3000);
+            } else if (result?.merged) {
+                flash(card, t("plugin.bootstrap_merged"), false, 3000);
+            }
+            await refreshPluginSections(id);
+        } catch (error) {
+            flash(card, commandErrorText(error, t("plugin.bootstrap_start_failed")), true, 6000);
+            await refreshPluginSections(id);
+        } finally {
+            button.disabled = false;
+        }
+    }));
+    card.querySelectorAll(".plugin-dataset-cancel").forEach(button => button.addEventListener("click", async () => {
+        const datasetId = button.dataset.dataset;
+        button.disabled = true;
+        try {
+            await invoke("cancel_plugin_dataset_prepare", {pluginId: id, datasetId});
+        } catch (error) {
+            flash(card, commandErrorText(error, t("plugin.bootstrap_cancel_failed")), true, 6000);
+        } finally {
+            await refreshPluginSections(id);
+        }
+    }));
+    card.querySelectorAll(".plugin-dataset-install-local").forEach(button => button.addEventListener("click", async () => {
+        button.disabled = true;
+        try {
+            const path = await openDialog({
+                title: t("plugin.dataset_pick_title"),
+                filters: [{name: "Blink dataset", extensions: ["zip"]}],
+                multiple: false,
+                directory: false,
+            });
+            if (!path) return;
+            const record = await invoke("install_plugin_dataset", {path});
+            flash(card, t("plugin.dataset_installed_ok", {id: record.dataset_id, version: record.version}), false, 4000);
+            await refreshPluginSections(id);
+        } catch (error) {
+            flash(card, commandErrorText(error, t("plugin.dataset_install_failed")), true, 6000);
+        } finally {
+            button.disabled = false;
+        }
+    }));
+    // 0.28.4：数据包卸载（二次确认；文件被占用时如实提示待清理）
+    card.querySelectorAll(".plugin-dataset-uninstall").forEach(button => button.addEventListener("click", async () => {
+        const datasetId = button.dataset.dataset;
+        if (!await confirmDialog(t("plugin.dataset_uninstall_confirm", {id: datasetId}), {kind: "warning"})) return;
+        button.disabled = true;
+        try {
+            const result = await invoke("uninstall_plugin_dataset", {pluginId: id, datasetId});
+            flash(card, result?.pending_files
+                ? t("plugin.dataset_uninstall_pending", {count: result.pending_files})
+                : t("plugin.dataset_uninstalled"), result?.pending_files ? true : false, 4000);
+            await refreshPluginSections(id);
+        } catch (error) {
+            flash(card, commandErrorText(error, t("plugin.dataset_uninstall_failed")), true, 6000);
+        } finally {
+            button.disabled = false;
+        }
+    }));
+    // 未就绪徽标 → 展开配置区（修复入口：缺密钥等在配置区补齐）
+    card.querySelectorAll(".plugin-surface-blocked").forEach(badge => badge.addEventListener("click", () => {
+        const section = card.querySelector("details.plugin-config-section");
+        if (section) section.open = true;
+        section?.querySelector("input, select")?.focus?.();
+    }));
+}
+
 /**
  * 绑定单个插件卡片事件（enabled 开关 + 保存 settings + 触发词增删禁用）
  */
@@ -1106,14 +1218,6 @@ export function bindPluginCardEvents(plugin) {
             if (enabled) guideScriptRuntimeInstall(plugin.runtime_type);
         }
     });
-    // 0.28.2：打开插件独立窗口（宿主入口；重复唤起后端复用同一窗口）
-    card.querySelectorAll(".plugin-open-window").forEach(button => button.addEventListener("click", async () => {
-        try {
-            await invoke("open_plugin_page", {pluginId: id, pageId: button.dataset.page || null});
-        } catch (error) {
-            flash(card, error?.message || String(error), true, 4000);
-        }
-    }));
     // 0.28.12：卸载 / 移除更新并恢复随包版。三选一确认：默认保留数据与词库，
     // 第三动作同时清除；后端先撤销运行时再清理文件（占用如实报待清理）。
     card.querySelectorAll(".plugin-uninstall").forEach(button => button.addEventListener("click", async () => {
@@ -1146,54 +1250,7 @@ export function bindPluginCardEvents(plugin) {
         await loadPlugins(true);
         await loadCatalog(false);
     }));
-    // 0.28.5：数据包安装/更新。data-catalog=1 → 官方目录下载（主通道）；
-    // -local 后缀 → dev 本地 zip（仅开发模式出现，生产由后端门禁兜底）
-    card.querySelectorAll(".plugin-dataset-install[data-catalog='1']").forEach(button => button.addEventListener("click", () => {
-        installFromCatalog(button, "dataset",
-            {pluginId: id, datasetId: button.dataset.dataset}, `${id}/${button.dataset.dataset}`);
-    }));
-    card.querySelectorAll(".plugin-dataset-install-local").forEach(button => button.addEventListener("click", async () => {
-        button.disabled = true;
-        try {
-            const path = await openDialog({
-                title: t("plugin.dataset_pick_title"),
-                filters: [{name: "Blink dataset", extensions: ["zip"]}],
-                multiple: false,
-                directory: false,
-            });
-            if (!path) return;
-            const record = await invoke("install_plugin_dataset", {path});
-            flash(card, t("plugin.dataset_installed_ok", {id: record.dataset_id, version: record.version}), false, 4000);
-            await loadPlugins(true);
-        } catch (error) {
-            flash(card, commandErrorText(error, t("plugin.dataset_install_failed")), true, 6000);
-        } finally {
-            button.disabled = false;
-        }
-    }));
-    // 0.28.4：数据包卸载（二次确认；文件被占用时如实提示待清理）
-    card.querySelectorAll(".plugin-dataset-uninstall").forEach(button => button.addEventListener("click", async () => {
-        const datasetId = button.dataset.dataset;
-        if (!await confirmDialog(t("plugin.dataset_uninstall_confirm", {id: datasetId}), {kind: "warning"})) return;
-        button.disabled = true;
-        try {
-            const result = await invoke("uninstall_plugin_dataset", {pluginId: id, datasetId});
-            flash(card, result?.pending_files
-                ? t("plugin.dataset_uninstall_pending", {count: result.pending_files})
-                : t("plugin.dataset_uninstalled"), result?.pending_files ? true : false, 4000);
-            await loadPlugins(true);
-        } catch (error) {
-            flash(card, commandErrorText(error, t("plugin.dataset_uninstall_failed")), true, 6000);
-        } finally {
-            button.disabled = false;
-        }
-    }));
-    // 未就绪徽标 → 展开配置区（修复入口：缺密钥等在配置区补齐）
-    card.querySelectorAll(".plugin-surface-blocked").forEach(badge => badge.addEventListener("click", () => {
-        const section = card.querySelector("details.plugin-config-section");
-        if (section) section.open = true;
-        section?.querySelector("input, select")?.focus?.();
-    }));
+    bindPluginSectionEvents(plugin, card);
     card.querySelectorAll(".plugin-field").forEach(input => {
         input.addEventListener("change", async () => {
             applyFieldVisibility(card, schema);

@@ -1,0 +1,23 @@
+{
+  "format_version": 1,
+  "resources": [
+    {
+      "id": "ecdict-csv",
+      "url": "https://raw.githubusercontent.com/skywind3000/ECDICT/8defb761f7c7ad1818ca94290a1844d7b33d6b23/ecdict.csv",
+      "sha256": "d0ce61e560b50d9905d20de3173aa3ca80950ce235bedd21c53e025cf9f38cb0",
+      "bytes": 65936699,
+      "format": "csv",
+      "license": "MIT",
+      "revision": "8defb761f7c7ad1818ca94290a1844d7b33d6b23"
+    },
+    {
+      "id": "wordroot-txt",
+      "url": "https://raw.githubusercontent.com/skywind3000/ECDICT/8defb761f7c7ad1818ca94290a1844d7b33d6b23/wordroot.txt",
+      "sha256": "4b400dc5980e4a362fa12c7a49b326bb621c4e6bebd5f37146fbdcbe9db6bb6e",
+      "bytes": 370702,
+      "format": "text",
+      "license": "MIT",
+      "revision": "8defb761f7c7ad1818ca94290a1844d7b33d6b23"
+    }
+  ]
+}

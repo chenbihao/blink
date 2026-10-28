@@ -30,6 +30,11 @@ pub const BASIC_DATASET_ID: &str = "dictionary-basic";
 pub const ETY_DATASET_ID: &str = "dictionary-etymology";
 /// 数据包归属插件。
 pub const PLUGIN_ID: &str = "builtin.dictionary";
+/// 自举构建的基础词库版本（0.28.13 起客户端构建；与 manifest 的
+/// datasets.min_version 对齐——旧目录安装（1.0.0）低于它即触发升级重建）。
+pub const BASIC_DATASET_VERSION: &str = "1.1.0";
+/// 自举构建的词源包版本（同上语义）。
+pub const ETY_DATASET_VERSION: &str = "1.1.0";
 /// ECDICT 源信息（许可可追溯，DATASETS.md 有完整记录）。
 pub const ECDICT_SOURCE: (&str, &str, &str) =
     ("ECDICT", "https://github.com/skywind3000/ECDICT", "MIT");

@@ -142,7 +142,13 @@ struct PluginProcess {
     /// 单调递增的请求 id 计数。
     next_id: std::sync::atomic::AtomicU64,
     cancel: mpsc::Sender<String>,
+    /// 进程实例号（0.28.13）：自举操作用它判定"我启动的那个进程"是否仍
+    /// 是当前进程——进程崩溃后被 query 重启即换新实例，旧操作据此收敛。
+    instance: u64,
 }
+
+/// 进程实例号计数器（跨 handle 全局单调）。
+static PROCESS_INSTANCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// 解析托管脚本解释器 exe 路径（0.25.20 取代 PATH 探测）。
 ///
@@ -166,6 +172,12 @@ impl PluginProcess {
     /// `init`（0.28.1 v2 握手）：进程就绪后立即发送的初始化帧——仅
     /// manifest `protocol_version >= 2` 时由调用方构造，v1 传 None
     /// （v1 插件不被强发不认识的帧）。
+    ///
+    /// `aux`（0.28.13）：自举上行帧出口——stdout reader 把
+    /// `fetch_resource`/`install_dataset`/`init_stage`/`init_result` 转发给
+    /// 自举管理器的事件循环（带 plugin_id）。None = 本环境无自举管理器
+    /// （CLI 等），请求帧直接回结构化不支持。
+    #[allow(clippy::too_many_arguments)]
     async fn spawn(
         exec_path: &PathBuf,
         work_dir: &PathBuf,
@@ -173,7 +185,9 @@ impl PluginProcess {
         runtime_type: RuntimeType,
         proxy: Option<(String, String)>,
         init: Option<super::protocol::PluginRequest>,
+        aux: Option<mpsc::UnboundedSender<super::bootstrap::AuxInbound>>,
     ) -> Result<Self, PluginError> {
+        let instance = PROCESS_INSTANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // 根据 runtime 类型构造 Command
         let mut cmd = match runtime_type {
             RuntimeType::Process => {
@@ -260,6 +274,7 @@ impl PluginProcess {
             let pending_raw_tools = Arc::clone(&pending_raw_tools);
             let stdin = Arc::clone(&stdin);
             let id = plugin_id.to_string();
+            let aux = aux.clone();
             // 每进程的网络请求及回写任务均有界；超额立即回 busy，不创建等待队列。
             let http_slots = Arc::new(Semaphore::new(8));
             tokio::spawn(async move {
@@ -340,6 +355,114 @@ impl PluginProcess {
                                         "收到插件 initialized 握手帧"
                                     );
                                 }
+                                Ok(PluginUpstreamMessage::FetchResource {
+                                    id: frame_id,
+                                    op_id: frame_op,
+                                    resource_id,
+                                }) => {
+                                    // 0.28.13 自举帧：带进程身份转发给管理器；
+                                    // 无管理器（CLI 等环境）回结构化不支持。
+                                    match &aux {
+                                        Some(tx) => {
+                                            let _ = tx.send((
+                                                id.clone(),
+                                                instance,
+                                                PluginUpstreamMessage::FetchResource {
+                                                    id: frame_id,
+                                                    op_id: frame_op,
+                                                    resource_id,
+                                                },
+                                            ));
+                                        }
+                                        None => {
+                                            write_message(
+                                                &stdin,
+                                                &PluginRequest::ResourceResult {
+                                                    id: frame_id,
+                                                    op_id: frame_op,
+                                                    path: None,
+                                                    bytes: None,
+                                                    sha256: None,
+                                                    revision: None,
+                                                    license: None,
+                                                    error: Some(PluginErrorPayload {
+                                                        code: "unsupported".into(),
+                                                        message: "宿主不支持数据集自举".into(),
+                                                    }),
+                                                },
+                                            )
+                                            .await;
+                                        }
+                                    }
+                                }
+                                Ok(PluginUpstreamMessage::InstallDataset {
+                                    id: frame_id,
+                                    op_id: frame_op,
+                                    dataset_id: frame_dataset,
+                                    source_dir,
+                                }) => match &aux {
+                                    Some(tx) => {
+                                        let _ = tx.send((
+                                            id.clone(),
+                                            instance,
+                                            PluginUpstreamMessage::InstallDataset {
+                                                id: frame_id,
+                                                op_id: frame_op,
+                                                dataset_id: frame_dataset,
+                                                source_dir,
+                                            },
+                                        ));
+                                    }
+                                    None => {
+                                        write_message(
+                                            &stdin,
+                                            &PluginRequest::DatasetResult {
+                                                id: frame_id,
+                                                op_id: frame_op,
+                                                version: None,
+                                                error: Some(PluginErrorPayload {
+                                                    code: "unsupported".into(),
+                                                    message: "宿主不支持数据集自举".into(),
+                                                }),
+                                            },
+                                        )
+                                        .await;
+                                    }
+                                },
+                                Ok(PluginUpstreamMessage::InitStage {
+                                    op_id: frame_op,
+                                    stage,
+                                    note,
+                                }) => {
+                                    if let Some(tx) = &aux {
+                                        let _ = tx.send((
+                                            id.clone(),
+                                            instance,
+                                            PluginUpstreamMessage::InitStage {
+                                                op_id: frame_op,
+                                                stage,
+                                                note,
+                                            },
+                                        ));
+                                    }
+                                }
+                                Ok(PluginUpstreamMessage::InitResult {
+                                    op_id: frame_op,
+                                    dataset_id: frame_dataset,
+                                    error,
+                                }) => {
+                                    if let Some(tx) = &aux {
+                                        let _ = tx.send((
+                                            id.clone(),
+                                            instance,
+                                            PluginUpstreamMessage::InitResult {
+                                                op_id: frame_op,
+                                                dataset_id: frame_dataset,
+                                                error,
+                                            },
+                                        ));
+                                    }
+                                }
                                 Err(_) => {
                                     // 向后兼容：尝试旧格式（直接 PluginResponse struct）
                                     match serde_json::from_str::<PluginResponse>(&line) {
@@ -406,6 +529,7 @@ impl PluginProcess {
             pending_raw_tools,
             next_id: std::sync::atomic::AtomicU64::new(1),
             cancel,
+            instance,
         })
     }
 
@@ -545,6 +669,10 @@ pub struct PluginHandle {
     dirs: std::sync::Mutex<Option<super::protocol::PluginDirs>>,
     /// 连续崩溃计数/冷却。
     crash: std::sync::Mutex<CrashState>,
+    /// 自举上行帧出口（0.28.13；engine 盖戳注入，spawn 时随进程带走）。
+    bootstrap_tx: std::sync::Mutex<Option<mpsc::UnboundedSender<super::bootstrap::AuxInbound>>>,
+    /// 自举启动/最终提交与生命周期撤销共用的栅栏；false 表示已撤销。
+    bootstrap_fence: Arc<Mutex<bool>>,
 }
 
 impl PluginHandle {
@@ -562,12 +690,23 @@ impl PluginHandle {
             query_slots: Arc::new(Semaphore::new(concurrency)),
             dirs: std::sync::Mutex::new(None),
             crash: std::sync::Mutex::new(CrashState::default()),
+            bootstrap_tx: std::sync::Mutex::new(None),
+            bootstrap_fence: Arc::new(Mutex::new(true)),
         }
     }
 
     /// 注入宿主分配目录（v2 握手用；wiring 在构造后、首次 spawn 前调用）。
     pub fn set_dirs(&self, dirs: super::protocol::PluginDirs) {
         *self.dirs.lock().unwrap() = Some(dirs);
+    }
+
+    /// 注入自举上行帧出口（0.28.13；engine 盖戳，wiring 在管理器构造后调用）。
+    pub fn set_bootstrap_sender(&self, tx: mpsc::UnboundedSender<super::bootstrap::AuxInbound>) {
+        *self.bootstrap_tx.lock().unwrap() = Some(tx);
+    }
+
+    pub(crate) fn bootstrap_fence(&self) -> Arc<Mutex<bool>> {
+        Arc::clone(&self.bootstrap_fence)
     }
 
     /// 冷却剩余秒数；None = 未在冷却。
@@ -655,14 +794,21 @@ impl PluginHandle {
             let runtime_type = self.manifest.runtime.r#type;
             tracing::info!(plugin = %self.manifest.id, ?runtime_type, "拉起插件进程");
             let proxy = self.proxy.lock().unwrap().clone();
-            // v2 握手帧：manifest 声明 protocol_version >= 2 才发（v1 保持旧行为）
+            // v2 握手帧：manifest 声明 protocol_version >= 2 才发（v1 保持旧行为）。
+            // 0.28.13：宿主能力面固定声明 http_proxy + dataset_init——旧插件
+            // 忽略未知能力串；dataset_init 业务帧只发给 manifest 声明该能力
+            // 的插件（bootstrap 管理器入口判定）。
             let init = (self.manifest.protocol_version >= 2).then(|| {
                 super::protocol::PluginRequest::Initialize {
                     protocol: super::protocol::SUPPORTED_PROTOCOL_VERSION,
-                    capabilities: vec!["http_proxy".to_string()],
+                    capabilities: vec![
+                        super::protocol::CAPABILITY_HTTP_PROXY.to_string(),
+                        super::protocol::CAPABILITY_DATASET_INIT.to_string(),
+                    ],
                     dirs: self.dirs.lock().unwrap().clone(),
                 }
             });
+            let aux = self.bootstrap_tx.lock().unwrap().clone();
             let process = PluginProcess::spawn(
                 &exec,
                 &self.dir,
@@ -670,7 +816,9 @@ impl PluginHandle {
                 runtime_type,
                 proxy,
                 init,
-            ).await?;
+                aux,
+            )
+            .await?;
             *guard = Some(Arc::new(process));
         }
         Ok(Arc::clone(guard.as_ref().unwrap()))
@@ -720,7 +868,21 @@ impl PluginHandle {
         match result {
             Ok(items) => Ok(items),
             Err(e) => {
-                tracing::warn!(plugin = %self.manifest.id, "插件查询失败");
+                let kind = match &e {
+                    PluginError::Busy => "busy",
+                    PluginError::Timeout => "timeout",
+                    PluginError::ProcessClosed => "process_closed",
+                    PluginError::Spawn(_) => "spawn",
+                    PluginError::InterpreterNotInstalled { .. } => "interpreter_missing",
+                    PluginError::PluginReturned(_) => "plugin_error",
+                    PluginError::CrashCooldown { .. } => "crash_cooldown",
+                    PluginError::Io(_) => "io",
+                };
+                if matches!(e, PluginError::Busy) {
+                    tracing::debug!(plugin = %self.manifest.id, kind, "插件查询达到并发上限");
+                } else {
+                    tracing::warn!(plugin = %self.manifest.id, kind, "插件查询失败");
+                }
                 let message = match &e {
                     PluginError::InterpreterNotInstalled { kind } => {
                         format!("脚本运行时（{kind}）未安装，请在 设置 → 引擎 → 脚本运行时 安装")
@@ -763,6 +925,68 @@ impl PluginHandle {
             .await
             .unwrap_or(Err(PluginError::Timeout))
     }
+
+    /// 当前进程实例号（未拉起 = None）。自举操作用它判定进程是否仍是
+    /// 自己启动的那个（崩溃后重启即换新实例）。
+    pub async fn current_process_instance(&self) -> Option<u64> {
+        let proc = self.process.lock().await.clone()?;
+        proc.is_alive().await.then_some(proc.instance)
+    }
+
+    /// 发送 dataset_init 启动帧（0.28.13）——不设应答 deadline（分钟级构建，
+    /// 完成以 init_result 为准）。返回被使用的进程实例号。
+    pub async fn begin_dataset_init(
+        &self,
+        op_id: &str,
+        dataset_id: &str,
+        work_dir: &str,
+        expected_instance: &std::sync::atomic::AtomicU64,
+    ) -> Result<u64, PluginError> {
+        let proc = self.ensure_process().await?;
+        // reader 可能在 write 返回前收到第一帧，必须先绑定实例。
+        expected_instance.store(proc.instance, std::sync::atomic::Ordering::Release);
+        let req = PluginRequest::DatasetInit {
+            id: format!(
+                "init_{}",
+                proc.next_id
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ),
+            op_id: op_id.to_string(),
+            dataset_id: dataset_id.to_string(),
+            work_dir: work_dir.to_string(),
+        };
+        Self::write_request_frame(&proc, &req, Duration::from_secs(2)).await?;
+        Ok(proc.instance)
+    }
+
+    /// 写一帧自举应答（fetch/install 的结果回写；有界，失败静默——
+    /// 进程已死时 op 由巡检收敛）。
+    pub async fn write_aux_frame(&self, frame: &PluginRequest, expected_instance: u64) {
+        let Some(proc) = self.process.lock().await.clone() else {
+            return;
+        };
+        if proc.instance == expected_instance {
+            let _ = Self::write_request_frame(&proc, frame, Duration::from_secs(2)).await;
+        }
+    }
+
+    /// 有界写一帧请求并如实报告失败（write_message 的带错误版本）。
+    async fn write_request_frame(
+        proc: &Arc<PluginProcess>,
+        req: &PluginRequest,
+        budget: Duration,
+    ) -> Result<(), PluginError> {
+        let line =
+            serde_json::to_string(req).map_err(|_| PluginError::Io("请求序列化失败".into()))?;
+        let stdin = Arc::clone(&proc.stdin);
+        let write = async {
+            let mut pipe = stdin.pipe.lock().await;
+            write_frame(&mut *pipe, &stdin.valid, line).await
+        };
+        tokio::time::timeout(budget, write)
+            .await
+            .map_err(|_| PluginError::ProcessClosed)?
+    }
 }
 /// 执行 HTTP 请求（插件代理请求用）。经 net 工厂注入代理策略。
 /// 返回 (status_code, body, error)。
@@ -773,7 +997,6 @@ async fn execute_http_request(
     timeout_ms: u64,
     headers: &[(String, String)],
 ) -> (u16, Option<String>, Option<String>) {
-
     // 0.26.2:带鉴权头的请求禁止跨目的地重定向——reqwest 跟随重定向时只剥离
     // Authorization/Cookie 等内建敏感头，自定义头（如 X-QW-Api-Key）会原样重发，
     // 用户凭据可能被送往配置 Host 之外的服务器。同 host 的 HTTPS 重定向仍允许。
@@ -788,17 +1011,15 @@ async fn execute_http_request(
     let builder = match redirect_rule(headers) {
         RedirectRule::Never => base().redirect(reqwest::redirect::Policy::none()),
         RedirectRule::SameHostHttps => match url_host(url) {
-            Some(host) => {
-                base().redirect(reqwest::redirect::Policy::custom(move |attempt| {
-                    if attempt.url().scheme() == "https"
-                        && attempt.url().host_str() == Some(host.as_str())
-                    {
-                        attempt.follow()
-                    } else {
-                        attempt.stop()
-                    }
-                }))
-            }
+            Some(host) => base().redirect(reqwest::redirect::Policy::custom(move |attempt| {
+                if attempt.url().scheme() == "https"
+                    && attempt.url().host_str() == Some(host.as_str())
+                {
+                    attempt.follow()
+                } else {
+                    attempt.stop()
+                }
+            })),
             None => base().redirect(reqwest::redirect::Policy::none()),
         },
         RedirectRule::Follow => base(),
@@ -1009,8 +1230,8 @@ mod tests {
     /// 跨目的地重定向被停止（3xx 原样返回，目标服务器零命中），凭据不外发。
     #[tokio::test]
     async fn live_redirects_are_rejected_for_credential_bearing_requests() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 

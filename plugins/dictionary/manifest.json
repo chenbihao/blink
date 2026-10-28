@@ -2,12 +2,12 @@
   "schema_version": 1,
   "id": "builtin.dictionary",
   "name": { "zh": "离线词典", "en": "Dictionary" },
-  "version": "0.2.0",
-  "description": { "zh": "离线英汉词典与基础汉英反查：词形/短语/详情与可选词源，断网可用", "en": "Offline English-Chinese dictionary with basic reverse lookup, forms, phrases and optional etymology" },
-  "builtin": true,
+  "version": "0.3.2",
+  "description": { "zh": "离线英汉词典与基础汉英反查：词形/短语/详情与可选词源；安装后自动下载源数据在本机构建词库，之后断网可用", "en": "Offline English-Chinese dictionary with basic reverse lookup, forms, phrases and optional etymology; fetches source data and builds the database locally after install, then works offline" },
+  "builtin": false,
   "default_enabled": true,
   "protocol_version": 2,
-  "host": { "min_version": "0.28.4" },
+  "host": { "min_version": "0.28.13" },
   "runtime": {
     "type": "process",
     "protocol": "jsonl",
@@ -25,7 +25,7 @@
     { "type": "keyword", "keyword": "查词", "exclusive": true },
     { "type": "keyword", "keyword": "dict", "exclusive": true }
   ],
-  "capabilities": ["query"],
+  "capabilities": ["query", "dataset_init"],
   "tools": [
     {
       "name": "dictionary_lookup",
@@ -86,11 +86,12 @@
   "datasets": [
     {
       "id": "dictionary-basic",
-      "min_version": "1.0.0",
+      "min_version": "1.1.0",
       "optional": false
     },
     {
       "id": "dictionary-etymology",
+      "min_version": "1.1.0",
       "optional": true
     }
   ]

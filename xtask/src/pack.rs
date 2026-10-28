@@ -1,9 +1,15 @@
-//! 官方插件打包与目录生成（0.28.5 §五.5）——`cargo xtask pack`。
+//! 官方插件打包与目录生成（0.28.5 §五.5；0.28.13 词典线上化）——
+//! `cargo xtask pack`。
 //!
-//! 发布链路：`pack`（构建 → 插件/数据集 zip → catalog.json → 自校验）→
+//! 发布链路：`pack`（构建 → 插件 zip → catalog.json → 自校验）→
 //! CI 上传固定 tag `plugins-catalog` 的 GitHub Release（见
 //! .github/workflows/plugins-release.yml）。不套用应用 updater 的
 //! latest.json 语义——插件/词库与应用版本各自独立（phase §五.5）。
+//!
+//! **0.28.13：词库数据包不再由我们构建托管**——发布 CI 不再拉 ECDICT、
+//! 不再产数据集条目；词典安装后客户端按 bootstrap.json 源锁定声明自举
+//! （拉源→本机构建→挂载）。pack 仅产插件 zip 与 catalog（`--plugins-only`
+//! 成为缺省行为；`--ecdict/--wordroot` 保留给本地质量验证流程但不再进目录）。
 //!
 //! 产物布局（默认 `target/plugin-dist/`）：
 //!
@@ -11,7 +17,7 @@
 //! target/plugin-dist/
 //!   blink-plugins-catalog.json
 //!   builtin.translate-0.4.0-windows-x86_64.zip   # manifest.json 在 zip 根
-//!   dictionary-basic-1.0.0.zip                    # dataset.json 在 zip 根
+//!   builtin.dictionary-0.3.0-windows-x86_64.zip  # 自包含线上插件（0.28.13）
 //!   ...
 //! ```
 //!
@@ -27,14 +33,16 @@ use crate::workspace_root;
 
 /// 目录文件名（与应用端 catalog_endpoint 约定一致）。
 const CATALOG_FILE: &str = "blink-plugins-catalog.json";
-/// 词库构建产物根（dictionary builder 默认 --out）。
+/// 词库构建产物根（dictionary builder 默认 --out；本地质量验证用）。
 const DATASET_BUILD_ROOT: &str = "target/dictionary";
 
-/// pack 参数。
+/// pack 参数。`plugins_only` 为 0.28.13 起的缺省行为（词包改客户端自举，
+/// 目录恒无数据集条目），保留 flag 兼容旧调用。
 struct PackArgs {
     base: String,
     out: PathBuf,
     skip_build: bool,
+    #[allow(dead_code)] // 0.28.13 起恒等效 true（见上）
     plugins_only: bool,
     ecdict: Option<String>,
     wordroot: Option<String>,
@@ -52,35 +60,34 @@ pub fn run(args: &[String]) {
 
     if !parsed.skip_build {
         tracing::info!("🔨 编译官方插件（release）");
-        crate::build_plugins(true, false, &mut None); // 编译 + 拷贝到 builtin/<id>/bin
+        crate::build_plugins(true, false, &mut None); // 编译 + 拷贝（builtin 例程与自包含插件各自回 bin）
     } else {
         tracing::info!("⏭  跳过编译（--skip-build）");
     }
 
-    // 数据集：给了源数据就先构建（basic/ety 各一次），否则复用已有产物
-    if !parsed.plugins_only {
-        if let Some(csv) = parsed.ecdict.clone() {
-            tracing::info!("📦 构建基础词库（ECDICT → SQLite）");
-            crate::dictionary::run(&[
-                "dictionary".into(),
-                "--build-basic".into(),
-                "--ecdict".into(),
-                csv,
-                "--out".into(),
-                DATASET_BUILD_ROOT.into(),
-            ]);
-        }
-        if let Some(wordroot) = parsed.wordroot.clone() {
-            tracing::info!("📦 构建词源增强包");
-            crate::dictionary::run(&[
-                "dictionary".into(),
-                "--build-ety".into(),
-                "--wordroot".into(),
-                wordroot,
-                "--out".into(),
-                DATASET_BUILD_ROOT.into(),
-            ]);
-        }
+    // 0.28.13：数据集构建仅用于本地质量验证（--ecdict/--wordroot 显式给源
+    // 才跑），产物不进目录——词包已改由客户端自举，发布目录无数据集条目。
+    if let Some(csv) = parsed.ecdict.clone() {
+        tracing::info!("📦 [本地验证] 构建基础词库（ECDICT → SQLite，不进发布目录）");
+        crate::dictionary::run(&[
+            "dictionary".into(),
+            "--build-basic".into(),
+            "--ecdict".into(),
+            csv,
+            "--out".into(),
+            DATASET_BUILD_ROOT.into(),
+        ]);
+    }
+    if let Some(wordroot) = parsed.wordroot.clone() {
+        tracing::info!("📦 [本地验证] 构建词源增强包（不进发布目录）");
+        crate::dictionary::run(&[
+            "dictionary".into(),
+            "--build-ety".into(),
+            "--wordroot".into(),
+            wordroot,
+            "--out".into(),
+            DATASET_BUILD_ROOT.into(),
+        ]);
     }
 
     std::fs::create_dir_all(&parsed.out)
@@ -92,20 +99,27 @@ pub fn run(args: &[String]) {
         "generated_at": crate::rfc3339_now_utc(),
     });
     let mut plugins = Vec::new();
-    let mut datasets = Vec::new();
     let mut manifest_files: BTreeMap<String, (String, u64)> = BTreeMap::new(); // 文件名 → (sha256, bytes)
 
-    // ── 插件 zip：plugins/builtin/<id>/ 全目录，manifest.json 在 zip 根 ──
-    let builtin_dir = root.join("plugins").join("builtin");
-    let mut plugin_dirs: Vec<PathBuf> = std::fs::read_dir(&builtin_dir)
-        .unwrap_or_else(|e| panic!("读取 {} 失败: {e}", builtin_dir.display()))
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.is_dir() && p.join("manifest.json").is_file())
-        .collect();
+    // ── 插件 zip：builtin/<id>/ 与自包含 plugins/<id>/（有 manifest 的打包单元）──
+    // 打包根 = builtin 目录 + plugins 根（后者只取含 manifest.json 的直接子目录，
+    // 即 0.28.13 起的自包含线上插件如 dictionary；examples/builtin 自身无 manifest 不入）。
+    let mut plugin_dirs: Vec<PathBuf> = Vec::new();
+    for scan_root in [root.join("plugins").join("builtin"), root.join("plugins")] {
+        let Ok(entries) = std::fs::read_dir(&scan_root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() && path.join("manifest.json").is_file() {
+                plugin_dirs.push(path);
+            }
+        }
+    }
     plugin_dirs.sort();
+    plugin_dirs.dedup();
     if plugin_dirs.is_empty() {
-        panic!("plugins/builtin/ 下没有可打包的插件（manifest.json 缺失）");
+        panic!("plugins/ 下没有可打包的插件（manifest.json 缺失）");
     }
 
     for dir in &plugin_dirs {
@@ -142,68 +156,16 @@ pub fn run(args: &[String]) {
         ));
     }
 
-    // ── 数据集 zip：target/dictionary/<dataset_id>/<version>/，dataset.json 在根 ──
-    if !parsed.plugins_only {
-        let ds_root = root.join(DATASET_BUILD_ROOT);
-        let mut ds_versions: Vec<(String, String)> = Vec::new(); // (dataset_id, version)
-        if ds_root.is_dir() {
-            for entry in std::fs::read_dir(&ds_root).unwrap().flatten() {
-                let ds_dir = entry.path();
-                if !ds_dir.is_dir() {
-                    continue;
-                }
-                for v_entry in std::fs::read_dir(&ds_dir).unwrap().flatten() {
-                    if v_entry.path().join("dataset.json").is_file() {
-                        ds_versions.push((
-                            entry.file_name().to_string_lossy().into_owned(),
-                            v_entry.file_name().to_string_lossy().into_owned(),
-                        ));
-                    }
-                }
-            }
-        }
-        ds_versions.sort();
-        if ds_versions.is_empty() {
-            panic!(
-                "未找到词库产物（{}）。先运行 `cargo xtask pack --ecdict <csv>` \
-                 或 `cargo xtask dictionary --build-basic ...` 构建；\
-                 跳过数据集用 --plugins-only",
-                ds_root.display()
-            );
-        }
-        for (dataset_id, version) in &ds_versions {
-            let dir = ds_root.join(dataset_id).join(version);
-            let ds_meta: serde_json::Value = read_json(&dir.join("dataset.json"));
-            let plugin_id = ds_meta["plugin_id"].as_str().unwrap_or_default().to_string();
-            if plugin_id.is_empty() {
-                panic!("{} 的 dataset.json 缺少 plugin_id", dir.display());
-            }
-            let filename = format!("{dataset_id}-{version}.zip");
-            let zip_path = parsed.out.join(&filename);
-            let file_count = zip_dir(&dir, &zip_path);
-            let (sha, bytes) = sha256_and_size(&zip_path);
-            tracing::info!(
-                "  ✓ {filename}（{file_count} 文件，{} MB）",
-                bytes / 1024 / 1024
-            );
-            manifest_files.insert(filename.clone(), (sha.clone(), bytes));
-            datasets.push(serde_json::json!({
-                "plugin_id": plugin_id,
-                "dataset_id": dataset_id,
-                "version": version,
-                "asset": {"url": format!("{}/{filename}", parsed.base), "sha256": sha, "bytes": bytes},
-            }));
-        }
-    }
-
     catalog["plugins"] = serde_json::Value::Array(plugins);
-    catalog["datasets"] = serde_json::Value::Array(datasets);
+    catalog["datasets"] = serde_json::Value::Array(Vec::new());
     let catalog_path = parsed.out.join(CATALOG_FILE);
     std::fs::write(&catalog_path, serde_json::to_string_pretty(&catalog).unwrap())
         .unwrap_or_else(|e| panic!("写 {} 失败: {e}", catalog_path.display()));
-    tracing::info!("📝 {}（{} 插件 / {} 数据集）", catalog_path.display(),
+    tracing::info!(
+        "📝 {}（{} 插件 / 0 数据集——词包已改客户端自举，0.28.13）",
+        catalog_path.display(),
         catalog["plugins"].as_array().map(Vec::len).unwrap_or(0),
-        catalog["datasets"].as_array().map(Vec::len).unwrap_or(0));
+    );
 
     // 产物自校验（构建即验：上传前问题在本机暴露）
     verify_dist(&parsed.out);

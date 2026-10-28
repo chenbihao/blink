@@ -46,6 +46,9 @@ pub struct PluginEngine {
     /// 全局代理(HTTP,HTTPS),进程启动时 env 注入;插件 ure/reqwest 原生读取。
     #[allow(dead_code)] // 保留用于未来插件代理配置
     global_proxy: Option<(String, String)>,
+    /// 自举上行帧出口（0.28.13）：set_bootstrap_sender 时盖戳到当前全部句柄，
+    /// replace_plugins 时给新集合补戳——后续 spawn 的进程才能转发自举帧。
+    bootstrap_tx: RwLock<Option<tokio::sync::mpsc::UnboundedSender<super::bootstrap::AuxInbound>>>,
 }
 
 impl PluginEngine {
@@ -63,6 +66,7 @@ impl PluginEngine {
             pool,
             update_lock: tokio::sync::Mutex::new(()),
             global_proxy,
+            bootstrap_tx: RwLock::new(None),
         }
     }
 
@@ -76,6 +80,12 @@ impl PluginEngine {
     /// 返回 (新 generation, 被替换的旧句柄列表)——调用方（runtime.rs 发布器）
     /// 负责 bounded drain 旧进程、撤销路由与能力出口；本方法只换快照。
     pub fn replace_plugins(&self, new_plugins: Vec<Arc<PluginHandle>>) -> (u64, Vec<Arc<PluginHandle>>) {
+        // 0.28.13：新集合统一盖戳自举上行通道（安装/更新产生的新句柄）。
+        if let Some(tx) = self.bootstrap_tx.read().unwrap().clone() {
+            for handle in &new_plugins {
+                handle.set_bootstrap_sender(tx.clone());
+            }
+        }
         let mut guard = self.plugins.write().unwrap();
         let retired = guard.plugins.clone();
         let generation = guard.generation + 1;
@@ -84,6 +94,18 @@ impl PluginEngine {
             plugins: new_plugins,
         });
         (generation, retired)
+    }
+
+    /// 注入自举上行通道（0.28.13；wiring 在 BootstrapManager 构造后调用一次）：
+    /// 存储通道并盖戳当前全部句柄；后续 replace_plugins 的新句柄自动补戳。
+    pub fn set_bootstrap_sender(
+        &self,
+        tx: tokio::sync::mpsc::UnboundedSender<super::bootstrap::AuxInbound>,
+    ) {
+        *self.bootstrap_tx.write().unwrap() = Some(tx.clone());
+        for handle in self.plugin_set().plugins.iter() {
+            handle.set_bootstrap_sender(tx.clone());
+        }
     }
 
     /// 指定 handle 是否仍是当前代次的活跃成员（Arc 指针比对）。

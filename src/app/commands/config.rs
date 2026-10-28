@@ -608,6 +608,7 @@ async fn set_config_value(
             let engine = app.state::<std::sync::Arc<crate::domain::plugin::PluginEngine>>();
             let router = app.state::<std::sync::Arc<crate::domain::intent::RuleRouter>>();
             let mut config = engine.get_config(&v.plugin_id).unwrap_or_default();
+            let was_enabled = config.enabled;
             config.enabled = v.enabled;
             config.settings = v.settings;
             // 0.28.6：同步通路显式携带才覆盖；设置页旧 payload（None）保持现值。
@@ -639,6 +640,14 @@ async fn set_config_value(
                         {
                             pc.cancel_for_tools(&revoked).await;
                         }
+                    }
+                    // 0.28.13：数据集自举联动——禁用取消在途操作（下载/构建随
+                    // 进程终止，禁用态不启动后台下载/构建）；启用触发 auto-init
+                    // （missing/corrupt/outdated 任一成立才实际开始，兼容跳过）。
+                    if v.enabled && !was_enabled {
+                        super::plugin::trigger_plugin_bootstrap(&app, &v.plugin_id, "enable").await;
+                    } else if !v.enabled {
+                        super::plugin::revoke_plugin_bootstrap(&app, &v.plugin_id, "插件禁用").await;
                     }
                     // 0.17.8: 插件禁用时清理该插件的权限记忆行
                     if !v.enabled {

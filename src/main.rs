@@ -865,6 +865,7 @@ fn setup_app(app: &mut tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error:
         );
         tracing::debug!(count = examples.len(), "已加载 examples 示例插件");
         plugins.extend(examples);
+        // 可选插件在 dev/release 均经插件中心安装；源码目录不视为已安装。
         plugins
     };
     // 0.28.1：随后的用户目录安装覆盖需要可变集合（两个构建变体共用）。
@@ -1297,6 +1298,37 @@ fn setup_app(app: &mut tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error:
     app.manage(plugin_installer.clone());
     // 0.28.4：数据包安装器（词库安装/卸载命令的数据源）
     app.manage(dataset_installer.clone());
+    // 0.28.13：数据集自举管理器（词典线上化：安装后拉源→本机构建→挂载）。
+    // 构造后立即盖戳自举上行通道（当前句柄 + 后续 replace_plugins 新句柄）；
+    // 启动恢复清理孤儿 op 目录（操作不跨重启）；状态变化转发前端事件。
+    // setup 在同步主线程执行，显式注入 Tauri 的运行时，不使用隐式 tokio::spawn。
+    // new 已返回 Arc；保持 managed state 为 Arc<BootstrapManager>，避免二次包装。
+    let bootstrap_manager: std::sync::Arc<domain::plugin::BootstrapManager> =
+        domain::plugin::BootstrapManager::new(
+            plugin_engine.clone(),
+            plugin_storage.clone(),
+            dataset_installer.clone(),
+            std::sync::Arc::new(domain::plugin::HttpResourceTransport),
+            tauri::async_runtime::handle().inner().clone(),
+        );
+    plugin_engine.set_bootstrap_sender(bootstrap_manager.aux_sender());
+    bootstrap_manager.recover_orphan_ops();
+    {
+        let manager = bootstrap_manager.clone();
+        let app_handle = app.app_handle().clone();
+        tauri::async_runtime::spawn(async move {
+            let mut rx = manager.subscribe();
+            use tauri::Emitter;
+            while let Ok(snapshot) = rx.recv().await {
+                let _ = app_handle.emit(
+                    crate::infra::event_names::EventNames::PLUGIN_BOOTSTRAP_PROGRESS,
+                    snapshot,
+                );
+            }
+        });
+    }
+    app.manage(bootstrap_manager.clone());
+    tracing::info!("数据集自举管理器初始化完成（宿主运行时）");
     // 0.28.5：官方插件中心目录缓存（内存 TTL + 磁盘降级回放）
     app.manage(std::sync::Arc::new(app::commands::PluginCatalogState::default()));
     // 0.28.7：GIF 录制服务 + 素材 TTL 清理（阻塞 IO，放后台线程）
@@ -2178,6 +2210,12 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
         app::commands::plugin_page_get_settings,
         app::commands::plugin_page_clipboard,
         app::commands::plugin_page_close,
+        // 0.28.13：数据集自举（设置页入口 + 页面受限入口，同一 begin/取消/状态）
+        app::commands::prepare_plugin_dataset,
+        app::commands::cancel_plugin_dataset_prepare,
+        app::commands::plugin_page_prepare_dataset,
+        app::commands::plugin_page_cancel_prepare,
+        app::commands::plugin_page_prepare_status,
         app::commands::get_plugin_surface_status,
         app::commands::prompt_library_list,
         app::commands::prompt_library_upsert,

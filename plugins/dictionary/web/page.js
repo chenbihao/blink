@@ -224,13 +224,6 @@ function renderReverse(term, hits) {
     return wrap;
 }
 
-function renderStateMessage(message, hint) {
-    const nf = el("div", "dict-notfound");
-    nf.appendChild(el("div", null, message));
-    if (hint) nf.appendChild(el("div", "dict-notfound-hint", hint));
-    return nf;
-}
-
 // ── 双击取词悬浮提示 ──────────────────────────────────────────────────────────
 // 结果区的英文义项/例句里双击选词 → 词旁浮卡速查。复用 dictionary_lookup，
 // 竞态用独立 tipEpoch（主查询发起即令其失效），不与主 epoch 混用。
@@ -407,17 +400,11 @@ async function query(word) {
         : null;
     if (!data || data.status) {
         if (data?.status === "not_installed") {
-            body.replaceChildren(renderStateMessage(
-                "离线词库未安装",
-                "在 设置 → 插件 → 离线词典 → 数据包 安装后可用",
-            ));
+            body.replaceChildren(renderPrepareCard("离线词库未就绪"));
             return;
         }
         if (data?.status === "corrupt") {
-            body.replaceChildren(renderStateMessage(
-                "离线词库数据损坏",
-                "在设置页重装数据包可修复",
-            ));
+            body.replaceChildren(renderPrepareCard("离线词库数据损坏"));
             return;
         }
         if (data?.status === "not_found") {
@@ -428,6 +415,106 @@ async function query(word) {
         return;
     }
     body.replaceChildren(renderEntry(data, r.desc));
+}
+
+// ── 词库自举入口（0.28.13）───────────────────────────────────────────────────
+// 未就绪/损坏状态渲染「准备词库」按钮：走宿主受限桥接命令
+// plugin_page_prepare_dataset / plugin_page_prepare_status（身份由窗口 label
+// 反查复核，只能操作本插件；与设置页/自动触发共用同一 begin 入口，触发合并）。
+// 进度经 plugin_page_prepare_status 轮询渲染真实阶段（窗口隐藏/重开可恢复，
+// 不依赖事件通道）。首次准备需联网（下载约 63MB 源数据），完成后离线可用。
+
+let prepareTimer = null;
+
+/** 宿主命令直达（受限桥接命令不经 Blink.invoke 的 tool 通道）。 */
+function hostInvoke(command, args) {
+    const TAU = window.__TAURI__;
+    if (!TAU || !TAU.core || !TAU.core.invoke) {
+        return Promise.reject(new Error("Blink host unavailable"));
+    }
+    return TAU.core.invoke(command, { ...args, pluginId: "builtin.dictionary" });
+}
+
+function renderPrepareCard(title) {
+    const nf = el("div", "dict-notfound");
+    nf.appendChild(el("div", null, title));
+    const hint = el("div", "dict-notfound-hint",
+        "首次使用需联网下载约 63MB 源数据，再在本机构建词库，请预留充足磁盘空间");
+    nf.appendChild(hint);
+    const status = el("div", "dict-prepare-status");
+    nf.appendChild(status);
+    const btn = el("button", "dict-prepare-btn", "准备词库");
+    btn.type = "button";
+    btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        status.textContent = "准备中…";
+        try {
+            const r = await hostInvoke("plugin_page_prepare_dataset",
+                { datasetId: "dictionary-basic" });
+            if (r?.already_ready) status.textContent = "词库已就绪，重新查词即可";
+        } catch (error) {
+            status.textContent = `准备失败：${error?.message || error}`;
+            btn.disabled = false;
+            return;
+        }
+        pollPrepareStatus();
+    });
+    nf.appendChild(btn);
+    // 渲染时若已有在途操作（窗口重开），直接进入轮询。
+    pollPrepareStatus();
+    return nf;
+}
+
+const PREPARE_STAGE_TEXT = {
+    "starting": "准备中…",
+    "downloading-source": "下载源数据…",
+    "building": "本机构建词库…（约半分钟）",
+    "verifying": "校验质量样本…",
+    "installing": "挂载词库…",
+    "mounting": "挂载词库…",
+    "mounted": "已挂载，即将就绪",
+};
+
+function prepareStatusText(phase) {
+    if (!phase) return "";
+    if (phase.kind === "fetching_resource") {
+        return `下载源数据 ${((phase.received || 0) / 1048576).toFixed(1)}/${((phase.total || 0) / 1048576).toFixed(1)} MB`;
+    }
+    if (phase.kind === "plugin_stage") return PREPARE_STAGE_TEXT[phase.stage] || phase.stage;
+    return PREPARE_STAGE_TEXT[phase.kind] || phase.kind;
+}
+
+async function pollPrepareStatus() {
+    if (prepareTimer) return;
+    const tick = async () => {
+        let ops = [];
+        try {
+            ops = await hostInvoke("plugin_page_prepare_status", {});
+        } catch { /* 宿主暂不可达：下轮重试 */ }
+        ops = ops.filter(op => op.dataset_id === "dictionary-basic");
+        const live = ops.find(op =>
+            !["succeeded", "failed", "cancelled"].includes(op.phase?.kind));
+        const statusEl = document.querySelector(".dict-prepare-status");
+        if (statusEl) {
+            if (live) {
+                statusEl.textContent = prepareStatusText(live.phase);
+            } else if (ops.some(op => op.phase?.kind === "failed")) {
+                const failed = ops.find(op => op.phase?.kind === "failed");
+                statusEl.textContent = `准备失败：${failed?.phase?.message || "未知错误"}`;
+                const btn = document.querySelector(".dict-prepare-btn");
+                if (btn) btn.disabled = false;
+            } else if (ops.some(op => op.phase?.kind === "succeeded")) {
+                statusEl.textContent = "词库已就绪，输入单词开始查词";
+            }
+        }
+        // 基础库在途才继续轮询；成功后停（用户下次查询自然拿到 Ready）。
+        if (live) {
+            prepareTimer = setTimeout(tick, 1500);
+        } else {
+            prepareTimer = null;
+        }
+    };
+    prepareTimer = setTimeout(tick, 500);
 }
 
 // ── 事件绑定 ─────────────────────────────────────────────────────────────────

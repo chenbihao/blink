@@ -11,7 +11,7 @@ test("deferred cross-window plugin config reload resumes after focus leaves the 
     const input = {};
     const doc = new TestElement();
     doc.activeElement = null;
-    doc.getElementById = () => container;
+    doc.getElementById = id => id === "plugins-container" ? container : null;
     doc.querySelector = () => card;
     container.contains = element => element === input;
     globalThis.document = doc;

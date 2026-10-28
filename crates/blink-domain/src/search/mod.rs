@@ -257,6 +257,7 @@ pub use start_menu_engine::StartMenuEngine;
 use system_shortcuts::SystemShortcutEngine;
 
 // 多路搜索服务:路由 + 融合 + 渐进式调度
+mod plugin_queries;
 mod service;
 pub use service::{EngineConfigUpdate, FileSearchStatus, SearchResponse, SearchService};
 

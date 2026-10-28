@@ -65,13 +65,14 @@ pub struct CatalogResponse {
     /// 实际目录来源（0.28.12）：`online` 在线拉取 / `cache` 官方磁盘缓存回放 /
     /// `local` dev 本地目录（显式选择或自动模式末位降级）。前端据此标注来源。
     pub source: &'static str,
+    /// dev 自动回退时安装使用同一目录，避免展示本地产物却再次联网下载。
+    pub local_dir: Option<String>,
 }
 
 /// dev 本地目录源（0.28.12）：`cargo xtask pack --out` 产物目录。
 pub(crate) const LOCAL_CATALOG_FILE: &str = "blink-plugins-catalog.json";
 
 /// 自动模式下本地 pack 产物的默认目录（仓库 target/plugin-dist；仅 debug 消费）。
-#[cfg(debug_assertions)]
 fn default_local_pack_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("target")
@@ -133,6 +134,7 @@ pub async fn get_plugin_catalog(
     if let Some(dir) = local_dir {
         reject_production_local_source()?;
         let dir = std::path::PathBuf::from(&dir);
+        let local_dir = Some(dir.to_string_lossy().into_owned());
         let catalog = tokio::task::spawn_blocking(move || load_local_catalog(&dir))
             .await
             .map_err(|e| CommandError::new("internal", format!("本地目录读取任务失败: {e}"), true))??;
@@ -142,6 +144,7 @@ pub async fn get_plugin_catalog(
             endpoint,
             dev_mode: cfg!(debug_assertions),
             source: "local",
+            local_dir,
         });
     }
 
@@ -156,6 +159,7 @@ pub async fn get_plugin_catalog(
                 endpoint: endpoint.clone(),
                 dev_mode: cfg!(debug_assertions),
                 source: "online",
+                local_dir: None,
             });
         }
     }
@@ -173,6 +177,7 @@ pub async fn get_plugin_catalog(
                 endpoint,
                 dev_mode: cfg!(debug_assertions),
                 source: "online",
+                local_dir: None,
             })
         }
         Err(fetch_err) => {
@@ -216,6 +221,7 @@ pub async fn get_plugin_catalog(
                 endpoint,
                 dev_mode: cfg!(debug_assertions),
                 source,
+                local_dir: (source == "local").then(|| default_local_pack_dir().to_string_lossy().into_owned()),
             })
         }
     }
@@ -752,7 +758,7 @@ mod tests {
     fn catalog_response_exposes_the_frontend_dev_mode_field() {
         let response = CatalogResponse {
             catalog: PluginCatalog { format_version: 1, generated_at: String::new(), plugins: vec![], datasets: vec![] },
-            stale: false, endpoint: String::new(), dev_mode: false, source: "online",
+            stale: false, endpoint: String::new(), dev_mode: false, source: "online", local_dir: None,
         };
         let json = serde_json::to_value(response).unwrap();
         assert_eq!(json["devMode"], false);

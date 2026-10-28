@@ -37,7 +37,10 @@ const PAGE_CLIPBOARD_MAX_BYTES: usize = 1 << 20;
 pub(crate) fn command_allowed(label: &str, command: &str) -> bool {
     !label.starts_with("plugin-") || matches!(command,
         "plugin_page_ready" | "plugin_page_invoke" | "plugin_page_get_settings"
-        | "plugin_page_clipboard" | "plugin_page_close")
+        | "plugin_page_clipboard" | "plugin_page_close"
+        // 0.28.13：数据集自举的页面入口（仅本插件作用域——词库准备/取消/状态，
+        // 页面身份由窗口 label 反查复核，不依赖词典已 ready，也不放宽其他安装命令）
+        | "plugin_page_prepare_dataset" | "plugin_page_cancel_prepare" | "plugin_page_prepare_status")
 }
 
 #[cfg(test)]
@@ -46,11 +49,15 @@ mod tests {
 
     #[test]
     fn plugin_commands_are_default_deny() {
-        for command in ["set_config", "reset_config", "clear_plugin_secret", "run_builtin_action", "gif_start_recording", "future_host_command"] {
+        for command in ["set_config", "reset_config", "clear_plugin_secret", "run_builtin_action", "gif_start_recording", "future_host_command", "install_plugin_from_catalog", "uninstall_plugin", "prepare_plugin_dataset"] {
             assert!(!command_allowed("plugin-builtin-ip", command));
             assert!(command_allowed("settings", command));
         }
         assert!(command_allowed("plugin-builtin-ip", "plugin_page_ready"));
+        // 0.28.13：自举页面入口对插件页放行；任意安装命令仍默认拒绝。
+        assert!(command_allowed("plugin-builtin-dictionary", "plugin_page_prepare_dataset"));
+        assert!(command_allowed("plugin-builtin-dictionary", "plugin_page_cancel_prepare"));
+        assert!(command_allowed("plugin-builtin-dictionary", "plugin_page_prepare_status"));
         assert!(!command_allowed("plugin-builtin-ip", "plugin_page_unrestricted"));
     }
 }
@@ -242,11 +249,106 @@ pub async fn plugin_page_close(
         .map_err(|e| CommandError::new("internal", format!("隐藏窗口失败: {e}"), true))
 }
 
+/// 页面侧准备本插件数据集（0.28.13）——与设置页/自动触发共用同一 begin
+/// 入口（触发合并）。页面身份由窗口 label 反查复核，只能准备**自己**的数据集，
+/// 不依赖插件 ready（未装词库正是本入口的用途）。
+#[tauri::command]
+pub async fn plugin_page_prepare_dataset(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    plugin_id: String,
+    dataset_id: String,
+) -> Result<serde_json::Value, CommandError> {
+    let surface = plugin_surface::surface_state(&app);
+    let engine = app.state::<Arc<PluginEngine>>().inner().clone();
+    plugin_surface::page_session(&surface, &app, &window, &engine, &plugin_id)
+        .map_err(|e| CommandError::new("permission_denied", e, false))?;
+    let manager = app
+        .state::<Arc<crate::domain::plugin::BootstrapManager>>()
+        .inner()
+        .clone();
+    let outcome = manager
+        .begin(&plugin_id, &dataset_id, "manual")
+        .await
+        .map_err(|e| CommandError::new("bootstrap_failed", e.to_string(), false))?;
+    Ok(match outcome {
+        crate::domain::plugin::BeginOutcome::Started(s) => serde_json::json!({
+            "started": true, "op_id": s.op_id,
+        }),
+        crate::domain::plugin::BeginOutcome::AlreadyRunning(s) => serde_json::json!({
+            "started": false, "merged": true, "op_id": s.op_id,
+        }),
+        crate::domain::plugin::BeginOutcome::AlreadyReady => serde_json::json!({
+            "started": false, "already_ready": true,
+        }),
+    })
+}
+
+/// 页面侧取消本插件某数据集的在途自举（杀进程终止构建）。
+#[tauri::command]
+pub async fn plugin_page_cancel_prepare(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    plugin_id: String,
+    dataset_id: String,
+) -> Result<bool, CommandError> {
+    let surface = plugin_surface::surface_state(&app);
+    let engine = app.state::<Arc<PluginEngine>>().inner().clone();
+    plugin_surface::page_session(&surface, &app, &window, &engine, &plugin_id)
+        .map_err(|e| CommandError::new("permission_denied", e, false))?;
+    let manager = app
+        .state::<Arc<crate::domain::plugin::BootstrapManager>>()
+        .inner()
+        .clone();
+    Ok(manager.cancel(&plugin_id, &dataset_id).await)
+}
+
+/// 页面侧轮询本插件自举状态（窗口隐藏/重开后按快照恢复进度，不依赖事件）。
+#[tauri::command]
+pub async fn plugin_page_prepare_status(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    plugin_id: String,
+) -> Result<Vec<crate::domain::plugin::OpSnapshot>, CommandError> {
+    let surface = plugin_surface::surface_state(&app);
+    let engine = app.state::<Arc<PluginEngine>>().inner().clone();
+    plugin_surface::page_session(&surface, &app, &window, &engine, &plugin_id)
+        .map_err(|e| CommandError::new("permission_denied", e, false))?;
+    let manager = app
+        .state::<Arc<crate::domain::plugin::BootstrapManager>>()
+        .inner()
+        .clone();
+    Ok(manager.status(&plugin_id))
+}
+
+/// InstallSource → 前端 JSON（来源徽标：官方目录/本地安装/本机构建）。
+fn install_source_json(source: &blink_infra::plugin_storage::InstallSource) -> serde_json::Value {
+    match source {
+        blink_infra::plugin_storage::InstallSource::LocalDev { origin } => {
+            serde_json::json!({"kind": "local_dev", "origin": origin})
+        }
+        blink_infra::plugin_storage::InstallSource::Official { catalog_url } => {
+            serde_json::json!({"kind": "official", "catalog_url": catalog_url})
+        }
+        blink_infra::plugin_storage::InstallSource::Managed {
+            plugin_version,
+            source_revision,
+            operation,
+        } => serde_json::json!({
+            "kind": "managed",
+            "plugin_version": plugin_version,
+            "source_revision": source_revision,
+            "operation": operation,
+        }),
+    }
+}
+
 /// 插件窗口面状态（设置页"已安装/获取"数据源，0.28.2 §五.5）：
 /// 每插件 pages / readiness / 安装记录合并视图。
 #[tauri::command]
 pub async fn get_plugin_surface_status(
     app: tauri::AppHandle,
+    plugin_id: Option<String>,
 ) -> Result<Vec<serde_json::Value>, CommandError> {
     let engine = app.state::<Arc<PluginEngine>>().inner().clone();
     let pool = app.state::<crate::infra::data::DbPools>().config.clone();
@@ -281,9 +383,29 @@ pub async fn get_plugin_surface_status(
         }
     }
 
+    // 0.28.13：自举操作快照（含终态）+ 能力标记，按插件分组。
+    let mut bootstrap_ops: std::collections::HashMap<String, Vec<crate::domain::plugin::OpSnapshot>> =
+        std::collections::HashMap::new();
+    let bootstrap_supported = |handle: &Arc<crate::domain::plugin::PluginHandle>| -> bool {
+        handle.manifest().supports_dataset_init()
+            && crate::domain::plugin::load_source_lock(handle.package_dir()).is_ok()
+    };
+    if let Some(manager) = app.try_state::<Arc<crate::domain::plugin::BootstrapManager>>() {
+        for handle in engine.all_plugins() {
+            if plugin_id.as_ref().is_some_and(|id| id != handle.id()) {
+                continue;
+            }
+            let ops = manager.status(handle.id());
+            if !ops.is_empty() || bootstrap_supported(&handle) {
+                bootstrap_ops.insert(handle.id().to_string(), ops);
+            }
+        }
+    }
+
     let mut rows: Vec<serde_json::Value> = engine
         .all_plugins()
         .iter()
+        .filter(|handle| plugin_id.as_ref().is_none_or(|id| id == handle.id()))
         .map(|handle| {
             let manifest = handle.manifest();
             let readiness = engine
@@ -297,14 +419,7 @@ pub async fn get_plugin_surface_status(
                         blink_infra::plugin_storage::InstallState::Active => "active",
                         blink_infra::plugin_storage::InstallState::PendingRemove => "pending_remove",
                     },
-                    "source": match &r.source {
-                        blink_infra::plugin_storage::InstallSource::LocalDev { origin } => {
-                            serde_json::json!({"kind": "local_dev", "origin": origin})
-                        }
-                        blink_infra::plugin_storage::InstallSource::Official { catalog_url } => {
-                            serde_json::json!({"kind": "official", "catalog_url": catalog_url})
-                        }
-                    },
+                    "source": install_source_json(&r.source),
                 })
             });
             // manifest 声明的数据包逐个合并安装记录（缺装/版本/损坏状态）
@@ -327,14 +442,7 @@ pub async fn get_plugin_surface_status(
                                 blink_infra::plugin_storage::InstallState::Active => "active",
                                 blink_infra::plugin_storage::InstallState::PendingRemove => "pending_remove",
                             },
-                            "source": match &r.source {
-                                blink_infra::plugin_storage::InstallSource::LocalDev { origin } => {
-                                    serde_json::json!({"kind": "local_dev", "origin": origin})
-                                }
-                                blink_infra::plugin_storage::InstallSource::Official { catalog_url } => {
-                                    serde_json::json!({"kind": "official", "catalog_url": catalog_url})
-                                }
-                            },
+                            "source": install_source_json(&r.source),
                         })),
                     })
                 })
@@ -352,12 +460,21 @@ pub async fn get_plugin_surface_status(
                 "readiness": readiness,
                 "install": install,
                 "datasets": datasets,
+                // 0.28.13：自举能力与操作状态（前端"准备词库"入口/进度渲染）。
+                // supported = 声明 dataset_init 且源锁定声明合法可解析。
+                "bootstrap": {
+                    "supported": bootstrap_supported(handle),
+                    "ops": bootstrap_ops.get(handle.id()).cloned().unwrap_or_default(),
+                },
             })
         })
         .collect();
     // 0.28.12：待清理插件（卸载时文件被占用）已从运行时撤销——引擎集合无
     // 句柄，按安装记录追加占位行，前端如实展示"待清理（重启后完成）"。
     for (pid, record) in &installs {
+        if plugin_id.as_ref().is_some_and(|id| id != pid) {
+            continue;
+        }
         if record.state != blink_infra::plugin_storage::InstallState::PendingRemove
             || rows.iter().any(|r| r["plugin_id"] == *pid)
         {
@@ -373,16 +490,10 @@ pub async fn get_plugin_surface_status(
                 "version": record.version,
                 "installed_at": record.installed_at,
                 "state": "pending_remove",
-                "source": match &record.source {
-                    blink_infra::plugin_storage::InstallSource::LocalDev { origin } => {
-                        serde_json::json!({"kind": "local_dev", "origin": origin})
-                    }
-                    blink_infra::plugin_storage::InstallSource::Official { catalog_url } => {
-                        serde_json::json!({"kind": "official", "catalog_url": catalog_url})
-                    }
-                },
+                "source": install_source_json(&record.source),
             },
             "datasets": [],
+            "bootstrap": {"supported": false, "ops": []},
         }));
     }
     Ok(rows)

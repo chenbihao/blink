@@ -308,6 +308,35 @@ html, body {
 
 .dict-notfound .dict-btn { margin-top: var(--space-sm); }
 
+/* 0.28.13：词库自举入口（准备按钮 + 真实阶段文案） */
+.dict-prepare-status {
+    margin-top: var(--space-2xs);
+    font-size: var(--text-sm);
+    color: var(--accent);
+    min-height: 1.2em;
+}
+
+.dict-prepare-btn {
+    margin-top: var(--space-xs);
+    padding: var(--space-2xs) var(--space-sm);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--accent);
+    background: transparent;
+    color: var(--accent);
+    font-size: var(--text-sm);
+    cursor: pointer;
+}
+
+.dict-prepare-btn:hover:not(:disabled) {
+    background: var(--accent);
+    color: var(--bg, var(--surface));
+}
+
+.dict-prepare-btn:disabled {
+    opacity: 0.6;
+    cursor: default;
+}
+
 /* ── 页脚（kbd 对齐宿主 flat filled pill）────────────────── */
 
 .dict-footer {

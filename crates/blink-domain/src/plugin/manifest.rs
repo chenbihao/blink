@@ -772,6 +772,14 @@ impl PluginManifest {
         self.capabilities.iter().any(|c| c == "query")
     }
 
+    /// 是否声明数据集自举能力（0.28.13）——宿主只对声明 `dataset_init`
+    /// 的插件启用 bootstrap 流程（发 dataset_init 帧、受理 fetch/install）。
+    pub fn supports_dataset_init(&self) -> bool {
+        self.capabilities
+            .iter()
+            .any(|c| c == super::protocol::CAPABILITY_DATASET_INIT)
+    }
+
     /// 是否声明独立页面（0.28.1）。
     pub fn supports_pages(&self) -> bool {
         !self.pages.is_empty()
@@ -790,33 +798,17 @@ impl PluginManifest {
 
     /// 解析 exec 为绝对路径(相对路径基于 manifest 所在目录,不依赖 cwd)。
     ///
-    /// 对于 Rust 内置插件（type=Process, exec 以 ./bin/ 开头），Dev 模式下直接指向 target/debug/，
-    /// 避免创建 Junction 符号链接导致 IDE 索引爆炸。Release 模式下保持相对路径不变。
+    /// 仓库源码插件在 Dev 模式可用 target/debug 产物；用户安装的插件始终
+    /// 使用自身包内文件，不能被开发工作区的旧 exe 覆盖。
     pub fn exec_path(&self, manifest_dir: &Path) -> PathBuf {
         let exec = &self.runtime.exec;
 
-        // Rust 内置插件特殊处理：exec 以 ./bin/ 开头 且 是 Process 类型
-        // Dev 模式下直接指向 target/debug/{exe_name}，无需 Junction
+        // 仅源码目录使用 debug 产物，无需 Junction。
         #[cfg(debug_assertions)]
         if matches!(self.runtime.r#type, RuntimeType::Process) && exec.starts_with("./bin/") {
-            // 提取 exe 文件名："./bin/blink-plugin-echo.exe" -> "blink-plugin-echo.exe"
             let exe_name = exec.trim_start_matches("./bin/");
-            // CARGO_MANIFEST_DIR 是 Blink 根目录
-            if let Ok(root) = std::env::var("CARGO_MANIFEST_DIR") {
-                let target_path = PathBuf::from(root).join("target/debug").join(exe_name);
-                if target_path.exists() {
-                    return target_path;
-                }
-            }
-            // fallback: manifest 上溯三级到项目根 -> target/debug
-            let fallback = manifest_dir
-                .parent()
-                .and_then(|p| p.parent())
-                .and_then(|p| p.parent())
-                .map(|root| root.join("target/debug").join(exe_name));
-            if let Some(path) = fallback
-                && path.exists()
-            {
+            let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+            if let Some(path) = debug_source_exec_path(manifest_dir, &workspace, exe_name) {
                 return path;
             }
         }
@@ -857,6 +849,18 @@ impl PluginManifest {
     }
 }
 
+/// 源码与用户安装目录按真实路径隔离，不能只凭 ./bin/ 或 builtin id 判断。
+#[cfg(debug_assertions)]
+fn debug_source_exec_path(manifest_dir: &Path, workspace: &Path, exe_name: &str) -> Option<PathBuf> {
+    let source_root = workspace.join("plugins").canonicalize().ok()?;
+    let package = manifest_dir.canonicalize().ok()?;
+    if !package.starts_with(&source_root) {
+        return None;
+    }
+    let target = workspace.join("target/debug").join(exe_name);
+    target.is_file().then(|| strip_windows_verbatim_prefix(&target))
+}
+
 /// 剥掉 Windows verbatim/extended-length 前缀 `\\?\`。
 ///
 /// 背景：Tauri release 下 `resource_dir()` 返回的路径带 `\\?\` 前缀（如
@@ -883,6 +887,24 @@ fn strip_windows_verbatim_prefix(p: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(debug_assertions)]
+    #[test]
+    fn debug_executable_override_is_limited_to_source_packages() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let source = workspace.join("plugins/dictionary");
+        let installed = temp.path().join("installed/builtin.dictionary/0.3.0");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&installed).unwrap();
+        std::fs::create_dir_all(workspace.join("target/debug")).unwrap();
+        let debug_exe = workspace.join("target/debug/dictionary.exe");
+        std::fs::write(&debug_exe, b"debug").unwrap();
+        assert_eq!(super::debug_source_exec_path(&source, &workspace, "dictionary.exe"), Some(debug_exe));
+        assert!(super::debug_source_exec_path(&installed, &workspace, "dictionary.exe").is_none());
+        // 路径不存在时不能误把用户目录判作源码，也不回退到其他工作区。
+        assert!(super::debug_source_exec_path(&installed.join("missing"), &workspace, "dictionary.exe").is_none());
+    }
+
     #[test]
     fn weather_manifest_localizes_credential_groups_and_keeps_app_key_visible() {
         let manifest: super::PluginManifest = serde_json::from_str(include_str!(concat!(

@@ -51,6 +51,43 @@ pub enum CoreToPlugin {
         #[allow(dead_code)]
         id: String,
     },
+    /// 数据集自举启动（0.28.13）：宿主请求本插件准备一个数据集——在
+    /// work_dir 内 fetch 源 → 构建 → install_dataset → init_result。
+    /// 构建在工作线程执行，服务循环保持响应（查询仍可返回 not_installed）。
+    #[serde(rename = "dataset_init")]
+    DatasetInit {
+        #[allow(dead_code)]
+        id: String,
+        op_id: String,
+        dataset_id: String,
+        work_dir: String,
+    },
+    /// fetch_resource 应答：path 为 work_dir 下相对路径（resources/<id>）。
+    #[serde(rename = "resource_result")]
+    ResourceResult {
+        id: String,
+        #[serde(default)]
+        path: Option<String>,
+        /// wire 对齐保留（宿主侧回显锁定 bytes；worker 校验哈希而非重复核对大小）。
+        #[serde(default)]
+        #[allow(dead_code)]
+        bytes: Option<u64>,
+        #[serde(default)]
+        revision: Option<String>,
+        #[serde(default)]
+        license: Option<String>,
+        #[serde(default)]
+        error: Option<PluginError>,
+    },
+    /// install_dataset 应答：version = 已挂载版本。
+    #[serde(rename = "dataset_result")]
+    DatasetResult {
+        id: String,
+        #[serde(default)]
+        version: Option<String>,
+        #[serde(default)]
+        error: Option<PluginError>,
+    },
 }
 
 /// 插件 → core 的上行消息。
@@ -66,6 +103,38 @@ pub enum PluginToCore {
     /// 轨道 A 纯数据 tool 结果——manifest 配了 projection 的 tool 走此路径。
     #[serde(rename = "raw_result")]
     RawResult(RawToolResult),
+    /// 数据集自举：请求宿主下载源锁定资源（0.28.13）。
+    #[serde(rename = "fetch_resource")]
+    FetchResource {
+        id: String,
+        op_id: String,
+        resource_id: String,
+    },
+    /// 数据集自举：请求宿主挂载本操作构建输出的数据集（0.28.13）。
+    #[serde(rename = "install_dataset")]
+    InstallDataset {
+        id: String,
+        op_id: String,
+        dataset_id: String,
+        /// work_dir 下的相对路径（build/<dataset_id>/<version>）。
+        source_dir: String,
+    },
+    /// 数据集自举：上报当前阶段（信息性）。
+    #[serde(rename = "init_stage")]
+    InitStage {
+        op_id: String,
+        stage: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    /// 数据集自举：操作终态。
+    #[serde(rename = "init_result")]
+    InitResult {
+        op_id: String,
+        dataset_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<PluginError>,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -86,7 +155,7 @@ pub struct RawToolResult {
     pub desc: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginError {
     pub code: String,
     pub message: String,

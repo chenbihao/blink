@@ -140,6 +140,7 @@ pub struct SearchService {
     router: Arc<dyn IntentRouter>,
     /// 最近一次 query 的 seq,用于丢弃过期 async 增量(emit 前校验)。
     latest_seq: Arc<AtomicU64>,
+    plugin_queries: Arc<super::plugin_queries::PluginQueries>,
     /// 唤起时的上下文快照（前台应用、剪贴板等）。
     /// invoke 时更新，search 时读取。RwLock 读可并行，写极少（仅唤起时）。
     snapshot: Arc<RwLock<ContextSnapshot>>,
@@ -223,6 +224,7 @@ impl SearchService {
             plugin_engine,
             router,
             latest_seq: Arc::new(AtomicU64::new(0)),
+            plugin_queries: Arc::default(),
             snapshot: Arc::new(RwLock::new(ContextSnapshot::default())),
             snapshot_generation: Arc::new(AtomicU64::new(0)),
             max_results: Arc::new(AtomicUsize::new(50)),
@@ -1309,7 +1311,10 @@ impl SearchService {
         let latest_seq = Arc::clone(&self.latest_seq);
         let snapshot = Arc::clone(&self.snapshot);
         let max_results = Arc::clone(&self.max_results);
-        tokio::spawn(async move {
+        self.plugin_queries.submit(plugin_id.clone(), seq, &self.latest_seq, async move {
+            if seq != latest_seq.load(Ordering::SeqCst) {
+                return;
+            }
             // 防抖:等待连续输入停止后再查询
             if debounce_ms > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(debounce_ms)).await;
@@ -1355,6 +1360,7 @@ impl SearchService {
         let snapshot = Arc::clone(&self.snapshot);
         let max_results = Arc::clone(&self.max_results);
 
+        let plugin_queries = Arc::clone(&self.plugin_queries);
         tokio::spawn(async move {
             let history = blink_infra::data::history::get_weights(&pool).await;
             let snapshot = snapshot.read().unwrap().clone();
@@ -1366,42 +1372,31 @@ impl SearchService {
                 .map(|c| c.plugin_id)
                 .collect();
 
-            // ── 1. 插件查询任务（独立 spawn，支持 per-plugin 防抖）
-            if !plugin_ids.is_empty() {
-                let plugin_ctx =
-                    crate::plugin::PluginQueryContext::from_snapshot(&snapshot);
+            // 每插件独立串行，旧查询结束后只执行最新输入；慢插件不阻塞其他插件。
+            for (plugin_id, arg) in plugin_ids {
+                let plugin_ctx = crate::plugin::PluginQueryContext::from_snapshot(&snapshot);
                 let pe = plugin_engine.clone();
-                let plugin_ids = plugin_ids.clone();
                 let app = app.clone();
                 let latest_seq = latest_seq.clone();
-                // 取所有命中插件中最大的 debounce_ms（同一批查询共享一个 task）
-                let max_debounce = plugin_ids
-                    .iter()
-                    .map(|(id, _)| pe.get_debounce_ms(id))
-                    .max()
-                    .unwrap_or(0);
-                tokio::spawn(async move {
-                    // 防抖:等待连续输入停止后再查询,避免每次按键都触发网络请求
-                    if max_debounce > 0 {
-                        tokio::time::sleep(std::time::Duration::from_millis(max_debounce)).await;
+                let priority = priority_set.contains(&plugin_id);
+                let debounce_ms = pe.get_debounce_ms(&plugin_id);
+                let current = latest_seq.clone();
+                plugin_queries.submit(plugin_id.clone(), seq, &current, async move {
+                    if seq != latest_seq.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    if debounce_ms > 0 {
+                        tokio::time::sleep(std::time::Duration::from_millis(debounce_ms)).await;
                         if seq != latest_seq.load(Ordering::SeqCst) {
-                            tracing::trace!(debounce_ms = max_debounce, "插件防抖:seq 已过期,跳过");
                             return;
                         }
                     }
-                    let mut items = pe.query_subset(&plugin_ids, &plugin_ctx).await;
-                    // priority 候选 score 抬高,确保置顶
-                    for item in &mut items {
-                        if priority_set.contains(&item.source) {
-                            item.score = boost_priority(item.score);
-                        }
+                    let mut items = pe.query_subset(&[(plugin_id.clone(), arg)], &plugin_ctx).await;
+                    if priority {
+                        for item in &mut items { item.score = boost_priority(item.score); }
                     }
                     if seq == latest_seq.load(Ordering::SeqCst) {
-                        // 即使空结果也要 emit,让前端清除占位符
-                        tracing::trace!(count = items.len(), "插件查询返回");
-                        // 插件查询：空结果时用第一个 plugin_id 作为来源
-                        let empty_source = plugin_ids.first().map(|(id, _)| id.as_str());
-                        emit_results(app.as_ref(), seq, items, limit, empty_source);
+                        emit_results(app.as_ref(), seq, items, limit, Some(&plugin_id));
                     }
                 });
             }

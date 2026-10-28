@@ -28,15 +28,8 @@ fn handle_from_record(
 ) -> Result<std::sync::Arc<crate::domain::plugin::PluginHandle>, CommandError> {
     let dir = installer
         .active_version_dir(&record.plugin_id)
-        .ok_or_else(|| {
-            CommandError::new("invalid_state", "安装记录存在但版本目录缺失", false)
-        })?;
-    handle_from_dir(
-        installer.storage(),
-        &dir,
-        &record.plugin_id,
-        proxy,
-    )
+        .ok_or_else(|| CommandError::new("invalid_state", "安装记录存在但版本目录缺失", false))?;
+    handle_from_dir(installer.storage(), &dir, &record.plugin_id, proxy)
 }
 
 /// 本地包安装命令的统一开发模式门禁（0.28.5）：LocalDev 通道（zip/目录）
@@ -125,6 +118,8 @@ pub(crate) async fn publish_installed_plugin(
     let pool = app.state::<crate::infra::data::DbPools>().config.clone();
     let proxy = plugin_env_proxy(&pool).await;
     let new_handle = handle_from_record(&installer, record, proxy)?;
+    // 先关闭旧句柄的自举提交关卡，再发布新代次。
+    revoke_plugin_bootstrap(app, &record.plugin_id, "插件更新").await;
     let mut target = engine.all_plugins();
     target.retain(|h| h.id() != record.plugin_id);
     target.push(new_handle);
@@ -147,6 +142,9 @@ pub(crate) async fn publish_installed_plugin(
                     true,
                 )
             })?;
+            if rolled_back.is_some() {
+                trigger_plugin_bootstrap(app, &record.plugin_id, "rollback").await;
+            }
             return match rolled_back {
                 Some(old) => Err(CommandError::new(
                     "publish_failed",
@@ -179,6 +177,9 @@ pub(crate) async fn publish_installed_plugin(
         pc.cancel_for_tools(&report.revoked_tool_ids).await;
     }
     crate::app::plugin_surface::close_plugin_windows(app, &record.plugin_id);
+    // 0.28.13：更新即撤销旧代次的在途自举操作（旧进度不得污染新会话）；
+    // 随后对新版本触发 auto-init（已兼容则 AlreadyReady 跳过）。
+    trigger_plugin_bootstrap(app, &record.plugin_id, "auto_install").await;
     tracing::info!(
         plugin = %record.plugin_id,
         version = %record.version,
@@ -226,9 +227,7 @@ pub async fn install_plugin_package(
     })
     .await
     .map_err(|e| CommandError::new("internal", format!("安装任务失败: {e}"), true))?
-    .map_err(|e| {
-        CommandError::new("install_failed", format!("插件安装失败: {e}"), false)
-    })?;
+    .map_err(|e| CommandError::new("install_failed", format!("插件安装失败: {e}"), false))?;
 
     publish_installed_plugin(&app, &outcome).await?;
     Ok(outcome.record)
@@ -284,6 +283,8 @@ pub async fn uninstall_plugin(
     }
 
     // 2. 撤销页面会话与运行时出口（撤能力/路由/快照 + 杀进程）。
+    //    0.28.13：先取消该插件全部在途自举操作（下载/构建随进程终止，
+    //    PendingRemove 已拒新操作与迟到挂载）。
     crate::app::plugin_surface::close_plugin_windows(&app, &plugin_id);
     let engine = app
         .state::<std::sync::Arc<crate::domain::plugin::PluginEngine>>()
@@ -293,6 +294,7 @@ pub async fn uninstall_plugin(
         .state::<std::sync::Arc<crate::domain::plugin::PluginRuntimePublisher>>()
         .inner()
         .clone();
+    revoke_plugin_bootstrap(&app, &plugin_id, "插件卸载").await;
     let mut target = engine.all_plugins();
     target.retain(|h| h.id() != plugin_id);
     let report = publisher.publish(target).await.map_err(|e| {
@@ -318,9 +320,7 @@ pub async fn uninstall_plugin(
     })
     .await
     .map_err(|e| CommandError::new("internal", format!("卸载任务失败: {e}"), true))?
-    .map_err(|e| {
-        CommandError::new("uninstall_failed", format!("插件卸载失败: {e}"), false)
-    })?;
+    .map_err(|e| CommandError::new("uninstall_failed", format!("插件卸载失败: {e}"), false))?;
     let pending_files = match &outcome {
         crate::domain::plugin::UninstallOutcome::Removed => 0,
         crate::domain::plugin::UninstallOutcome::RemovedPendingFiles { pending_paths } => {
@@ -450,9 +450,117 @@ pub async fn list_plugin_installations(
         .state::<std::sync::Arc<crate::domain::plugin::PluginInstaller>>()
         .inner()
         .clone();
-    installer.list_installed().map_err(|e| {
-        CommandError::new("io", format!("读取安装记录失败: {e}"), true)
+    installer
+        .list_installed()
+        .map_err(|e| CommandError::new("io", format!("读取安装记录失败: {e}"), true))
+}
+
+/// 对某插件的全部声明数据集触发自举（0.28.13 auto-init）：
+/// 安装成功且已启用、或由禁用切启用时调用。逐数据集 begin——
+/// 兼容跳过、在途合并、失败分类记日志（不阻塞安装命令的返回）。
+pub(crate) async fn trigger_plugin_bootstrap(
+    app: &tauri::AppHandle,
+    plugin_id: &str,
+    trigger: &str,
+) {
+    let Some(manager) = app.try_state::<std::sync::Arc<crate::domain::plugin::BootstrapManager>>()
+    else {
+        return;
+    };
+    let manager = manager.inner().clone();
+    let engine = app
+        .state::<std::sync::Arc<crate::domain::plugin::PluginEngine>>()
+        .inner()
+        .clone();
+    let Some(handle) = engine
+        .all_plugins()
+        .into_iter()
+        .find(|h| h.id() == plugin_id)
+    else {
+        return;
+    };
+    manager.resume_plugin(&handle).await;
+    for def in &handle.manifest().datasets {
+        match manager.begin(plugin_id, &def.id, trigger).await {
+            Ok(crate::domain::plugin::BeginOutcome::Started { .. }) => {
+                tracing::info!(plugin = plugin_id, dataset = %def.id, "自举操作已启动");
+            }
+            Ok(crate::domain::plugin::BeginOutcome::AlreadyRunning { .. }) => {}
+            Ok(crate::domain::plugin::BeginOutcome::AlreadyReady) => {}
+            Err(e) => {
+                // 分类失败不静默（用户在设置页/词典页可见状态与重试入口）。
+                tracing::warn!(plugin = plugin_id, dataset = %def.id, error = %e, "自举启动失败");
+            }
+        }
+    }
+}
+
+/// 撤销某插件全部在途自举操作（0.28.13：禁用/更新/卸载先阻止新操作并
+/// 取消下载/构建，旧代次不得挂载）。句柄从当前引擎集合取（可能已是旧代次
+/// 句柄——revoke 以 plugin_id 匹配操作并以 reset 杀进程）。
+pub(crate) async fn revoke_plugin_bootstrap(app: &tauri::AppHandle, plugin_id: &str, reason: &str) {
+    let Some(manager) = app.try_state::<std::sync::Arc<crate::domain::plugin::BootstrapManager>>()
+    else {
+        return;
+    };
+    let engine = app
+        .state::<std::sync::Arc<crate::domain::plugin::PluginEngine>>()
+        .inner()
+        .clone();
+    if let Some(handle) = engine
+        .all_plugins()
+        .into_iter()
+        .find(|h| h.id() == plugin_id)
+    {
+        manager.revoke_plugin(&handle, reason).await;
+    }
+}
+
+/// 准备数据集（0.28.13 设置页入口）：启动/合并自举操作（拉源→构建→挂载）。
+/// 触发合并——重复点击/多窗口/自动触发同一数据集只有一个在途操作。
+#[tauri::command]
+pub async fn prepare_plugin_dataset(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    plugin_id: String,
+    dataset_id: String,
+) -> Result<serde_json::Value, CommandError> {
+    reject_plugin_window(&window)?;
+    let manager = app
+        .state::<std::sync::Arc<crate::domain::plugin::BootstrapManager>>()
+        .inner()
+        .clone();
+    let outcome = manager
+        .begin(&plugin_id, &dataset_id, "manual")
+        .await
+        .map_err(|e| CommandError::new("bootstrap_failed", e.to_string(), false))?;
+    Ok(match outcome {
+        crate::domain::plugin::BeginOutcome::Started(s) => serde_json::json!({
+            "started": true, "op_id": s.op_id,
+        }),
+        crate::domain::plugin::BeginOutcome::AlreadyRunning(s) => serde_json::json!({
+            "started": false, "merged": true, "op_id": s.op_id,
+        }),
+        crate::domain::plugin::BeginOutcome::AlreadyReady => serde_json::json!({
+            "started": false, "already_ready": true,
+        }),
     })
+}
+
+/// 取消在途自举操作（设置页）：杀插件进程终止构建，清理本次下载/构建目录。
+#[tauri::command]
+pub async fn cancel_plugin_dataset_prepare(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    plugin_id: String,
+    dataset_id: String,
+) -> Result<bool, CommandError> {
+    reject_plugin_window(&window)?;
+    let manager = app
+        .state::<std::sync::Arc<crate::domain::plugin::BootstrapManager>>()
+        .inner()
+        .clone();
+    Ok(manager.cancel(&plugin_id, &dataset_id).await)
 }
 
 /// 安装本地数据包（0.28.4 词库通道：zip 归档或解包目录，dev 本地包；
@@ -491,9 +599,7 @@ pub async fn install_plugin_dataset(
     })
     .await
     .map_err(|e| CommandError::new("internal", format!("数据包安装任务失败: {e}"), true))?
-    .map_err(|e| {
-        CommandError::new("install_failed", format!("数据包安装失败: {e}"), false)
-    })?;
+    .map_err(|e| CommandError::new("install_failed", format!("数据包安装失败: {e}"), false))?;
     tracing::info!(
         plugin = %record.plugin_id,
         dataset = %record.dataset_id,
@@ -503,8 +609,7 @@ pub async fn install_plugin_dataset(
     Ok(record)
 }
 
-/// 卸载数据包（0.28.4）。插件进程可能仍持有 DB 句柄——文件删不净时如实
-/// 返回待清理数（下次启动 recover 重试），不假报已删除。
+/// 卸载数据包：先撤销自举并停进程释放句柄，再清文件；清理期间禁止迟到挂载。
 #[tauri::command]
 pub async fn uninstall_plugin_dataset(
     app: tauri::AppHandle,
@@ -513,6 +618,21 @@ pub async fn uninstall_plugin_dataset(
     dataset_id: String,
 ) -> Result<serde_json::Value, CommandError> {
     reject_plugin_window(&window)?;
+    let handle = app
+        .state::<std::sync::Arc<crate::domain::plugin::PluginEngine>>()
+        .all_plugins()
+        .into_iter()
+        .find(|h| h.id() == plugin_id);
+    if let Some(handle) = &handle {
+        if let Some(manager) =
+            app.try_state::<std::sync::Arc<crate::domain::plugin::BootstrapManager>>()
+        {
+            // 各数据集共用进程；终止同进程构建，避免卸载后又挂回数据。
+            manager.revoke_plugin(handle, "卸载数据包").await;
+        } else {
+            handle.reset_process().await;
+        }
+    }
     let installer = app
         .state::<std::sync::Arc<crate::domain::plugin::DatasetInstaller>>()
         .inner()
@@ -522,21 +642,31 @@ pub async fn uninstall_plugin_dataset(
         installer_io.uninstall(&plugin_id, &dataset_id)
     })
     .await
-    .map_err(|e| CommandError::new("internal", format!("数据包卸载任务失败: {e}"), true))?
-    .map_err(|e| {
-        CommandError::new("uninstall_failed", format!("数据包卸载失败: {e}"), false)
-    })?;
+    .map_err(|e| CommandError::new("internal", format!("数据包卸载任务失败: {e}"), true))
+    .and_then(|result| {
+        result.map_err(|e| {
+            CommandError::new("uninstall_failed", format!("数据包卸载失败: {e}"), false)
+        })
+    });
+    if let Some(handle) = &handle
+        && let Some(manager) =
+            app.try_state::<std::sync::Arc<crate::domain::plugin::BootstrapManager>>()
+    {
+        // 不跨 installer 的 op_lock 持生命周期锁（挂载的锁序为 op_lock → fence）。
+        manager.resume_plugin(handle).await;
+    }
+    let outcome = outcome?;
     Ok(match outcome {
         crate::domain::plugin::UninstallDatasetOutcome::Removed => {
             serde_json::json!({"removed": true, "pending_files": 0})
         }
-        crate::domain::plugin::UninstallDatasetOutcome::RemovedPendingFiles {
-            pending_paths,
-        } => serde_json::json!({
-            "removed": true,
-            "pending_files": pending_paths.len(),
-            "note": "部分文件被占用，将在下次启动时清理",
-        }),
+        crate::domain::plugin::UninstallDatasetOutcome::RemovedPendingFiles { pending_paths } => {
+            serde_json::json!({
+                "removed": true,
+                "pending_files": pending_paths.len(),
+                "note": "部分文件被占用，将在下次启动时清理",
+            })
+        }
     })
 }
 

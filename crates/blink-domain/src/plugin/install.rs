@@ -324,6 +324,15 @@ impl PluginInstaller {
         let manifest = PluginManifest::from_path(&manifest_path)
             .map_err(InstallError::Manifest)?;
 
+        // 1.5 源锁定声明（0.28.13）：声明 dataset_init 能力的插件必须携带合法
+        //     bootstrap.json——运行期 fetch_resource 的期望 URL/hash/bytes 全部
+        //     来自该文件（运行时消息不可改写），安装期校验失败即拒装。
+        if manifest.supports_dataset_init() {
+            super::bootstrap::load_source_lock(package_root).map_err(|e| {
+                InstallError::InvalidPackage(format!("源锁定声明校验失败: {e}"))
+            })?;
+        }
+
         // 2. 宿主兼容范围
         if let Some(host) = &manifest.host
             && let Some(min) = &host.min_version

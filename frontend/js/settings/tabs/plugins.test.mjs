@@ -244,7 +244,7 @@ test("renderDatasetsSection renders install states and actions", () => {
     assert.match(html, /未安装（可选）/);                            // 可选包
     assert.match(html, /plugin-dataset-optional/);
     assert.doesNotMatch(html, /plugin-dataset-install/);
-    assert.match(html, /暂无安装源/);
+    assert.match(html, /在线安装暂不可用/);
     assert.doesNotMatch(html, /plugin-dataset-uninstall/); // 未装无卸载按钮
 
     // 已安装：版本徽标 + 更新/卸载按钮
@@ -254,7 +254,7 @@ test("renderDatasetsSection renders install states and actions", () => {
             {...base.datasets[1], installed: null},
         ]});
     assert.match(html, /plugin-dataset-ready">v1\.2\.0</);
-    assert.match(html, /暂无安装源/);
+    assert.match(html, /在线安装暂不可用/);
     assert.match(html, /plugin-dataset-uninstall/);
 
     // 损坏/过低：readiness blocker 命中该数据包 → 修复徽标
@@ -343,7 +343,7 @@ test("renderDatasetsSection prefers catalog source and gates local install by de
     // 无目录 + 生产：无安装按钮，提示无安装源
     html = renderDatasetsSection(plugin, surface, null, false);
     assert.doesNotMatch(html, /plugin-dataset-install/);
-    assert.match(html, /暂无安装源/);
+    assert.match(html, /在线安装暂不可用/);
 
     // 未知模式/无目录不展示开发入口；开发模式仅显示明确的“本地包”。
     html = renderDatasetsSection(plugin, surface);
@@ -352,4 +352,15 @@ test("renderDatasetsSection prefers catalog source and gates local install by de
     assert.match(html, /plugin-dataset-install-local/);
     assert.doesNotMatch(html, /class="btn-small plugin-dataset-install"/);
     assert.doesNotMatch(html, /data-catalog/);
+});
+
+
+test("bootstrap download status shows real received and total bytes", () => {
+    const html = renderDatasetsSection({id: "builtin.dictionary"}, {
+        datasets: [{id: "dictionary-basic"}],
+        bootstrap: {supported: true, ops: [{dataset_id: "dictionary-basic", phase: {
+            kind: "fetching_resource", received: 31 * 1024 * 1024, total: 63 * 1024 * 1024,
+        }}]},
+    });
+    assert.match(html, /31\.0\/63\.0 MB/);
 });

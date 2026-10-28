@@ -40,7 +40,7 @@ static REGISTRY_WRITE_LOCK: Mutex<()> = Mutex::new(());
 /// 安装记录文件名（root 下）。
 const REGISTRY_FILE: &str = "registry.json";
 
-/// 安装来源（0.28.1 本地开发包；0.28.5 增官方目录）。
+/// 安装来源（0.28.1 本地开发包；0.28.5 增官方目录；0.28.13 增客户端自举）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "source", rename_all = "snake_case")]
 pub enum InstallSource {
@@ -54,6 +54,16 @@ pub enum InstallSource {
     Official {
         /// 下载该包的目录端点（溯源：目录漂移时可定位来源版本）。
         catalog_url: String,
+    },
+    /// 客户端自举派生（0.28.13）：插件在本机按源锁定声明构建的产物。
+    /// 不是 LocalDev（无本地安装入口参与），也不冒充官方预构建数据包。
+    Managed {
+        /// 构建该数据集的插件版本。
+        plugin_version: String,
+        /// 源锁定声明记录的上游修订（如 ECDICT commit SHA）。
+        source_revision: String,
+        /// 宿主自举操作 id（溯源）。
+        operation: String,
     },
 }
 

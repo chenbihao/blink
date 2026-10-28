@@ -3,6 +3,7 @@
 //! 本切片:builtin 插件加载(扫描 manifest)+ 进程拉起(JSONL stdio)+ PluginEngine
 //! 接 async lane。第三方插件目录(%APPDATA%\blink\plugins)、permissions、热重载等后续。
 
+mod bootstrap;
 mod capability;
 mod catalog;
 mod contract;
@@ -20,6 +21,12 @@ mod weather_config;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+pub use bootstrap::{
+    AuxInbound, BeginOutcome, BootstrapError, BootstrapManager, BOOTSTRAP_FILE, FetchFailure,
+    HttpResourceTransport, LockedResource, MAX_RESOURCE_BYTES, MAX_TOTAL_RESOURCE_BYTES,
+    OP_TOTAL_BUDGET, OpPhase, OpSnapshot, ResourceTransport, SourceLock, SourceLockError,
+    SUPPORTED_BOOTSTRAP_FORMAT_VERSION, load_source_lock, parse_source_lock,
+};
 pub use capability::{PluginCapabilityAdapter, plugin_tool_id};
 pub use catalog::{
     CatalogAsset, CatalogCompat, CatalogDatasetEntry, CatalogError, CatalogPluginEntry,
@@ -121,6 +128,21 @@ pub fn examples_plugins_dir() -> PathBuf {
         .join("examples")
 }
 
+/// 插件源码根目录（仓库内 `plugins/`，供开发工具与测试读取）。
+///
+/// 0.28.13：词典移出随包后成为自包含插件目录（manifest+web+bin+源码同处
+/// `plugins/dictionary/`），dev/release 均经插件中心安装到用户目录。
+/// 扫描 `<dir>/*/manifest.json` 只会命中直接子目录，
+/// builtin/ 与 examples/ 自身无 manifest 不会误入。
+#[cfg(debug_assertions)]
+pub fn plugins_root_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("blink-domain 应位于 workspace 的 crates/ 下")
+        .join("plugins")
+}
+
 /// 加载一个目录下的全部插件:扫描 `<dir>/*/manifest.json` → 解析 → 冻结契约
 /// → 集合校验。失败的单个插件跳过(降级,不影响其余),记日志；**契约集合校验
 /// 失败的插件剔除后重试**（碰撞双方取加载序在先者），不会整目录报废。
@@ -216,13 +238,12 @@ mod tests {
     fn dev_discovers_builtin_plugins_and_translation_tools() {
         // 实际扫描仓库 manifest，防止拆 crate 后路径漂移但存量解析单测仍通过。
         // PluginHandle 懒启动，此处不会拉起插件进程或读取用户配置。
+        // 0.28.13：词典移出随包（plugins/builtin 只剩 ip/translate/weather），
+        // 自包含线上插件目录 plugins/dictionary 单独加载。
         let plugins = load_builtin_plugins(&builtin_plugins_dir(), None);
         let mut ids: Vec<_> = plugins.iter().map(|plugin| plugin.id()).collect();
         ids.sort_unstable();
-        assert_eq!(
-            ids,
-            ["builtin.dictionary", "builtin.ip", "builtin.translate", "builtin.weather"]
-        );
+        assert_eq!(ids, ["builtin.ip", "builtin.translate", "builtin.weather"]);
 
         let translate = plugins
             .iter()
@@ -239,14 +260,16 @@ mod tests {
             );
         }
 
-        // 0.28.4：词典插件声明数据集依赖（必备 basic + 可选词源），纯加载不
-        // 触发就绪判定——数据集挂载状态由运行期 readiness 消费。
-        let dictionary = plugins
-            .iter()
+        // 词典自包含目录（0.28.13 线上化）：manifest 从随包身份切到可选安装，
+        // 声明 dataset_init 能力 + 数据集依赖（必备 basic + 可选词源）。
+        let dictionary = load_builtin_plugins(&plugins_root_dir(), None)
+            .into_iter()
             .find(|plugin| plugin.id() == "builtin.dictionary")
-            .expect("应发现词典插件");
-        let ds: Vec<(String, bool)> = dictionary
-            .manifest()
+            .expect("应从 plugins/ 根发现词典自包含插件");
+        let manifest = dictionary.manifest();
+        assert!(!manifest.builtin, "词典不再随包（线上插件）");
+        assert!(manifest.supports_dataset_init(), "词典声明 dataset_init 能力");
+        let ds: Vec<(String, bool)> = manifest
             .datasets
             .iter()
             .map(|d| (d.id.clone(), d.optional))
