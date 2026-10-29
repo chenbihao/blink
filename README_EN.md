@@ -44,10 +44,11 @@ Blink's built-in AI can use these capabilities. With your permission, Blink can 
 </p>
 
 - **App Search** — Fuzzy matching + Pinyin initials + full Pinyin (`wx` → WeChat, `dksz` → Settings)
-- **File Search** — Integrates local app scan and Everything extension
+- **File Search** — Search all drives with Everything; install the managed engine from Settings
+- **Websites & Bookmarks** — Open or search websites by keyword; use `bm` to search browser bookmarks
 - **Live Calculator** — Calculation formulas, press Enter to copy
 - **Clipboard History** — Background recording, supports fuzzy search
-- **Tab Quick Accept** — Type `fy`, press Tab to auto-complete to `fanyi `, then start typing what you want to translate
+- **Smart Tab** — `Tab` / `Shift+Tab` accept primary and secondary suggestions, from keyword completion to contextual actions
 - **Lightning Fast** — Summon < 50ms, first result < 20ms
 
 ---
@@ -75,11 +76,12 @@ Blink silently senses your context in the background, but never intrudes — use
 
 Plugins run in isolated processes — crashes don't affect Blink's core. Supports Python, Node.js, Rust, or any executable.
 
-- **Translation** — Multi-engine built-in
+- **Plugin Center** — Browse, install, and update official plugins in Settings
+- **Translation** — Multiple engines, quick results, and a dedicated window with automatic Chinese–English translation
+- **Offline Dictionary** — English–Chinese lookup, Chinese reverse lookup, word forms, and phrases; double-click English words for a quick lookup card
 - **Weather** — Clean weather card
 - **IP Lookup** — Quick network info check
 - **More Possibilities** — Write plugins in your favorite language, JSONL protocol communication, just a few lines of code to integrate
-- **Coming Soon** — One-click discovery of CLI tools on your system, auto-configure them as Blink plugins/skills
 
 ---
 
@@ -121,6 +123,13 @@ While the main window is open, hold Alt and letter keys become quick action shor
 
 Screenshots support annotation (rectangle, arrow, text, brush, blur, mosaic, etc.), OCR text recognition, on-image translation, and pin-to-top. OCR uses Windows' built-in engine by default with no additional installation; you can also download PP-OCRv6 on demand for higher-quality local text recognition. Hold `Alt + Space` for voice input — supports cloud (OpenAI / Groq) and local (FunASR) dual engines, words appear as you speak with VAD auto-sentence-splitting.
 
+### Scrolling Screenshots & GIF Recording
+
+Select a screenshot region, then choose from the toolbar:
+
+- **Scrolling capture** — Scroll the page to stitch a long screenshot, or enable automatic scrolling. Annotate, copy, or save when done.
+- **Record GIF** — Choose the frame rate and cursor option, then start, pause, or resume. After stopping, trim the ends, delete frames, adjust speed and frame duration, and export your walkthrough.
+
 ---
 
 ## AI, Skills, and MCP Ready
@@ -149,24 +158,24 @@ Blink's reusable capabilities can be called by AI and connected to external tool
 - **MCP Server** — Blink can also make user-selected local capabilities available to other agents
 - **Independent Permissions** — Manage AI and MCP capability access separately in the feature catalog, without conflating local feature settings with external access
 - **Multi-provider Support** — Includes presets for OpenAI, DeepSeek, and more, with support for compatible providers and local models such as Ollama and LM Studio
-- **Chat Window** — A standalone agent window where natural language can be used to combine and invoke capabilities
+- **Chat & Attachments** — A standalone agent window with image, text-file, and audio attachments; `/` opens commands and `@` opens the attachment picker
+- **Prompts & Editor** — Save reusable prompts, dictate continuously, then polish, shorten, or translate with AI and review before applying
 
 ---
 
-## Roadmap
+## Configuration Sync
 
-**Completed:** Core search → Plugin ecosystem → Context awareness → Chord interactions → Voice input → Screenshot annotation → AI Agent → Skills and bidirectional MCP integration → Sticky note, image, and clipboard capability loops
+Connect WebDAV under **Settings → Storage → Configuration Sync** to manually sync everyday settings, shortcuts, and your prompt library across computers. Credentials and personal content stay on the local computer.
 
-**Continuing Evolution:**
+---
+
+## Ongoing Improvements
 
 - **Core-path Reliability** — Continue protecting summon, focus, input, and first-result performance
 - **Capability Foundation** — Let more existing capabilities share implementations and form more natural workflows
 - **Capability Discoverability** — Make existing capabilities easier for both users and AI to find, understand, and invoke
 
-**Near-term Plans:**
-
-- **Continuous Editor Dictation** — Support long-form dictation with continuous recording, pause and resume, reliable segmented insertion, and selection-based AI rewriting with diff confirmation
-- **Smart Tab** — Unify keyword completion, contextual actions, and AI suggestions, with `Tab` / `Shift+Tab` to accept primary and secondary suggestions
+See the [Roadmap](docs/roadmap.md) for future directions.
 
 ---
 
@@ -192,6 +201,7 @@ Download the latest installer from [Releases](../../releases).
 | `Alt + Space` | Summon / hide |
 | `↑` `↓` | Navigate results |
 | `Tab` | Accept completion suggestion (e.g. `fy` → `fanyi `) or context recommendation |
+| `Shift + Tab` | Accept the secondary suggestion |
 | `Enter` | Launch / copy result |
 | `Alt + Q` | AI chat window |
 | `Alt + A` | Region screenshot |
@@ -202,13 +212,15 @@ Download the latest installer from [Releases](../../releases).
 | `Alt + Space` (hold) | Voice input |
 | `Esc` | Hide |
 
+For everyday operations and hidden shortcuts, see [Tips & Tricks](docs/guide.en.md), also available under **Settings → Perception & Interaction → Tips & Tricks**.
+
 ---
 
 ## Development
 
 ### Prerequisites
 
-- [Rust](https://www.rust-lang.org/tools/install) 1.75+
+- [Rust](https://www.rust-lang.org/tools/install) (version pinned in [rust-toolchain.toml](rust-toolchain.toml))
 - [tauri-cli](https://v2.tauri.app/start/prerequisites/) (the `cargo tauri` subcommand behind `cargo tauri dev` / `cargo tauri build`: `cargo install tauri-cli --locked`)
 - [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) (MSVC C++ workload; also tick the **C++ CMake tools for Windows** individual component, needed to build the GGUF STT worker)
 - [WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/) (pre-installed on Windows 10/11)
@@ -229,7 +241,7 @@ cargo tauri dev
 cargo xtask release
 
 # Run tests
-cargo test --bin blink
+cargo xtask test
 ```
 
 ### Architecture Overview

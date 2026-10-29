@@ -44,10 +44,11 @@ Blink 内置 AI 可以调用这些能力；经用户授权后，也可以通过 
 </p>
 
 - **应用搜索** — 模糊匹配 + 拼音首字母 + 全拼（`wx` → 微信、`dksz` → 打开设置）
-- **文件搜索** — 集成本地应用扫描、Everything 扩展
+- **文件搜索** — 通过 Everything 搜索全盘文件，可一键安装托管引擎
+- **网页与书签** — 关键词直达网站或搜索网页，`bm` 搜索浏览器书签
 - **实时计算** — 计算公式回车即复制
 - **剪贴板历史** — 后台记录，支持模糊搜索
-- **Tab 快速采纳** — 输入 `fy` 按 Tab 自动补全为 `fanyi `，直接开始翻译
+- **Smart Tab** — `Tab` / `Shift+Tab` 采纳主次建议，补全关键词或调用上下文动作
 - **极速响应** — 唤起 < 50ms，首个结果 < 20ms
 
 ---
@@ -75,11 +76,12 @@ Blink 会在后台静默感知你的上下文，但不会打扰你——看到�
 
 插件运行在独立进程，崩溃不影响 Blink 核心。支持 Python、Node.js、Rust 或任何可执行文件。
 
-- **翻译** — 多引擎内置
+- **插件中心** — 在设置中浏览、安装和更新官方插件
+- **翻译** — 多引擎快译与独立翻译窗口，中英自动互换
+- **离线词典** — 英汉查词、中文反查、词形与短语；双击英文单词弹出速查卡
 - **天气查询** — 简洁的天气卡片
 - **IP 查询** — 快速查看当前网络信息
 - **更多可能** — 用你熟悉的语言写插件，JSONL 协议通信，几行代码就能接入
-- **未来** — 一键探索系统中的 CLI 工具，自动配置为 Blink 插件/skill
 
 ---
 
@@ -122,6 +124,13 @@ AI 功能：
 
 按住 `Alt + Space` 可以语音输入，支持云端（OpenAI / Groq）和本地（FunASR）双引擎，边说边出字，VAD 自动切句。
 
+### 长截图与 GIF 录制
+
+截图框选区域后，可在工具栏继续：
+
+- **长截图** — 滚动页面连续拼接，也可开启自动滚动；完成后继续标注、复制或保存。
+- **录制 GIF** — 调整帧率与光标选项后开始，支持暂停、继续；停止后修剪首尾、删帧、调速度和帧停留时间，再导出操作演示。
+
 ---
 
 ## AI、Skill 与 MCP 就绪
@@ -151,24 +160,24 @@ Blink 中可复用的业务能力可以被 AI 调用，也可以通过开放协�
 - **MCP Server** — Blink 也可以把用户选择的本地能力提供给其他 Agent
 - **独立授权** — 在功能目录中分别管理 AI 与 MCP 可以调用的能力，本地功能开关与外部授权互不混淆
 - **供应商支持** — 内置 OpenAI、DeepSeek 等预设，可配置任何兼容协议的供应商或本地大模型（Ollama / LM Studio）
-- **对话窗口** — 独立 Agent 窗口，可以用自然语言组合并调用能力
+- **对话与附件** — 独立 Agent 窗口，支持图片、文本文件和音频附件；`/` 打开命令面板，`@` 选择附件
+- **提示词与编辑器** — 保存常用提示词，连续听写后用 AI 整理、精简或互译，确认后应用
 
 ---
 
-## 路线图
+## 配置同步
 
-**已完成：** 基础搜索 → 插件生态 → 上下文感知 → Chord 交互 → 语音输入 → 截图标注 → AI Agent → Skill 与 MCP 双向接入 → 便签、图片、剪贴板能力闭环
+在「设置 → 存储 → 配置同步」连接 WebDAV，在多台电脑间手动同步常用设置、快捷键与提示词库。密钥和个人内容保留在本机。
 
-**持续演进：**
+---
+
+## 持续改进
 
 - **主链路可靠性** — 持续保护唤起、焦点、输入和首个结果速度
 - **能力底座收敛** — 以 Capability 统一原子执行，持续交互留在 Interaction，并让本地、AI 与 MCP 在授权边界内复用同一实现
 - **能力可发现性** — 让用户和 AI 更容易看到、理解并调用已有能力
 
-**近期规划：**
-
-- **编辑器连续听写** — 面向长篇口述，支持持续录音、暂停与继续、分段可靠落文，并衔接选区 AI 改写与 Diff 确认
-- **Smart Tab** — 统一关键词补全、上下文动作与 AI 建议，通过 `Tab` / `Shift+Tab` 快速采纳主次建议
+后续方向见 [Roadmap](docs/roadmap.md)。
 
 ---
 
@@ -194,6 +203,7 @@ Blink 中可复用的业务能力可以被 AI 调用，也可以通过开放协�
 | `Alt + Space` | 唤起 / 隐藏 |
 | `↑` `↓` | 上下选择 |
 | `Tab` | 采纳补全建议（如 `fy` → `fanyi `）或上下文推荐 |
+| `Shift + Tab` | 采纳次建议 |
 | `Enter` | 启动 / 复制结果 |
 | `Alt + Q` | AI 对话窗口 |
 | `Alt + A` | 区域截图 |
@@ -214,7 +224,7 @@ English edition: [Tips & Tricks](docs/guide.en.md)（英文版可能滞后于中
 
 ### 环境要求
 
-- [Rust](https://www.rust-lang.org/tools/install) 1.75+
+- [Rust](https://www.rust-lang.org/tools/install)（版本以 [rust-toolchain.toml](rust-toolchain.toml) 为准）
 - [tauri-cli](https://v2.tauri.app/start/prerequisites/)（`cargo tauri dev` / `cargo tauri build` 的 cargo 子命令：`cargo install tauri-cli --locked`）
 - [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)（MSVC C++ 工作负载；另需在「单个组件」中勾选**适用于 Windows 的 C++ CMake 工具**，用于构建 GGUF STT worker）
 - [WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/)（Windows 10/11 通常已预装）
@@ -235,7 +245,7 @@ cargo tauri dev
 cargo xtask release
 
 # 运行测试
-cargo test --bin blink
+cargo xtask test
 ```
 
 ### 架构概览

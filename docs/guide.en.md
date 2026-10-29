@@ -1,10 +1,10 @@
 # Blink Tips & Tricks
 
-> This is the Blink user guide: organized by scenario, covering the everyday operations of each feature along with the silky-smooth tricks you would almost never discover on your own.
+> Find everyday operations, entry points, shortcuts, and hidden tricks by scenario.
 >
-> In-app entry: Settings → Perception & Interaction → Tips & Tricks (the content is embedded in the installed package and always matches your installed version's behavior). The online edition follows the repository and may describe features you have not installed yet.
+> In-app entry: Settings → Perception & Interaction → Tips & Tricks.
 >
-> 中文版：[guide.md](guide.md)（中文版为真源，本文更新可能滞后）。
+> 中文版：[guide.md](guide.md)
 
 ---
 
@@ -13,12 +13,12 @@
 1. [Quick start](#1-quick-start)
 2. [Main window and search](#2-main-window-and-search)
 3. [Clipboard history](#3-clipboard-history)
-4. [Screenshot and annotation](#4-screenshot-and-annotation)
+4. [Screenshots and GIFs](#4-screenshots-and-gifs)
 5. [Pin to desktop](#5-pin-to-desktop)
 6. [Sticky notes and content editor](#6-sticky-notes-and-content-editor)
 7. [AI chat](#7-ai-chat)
 8. [Voice input](#8-voice-input)
-9. [Using plugins](#9-using-plugins)
+9. [Plugin Center and plugins](#9-plugin-center-and-plugins)
 10. [Hidden gems at a glance](#10-hidden-gems-at-a-glance)
 11. [Keyboard shortcuts reference](#11-keyboard-shortcuts-reference)
 
@@ -47,7 +47,7 @@ While the main window is open, **hold `Alt`** — the input box (when empty) or 
 | `Alt+S` | Pin as sticky note (takes the input box text; empty input creates a blank note) |
 | `Alt+Space` (hold) | Voice input; release to transcribe |
 
-Every Chord action can be remapped in Settings and promoted to a **global hotkey** (works even when the main window is hidden). Custom combos support Ctrl/Alt/Win (Shift optional) + letter/number/space/punctuation/arrow/PgUp-PgDn-Home-End/F1–F11, or standalone F1–F11; invalid recordings show the exact reason in the status line.
+Under **Settings → Chord**, remap an action or enable its **global hotkey** to take screenshots, open chat, or create notes while the main window is hidden.
 
 ---
 
@@ -55,97 +55,75 @@ Every Chord action can be remapped in Settings and promoted to a **global hotkey
 
 | Operation | Trigger | Notes |
 |---|---|---|
-| Page | `PgUp` / `PgDn` | Always moves a full screen, preserving the relative highlight position |
-| Wheel navigation | Scroll in the main window | Search and clipboard share the same preference, defaulting to line by line. Choose full-page scrolling in Settings → General → Main window wheel behavior; changes apply immediately and preserve the viewport and selection |
-| Dual-slot suggestions | `Tab` / `Shift+Tab` | Primary and secondary suggestions each own one key; you can also click the suggestion row |
-| Command mode | Start input with `>` | Exclusive mode; `Enter` runs the command in a terminal; `Backspace` past `>` exits |
-| Calculator | Just type an expression | An `= result` item appears; `Enter` copies the result |
-| Clipboard recall | Type `剪贴板` / `clip` / `jtb` | Opens the clipboard history without `Alt+C` |
-| Web links | `bili` + Enter opens Bilibili's homepage; `bili keywords` searches | Keywords support Tab completion. No query opens the homepage; a query replaces `{query}` in the search URL. Set a homepage and optional search URL in Settings → Search Engines → Web Links. An empty homepage automatically uses the search site's home address. The list sorts by name A–Z (Chinese names by pinyin), filters by name, keyword or URL, long lists scroll inside the card with a total count; Click "Import from browser" to import custom search engines from Chrome / Edge / Brave in one step (preview and tick entries first; keywords are editable and conflicts are flagged with reasons). Edit in a separate dialog; conflicts keep your draft for correction. Default GitHub supports `gh` for its homepage and `gh keywords` for search |
-| Browser bookmarks | Type `bm`; `bm keywords` to search | Searches Chrome / Edge / Brave bookmarks (title/URL/folder path, pinyin initials supported); `bm` lists recent bookmarks, and Tab completes the keyword for query input. Results show their source browser's icon, falling back to a bookmark icon if unavailable; Enter still opens in the default browser. Bookmarks are indexed in local memory only; keyword, browser scope and mixing live in Settings → Search Engines → Browser Bookmarks |
-| File search | Type a file-name fragment | Searches your whole disk. Enter a single Everything port (default 80) under Settings → Search Engines → File Search: a service you already run is detected and shared; if none is found, install the built-in engine from the same card (~1.8 MB; it starts automatically after install, with its port auto-assigned). Blink picks whichever source is currently available — no manual switching needed |
-| New version notice | Suggestion bar on an empty window; type `update` (or `更新`) | Blink silently checks for new versions once a day. When one is found, the suggestion bar shows "Blink x.y.z available" — `Tab` opens Settings → About with the changelog and one-click update; click the `×` at the end of the row to dismiss it for this version (it returns when a newer release arrives). The tray menu also has "Check for Updates"; the "Changelog" button on the About page shows the last few releases (including your current one) at any time, no new version required; auto-check can be turned off in Settings → About, manual checking still works |
-| Idle context suggestions | Summon after copying a URL / after selecting text anywhere | The suggestion bar offers "open link / ask AI / translate selection", labeled with where the content came from |
-| Context menu | Right-click anywhere | Cut/copy/paste/select all, Chord shortcuts, create a sticky note from the search text, note manager, settings, exit |
-| Result item menu | Right-click a result entry | Open containing folder, copy path / file name, open shortcut target, reset that entry's launch-frequency stats, and more |
-| Drag the main window | Drag the card's blank area | Moves the main window (no visual hint, but the blank area really is draggable) |
+| Page / scroll | `PgUp` / `PgDn`; wheel | Wheel scrolling moves one item by default; choose full-page scrolling in General settings |
+| Primary / secondary suggestion | `Tab` / `Shift+Tab` | Complete a keyword or use a contextual action in the suggestion bar |
+| Run a command | Type `>` followed by a command | Press `Enter` to run it in a terminal |
+| Calculator | Type an expression | `Enter` copies the result |
+| Website shortcuts | `bili` / `bili query`; `gh` / `gh query` | Open a homepage or search; add shortcuts or import them from a browser under Settings → Search Engines → Web Links |
+| Browser bookmarks | `bm` / `bm query` | Browse recent bookmarks or search Chrome / Edge / Brave by title, URL, or folder |
+| File search | Type part of a filename | Install the built-in file search engine under Settings → Managed Engines, or use an existing Everything service |
+| Check for updates | Type `更新` / `update`, or use the tray menu | View and install updates on the About page |
+| Contextual suggestions | Copy a link or select text, then summon Blink | Open links, ask AI, or translate |
+| Context menu | Right-click the main window or a result | Reveal files, copy paths, create notes, open Settings, and more |
+| Move the window | Drag the card's blank area | Reposition the main window |
 
 ### Silky tricks
 
-| Trick | Trigger | Notes |
-|---|---|---|
-| Color detection | Type `#fff`, `rgb(...)`, `hsl(...)` | A color swatch item appears; `Enter` copies HEX; right-click for HEX/RGB/HSL or pin it as a sticky note |
-| Custom search shortcuts | `bil` → Tab → `bili ` | Shares Smart Tab with plugins: Tab accepts the primary suggestion, Shift+Tab the secondary. Pinyin is only a matching alias: `jt` suggests 剪贴板, and Tab inserts the real Chinese keyword. Full keywords retain a quiet Tab hint; accept and continue typing a query. Repeated refreshes do not hide completion. Use `{query}` in the search URL; text and symbols are encoded automatically. `bili` + Enter opens the homepage. Set a homepage manually when search uses another origin (default Bilibili already does) |
-| Bookmark hover preview | Hover the left third of a bookmark row | Full title, URL and folder path shown in one panel — long titles are no longer clipped by the list |
-| Refresh bookmarks now | Settings → Search Engines → Browser Bookmarks → Refresh now | Loads automatically after startup, then follows bookmark changes in your browser with periodic checks; changing browser scope, enabled state or the entry cap triggers an immediate re-scan. Use "Refresh now" after adding bookmarks to re-read right away; the status shows progress and the final count |
-| Real-time whole-disk indexing | Settings → Managed Engines → File Search Engine | One card manages the built-in engine’s install, start, stop and uninstall. For true real-time whole-disk indexing, click "Install service" and authorize once. Searching works without the service too — only the initial index build takes a little longer |
-| Promote AI thread | Press `Alt+Q` again inside AI mode | Exports the temporary conversation from the main window into a persistent one and opens the chat window |
-| AI dictation guard | Hold `Alt+Space` and speak in AI mode | The transcript only fills the input box, **never auto-sends**; confirm, then `Enter` |
-| Modifier protection | Press `Alt` / `F1`-`F12` in the main window | Won't trigger the system menu bar or freeze the window — safe to hold `Alt` while reading keycap hints |
+- Type `#fff`, `rgb(...)`, or `hsl(...)` to inspect a color. `Enter` copies HEX; right-click for other formats or a sticky note.
+- Type `bil`, press `Tab` to complete `bili `, then enter your query. Custom search URLs use `{query}` as the placeholder.
+- Hover over the left third of a bookmark result for its full title, URL, and folder. Use **Refresh now** in bookmark settings after adding bookmarks.
+- Under **Settings → Managed Engines → File Search Engine**, choose **Install service** for a live index across drives.
+- Press `Alt+Q` again in the main window's AI mode to move the temporary conversation into a persistent chat window.
+
+### Sync settings across computers
+
+Under **Settings → Storage → Configuration Sync**, enter your WebDAV connection, click **Save & test connection**, then **Sync now**. On the first sync, choose to upload this computer's configuration or use the remote one; resolve conflicts by choosing a side for each item. Everyday settings, shortcuts, and prompts sync; credentials and personal content stay local.
 
 ---
 
 ## 3. Clipboard history
 
-Hover over the **left third** of an entry to preview it: text shows its full content (scrollable; drag-select and press `Ctrl+C` to copy), and images show the original (**scroll to zoom around the pointer, drag after zooming, double-click to reset**). File images support PNG, JPG/JPEG, GIF, and WebP with animations playing; ordinary files show their full path, multi-file entries list their paths, and missing or unsupported items explain why. `Esc` closes the preview.
-
-List previews show line breaks as dimmed `⏎` markers; full-text previews and copying preserve real line breaks.
-
-Right-click inside the preview for that entry's menu: copy, edit, pin as a note, or delete for text; copy, pin, or edit for images; copy path list or delete for files, plus "Save as image entry" with follow-up pin/edit for single image files. Right-clicking a **single text or file entry** also detects open-style actions — a link offers "Open URL", and a local path offers "Open file / Open containing folder".
-
-Open with: `Alt+C` in the main window (or type 剩贴板 / `clip`). Text, images, and copied file paths are recorded in the background (**file content is never stored**; restricted sources such as network paths are saved as paths only).
+Press `Alt+C` in the main window, or type `剪贴板` / `clip` / `jtb`. Find text, images, and files you copied earlier.
 
 | Operation | Trigger | Notes |
 |---|---|---|
-| Filter | Just type | Fuzzy-search your clipboard history |
-| Type filter | Top "All / Text / Images / Files" chips, or cycle with `Tab` / `Shift+Tab` | Switching keeps the query, clears the selection, and returns to the first page; each visit starts on "All" |
-| Copy entry | Select one entry and press `Ctrl+C`; text/images also offer right-click "Copy" | Supports text, images, and files; paste copied files manually at the destination |
-| Paste out | `Enter` / double-click / `Alt+number` | Text is really pasted into the focused-before-summon window's input box (Blink's own windows like chat and sticky notes work too; falls back to copy when the target isn't an input box); images and files go to the clipboard for manual pasting |
-| Edit entry | `Alt+E` or right-click "Edit" | Opens the content editor; saving creates a new history entry. Editing a pinned entry moves the pin to the new content (the old entry drops back to normal ordering) |
-| Pin entry | Right-click any text/image/file entry | The original flat context menu offers pinning for 1, 3, or 7 days. Pinned entries stay at the top (the most recently pinned first) with remaining time shown at the row's end, and are exempt from retention/count cleanup. Pin the same duration again to restart the timer and move the entry back to the top, or unpin; expired entries return to normal ordering. The clipboard list stays open after pinning |
-| Delete entry | `Alt+D`, the context menu's delete options, or bare `Delete` (with empty input) | Shortcuts delete the selection, or the highlighted entry if none; the context menu lets you choose the scope |
-| Image entry menu | Right-click an image item | Pin to desktop, or open the image editor directly (without overwriting the clipboard) |
-| File entry | `Enter` / double-click / `Alt+number` / single-select `Ctrl+C` | Writes the whole path list back to the clipboard as files; press `Ctrl+V` in the target app to paste. Replays use **copy semantics**; expired paths still copy |
-| File entry menu | Right-click a file item | "Copy path list" (original paths, one per line, as text); a single PNG, JPG/JPEG, or static WebP offers "Save as image entry", "Save as image entry and pin", or "Save as image entry and edit". These save PNG history, keep the file entry, and leave the system clipboard unchanged; GIF has no save-as-image option |
-| Frequency weighting | On every paste / copy | The entry rises in the list — the more you use it, the easier to find |
+| Search / filter | Type a query; use the type tabs | `Tab` / `Shift+Tab` cycle through All, Text, Images, and Files |
+| Preview | Hover over the left third of an entry | Scroll and select text; zoom images with the wheel, drag to pan, double-click to reset; animated images play |
+| Copy | `Ctrl+C` or right-click | Copy the entry; files can then be pasted into the destination folder |
+| Paste out | `Enter` / double-click / `Alt+number` | Text is pasted into the previous input; images and files are copied for manual pasting |
+| Edit / create note | `Alt+E` / `Alt+S` | Send text to the editor or a sticky note |
+| Pin an entry | Right-click → pin for 1 / 3 / 7 days | Keep frequently used content at the top, or unpin it |
+| Image actions | Right-click an image | Pin, edit, or ask AI |
+| File actions | Right-click a file | Copy paths, open or reveal files; save static image files into image history and pin or edit them |
+| Delete | `Alt+D` / `Delete` with empty input | Delete the selection or current entry; deleting file history keeps the original files |
 
-### Multi-select and batch operations (build the habit)
+### Multi-select and batch actions
 
 | Operation | Trigger | Notes |
 |---|---|---|
-| Single / multiple selection | Click / `Ctrl+click` | Text and images can be mixed; Ctrl toggles an entry, plain click replaces the selection |
-| Range selection | `Shift+click` | Selects from the anchor through the clicked entry across loaded pages; `Ctrl+Shift+click` adds a range |
-| Select all | `Ctrl+A` (with empty input) | Selects all currently loaded history entries, including images |
-| Batch copy / paste | `Ctrl+C` / `Enter` with text selected | Joins in selection order with newlines; saves the combination as one new history entry |
-| Merge & edit / note | `Alt+E` / `Alt+S` with text selected | Merge editing keeps the originals; note creation produces one note |
-| Actions by type | Right-click a selected entry in a mixed selection | Text copy / paste / edit / note come before "Copy selected file paths", then image pinning; deletion always follows "Text only → Images only → Files only → All selected", regardless of selection order |
-| Batch pin images | Select images, then right-click "Pin" | Opens images sequentially with offset positions, up to 16 per operation; a failed image does not stop the rest |
-| Batch delete | `Alt+D` / `Delete` with empty input | Deletes the selection, or the highlighted history entry if nothing is selected; failed entries stay selected with feedback |
-| Right-click selection | Right-click a selected / unselected entry | Keeps the selected group / selects that entry alone; blank space keeps the selection |
-| Clear selection | `Esc` | Clears selection first, then exits clipboard mode on the next press |
+| Multi-select | `Ctrl+click` | Toggle individual entries, including mixed text, images, and files |
+| Range / select all | `Shift+click` / `Ctrl+A` with empty input | `Ctrl+Shift+click` adds a range; select all covers loaded entries |
+| Batch copy / paste | Text-only selection, then `Ctrl+C` / `Enter` | Join text with newlines in selection order |
+| Merge for editing / note | Text-only selection, then `Alt+E` / `Alt+S` | Continue working with the combined content |
+| Mixed selection | Right-click a selected entry | Act on text, files, and images separately; batch-pin images or delete by type |
+| Clear selection | `Esc` | First clears multi-selection; press again to leave clipboard mode |
 
 ### Silky tricks
 
-- Multi-selection survives paging and list refreshes; it resets automatically when the window hides, so it never lingers by mistake.
-- With mixed selections, `Ctrl+C` / `Enter` / `Alt+E` / `Alt+S` ask you to choose a type from the context menu to avoid silently dropping images; a single image can still be copied.
-- Combination entries created by batch copy / paste **keep only the latest one per combination**, auto-pinned to top; repeated use never piles up.
-- Selecting multiple file entries and pressing `Ctrl+C` merges their paths as text (in selection order, deduplicated); mixed selections containing files offer no cross-type paste — copy by type from the context menu. File entries appear on "All" and "Files", where you can search by filename or path.
-- Filters follow the stored entry type: paths copied as text belong to "Text"; files, folders, and multi-file groups belong to "Files". A PNG recorded as a file entry stays in "Files". "Save as image entry" creates separate history under "Images" and keeps the original file entry.
-- Previews show even very large images at original quality; “Save as image entry” handles one image at a time, and very large tall images may exceed its limit — being previewable does not always mean it can be saved.
-- GIF and animated WebP are preview-only (saving would lose the animation); JPEG imports are rotated to the shooting orientation automatically.
-- Save and pin or edit a file image directly, without switching to "Images" to find it. A failed import stops the following action. If saving succeeds but pinning or editing fails, the saved image entry remains and a notice explains the failure. Error feedback appears at the bottom of the window, above hover previews. If the image editor already has an active session, that editor is brought forward.
-- Clipboard history cleans up automatically: text is kept for 180 days by default with a 10,000-entry cap, images up to 1,000 — all adjustable under "Settings → Chord → Clipboard history" (set the retention to 0 for permanent); pinned entries are exempt from automatic cleanup.
-- File-path capture and its limit are configurable under "Settings → Chord → Clipboard history"; deleting a file entry removes only the history record and **never touches the original files on disk**.
+- Right-click inside a preview to open that entry's menu. Right-clicking a selected entry keeps the whole selection.
+- Selections survive paging. `Ctrl+C` on selected file entries copies their paths as combined text.
+- Batch copying or pasting creates a combined history entry; only the latest copy of the same combination is kept.
+- Adjust retention under **Settings → Chord → Clipboard History**. The `⏎` marker only indicates a line break; copying preserves real newlines.
 
 ---
 
-## 4. Screenshot and annotation
+## 4. Screenshots and GIFs
 
 Summon: `Alt+A` in the main window (empty input; can be promoted to a global hotkey in Settings).
 
 | Operation | Trigger | Notes |
 |---|---|---|
-| Smart pre-selection | Hover a window / control | Blue dashed box + spotlight cutout; click to adopt that region (clicking within 10px of a window's edge always adopts the whole window) |
+| Smart pre-selection | Hover over a window / control, then click | Adopt the highlighted region; click near a window edge to select the whole window |
 | Free-form selection | Left-button drag | Live `(x, y) w × h` size label |
 | Adjust region | Drag the 8 edge handles / drag inside the region | Resize / move (clamped to the monitor) |
 | Toolbar | Appears automatically after selection | Shapes (rectangle/ellipse/spotlight/magnifier), pens (pencil/arrow/highlighter), text (text/numbered badge/watermark), mosaic/Gaussian blur, eraser |
@@ -161,7 +139,7 @@ Summon: `Alt+A` in the main window (empty input; can be promoted to a global hot
 | Shortcut badges | **Hold `Alt` / `Ctrl`** | `Alt` shows tool-switching badges; `Ctrl` shows Z/Y/R badges for undo / redo / reset |
 | Cycle within group | Repeat `Alt+1`~`Alt+5` | Cycles tools within the group and briefly expands the dropdown to show the current item |
 | Wheel tunes everything | Wheel over a tool group button / thickness step / intensity·font-size slider / hue·opacity bar / preset swatches / color format | Switches tools, adjusts thickness, steps sliders, tunes color, switches formats respectively |
-| Brush size on the canvas | With the pencil or a brush-mode tool selected, wheel inside the region | Scroll up to increase size, down to decrease it; the cursor outline updates immediately with a brief size readout. Use presets or the slider for fine adjustment. Size stays fixed during a stroke; adjust after releasing. Existing annotations keep their size. During scrolling capture, the wheel still scrolls the target window |
+| Brush size on the canvas | Select a brush tool, then scroll inside the region | Scroll up for thicker strokes, down for thinner; the cursor shows the brush width |
 | Square constraint | Hold `Shift` while selecting / drawing rectangles or ellipses | Ratio constraint, applied live on press and release |
 | `E` key | Press `E` while annotating | Toggles the OCR panel |
 | Double-click full-screen copy | Double-click the dim overlay without a selection | Copies the whole screen |
@@ -175,6 +153,22 @@ Summon: `Alt+A` in the main window (empty input; can be promoted to a global hot
 | Pan long images | `Space+drag` or middle-button drag on long images / in edit mode | Pans the extra-tall canvas |
 | Click outside the region | Click outside the region while annotating | Exits annotation back to selection — does not cancel the screenshot |
 
+### GIF recording and editing
+
+Select a screenshot region, click **Record GIF**, choose the frame rate and whether to show the cursor, then click **Start recording**.
+
+| Operation | Entry / shortcut | Notes |
+|---|---|---|
+| Move the recording region | Drag the selection before recording, or its handle while recording | Position the region where you need it |
+| Pause / resume | Recording control bar | Paused time is excluded from the result |
+| Stop / cancel | Recording control bar | Stop opens the editor; cancel discards the recording |
+| Preview | `Space` to play / pause; `←` / `→` to step | Find the frames you want to edit |
+| Trim / delete frames | Set start / end; select frames and press `Delete` | `Shift+click` selects a range; `Ctrl+click` toggles individual frames |
+| Adjust pacing | Speed, frame duration, and loop controls | Hold key moments longer; toolbar buttons undo and redo edits |
+| Export | Top-right **Export** button | Choose size, quality, and where to save |
+
+Tip: record a smaller region and choose a smaller export size for a lightweight walkthrough.
+
 ---
 
 ## 5. Pin to desktop
@@ -184,7 +178,7 @@ Create from: the screenshot toolbar "Pin", the OCR panel "Pin", or right-click "
 | Operation | Trigger | Notes |
 |---|---|---|
 | Move | Drag the image | Extra-tall images switch to a dedicated drag (top edge can leave the screen; the bottom of a long image stays reachable) |
-| Zoom | Wheel (`Ctrl+wheel` for big steps) | 0.1~8×, anchored at the top-left corner, briefly shows the percentage |
+| Zoom | Wheel (`Ctrl+wheel` for bigger steps) | Resize the pin; a brief overlay shows the zoom level |
 | Shrink to mini | **Double-click** | Shrinks to a small window with a 160px max side; double-click again to restore (wheel or "reset zoom" also restores) |
 | Context menu | Right-click | Edit image / recognize text / translate image / save to clipboard / save as / reset zoom / close (mini state keeps only the last two) |
 | Recognize text | Right-click "Recognize text" | A selectable text layer appears on the image; double-click selects the whole line |
@@ -221,56 +215,51 @@ Create from: the screenshot toolbar "Pin", the OCR panel "Pin", or right-click "
 | Save | `Ctrl+S` | Writes back to the source (note/file/clipboard); saves without closing |
 | Dual view | Top "Raw / MD" tabs, switch with `←` `→` | The MD view renders live, with a formatting toolbar |
 | Continuous dictation | Microphone button at the bottom | Long-form dictation split into paragraphs; pause / resume |
-| AI polish | "Polish this dictation" chip after dictating, or right-click selected text | Produces a candidate card, applied only after confirmation; **applying is a single-transaction replace — one `Ctrl+Z` undoes it all** |
-| Draft protection | Automatic | Edits land in drafts; after a crash or a forgotten save, reopening prompts recovery, with a four-way dialog on conflict |
+| AI polish | "Polish this dictation," or right-click selected text | Choose polish, shorten, translate, or another preset; review before applying, then undo with one `Ctrl+Z` |
+| Recover drafts | Reopening prompts recovery, or use the top `⋯` menu | Find unsaved content |
 | More output | Top `⋯` menu | Save a copy, copy all, create a note, send to AI chat (prefills only, never sends), recover unsaved drafts |
 | Layered exit | `Esc` | In order: close menu → stop dictation → dismiss candidate card → close window (three-way dialog when there are unsaved changes) |
-
-When a clipboard editing session is cleared or contains only whitespace, `Esc` closes it and clears its draft without a save confirmation. Unsaved nonempty text, sticky notes, and file save targets still require confirmation.
 
 ---
 
 ## 7. AI chat
 
-Summon: `Alt+Q` (text in the main window's input is carried over automatically — prefills, never sends).
+Press `Alt+Q` in the main window to open chat. Existing input is brought along; review it before sending.
 
-| Operation | Trigger | Notes |
+| Operation | Entry / shortcut | Notes |
 |---|---|---|
-| Send / newline | `Enter` / `Shift+Enter` | Streaming output |
-| Stop generating | Stop button or `Esc` while generating | Generated content is kept |
-| Hide when idle | `Esc` | Hides the window (conversation preserved) |
-| Sidebar toggle | Menu button on the left of the header | Open by default; remembered within the session, resets after restart |
-| Edit & resend | Hover a user message → edit | Editing truncates the subsequent messages and resends |
-| Rename | Double-click a conversation in the sidebar | Inline rename |
-| Drag to organize | Drag a conversation into a group / drag a group into another | Moves conversations / reorders groups |
-| Temporary conversation | Sidebar `ⓘ` button | Never persisted; the header can "promote to persistent" |
-| `/skill` command | Type `/skill` in the input box | Picks one of your configured Skills |
-| Context details | Hover the capacity ring at the input's right | Context breakdown, memory health, available tools, MCP status |
-| Voice input | Hold `Alt+Space` while the chat window is visible | The transcript goes into the chat input |
-| Audio transcription | Audio attachment button at the input's left | AI automatically calls the transcription tool |
+| Send / newline | `Enter` / `Shift+Enter` | `Esc` or Stop stops generation; `Esc` hides the window when idle |
+| Switch models | Model button beside the input, or `/model` | Choose the model for this conversation |
+| Attach content | Attachment button, or `@` at the start of the input | Pick files, audio, recently copied files/images, or current conversation references |
+| Ask about an image | Paste or drop an image; use **Ask AI** on a screenshot or clipboard image | Choose an image-capable model, add a question, then send |
+| Reusable prompts | Prompt button, or `/prompt` | Insert a prompt, add your content, then send |
+| Edit and resend | Hover over a user message → Edit | Revise your question and regenerate |
+| Organize conversations | Double-click a name; drag into a group | Rename or move conversations; drag groups to reorder |
+| Temporary conversation | Sidebar ⓘ button | Promote it to persistent from the header when you want to keep it |
+| Context details | Hover over the capacity ring beside the input | Inspect context usage, available tools, and MCP status |
+| Voice input | Hold `Alt+Space` | Fill the chat input with your transcript |
 
-### Thinking control (0.27.15)
+### `/` commands and prompts
 
-The "Thinking" button next to the input renders according to the **current model's real capability**, in four shapes:
+Type `/` at the start of the input to open commands. Use `↑` / `↓` to select, `Enter` / `Tab` to adopt, and `Esc` to close the panel.
 
-| Model capability | Control | Choices |
-|---|---|---|
-| Known effort levels (e.g. GPT-5.4 / Claude Opus 4.6 / Gemini 3 / DeepSeek V3.2+) | Dropdown | Default (follow the service) / Off / On · default strength / levels (low·high·max etc.) |
-| Toggle-only (e.g. Claude Sonnet 4.5 budget type / Kimi k2.6 / local Ollama) | Toggle | On (default strength or budget) / Off |
-| Thinking cannot be turned off (e.g. Gemini 2.5 Pro / OpenAI o-series) | "Thinking · always on" label | Shows the real limitation, not interactive |
-| No thinking parameter (e.g. gpt-4o) | Control hidden | — |
+| Command | Action |
+|---|---|
+| `/new` | Start a conversation |
+| `/model` | Switch models |
+| `/prompt` | Insert a reusable prompt |
+| `/skill` | Choose a Skill |
+| `/tools` / `/mcp` | Inspect available tools and MCP connections |
+| `/compact` | Compact the conversation context |
 
-- **"Default" is not "off"**: choosing Default sends no thinking parameter at all and lets the service decide; to fully disable it, explicitly pick Off.
-- **Capability source**: the built-in verified model catalog (shipped with rig 0.45) plus the per-model "thinking control style" override in Settings (auto / force dropdown / force toggle). Self-hosted gateways (vLLM etc.) show a "capability unknown" dropdown — levels pass through verbatim; if a request errors, pick another level or switch to the force-toggle override.
-- **Out-of-range levels are rejected locally**: picking a level outside the catalog for a known model fails with a readable local error and nothing is sent; arbitrary values can still be passed through the model's custom parameters in Settings.
-- **Budget-type models** (Claude budget tiers / Gemini 2.5): the toggle's "on" uses the default budget (2048, clamped to the output limit); to change it, configure `thinking.budget_tokens` / `generationConfig.thinkingConfig.thinkingBudget` in the model's custom parameters.
-- **Keyboard**: with a dropdown open, `↑`/`↓` move the highlight, `Enter`/`Tab` adopt, `Esc` closes; IME composition never triggers adoption.
-- The thinking state of each turn is stored with the message; Markdown export annotates user messages with "[Thinking] level / on / off / default".
+Manage reusable instructions under **Settings → AI Chat Settings → Prompt Library**. Chat prompts appear in `/prompt`; editor prompts appear in the AI polish presets.
 
 ### Silky tricks
 
-- You can keep typing while generating, but `Enter` won't send — stop first, then send.
-- Unfinished history turns collapse into summary bars; click "expand" to read the full text.
+- The **Thinking** button shows the toggle or effort levels available for your model; **Default** follows the service.
+- Keep typing while generating, then stop generation before sending your next message.
+- Right-click clipboard text and choose **Send to AI chat**, or use **Ask AI** on an image to bring the content along.
+- Unfinished history turns collapse into summary bars; click **Expand** to read the full text.
 
 ---
 
@@ -285,97 +274,79 @@ The "Thinking" button next to the input renders according to the **current model
 
 ---
 
-## 9. Using plugins
+## 9. Plugin Center and plugins
 
-### Common operations
+### Plugin Center
 
-- Refresh the official catalog under **Settings → Plugins → Plugin Center**, then click **Install** or **Update** to download a plugin. Catalog entries show the name, description, package size and badges (Beta channel, standalone-window mark). The dictionary automatically downloads its source data and builds the databases locally after installation; view progress or retry in its **Datasets** section.
-- Uninstalling lives in the **Install** row of a plugin card: bundled plugins with a user-installed update show **Remove update & restore bundled** (data and datasets kept); purely downloaded plugins show **Uninstall** — the confirm dialog keeps plugin data and all dataset directories by default (settings and grants are preserved); pick "Uninstall & clear data/datasets" only when you want a full cleanup. Bundled-only plugins have no uninstall (disable them instead). Files locked by Windows are reported as "pending cleanup" and finish on the next start.
-- The plugin catalog selects an available source automatically and shows a loading indicator while fetching.
-- Enable a plugin and expand its configuration under **Settings → Plugins**, then type its trigger in the main window. Translate is disabled by default; enable it and configure engine credentials first.
-- Ordinary settings save automatically. Weather's “Save location” button commits only the location draft, so click it after choosing a place.
-- Weather and Translate credential groups start collapsed each time you open settings. Their headings show Not configured, Incomplete or Configured; expand a group for its registration link. Configured means all fields are present; an actual query checks whether they work. Use “Remove spaces” below an input if it contains whitespace. Password fields are stored in Windows Credential Manager: leaving them blank keeps the saved value; use the side button to clear it.
-- Hover over the left third of a query error to read its full message. Right-click the entry or preview and choose “Copy error message” when reporting a problem.
+Browse official plugins under **Settings → Plugins → Plugin Center**.
+
+| Operation | Entry | Notes |
+|---|---|---|
+| Install / update | Corresponding button in Plugin Center | Download plugins; enabling the offline dictionary starts preparing its databases |
+| Enable / configure | Installed plugin card | Enable the plugin, adjust options, or enter credentials |
+| Run a plugin | Type its trigger in the main window | `Tab` completes keywords; Translate and Dictionary open a window when the bare keyword is submitted |
+| Open a window | **Open page** on the plugin card | Useful for repeated translations or lookups |
+| Uninstall / restore | Installation row on the plugin card | Keep or clear data; updated bundled plugins can revert to their bundled version |
+
+Ordinary options save automatically; forms with a **Save** button, such as locations, need that click. Leaving a password field blank keeps the saved credential.
 
 ### Weather
 
-| How to call | Action |
+| Input / action | Result |
 |---|---|
-| `天气` / `weather` | Query the saved default location |
-| `天气 广州` / `weather Guangzhou` | Query another place without changing the default |
-| `天气 辽宁/朝阳` / `天气 广州/天河区` | Add a parent region to distinguish places with the same name |
+| `天气` / `weather` | Query the default location |
+| `天气 广州` / `weather Guangzhou` | Check another location for this query |
+| `天气 辽宁/朝阳` | Add a parent region to distinguish places with the same name |
+| Select a result and press `Enter` | Copy the complete summary from the first row, or one day's forecast from a daily row |
 
-**Common operations**:
-
-- In Weather configuration, click “Change location,” search and select a complete candidate, then click “Save location.” You can also enter latitude and longitude manually; canceling discards the location draft.
-- Choose Open-Meteo (free, no key required), QWeather or Caiyun as the “Weather provider”; adjust the temperature unit separately. “Search source” in the location panel only chooses the service used to find places.
-- QWeather: obtain an API Key from the [QWeather console](https://console.qweather.com/) and copy your account-specific API Host from console settings. Paste a bare hostname or an `https://` root URL, without an API path.
-- Caiyun: obtain an App Key and App Secret from the [Caiyun open platform](https://platform.caiyunapp.com/). App Key is visible text that you can edit or clear; App Secret is stored as a password field. If a query asks you to confirm the location region, choose “Mainland China” or “Outside mainland China” under “Change location,” then save.
-- “Allow fallback to other providers” is off by default. Enable it and drag “Fallback order” to try configured providers after the primary fails; results identify the actual source. Partial weather results explain which data is missing.
-
-**Tips**:
-
-- If a Chinese place name returns no matches, try the full district or county name, add a parent region, use an English name, or enter coordinates directly.
-- The first row shows current weather, or a weather summary when current conditions are unavailable. Each following forecast row covers one day, showing the date, weekday, conditions, and low–high temperature; its subtitle shows precipitation probability and maximum wind speed.
-- Select the first row and press `Enter` to copy the complete weather summary. Select a daily forecast and press `Enter` to copy only that day's forecast. Select the attribution entry at the end and press `Enter` to open the source and usage information.
-- Forecast length depends on the service's actual response. A daily description summarizes the day; it does not mean the condition lasts all day.
+In Weather settings, choose **Change location**, search and select a place, then **Save location**. Choose key-free Open-Meteo, or configure QWeather or Caiyun. Enable fallback and drag the order if you want automatic switching between sources.
 
 ### Translate
 
-| How to call | Action |
+| Input / action | Result |
 |---|---|
-| `翻译 hello` / `translate hello` | Translate text into the configured target language |
-| Select the translated result and press `Enter` | Copy the translation |
+| `翻译 hello` / `translate hello` | Quick translation; `Enter` copies the result |
+| Submit bare `翻译` / `translate` | Open the translation window |
+| `translate hello -> ja` | Translate to Japanese for this query |
+| Translate configuration | Set the default engine, target language, and credentials |
 
-**Common operations**: Choose “Default engine” and “Target language” in Translate configuration, then expand the engine's credential group to register and enter credentials. Alibaba, Baidu, Tencent, Youdao and DeepL are supported. To switch engines automatically after a failure, enable “Allow fallback to other engines” and drag to reorder them; fallback is off by default.
-
-**Tips**: Main-window translation and the translation window default to “Auto (Chinese–English)” (the old Chinese default is upgraded to Auto once; fixed targets saved afterward still apply): Chinese input becomes English, and other languages become Chinese. Reopening the translation window resets its direction and engine to the defaults, including when text is supplied. Change the target for the current session, or use `translate hello -> ja` in the main window for a one-off Japanese target. Variable names such as `helloWorld` and `hello_world` are split into words before translation.
+Auto translates Chinese to English and other languages to Chinese. Change the direction or engine within the window for the current session. Variable names such as `helloWorld` and `hello_world` are split into words before translating.
 
 ### IP lookup
 
-**How to call**: Type `ip` to view local addresses and the egress IPs seen by domestic and international detectors. Select an address and press `Enter` to copy it. After typing `ip`, the list shows `ip refresh` / `ip local` guide entries — press `Enter` to run that query directly. Typing `ip r` shows a gray inline completion; press `Tab` to complete it to `ip refresh` (alias prefixes such as `ip 刷` / `ip 本` complete the same way).
+| Input | Result |
+|---|---|
+| `ip` | Local addresses plus domestic and international egress IPs; `Enter` copies |
+| `ip local` | Local addresses only |
+| `ip refresh` | Refresh egress lookups |
 
-**Common operations**: Under **Settings → Plugins → IP**, choose the IPv4 query scope. “Query IPv6” is off by default; enable it to show one valid non-temporary and one temporary local IPv6, and run one independent IPv6 egress check, with IPv4 listed first. “Enhanced network details” is off by default; enable it to also query gateways, tunnel/virtual adapters and system proxy status, and show other valid IPv6 addresses. Drag to reorder detectors. Failed checks use backups within the same group by default; fallback can be disabled. The international IPv4 detectors include location info by default.
-
-**Tips**: Use `ip local` for local addresses without network requests, or `ip refresh` to refresh egress results subject to detector rate limits. When sharing a LAN address, choose the physical adapter's local IPv4. While typing, the query fires after a pause of roughly half a second, so intermediate keystrokes do not produce error rows.
+Type `ip r`, then `Tab` to complete `ip refresh`. Share a physical adapter's local IPv4 for LAN connections; enable IPv6 and enhanced network details in the plugin's settings.
 
 ### Offline dictionary
 
-| How to call | What it does |
+| Input / action | Result |
 |---|---|
-| `查词 hello` / `dict hello` | Look up the offline English–Chinese dictionary (senses, phonetics, forms, phrases) |
-| `查词 苹果` | Reverse lookup: Chinese term → English candidates (basic coverage, frequency-ordered) |
-| Click "Open page" on the plugin's settings card | Open the dictionary window for continuous lookup and full details |
-| Press `Enter` on a bare `查词` / `dict` keyword | Opens the dictionary window directly (works for any plugin keyword) |
+| `查词 hello` / `dict hello` | Senses, phonetics, word forms, and phrases |
+| `查词 苹果` | Chinese-to-English reverse lookup |
+| Submit bare `查词` / `dict` | Open the dictionary window; `Enter` queries and `Esc` hides it |
+| Double-click an English word in a result | Open a quick lookup card beside the word, with a link to the full entry |
 
-**Common operations**: Dictionary is optional; install it from the Plugin Center first. Once installed and enabled, it downloads about 63MB of source data and builds the databases locally. Lookups then work offline. Its **Datasets** section shows progress and lets you cancel preparation, rebuild or uninstall a database. Optional etymology failures do not block basic lookups. Uninstall the plugin from its card, choosing whether to keep or clear its data and databases.
-
-**Tips**: In the dictionary window, `Enter` queries immediately and `Esc` hides the window; every reopen starts a fresh query. While typing, unknown words instantly get candidates — typos surface the closest spellings first (e.g. `aple` offers `apple`), and clicking a candidate queries it directly. Double-click an English word in the results (a sense line, an example) to pop a small lookup card beside it; `Esc` or clicking blank space closes it, and the card links to the full entry. Entries offer one-click "Copy senses" / "Copy word". Everything works offline — no AI-generated definitions; if the dictionary does not contain it, we say so.
+Click a spelling candidate to look it up; copy the word or senses from the entry. Once its databases are ready, lookups work offline. Preparation progress and **Rebuild** live in the plugin's **Datasets** section.
 
 ---
 
 ## 10. Hidden gems at a glance
 
-Things you would almost never discover without this list:
-
-1. **The main window's blank area is draggable** — there is no drag bar, but holding the card's blank area moves the window.
-2. **Shared main window wheel navigation** — search and clipboard scroll line by line by default; choose full-page scrolling in General settings. Arrow keys always move one item; `PgUp/PgDn` always page.
-3. **Type `>` to run commands** — `Enter` executes in a terminal, no need to open one first.
-4. **Type `#fff` to detect colors** — works in both the main window and the clipboard panel; `Enter` copies HEX.
-5. **Clipboard mixed selection** — use `Ctrl+click` to toggle entries and `Shift+click` for ranges. Text-only selections support batch copy / paste; mixed selections offer actions by type in the context menu, including batch image pinning.
-6. **Clipboard bare `Delete` deletes** — no need to reach for `Alt+D`.
-7. **Screenshot shortcut badges follow their modifier** — hold `Alt` for tool-switching hints, or `Ctrl` for undo / redo / reset hints.
-8. **The screenshot wheel tunes everything** — wheel inside the region to adjust brush size with a live cursor preview; tool buttons / thickness / sliders / hue bar / preset swatches also respond to the wheel.
-9. **Double-click the dim overlay = copy the whole screen.**
-10. **Press `E` while annotating to toggle the OCR panel.**
-11. **Text becomes selectable right after you select a region** — silent background OCR; `Ctrl+C` copies text straight off the image.
-12. **Double-click a pin to shrink it to mini** — double-click again to restore; `Ctrl+wheel` for big zoom steps.
-13. **Repeated `Esc` never closes a pin by accident** — the priority chain clears the text selection first and closes the pin last.
-14. **Sticky notes: `Ctrl+wheel` zooms the font**, `Ctrl+middle-click` restores.
-15. **AI chat: double-click a conversation name to rename**, drag to organize groups.
-16. **Press `Alt+Q` again inside AI mode to promote a temporary conversation to persistent**.
-17. **The welcome page / Settings can promote every Chord action to a global hotkey** — `Alt+A` screenshots even with the main window hidden.
-18. **Type `更新` (update) to check for updates**.
+1. **Drag the main window by its blank area** — no title bar needed.
+2. **Mix clipboard entry types in one selection**: `Ctrl+click` toggles entries; right-click for batch actions by type.
+3. **The screenshot wheel tunes everything**: brush size, tools, sliders, and colors. Hold `Alt` / `Ctrl` to see shortcut badges.
+4. **Select text directly on a screenshot**, then `Ctrl+C` to copy; `E` opens the OCR panel.
+5. **Double-click a pin to shrink it to mini**, again to restore; `Ctrl+wheel` changes a note's font size.
+6. **Hold a key GIF frame longer** to explain an important step without recording it again.
+7. **Double-click an unfamiliar English word in dictionary results** for a quick lookup card.
+8. **`/prompt` inserts reusable instructions; `@` finds recently copied attachments**. Review before sending.
+9. **Press `Alt+Q` again in the main window's AI mode** to save the temporary conversation in a separate window.
+10. **Give Chord actions global hotkeys** to take screenshots or open chat while the main window is hidden.
 
 ---
 
@@ -431,6 +402,15 @@ Things you would almost never discover without this list:
 | Double-click region / overlay | Copy region / copy whole screen |
 | `Esc` | Layered exit (panel → submenu → cancel screenshot) |
 
+### GIF editor
+
+| Keys | Action |
+|---|---|
+| `Space` | Play / pause preview |
+| `←` / `→` | Previous / next frame |
+| `Shift+click` / `Ctrl+click` | Select a range / toggle individual frames |
+| `Delete` / `Backspace` | Delete selected frames |
+
 ### Pins / notes / editor / chat window
 
 | Keys | Action |
@@ -440,3 +420,4 @@ Things you would almost never discover without this list:
 | `Esc` | Pin priority chain; note close (to recycle bin); editor layered exit; chat stop generating / hide |
 | `Ctrl+S` | Editor saves to the source |
 | `Enter` / `Shift+Enter` | Chat send / newline |
+| `/` / `@` at the start of the input | Chat commands / attachment panel |
