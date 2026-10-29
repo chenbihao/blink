@@ -19,6 +19,7 @@ const state = {
     settings: null, // get_sync_settings 结果
     lastView: null, // 最近一次 run_sync 视图（needs_init/plan/report）
     busy: false, // 同步进行中（按钮禁用）
+    draft: null, // 未提交表单只留在当前页面内存；重绘不回填旧配置
 };
 
 export function initSyncTab() {
@@ -41,6 +42,13 @@ function render() {
     const container = document.getElementById("sync-container");
     if (!container) return;
     container.innerHTML = renderAll();
+    if (state.draft) {
+        for (const [key, value] of Object.entries(state.draft)) {
+            const input = container.querySelector(`.plugin-field[data-key="${key}"]`);
+            if (input) input.value = value;
+        }
+    }
+    container.querySelectorAll(".plugin-field").forEach((input) => { input.readOnly = state.busy; });
     bindEvents(container);
 }
 
@@ -244,6 +252,12 @@ function renderReportBody(report) {
 // ── 事件 ─────────────────────────────────────────────────────────────────────
 
 function bindEvents(container) {
+    const readDraft = () => Object.fromEntries(["sync_url", "sync_username", "sync_password"].map((key) => [
+        key, container.querySelector(`.plugin-field[data-key="${key}"]`)?.value || "",
+    ]));
+    container.querySelectorAll(".plugin-field").forEach((input) => {
+        input.addEventListener("input", () => { state.draft = readDraft(); });
+    });
     // kind 三态：true=失败（红）/ "ok"=成功（绿）/ 其他=中性（进行中、已保存等）
     const status = (id, message, kind) => {
         const el = container.querySelector(id);
@@ -266,13 +280,30 @@ function bindEvents(container) {
         // 重渲染后恢复状态行
         if (busy) status("#sync-run-status", t("sync.run.busy"), false);
     };
+    // 连接操作原位禁用，避免点击测试时重建表单、丢失草稿与焦点。
+    const disabledActions = new Map();
+    const setConnectionBusy = (busy) => {
+        state.busy = busy;
+        container.querySelectorAll("button[data-action]").forEach((button) => {
+            if (busy) disabledActions.set(button.dataset.action, button.disabled);
+            button.disabled = busy || disabledActions.get(button.dataset.action) === true;
+        });
+        container.querySelectorAll(".plugin-field").forEach((input) => { input.readOnly = busy; });
+    };
 
     container.querySelectorAll("button[data-action]").forEach((btn) => {
         btn.addEventListener("click", async () => {
             const action = btn.dataset.action;
+            if (state.busy) return;
+            const connectionAction = ["save-conn", "test-conn", "clear-password"].includes(action);
             try {
+                if (connectionAction) {
+                    state.draft = readDraft();
+                    setConnectionBusy(true);
+                }
                 switch (action) {
-                    case "save-conn": {
+                    case "save-conn":
+                    case "test-conn": {
                         const url = field("sync_url");
                         const username = field("sync_username");
                         const password = container.querySelector('.plugin-field[data-key="sync_password"]')?.value || "";
@@ -284,31 +315,29 @@ function bindEvents(container) {
                             url, username,
                             password: password || null,
                         });
+                        // 换连接后旧初始化/冲突计划不再适用于当前连接。
+                        state.lastView = null;
+                        if (action === "test-conn") {
+                            status("#sync-conn-status", t("sync.conn.testing"), false);
+                            const result = await invoke("test_sync_connection");
+                            state.draft = null;
+                            render();
+                            status("#sync-conn-status", result.status === "ok"
+                                ? t("sync.conn.ok", {revision: result.head_revision ?? 0})
+                                : t("sync.conn.empty_server"), "ok");
+                            break;
+                        }
+                        state.draft = null;
                         render();
                         status("#sync-conn-status", t("sync.conn.saved"), false);
                         break;
                     }
                     case "clear-password":
                         state.settings = await invoke("clear_sync_password");
+                        if (state.draft) state.draft.sync_password = "";
                         render();
                         status("#sync-conn-status", t("sync.conn.password.cleared"), false);
                         break;
-                    case "test-conn": {
-                        status("#sync-conn-status", t("sync.conn.testing"), false);
-                        // 表单直测：传输入框当前值（密码空时后端回退已存密码），
-                        // 保存前即可验证；后端在值为空时回退已保存设置。
-                        const result = await invoke("test_sync_connection", {
-                            url: field("sync_url") || null,
-                            username: field("sync_username") || null,
-                            password: container.querySelector('.plugin-field[data-key="sync_password"]')?.value || null,
-                        });
-                        if (result.status === "ok") {
-                            status("#sync-conn-status", t("sync.conn.ok", {revision: result.head_revision ?? 0}), "ok");
-                        } else {
-                            status("#sync-conn-status", t("sync.conn.empty_server"), "ok");
-                        }
-                        break;
-                    }
                     case "run-sync":
                     case "conflict-commit": {
                         const resolutions = action === "conflict-commit" ? collectResolutions(container) : [];
@@ -388,6 +417,10 @@ function bindEvents(container) {
                     ? "#sync-conn-status"
                     : "#sync-run-status";
                 status(target, message, true);
+            } finally {
+                if (connectionAction) {
+                    setConnectionBusy(false);
+                }
             }
         });
     });

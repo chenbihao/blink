@@ -116,6 +116,7 @@ pub async fn install_local_engine(
     let svc = get_service(&app)?;
     let eid = validate_engine_id(&engine_id)?;
     let mut adapter_config = build_adapter_config_for_engine(&engine_id)?;
+    tracing::info!(engine = %eid, "收到引擎安装请求");
 
     // 如果前端提交了 compute_preference，验证并覆盖
     if let Some(pref_str) = compute_preference {
@@ -128,7 +129,10 @@ pub async fn install_local_engine(
     let (operation_id, end_state) = svc
         .install(&eid, adapter_config)
         .await
-        .map_err(CommandError::from)?;
+        .map_err(|error| {
+            tracing::warn!(engine = %eid, code = ?error.code, phase = ?error.phase, "引擎安装失败");
+            CommandError::from(error)
+        })?;
 
     // 0.22.11: 从闭合 implementation topology 派生路由（替代 engine_id 字符串比较）
     if end_state == EnvOperationEndState::Completed

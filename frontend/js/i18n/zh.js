@@ -193,7 +193,7 @@ export const zh = {
     "sync.conn.password.cleared": "密码已清除",
     "sync.conn.clear_password": "清除密码",
     "sync.conn.save": "保存设置",
-    "sync.conn.test": "测试连接",
+    "sync.conn.test": "保存并测试连接",
     "sync.conn.testing": "正在连接…",
     "sync.conn.ok": "连接成功（远端版本 r{revision}）",
     "sync.conn.empty_server": "连接成功：远端为空，首次同步将上传本机配置",

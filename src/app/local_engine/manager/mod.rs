@@ -141,11 +141,11 @@ impl InstallSinkAdapter {
 
 impl InstallSink for InstallSinkAdapter {
     fn on_stage(&self, stage: &str) {
-        tracing::debug!(
+        tracing::info!(
             engine = %self.engine_id,
             op = %self.operation_id,
             stage = stage,
-            "install sink: stage"
+            "引擎安装阶段变更"
         );
         // 0.22.6 H4: 通过 emit_install_stage 广播阶段变更给前端
         self.event_port

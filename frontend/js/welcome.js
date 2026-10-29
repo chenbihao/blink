@@ -126,6 +126,7 @@ let ocrGeneration = 0;
  *  install_local_engine 的终态返回值仅作完成时兜底。
  *  用于隔离不同安装操作的事件——旧操作的迟到事件不能覆盖新操作 UI。 */
 let ocrOperationId = null;
+let ocrListenersReady = null;
 
 // ── 第 1 步：快捷键渲染 ──────────────────────────────────────────────────────
 
@@ -657,7 +658,9 @@ async function checkOcr() {
         const activeOpId = activeOperationId(status);
         if (activeOpId) {
             ocrOperationId = activeOpId;
+            ocrStage = status.status.operation.stage;
             setOcrState("installing");
+            void bindOcrOperationFromStatus(gen);
         } else {
             setOcrState(isOcrReady(status) ? "ready" : "not-installed");
         }
@@ -668,82 +671,74 @@ async function checkOcr() {
     }
 }
 
-const OCR_OPERATION_BIND_ATTEMPTS = 40;
-const OCR_OPERATION_BIND_INTERVAL_MS = 50;
+const OCR_OPERATION_BIND_INTERVAL_MS = 750;
 
 /**
  * 安装命令本身直到终态才返回，因此安装进行中必须主动从状态真源取得
  * operation_id。在绑定完成前事件监听器保持 fail-closed。
+ * 安装全程保持单飞轮询，覆盖慢探测超过两秒、错过阶段/终态事件和外部安装。
  */
 async function bindOcrOperationFromStatus(gen) {
-    for (let attempt = 0; attempt < OCR_OPERATION_BIND_ATTEMPTS; attempt++) {
-        if (gen !== ocrGeneration || ocrState !== "installing" || ocrOperationId) {
-            return ocrOperationId;
-        }
+    while (gen === ocrGeneration && ocrState === "installing") {
         try {
             const list = await invoke("get_local_engine_status", {engineId: OCR_ENGINE_ID});
             if (gen !== ocrGeneration || ocrState !== "installing") return null;
-            const activeOpId = activeOperationId(pickEngineStatus(list, OCR_ENGINE_ID));
+            const status = pickEngineStatus(list, OCR_ENGINE_ID);
+            const activeOpId = activeOperationId(status);
             if (activeOpId) {
+                // 首次绑定时补回已错过的阶段；后续不让快照的粗粒度阶段
+                // 覆盖 install-stage 事件里的 verifying/promoting 等细阶段。
+                if (ocrOperationId !== activeOpId) {
+                    ocrStage = status.status.operation.stage;
+                    ocrProgress = null;
+                } else if (!ocrStage || ["pending", "preparing"].includes(ocrStage)) {
+                    ocrStage = status.status.operation.stage;
+                }
                 ocrOperationId = activeOpId;
-                return ocrOperationId;
+                renderOcrStatus();
+            } else if (ocrOperationId || isOcrReady(status)) {
+                setOcrState(isOcrReady(status) ? "ready" : "failed");
+                return null;
             }
         } catch (error) {
-            // 安装命令的错误路径负责最终提示；这里继续短暂轮询以跨过 claim 竞态。
-            console.debug("welcome: operation_id 尚不可用", error);
+            console.debug("welcome: OCR 安装状态暂不可用", error);
         }
         await new Promise((resolve) => setTimeout(resolve, OCR_OPERATION_BIND_INTERVAL_MS));
     }
     return null;
 }
 
+/*
+ * 安装命令是终态兜底；轮询不 await 命令，也不从未经校验的事件绑定身份。
+ */
 async function installOcr() {
+    if (ocrState === "installing") return;
     const gen = ++ocrGeneration;
-    // 重置 operation_id：新安装操作的进度事件从此刻起绑定新 operation_id
     ocrOperationId = null;
+    ocrStage = "preparing";
     setOcrState("installing");
     try {
-        // PP-OCR 一键安装 = 引擎级安装：ORT DLL 与模型在同一安装事务内联合提交
-        // （0.22 §3.9），没有独立模型安装步骤；幂等，已就绪时后端自动跳过。
-        //
-        // install_local_engine 是阻塞命令：会等到安装完成（或失败/取消）才返回。
-        // 返回值 EngineOperationFinishedDto 包含 operation_id。
-        // 安装期间，后端通过 install-stage / install-progress 事件推送进度。
+        await watchInstallEvents();
+        if (gen !== ocrGeneration) return;
         const installPromise = invoke("install_local_engine", {
             engineId: OCR_ENGINE_ID,
             computePreference: null,
         });
-        // 不等待阻塞安装命令结束；从状态真源尽早绑定当前 operation。
-        const bindPromise = bindOcrOperationFromStatus(gen);
+        void bindOcrOperationFromStatus(gen);
         const result = await installPromise;
         if (gen !== ocrGeneration) return;
-        // 从返回值绑定 operation_id（即使安装已完成，终态事件仍需校验）
-        if (result?.operation_id) {
-            ocrOperationId = result.operation_id;
-        }
-        await bindPromise;
-        // 完成后复查状态定终态；未达 ready（异常场景）给失败态可重试
+        if (result?.operation_id) ocrOperationId = result.operation_id;
         const list = await invoke("get_local_engine_status", {engineId: OCR_ENGINE_ID});
         if (gen !== ocrGeneration) return;
         setOcrState(isOcrReady(pickEngineStatus(list, OCR_ENGINE_ID)) ? "ready" : "failed");
     } catch (e) {
-        console.error("welcome: OCR install failed:", e);
         if (gen !== ocrGeneration) return;
-        // already_running = 已有安装在进行（如设置页发起）
-        // 从后端状态获取当前 operation_id，用于事件隔离
         if (errorCodeOf(e) === "already_running") {
-            try {
-                const list = await invoke("get_local_engine_status", {engineId: OCR_ENGINE_ID});
-                if (gen !== ocrGeneration) return;
-                const status = pickEngineStatus(list, OCR_ENGINE_ID);
-                ocrOperationId = activeOperationId(status);
-            } catch (queryErr) {
-                console.warn("welcome: query operation_id for already_running failed:", queryErr);
-            }
-            // 留在 installing，由 install-stage 终态事件接管刷新
+            // 重新从真源接管；已有任务可能恰好在首次轮询前结束。
+            await checkOcr();
             return;
         }
-        // 其余错误给失败态 + 重试
+        console.error("welcome: OCR install failed:", e);
         setOcrState("failed");
     }
 }
@@ -756,8 +751,10 @@ async function installOcr() {
  *  - 已绑定 operation_id 时，事件 operation_id 必须匹配才接受。
  *  - 未绑定 operation_id 时拒绝事件，避免旧操作迟到推送污染当前 UI。 */
 function watchInstallEvents() {
+    if (ocrListenersReady) return ocrListenersReady;
+    const registrations = [];
     // 阶段事件：更新 installing 态的主文案（下载中/校验中/…）
-    listen(EVENTS.LOCAL_ENGINE_INSTALL_STAGE, (ev) => {
+    registrations.push(listen(EVENTS.LOCAL_ENGINE_INSTALL_STAGE, (ev) => {
         const p = ev?.payload;
         if (!p || p.engine_id !== OCR_ENGINE_ID) return;
         if (ocrState !== "installing") return;
@@ -774,13 +771,14 @@ function watchInstallEvents() {
         if (ocrState === "ready") return;
         // 终态事件到达时清理 operation 状态
         ocrOperationId = null;
+        const gen = ocrGeneration;
         setTimeout(() => {
-            if (ocrState === "installing") checkOcr();
+            if (gen === ocrGeneration && ocrState === "installing") checkOcr();
         }, 600);
-    });
+    }));
 
     // 字节进度事件：更新下载进度条与 ETA（仅 installing 态消费）
-    listen(EVENTS.LOCAL_ENGINE_INSTALL_PROGRESS, (ev) => {
+    registrations.push(listen(EVENTS.LOCAL_ENGINE_INSTALL_PROGRESS, (ev) => {
         const p = ev?.payload;
         if (!p || p.engine_id !== OCR_ENGINE_ID) return;
         if (ocrState !== "installing") return;
@@ -790,13 +788,21 @@ function watchInstallEvents() {
         const total = Number.isFinite(Number(p.total)) && p.total > 0 ? Number(p.total) : null;
         const samples = pushProgressSample(ocrProgress?.samples ?? [], Date.now(), downloaded);
         ocrProgress = {downloaded, total, samples};
-        renderOcrProgress();
+        // 字节进度本身证明已经开始下载，补偿绑定身份前丢失的 stage 事件。
+        ocrStage = "downloading";
+        renderOcrStatus();
+    }));
+    ocrListenersReady = Promise.all(registrations).catch((error) => {
+        // 状态轮询仍会接管终态与粗粒度阶段，监听失败不能成为永久等待。
+        console.warn("welcome: OCR 进度监听失败，使用状态轮询", error);
     });
+    return ocrListenersReady;
 }
 
 // ── 完成/退出 ───────────────────────────────────────────────────────────────
 
 async function finish() {
+    ++ocrGeneration;
     try {
         await invoke("complete_onboarding");
     } catch (e) {

@@ -155,6 +155,8 @@ impl EngineManager {
         })
         .await?;
 
+        tracing::info!(engine = %engine_id, op = %operation_id, "引擎安装任务已建立");
+
         // 更新会切换 slot——先停止运行中的实例（复用当前 claim 的 operation_id）
         if let Err(err) = self.stop_internal(engine_id, &entry, &operation_id).await {
             self.commit_status_internal(engine_id, Some(&operation_id), |status| {

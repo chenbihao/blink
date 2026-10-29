@@ -193,7 +193,7 @@ export const en = {
     "sync.conn.password.cleared": "Password cleared",
     "sync.conn.clear_password": "Clear password",
     "sync.conn.save": "Save",
-    "sync.conn.test": "Test connection",
+    "sync.conn.test": "Save & test connection",
     "sync.conn.testing": "Connecting…",
     "sync.conn.ok": "Connected (remote revision r{revision})",
     "sync.conn.empty_server": "Connected: remote is empty; first sync will upload this device",
