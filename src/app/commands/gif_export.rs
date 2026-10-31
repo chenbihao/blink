@@ -39,6 +39,7 @@ pub struct ExportRequest {
     pub format: ExportFormat,
     pub max_width: Option<u32>,
     pub quality: Option<String>,
+    pub preset: Option<media::VideoPreset>,
     pub overwrite: Option<bool>,
 }
 fn media_error(e: media::MediaError) -> CommandError {
@@ -230,6 +231,7 @@ async fn start_export(
                 let options = media::VideoOptions {
                     max_width: request.max_width,
                     quality,
+                    preset: request.preset,
                     overwrite: request.overwrite.unwrap_or(false),
                     ..Default::default()
                 };
@@ -353,6 +355,7 @@ pub async fn gif_export(
             format: ExportFormat::Gif,
             max_width,
             quality,
+            preset: None,
             overwrite,
         },
         false,
@@ -403,6 +406,32 @@ pub async fn gif_export_availability(
 mod tests {
     use super::*;
     #[test]
+    fn preset_request_is_typed_and_legacy_requests_remain_valid() {
+        let mut value = serde_json::json!({
+            "sessionId": "recording-1", "path": "C:\\recording.mp4", "format": "mp4"
+        });
+        assert!(
+            serde_json::from_value::<ExportRequest>(value.clone())
+                .unwrap()
+                .preset
+                .is_none()
+        );
+        for (name, preset) in [
+            ("general", media::VideoPreset::General),
+            ("highQuality", media::VideoPreset::HighQuality),
+            ("text", media::VideoPreset::Text),
+            ("compact", media::VideoPreset::Compact),
+        ] {
+            value["preset"] = serde_json::json!(name);
+            let request: ExportRequest = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(request.preset, Some(preset));
+            assert!(validate(&request).is_ok());
+        }
+        value["preset"] = serde_json::json!("-c:v arbitrary");
+        assert!(serde_json::from_value::<ExportRequest>(value).is_err());
+    }
+
+    #[test]
     fn export_request_rejects_wrong_extension_relative_path_and_invalid_session() {
         let mut request = ExportRequest {
             session_id: "recording-1".into(),
@@ -410,6 +439,7 @@ mod tests {
             format: ExportFormat::Mp4,
             max_width: None,
             quality: None,
+            preset: None,
             overwrite: None,
         };
         assert!(validate(&request).is_ok());

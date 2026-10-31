@@ -395,7 +395,10 @@ dialog {
     background: var(--bg-elevated, #1e1e22);
     color: var(--text-primary, #e8e8ec);
     padding: 20px;
-    min-width: 420px;
+    width: min(480px, calc(100vw - 32px));
+    min-width: 0;
+    max-height: calc(100vh - 32px);
+    overflow: auto;
 }
 
 dialog::backdrop {
@@ -414,6 +417,7 @@ dialog h3 {
 }
 
 .form-row label {
+    min-width: 0;
     display: flex;
     flex-direction: column;
     gap: 6px;
@@ -429,6 +433,7 @@ dialog h3 {
 
 .path-row input {
     flex: 1;
+    min-width: 0;
     background: var(--bg-base, #16161a);
     border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.1));
     border-radius: 6px;
@@ -438,6 +443,8 @@ dialog h3 {
 }
 
 dialog select {
+    width: 100%;
+    min-width: 0;
     background: var(--bg-base, #16161a);
     color: var(--text-primary, #e8e8ec);
     border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.1));
@@ -467,7 +474,8 @@ progress {
 }
 
 .export-note, .export-engine {
-    max-width: 420px;
+    max-width: 100%;
+    overflow-wrap: anywhere;
     margin-bottom: var(--space-md);
     color: var(--text-secondary);
     font-size: 12px;
@@ -482,3 +490,18 @@ progress {
 }
 
 .export-engine .btn { margin-top: var(--space-sm); }
+
+#export-preset-note { min-height: 4.8em; }
+
+.export-advanced {
+    margin-bottom: var(--space-md);
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+
+.export-advanced summary {
+    cursor: pointer;
+    padding-block: var(--space-sm);
+}
+
+.export-advanced .form-row { margin-top: var(--space-sm); }

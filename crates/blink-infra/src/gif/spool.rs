@@ -23,6 +23,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+mod maintenance;
+pub use maintenance::{cleanup_expired, cleanup_expired_except};
+
 /// 素材格式版本（`session.json` 的 `spool_version`；读取端拒绝更高版本）。
 pub const SPOOL_VERSION: u32 = 1;
 
@@ -98,6 +101,7 @@ struct FrameIndexEntry {
 /// 追加式素材写入器（录制 worker 压缩线程独占持有）。
 pub struct SpoolWriter {
     dir: PathBuf,
+    _usage: File,
     bin: BufWriter<File>,
     idx: BufWriter<File>,
     index: Vec<FrameIndexEntry>,
@@ -118,6 +122,7 @@ impl SpoolWriter {
             )));
         }
         fs::create_dir_all(&dir)?;
+        let usage = maintenance::usage_lock(&dir, false)?;
         write_session_json(&dir, &meta)?;
 
         let bin = BufWriter::with_capacity(
@@ -134,6 +139,7 @@ impl SpoolWriter {
         let raw_frame_len = (meta.region.w as usize) * (meta.region.h as usize) * 4;
         Ok(Self {
             dir,
+            _usage: usage,
             bin,
             idx,
             index: Vec::new(),
@@ -215,7 +221,7 @@ impl SpoolWriter {
     /// 丢弃（取消）：消费写入器并删除目录。
     pub fn discard(self) {
         let dir = self.dir.clone();
-        drop((self.bin, self.idx));
+        drop((self.bin, self.idx, self._usage));
         if let Err(e) = fs::remove_dir_all(&dir) {
             tracing::warn!(dir = %dir.display(), error = %e, "GIF 素材目录删除失败（待 TTL 清理兜底）");
         }
@@ -242,6 +248,7 @@ pub fn is_valid_session_id(id: &str) -> bool {
 /// 素材读取器（编辑器/导出按需解码）。
 pub struct SpoolReader {
     dir: PathBuf,
+    _usage: File,
     pub meta: SessionMeta,
     index: Vec<FrameIndexEntry>,
 }
@@ -253,6 +260,7 @@ impl SpoolReader {
             return Err(SpoolError::InvalidSession("会话标识无效".into()));
         }
         let dir = session_dir(root, id);
+        let usage = maintenance::usage_lock(&dir, false)?;
         let meta_path = dir.join("session.json");
         if !meta_path.is_file() {
             return Err(SpoolError::InvalidSession(id.to_string()));
@@ -286,7 +294,7 @@ impl SpoolReader {
                 index.push(entry);
             }
         }
-        Ok(Self { dir, meta, index })
+        Ok(Self { dir, _usage: usage, meta, index })
     }
 
     pub fn frame_count(&self) -> u32 {
@@ -359,38 +367,6 @@ pub fn list_session_ids(root: &Path) -> Vec<String> {
     ids
 }
 
-/// TTL 清理：删除 `created_at` 早于 TTL 的会话目录（含编辑器缩略图缓存）。
-/// 返回删除的会话数。录制中（state=recording 且 mtime 新）的目录跳过：
-/// 仅按 meta.state 判定不够（崩溃残留 state 永远是 recording）——用目录
-/// 修改时间兜底，TTL 之外的 recording 目录一并回收（崩溃残留也是死素材）。
-pub fn cleanup_expired(root: &Path, ttl: std::time::Duration) -> usize {
-    let deadline = SystemTime::now()
-        .checked_sub(ttl)
-        .unwrap_or(UNIX_EPOCH);
-    let deadline_ms = deadline
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    let mut removed = 0;
-    for id in list_session_ids(root) {
-        let dir = session_dir(root, &id);
-        let stale = fs::metadata(dir.join("session.json"))
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|t| t.as_millis() as u64 <= deadline_ms)
-            .unwrap_or(true); // 连 session.json 都没有/读不了：按死目录回收
-        if !stale {
-            continue;
-        }
-        match fs::remove_dir_all(&dir) {
-            Ok(_) => removed += 1,
-            Err(e) => tracing::warn!(dir = %dir.display(), error = %e, "GIF 素材 TTL 清理失败"),
-        }
-    }
-    removed
-}
-
 /// 生成会话 id：`rec-<unix秒>-<pid>-<序号>`（同秒碰撞由目录存在性拒绝；
 /// 无密码学随机需求——id 只需目录名唯一）。
 pub fn generate_session_id() -> String {
@@ -410,7 +386,7 @@ pub fn generate_session_id() -> String {
 mod tests {
     use super::*;
 
-    fn meta(w: u32, h: u32) -> SessionMeta {
+    pub(super) fn meta(w: u32, h: u32) -> SessionMeta {
         SessionMeta {
             spool_version: SPOOL_VERSION,
             id: generate_session_id(),

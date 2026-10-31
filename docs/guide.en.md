@@ -155,7 +155,7 @@ Summon: `Alt+A` in the main window (empty input; can be promoted to a global hot
 
 ### GIF recording and editing
 
-Select a screenshot region, click **Record GIF**, choose the frame rate and whether to show the cursor, then click **Start recording**.
+Select a screenshot region, click **Record**, choose the frame rate and whether to show the cursor, then click **Start recording**.
 
 | Operation | Entry / shortcut | Notes |
 |---|---|---|
@@ -168,7 +168,7 @@ Select a screenshot region, click **Record GIF**, choose the frame rate and whet
 | Export | Top-right **Export** button | Choose GIF / MP4, size, quality, and where to save. MP4 is silent and plays once; loop settings apply to GIF only |
 | Install the media engine | Choose MP4, then **Manage media engine** | Install FFmpeg, return to the editor, and export again; your edits are preserved. You can also manage it under Settings → Managed engines → Media engine |
 
-Tip: record a smaller region and choose a smaller export size for a lightweight walkthrough.
+Tip: record a smaller region and choose a smaller export size for a lightweight walkthrough. Recording material is retained for 72 hours, so export important recordings promptly; exported files are unaffected by material cleanup.
 
 ---
 

@@ -356,9 +356,9 @@ impl McpServerRuntime {
             .with_cancellation_token(server_cancel.child_token())
             // 只允许 loopback host，防 DNS rebinding
             .with_allowed_hosts(["127.0.0.1", "localhost"])
-            // Origin 校验：只接受 loopback 来源
+            // Origin 校验：显式允许 loopback 来源的任意端口，避免省略端口的语义随 rmcp 升级变化。
             // 空 Origin（非浏览器 client）不校验
-            .with_allowed_origins(["http://127.0.0.1", "http://localhost"]);
+            .with_allowed_origins(["http://127.0.0.1:*", "http://localhost:*"]);
 
         let service = rmcp::transport::streamable_http_server::StreamableHttpService::new(
             service_factory,

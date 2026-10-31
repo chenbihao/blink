@@ -93,13 +93,28 @@ impl GifService {
         }
     }
 
-    /// 启动清理：过期素材回收（main.rs spawn_blocking 调用）。
-    pub fn startup_cleanup() {
-        let removed = infra_gif::cleanup_expired(&Self::root(), SESSION_TTL);
+    /// 定期清理保留编辑会话；读写器租约保护在途录制/缩略图/导出。
+    pub fn cleanup_expired(&self) {
+        let recording = self
+            .recording
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|r| r.session_id.clone());
+        let current = self
+            .editor_session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut protected: Vec<String> = current.iter().cloned().collect();
+        if let Some(recording) = recording {
+            protected.push(recording);
+        }
+        let removed = infra_gif::spool::cleanup_expired_except(&Self::root(), SESSION_TTL, &protected);
         if removed > 0 {
-            tracing::info!(removed, "GIF 素材 TTL 清理完成");
+            tracing::info!(removed, "录制素材 TTL 清理完成");
         }
     }
+
 }
 
 // ── 状态广播 ────────────────────────────────────────────────────────────────

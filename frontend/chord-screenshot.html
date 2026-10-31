@@ -145,11 +145,11 @@
     <div id="gif-prep-bar">
         <label class="gif-prep-field" title="录制帧率">
             <span>帧率</span>
-            <select id="gif-prep-fps">
-                <option value="10">10</option>
-                <option value="15" selected>15</option>
-                <option value="24">24</option>
-                <option value="30">30</option>
+            <select id="gif-prep-fps" aria-label="录制帧率">
+                <option value="10">10 fps</option>
+                <option value="15" selected>15 fps</option>
+                <option value="24">24 fps</option>
+                <option value="30">30 fps</option>
             </select>
         </label>
         <label class="gif-prep-field gif-prep-cursor" title="是否录制鼠标光标">
@@ -519,8 +519,8 @@
                 <use href="#icon-gallery-vertical"/>
             </svg>
         </button>
-        <!-- 0.28.7：录制 GIF——按当前选区录制短演示（点击立即开始） -->
-        <button class="tool-btn" id="btn-gif" title="录制 GIF（选区范围，点击立即开始）">
+        <!-- 录制准备：按当前选区采集，结束后可导出 GIF / MP4。 -->
+        <button class="tool-btn" id="btn-gif" title="录制（GIF / MP4）" aria-label="录制">
             <svg aria-hidden="true" class="icon">
                 <use href="#icon-video"/>
             </svg>

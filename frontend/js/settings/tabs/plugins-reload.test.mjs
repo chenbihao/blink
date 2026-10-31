@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import {test} from "node:test";
 import {TestElement} from "./weather-settings-test-helpers.mjs";
 
-globalThis.window = {addEventListener() {}};
+globalThis.window = new TestElement();
 const {initPluginsTab} = await import("./plugins.js");
 
 test("deferred cross-window plugin config reload resumes after focus leaves the card", {timeout: 2000}, async () => {
@@ -29,6 +29,10 @@ test("deferred cross-window plugin config reload resumes after focus leaves the 
     initPluginsTab();
     await new Promise(resolve => setImmediate(resolve));
     assert.match(container.innerHTML, /v0\.1\.0/);
+    const group = {open: true};
+    doc.selectors.set('#plugins-container .plugin-group[open]', [group]);
+    await window.fire('blur');
+    assert.equal(group.open, true, 'window blur must not fold the credential configuration');
 
     doc.activeElement = input;
     revision = 2;

@@ -1358,7 +1358,6 @@ fn setup_app(app: &mut tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error:
     app.manage(std::sync::Arc::new(app::commands::PluginCatalogState::default()));
     // 0.28.7：GIF 录制服务 + 素材 TTL 清理（阻塞 IO，放后台线程）
     app.manage(std::sync::Arc::new(app::gif_service::GifService::new()));
-    tauri::async_runtime::spawn_blocking(app::gif_service::GifService::startup_cleanup);
     // 0.28.2：插件独立窗口面（会话表 + 窗口编排入口；必须在任何插件窗口打开前管理）
     app.manage(std::sync::Arc::new(app::plugin_surface::PluginSurface::new()));
 
@@ -1933,9 +1932,12 @@ fn setup_app(app: &mut tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error:
 
     // 修复：编辑器恢复草稿存储（原子持久化 + 单调 revision 水位；
     // 与保存目标完全分离，只写 %APPDATA%\blink\editor-drafts）
-    app.manage(std::sync::Arc::new(
-        app::editor_draft::EditorDraftStore::new(),
-    ));
+    let drafts = std::sync::Arc::new(app::editor_draft::EditorDraftStore::new());
+    app.manage(drafts.clone());
+    app::data_maintenance::spawn(
+        app.state::<std::sync::Arc<app::gif_service::GifService>>().inner().clone(),
+        drafts,
+    );
 
     // 0.23.4：编辑器 AI 整理服务（全局单活跃经 ChatService tracker；
     // provider 池与活跃槽在运行时经 app.state 解析）

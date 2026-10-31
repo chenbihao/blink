@@ -101,8 +101,50 @@ impl Default for Budget {
 pub struct VideoOptions {
     pub max_width: Option<u32>,
     pub quality: Quality,
+    pub preset: Option<VideoPreset>,
     pub overwrite: bool,
     pub budget: Budget,
+}
+
+/// 固定、类型化的导出配方；不允许调用方传入任意编码器参数。
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum VideoPreset {
+    #[default]
+    General,
+    HighQuality,
+    Text,
+    Compact,
+}
+impl VideoPreset {
+    fn codec(self) -> &'static str {
+        if self == Self::Compact {
+            "hevc"
+        } else {
+            "h264"
+        }
+    }
+    fn encoder(self) -> &'static str {
+        if self == Self::Compact {
+            "libx265"
+        } else {
+            "libx264"
+        }
+    }
+    fn pixel_format(self) -> &'static str {
+        if self == Self::Text {
+            "yuv444p"
+        } else {
+            "yuv420p"
+        }
+    }
+    fn crf(self) -> &'static str {
+        match self {
+            Self::General => "23",
+            Self::HighQuality | Self::Text => "18",
+            Self::Compact => "25",
+        }
+    }
 }
 #[derive(Clone, serde::Serialize, Debug)]
 #[serde(rename_all = "camelCase")]

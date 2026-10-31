@@ -2585,15 +2585,30 @@ html.eyedropper-picking * {
     cursor: default;
 }
 
-.gif-prep-field select {
-    background: rgba(255, 255, 255, 0.08);
-    color: #e8e8ec;
-    border: 1px solid rgba(255, 255, 255, 0.18);
-    border-radius: 6px;
-    padding: 2px 6px;
-    font-size: 16px;
-    /* 原生下拉弹层随暗色渲染（WebView2 默认白底弹层的根源） */
+#gif-prep-fps {
     color-scheme: dark;
+    min-width: 88px;
+    padding: 4px 6px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--surface);
+    color: var(--text);
+    font: inherit;
+    cursor: pointer;
+}
+
+#gif-prep-fps option {
+    background: var(--bg-deep);
+    color: var(--text);
+}
+
+[data-theme="light"] #gif-prep-fps {
+    color-scheme: light;
+}
+
+#gif-prep-fps:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
 }
 
 .gif-prep-field input[type="checkbox"] {

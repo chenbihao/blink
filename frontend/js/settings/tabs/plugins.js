@@ -13,6 +13,7 @@ import {saveConfig} from "../../shared/config-keys.js";
 import {navigateSettings} from "../navigation.js";
 import {renderWeatherSettings, mountWeatherSettings, WEATHER_EDITOR_CLOSED} from "./weather-settings.js";
 import {bindCredentialFields, refreshCredentialGroups} from "./plugin-credentials.js";
+import {capturePluginDisclosure, restorePluginDisclosure} from "./plugin-disclosure.js";
 import {EVENTS} from "../../shared/event-names.js";
 let pluginsLoadRevision = 0;
 let pluginWrites = 0;
@@ -73,11 +74,6 @@ export function initPluginsTab() {
             // Wait until focus has reached its new target. loadPlugins still protects
             // an active editor, revision conflict, or queued config write.
             setTimeout(() => { if (pendingPluginReload) void loadPlugins(); }, 0);
-        });
-        // Settings windows are reused after hiding; reset only credential disclosure,
-        // keeping the card, saved values and any editor draft in place.
-        window.addEventListener("blur", () => {
-            document.querySelectorAll("#plugins-container .plugin-group[open]").forEach(group => { group.open = false; });
         });
         listen(EVENTS.CONFIG_CHANGED, ({payload}) => {
             if (!payload?.key || payload.key === "plugin_config" || payload.key.startsWith("plugin:")) loadPlugins();
@@ -156,6 +152,7 @@ async function loadPlugins(force = false) {
         return;
     }
     pendingPluginReload = false;
+    const disclosure = capturePluginDisclosure(container);
     for (const editor of weatherEditors.values()) editor.dispose();
     weatherEditors.clear();
     renderedPlugins.clear();
@@ -178,6 +175,7 @@ async function loadPlugins(force = false) {
           </div>
         </div>`).join("");
     container.innerHTML = plugins.map(renderPluginCard).join("") + pendingRows;
+    restorePluginDisclosure(container, disclosure);
     for (const plugin of plugins) bindPluginCardEvents(plugin);
     initSortableLists();
     if (catalogState) renderCatalog();

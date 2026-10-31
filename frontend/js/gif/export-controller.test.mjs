@@ -4,10 +4,11 @@ const nodes = new Map(), events = new Map(), windowEvents = new Map(), calls = [
 function node(id) {
     if (!nodes.has(id)) {
         const classes = new Set();
-        nodes.set(id, {value:'', textContent:'', disabled:false, open:false, options:[{},{},{}], handlers:{},
+        nodes.set(id, {value:id==='export-preset'?'general':'', textContent:'', disabled:false, open:false, options:[{},{},{}], handlers:{},
             classList:{add:c=>classes.add(c), remove:c=>classes.delete(c), toggle(c,on){if(on)classes.add(c);else classes.delete(c);}, contains:c=>classes.has(c)},
             addEventListener(e,h){this.handlers[e]=h;}, removeEventListener(e){delete this.handlers[e];},
-            showModal(){this.open=true;}, close(){this.open=false;}});
+            showModal(){this.open=true;}, close(){this.open=false;},
+            scrollWidth:300, scrollLeft:0, setSelectionRange(start,end){this.selection=[start,end];}});
     }
     return nodes.get(id);
 }
@@ -65,5 +66,66 @@ test('切换会话后迟到开始/进度无效，新任务取消携带准确 job
     assert.deepEqual(calls.findLast(c=>c.command==='gif_cancel_export_job').args,{sessionId:'two',jobId:'new-job'});
     emit({...job('new-job',3,'cancelled','two')});
     assert.equal(node('btn-export-confirm').disabled,false);
+    controller.dispose();
+});
+
+test('MP4 presets show compatibility advice, freeze into requests and stay separate from GIF quality', async()=>{
+    calls.length=0; status=null; runtime={state:'ready'};
+    node('export-format').value='mp4'; node('export-preset').value='text';
+    const controller=createExportController(); controller.setSession('one'); click('btn-export'); await flush();
+    assert.equal(node('export-quality-field').classList.contains('hidden'),true);
+    assert.equal(node('export-preset-field').classList.contains('hidden'),false);
+    assert.match(node('export-preset-note').textContent,/4:4:4/);
+    assert.match(node('export-preset-note').textContent,/无法播放/);
+    node('export-path').value='C:\\text.mp4';
+    const started=click('btn-export-confirm'); await flush();
+    assert.equal(calls.findLast(c=>c.command==='gif_begin_export').args.request.preset,'text');
+    assert.equal(node('export-preset').disabled,true);
+    status=job('preset-job',2,'done'); beginResolve('preset-job'); await started; await flush();
+    assert.equal(node('export-preset').disabled,false);
+    node('export-preset').value='compact'; node('export-preset').handlers.change();
+    assert.match(node('export-preset-note').textContent,/HEVC/);
+    node('export-format').value='gif'; node('export-format').handlers.change(); await flush();
+    assert.equal(node('export-quality-field').classList.contains('hidden'),false);
+    assert.equal(node('export-preset-field').classList.contains('hidden'),true);
+    node('export-quality').value='low';
+    const gifStarted=click('btn-export-confirm'); await flush();
+    const request=calls.findLast(c=>c.command==='gif_begin_export').args.request;
+    assert.equal(request.preset,null); assert.equal(request.quality,'low');
+    status={...job('gif-job',2,'done'),format:'gif'}; beginResolve('gif-job'); await gifStarted; await flush();
+    node('export-format').value='mp4'; node('export-format').handlers.change();
+    assert.equal(node('export-preset').value,'compact');
+    controller.dispose();
+});
+
+test('editable paths normalize on export, Enter respects IME, and stale file pickers cannot overwrite edits', async()=>{
+    calls.length=0; status=null; runtime={state:'ready'};
+    node('export-format').value='mp4'; node('export-preset').value='general';
+    let pickResolve;
+    window.__TAURI__.dialog={save:()=>new Promise(resolve=>{pickResolve=resolve;})};
+    const controller=createExportController(); controller.setSession('one'); click('btn-export'); await flush();
+    const path=node('export-path');
+    path.value='  C:\\中文 空格\\手动文件  '; path.handlers.input();
+    path.handlers.keydown({key:'Enter',isComposing:true});
+    assert.equal(calls.some(c=>c.command==='gif_begin_export'),false);
+    let prevented=false;
+    path.handlers.keydown({key:'Enter',preventDefault(){prevented=true;},stopPropagation(){}});
+    await flush();
+    assert.equal(prevented,true);
+    assert.equal(calls.findLast(c=>c.command==='gif_begin_export').args.request.path,'C:\\中文 空格\\手动文件.mp4');
+    assert.equal(path.value,'C:\\中文 空格\\手动文件.mp4');
+    assert.equal(path.disabled,true);
+    assert.equal(path.scrollLeft,path.scrollWidth);
+    assert.deepEqual(path.selection,[path.value.length,path.value.length]);
+    status=job('edited-path',2,'done'); beginResolve('edited-path'); await flush(); await flush();
+    assert.equal(path.disabled,false);
+    const stalePick=click('btn-pick-path'); await flush();
+    path.value='C:\\new-input.mp4'; path.handlers.input();
+    pickResolve('C:\\stale.mp4'); await stalePick;
+    assert.equal(path.value,'C:\\new-input.mp4');
+    const currentPick=click('btn-pick-path'); await flush();
+    pickResolve('C:\\picked'); await currentPick;
+    assert.equal(path.value,'C:\\picked.mp4');
+    assert.deepEqual(path.selection,[path.value.length,path.value.length]);
     controller.dispose();
 });

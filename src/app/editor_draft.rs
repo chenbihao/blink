@@ -562,6 +562,42 @@ impl EditorDraftStore {
         let max_files = self.max_files;
         let _ = tokio::task::spawn_blocking(move || prune_dir(&dir, max_files)).await;
     }
+
+    /// 启动/定期复核数量上限，保留最近的恢复正文；不按年龄淘汰未保存草稿。
+    pub async fn cleanup(&self) {
+        let _gate = self.gate.lock().await;
+        let dir = self.dir.clone();
+        let max_files = self.max_files;
+        match tokio::task::spawn_blocking(move || {
+            let removed = prune_dir(&dir, max_files)?;
+            // 原子写入中断的临时文件与正式草稿分开回收；同门串行，不碰在途写入。
+            let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(86400);
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    if name.starts_with(".blink-tmp-draft-")
+                        && name.contains(".json-")
+                        && entry.file_type().is_ok_and(|kind| kind.is_file())
+                        && entry
+                            .metadata()
+                            .and_then(|m| m.modified())
+                            .is_ok_and(|t| t < cutoff)
+                    {
+                        std::fs::remove_file(entry.path())?;
+                    }
+                }
+            }
+            Ok::<_, std::io::Error>(removed)
+        })
+        .await
+        {
+            Ok(Ok(removed)) if removed > 0 => tracing::info!(removed, "恢复草稿数量清理完成"),
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => tracing::warn!(%error, "恢复草稿清理失败"),
+            Err(error) => tracing::warn!(%error, "恢复草稿清理任务失败"),
+        }
+    }
 }
 
 impl Default for EditorDraftStore {
@@ -583,6 +619,9 @@ fn prune_dir(dir: &Path, max_files: usize) -> std::io::Result<usize> {
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if !name.starts_with("draft-") || !name.ends_with(".json") {
+            continue;
+        }
+        if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
             continue;
         }
         let mtime = entry
@@ -929,6 +968,50 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn maintenance_keeps_old_recovery_text_and_reaps_only_old_atomic_residue() {
+        let root = tempfile::tempdir().unwrap();
+        let store = EditorDraftStore::with_dir(root.path().to_path_buf());
+        store
+            .save(draft("recover", "ed_old", 1, 1, "仍需恢复的正文"))
+            .await
+            .unwrap();
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(10 * 86400);
+        let old_draft = store.path_for("recover");
+        std::fs::File::options()
+            .write(true)
+            .open(&old_draft)
+            .unwrap()
+            .set_modified(past)
+            .unwrap();
+        let old = root.path().join(".blink-tmp-draft-fixture.json-1");
+        let fresh = root.path().join(".blink-tmp-draft-fixture.json-2");
+        let other = root.path().join(".blink-tmp-other.json-1");
+        for path in [&old, &fresh, &other] {
+            std::fs::write(path, b"temporary").unwrap();
+        }
+        std::fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(past)
+            .unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&other)
+            .unwrap()
+            .set_modified(past)
+            .unwrap();
+        store.cleanup().await;
+        assert_eq!(
+            store.load("recover").await.unwrap().unwrap().body,
+            "仍需恢复的正文"
+        );
+        assert!(!old.exists());
+        assert!(fresh.exists());
+        assert!(other.exists());
     }
 
     #[tokio::test]

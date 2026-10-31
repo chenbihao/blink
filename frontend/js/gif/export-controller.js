@@ -5,10 +5,12 @@ import {ExportJobState, exportPath, isTerminal, progressView} from './export-sta
 export function createExportController({documentRef = document, windowRef = window} = {}) {
     const $ = id => documentRef.getElementById(id);
     const els = Object.fromEntries(['export-dialog','export-format','export-path','export-size','export-quality',
+        'export-quality-field','export-preset','export-preset-field','export-preset-note',
         'export-note','export-engine','export-engine-text','btn-export-install','btn-export','btn-pick-path',
         'btn-export-confirm','btn-export-cancel-req','btn-export-close','btn-export-folder','export-progress-row',
         'export-progress','export-progress-text'].map(id => [id, $(id)]));
     const state = new ExportJobState();
+    let pathRevision = 0;
     let epoch = 0, queryVersion = 0, timer = null, starting = false, disposed = false;
     let availability = null, availabilityError = '', availabilityVersion = 0;
     let statusBusy = false, statusAgain = null, unlisten = null;
@@ -17,14 +19,23 @@ export function createExportController({documentRef = document, windowRef = wind
     const hint = text => { els['export-progress-text'].textContent = text; els['export-progress-row'].classList.remove('hidden'); };
     function render() {
         const mp4 = format() === 'mp4';
-        els['export-note'].textContent = mp4 ? 'MP4 · H.264 · 30fps · 无声 · 单次播放；循环设置仅用于 GIF。' : 'GIF 动图 · 使用时间轴的循环设置。';
+        els['export-note'].textContent = mp4 ? '30fps · 无声 · 单次播放；循环设置仅用于 GIF。' : 'GIF 动图 · 使用时间轴的循环设置。';
+        els['export-quality-field'].classList.toggle('hidden', mp4);
+        els['export-preset-field'].classList.toggle('hidden', !mp4);
+        els['export-preset-note'].classList.toggle('hidden', !mp4);
+        els['export-preset-note'].textContent = {
+            general: 'H.264 · 通用兼容，平衡画质与体积，适合日常分享。',
+            highQuality: 'H.264 · 减少压缩失真，文件通常更大；细小彩色文字仍可能偏色。',
+            text: 'H.264 · 4:4:4 · 减少彩色文字和细线偏色，仍为有损编码；部分播放器或设备可能无法播放。',
+            compact: 'H.265 / HEVC · 更侧重压缩效率，导出较慢；部分设备需额外的 HEVC 播放支持。',
+        }[els['export-preset'].value] || '';
         els['export-engine'].classList.toggle('hidden', !mp4 || availability?.state === 'ready');
         els['export-engine-text'].textContent = availabilityError || (!availability ? '正在检查媒体引擎…' : 'MP4 需要媒体引擎，请在设置中安装或修复 FFmpeg，然后返回此处导出。');
         els['btn-export-confirm'].disabled = !state.sessionId || busy() || (mp4 && availability?.state !== 'ready');
         els['btn-export-cancel-req'].disabled = !state.running;
-        for (const id of ['export-format','export-size','export-quality','btn-pick-path']) els[id].disabled = busy();
+        for (const id of ['export-format','export-path','export-size','export-quality','export-preset','btn-pick-path']) els[id].disabled = busy();
         els['btn-export-close'].textContent = busy() ? '后台继续' : '关闭';
-        const labels = mp4 ? ['高（较大文件）','中（推荐）','低（较小文件）'] : ['高','中','低（最快）'];
+        const labels = ['高','中','低（最快）'];
         Array.from(els['export-quality'].options).forEach((option, index) => { option.textContent = labels[index]; });
         const snapshot = state.snapshot;
         if (!snapshot) return;
@@ -72,13 +83,22 @@ export function createExportController({documentRef = document, windowRef = wind
         }
         render();
     }
+    function writePath(value) {
+        pathRevision++;
+        const input = els['export-path'];
+        input.value = value;
+        input.setSelectionRange(value.length, value.length);
+        input.scrollLeft = input.scrollWidth;
+    }
     async function start() {
         if (busy() || !state.sessionId) return;
         if (format() === 'mp4' && availability?.state !== 'ready') { hint('请先在设置中安装或修复媒体引擎'); refreshAvailability(); return; }
-        const path = els['export-path'].value.trim();
-        if (!path) { hint('请先选择目标文件'); return; }
+        const entered = els['export-path'].value.trim();
+        if (!entered) { hint('请输入完整文件路径，或点击选择…'); return; }
+        const path = exportPath(entered, format());
+        writePath(path);
         const captured = epoch;
-        const request = {sessionId: state.sessionId, path, format: format(), maxWidth: els['export-size'].value ? Number(els['export-size'].value) : null, quality: els['export-quality'].value};
+        const request = {sessionId: state.sessionId, path, format: format(), maxWidth: els['export-size'].value ? Number(els['export-size'].value) : null, quality: els['export-quality'].value, preset: format() === 'mp4' ? els['export-preset'].value : null};
         starting = true; queryVersion++; state.attach(null);
         els['btn-export-folder'].classList.add('hidden');
         els['export-progress'].value = 0; hint('创建导出任务…'); render();
@@ -102,14 +122,20 @@ export function createExportController({documentRef = document, windowRef = wind
         refreshAvailability(); refreshJob(!state.running && !starting); render();
     };
     const pick = async () => {
-        const captured = epoch, selected = format();
+        const captured = epoch, selected = format(), revision = ++pathRevision;
         const stamp = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15).replace('T','-');
         try {
-            const path = await saveDialog({title: `导出 ${selected.toUpperCase()}`, defaultPath: els['export-path'].value || `blink-${stamp}.${selected}`, filters: [{name: selected.toUpperCase(), extensions: [selected]}]});
-            if (captured === epoch && format() === selected && !busy() && !disposed && path) els['export-path'].value = exportPath(path, selected);
-        } catch (error) { if (captured === epoch && !disposed) hint(normalizeError(error).message); }
+            const path = await saveDialog({title: `导出 ${selected.toUpperCase()}`, defaultPath: els['export-path'].value.trim() || `blink-${stamp}.${selected}`, filters: [{name: selected.toUpperCase(), extensions: [selected]}]});
+            if (captured === epoch && revision === pathRevision && format() === selected && !busy() && !disposed && path) writePath(exportPath(path, selected));
+        } catch (error) { if (captured === epoch && revision === pathRevision && !disposed) hint(normalizeError(error).message); }
     };
-    const change = () => { els['export-path'].value = exportPath(els['export-path'].value, format()); render(); refreshAvailability(); };
+    const change = () => { writePath(exportPath(els['export-path'].value.trim(), format())); render(); refreshAvailability(); };
+    const pathInput = () => { pathRevision++; };
+    const pathKey = event => {
+        if (event.key !== 'Enter' || event.isComposing) return;
+        // 文本输入中的 Enter 应提交导出，不能触发 method=dialog 而直接关闭弹窗。
+        event.preventDefault(); event.stopPropagation(); start();
+    };
     const cancel = () => {
         const sessionId = state.sessionId, jobId = state.jobId, captured = epoch;
         if (!jobId || isTerminal(state.snapshot)) return;
@@ -123,8 +149,8 @@ export function createExportController({documentRef = document, windowRef = wind
     };
     const close = () => els['export-dialog'].close();
     const focus = () => { if (els['export-dialog'].open) { refreshAvailability(); refreshJob(!state.running && !starting); } };
-    const bindings = [['btn-export','click',open],['btn-pick-path','click',pick],['btn-export-confirm','click',start],
-        ['export-format','change',change],['btn-export-cancel-req','click',cancel],['btn-export-install','click',install],
+    const bindings = [['export-path','input',pathInput],['export-path','keydown',pathKey],['btn-export','click',open],['btn-pick-path','click',pick],['btn-export-confirm','click',start],
+        ['export-preset','change',render],['export-format','change',change],['btn-export-cancel-req','click',cancel],['btn-export-install','click',install],
         ['btn-export-folder','click',folder],['btn-export-close','click',close]];
     bindings.forEach(([id,event,handler]) => els[id].addEventListener(event, handler));
     windowRef.addEventListener('focus', focus);
@@ -135,7 +161,7 @@ export function createExportController({documentRef = document, windowRef = wind
     return {
         setSession(sessionId) {
             epoch++; queryVersion++; starting = false; clearTimeout(timer); state.reset(sessionId);
-            els['export-path'].value = ''; els['export-progress-row'].classList.add('hidden'); els['btn-export-folder'].classList.add('hidden');
+            writePath(''); els['export-progress-row'].classList.add('hidden'); els['btn-export-folder'].classList.add('hidden');
             if (els['export-dialog'].open) els['export-dialog'].close();
             render(); refreshJob(true);
         },

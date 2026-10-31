@@ -1,6 +1,6 @@
 //! 日志系统：文件轮转 + 控制台 + 动态级别（reload）。
 //!
-//! - 文件：%APPDATA%\blink\logs\，每日轮转，保留 7 天（启动时清理旧文件）。
+//! - 文件：%APPDATA%\blink\logs\，每日轮转，保留 7 天（启动与应用定期维护清理）。
 //! - 控制台：始终输出 stderr（release 无控制台时无害丢弃；debug 可见）。
 //! - 级别：EnvFilter + reload，默认 error，update_level 运行时切换（设置页触发）。
 
@@ -82,7 +82,7 @@ pub fn init(level: &str) {
         )
         .init();
 
-    clean_old_logs(&dir);
+    cleanup_old_logs(&dir);
     install_panic_hook(dir);
 }
 
@@ -224,32 +224,82 @@ fn parse_level(level: &str) -> String {
     }
 }
 
-/// 清理超过保留天数的旧日志（按文件 mtime，启动时执行）。
-fn clean_old_logs(dir: &PathBuf) {
+/// 启动与定期清理共用：只处理 Blink 的日期日志（含 panic 与旧命名）。
+pub fn cleanup_old_logs(dir: &std::path::Path) -> usize {
     let cutoff = SystemTime::now() - Duration::from_secs(60 * 60 * 24 * RETAIN_DAYS);
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
+        return 0;
     };
+    let mut removed = 0;
+    let today = chrono::Local::now().date_naive();
     for entry in entries.flatten() {
-        let is_log = entry
-            .file_name()
-            .to_str()
-            .is_some_and(|n| n.starts_with("blink.") && n.ends_with(".log"));
-        if !is_log {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let day = name
+            .strip_prefix("blink.panic.")
+            .and_then(|n| n.strip_suffix(".log"))
+            .or_else(|| {
+                name.strip_prefix("blink.")
+                    .and_then(|n| n.strip_suffix(".log"))
+            })
+            .or_else(|| name.strip_prefix("blink.log."));
+        let date = day.and_then(|day| chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").ok());
+        if !date.is_some_and(|date| date < today)
+            || !entry.file_type().is_ok_and(|kind| kind.is_file())
+        {
             continue;
         }
         if let Ok(meta) = entry.metadata()
             && let Ok(modified) = meta.modified()
             && modified < cutoff
         {
-            let _ = std::fs::remove_file(entry.path());
+            match std::fs::remove_file(entry.path()) {
+                Ok(()) => removed += 1,
+                Err(error) => tracing::warn!(%error, "过期日志清理失败"),
+            }
         }
     }
+    if removed > 0 {
+        tracing::info!(removed, "过期日志清理完成");
+    }
+    removed
 }
 
 #[cfg(test)]
 mod tests {
     use super::{parse_level, write_panic_report};
+
+    #[test]
+    fn cleanup_keeps_current_recent_and_unrelated_logs_and_removes_legacy_names() {
+        use std::{
+            fs::File,
+            time::{Duration, SystemTime},
+        };
+        let root = tempfile::tempdir().unwrap();
+        let today = chrono::Local::now().date_naive();
+        let old_day = today - chrono::Days::new(10);
+        let old_time = SystemTime::now() - Duration::from_secs(10 * 86400);
+        let mut paths = Vec::new();
+        for name in [
+            format!("blink.{old_day}.log"),
+            format!("blink.panic.{old_day}.log"),
+            format!("blink.log.{old_day}"),
+            format!("blink.{today}.log"),
+            "other.log".into(),
+        ] {
+            let path = root.path().join(name);
+            File::create(&path).unwrap().set_modified(old_time).unwrap();
+            paths.push(path);
+        }
+        let recent = root
+            .path()
+            .join(format!("blink.{}.log", today - chrono::Days::new(1)));
+        File::create(&recent).unwrap();
+        assert_eq!(super::cleanup_old_logs(root.path()), 3);
+        assert!(paths[..3].iter().all(|path| !path.exists()));
+        assert!(paths[3..].iter().all(|path| path.exists()));
+        assert!(recent.exists());
+    }
 
     #[test]
     fn panic_report_is_written_synchronously_and_appended() {

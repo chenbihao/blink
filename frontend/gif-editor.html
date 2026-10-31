@@ -143,20 +143,12 @@
         <div class="form-row">
             <label>目标文件
                 <div class="path-row">
-                    <input id="export-path" readonly type="text"/>
+                    <input id="export-path" type="text" placeholder="输入完整文件路径，或点击选择…" spellcheck="false" autocomplete="off"/>
                     <button class="btn" id="btn-pick-path" type="button">选择…</button>
                 </div>
             </label>
         </div>
-        <div class="form-row">
-            <label>尺寸
-                <select id="export-size">
-                    <option value="" selected>原始</option>
-                    <option value="640">宽 ≤640</option>
-                    <option value="480">宽 ≤480</option>
-                    <option value="320">宽 ≤320</option>
-                </select>
-            </label>
+        <div class="form-row" id="export-quality-field">
             <label>质量
                 <select id="export-quality">
                     <option value="high">高</option>
@@ -165,6 +157,31 @@
                 </select>
             </label>
         </div>
+        <div class="form-row hidden" id="export-preset-field">
+            <label>导出预设
+                <select id="export-preset" aria-describedby="export-preset-note">
+                    <option value="general" selected>通用分享（推荐）</option>
+                    <option value="highQuality">高画质</option>
+                    <option value="text">色彩保真</option>
+                    <option value="compact">小体积</option>
+                </select>
+            </label>
+        </div>
+        <p class="export-note hidden" id="export-preset-note" aria-live="polite"></p>
+        <details class="export-advanced">
+            <summary>更多选项</summary>
+            <div class="form-row">
+                <label>分辨率
+                    <select id="export-size" aria-describedby="export-size-note">
+                        <option value="" selected>原始分辨率（推荐）</option>
+                        <option value="640">宽度不超过 640 像素</option>
+                        <option value="480">宽度不超过 480 像素</option>
+                        <option value="320">宽度不超过 320 像素</option>
+                    </select>
+                </label>
+            </div>
+            <p class="export-note" id="export-size-note">按比例缩小画面以减小文件体积，不会放大原图。保留清晰细节请选择原始分辨率。</p>
+        </details>
         <div class="progress-row hidden" id="export-progress-row">
             <progress id="export-progress" max="100" value="0"></progress>
             <span id="export-progress-text">编码中…</span>

@@ -2287,15 +2287,14 @@ document.addEventListener('keydown', (e) => {
     }
 
     if (e.key === 'Escape') {
-        // 0.28.7：准备面 fps 下拉持有焦点时 ESC 只关下拉（原生行为），
-        // 不冒泡成「退出录制准备」
-        if (e.target && e.target.tagName === 'SELECT') return;
-        e.preventDefault();
-        // 0.28.7：GIF 录制准备模式——ESC 先退回截图标注模式
+        // 准备态优先退回截图，不能因控件持有焦点而永久忽略 Esc。
         if (isGifPrepActive()) {
+            e.preventDefault();
             exitGifRecordMode();
             return;
         }
+        if (e.target && e.target.tagName === 'SELECT') return;
+        e.preventDefault();
         // 0.15.7：长截图采集阶段——ESC 先退出长截图模式
         if (isScrollCaptureActive()) {
             exitScrollCapture().catch(() => {
@@ -2357,7 +2356,7 @@ window.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
     if (!document.body.classList.contains('image-editor-mode')) return;
     if (imageEditorEscExempt(e)) return;
-    if (isScrollCaptureActive()) return;
+    if (isScrollCaptureActive() || isGifPrepActive()) return;
     e.preventDefault();
     e.stopPropagation();
     console.debug('[image-editor] ESC（窗口捕获层）→ 整体取消编辑会话', {

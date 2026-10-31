@@ -87,7 +87,16 @@ fn task_lease_is_exclusive_and_released() {
 fn artifact_validation_rejects_wrong_codec_clock_color_or_extra_streams() {
     let valid = serde_json::json!({"streams":[{"codec_type":"video","codec_name":"h264","width":66,"height":68,
         "pix_fmt":"yuv420p","nb_frames":"24","avg_frame_rate":"30/1","duration":"0.800000","color_range":"tv","color_space":"bt709"}]});
-    assert!(encode::verify_metadata(&serde_json::to_vec(&valid).unwrap(), 66, 68, 24).is_ok());
+    assert!(
+        encode::verify_metadata(
+            &serde_json::to_vec(&valid).unwrap(),
+            66,
+            68,
+            24,
+            VideoPreset::General
+        )
+        .is_ok()
+    );
     for (field, value) in [
         ("codec_name", serde_json::json!("hevc")),
         ("width", serde_json::json!(64)),
@@ -101,7 +110,14 @@ fn artifact_validation_rejects_wrong_codec_clock_color_or_extra_streams() {
         let mut wrong = valid.clone();
         wrong["streams"][0][field] = value;
         assert!(
-            encode::verify_metadata(&serde_json::to_vec(&wrong).unwrap(), 66, 68, 24).is_err(),
+            encode::verify_metadata(
+                &serde_json::to_vec(&wrong).unwrap(),
+                66,
+                68,
+                24,
+                VideoPreset::General
+            )
+            .is_err(),
             "{field}"
         );
     }
@@ -110,8 +126,53 @@ fn artifact_validation_rejects_wrong_codec_clock_color_or_extra_streams() {
         .as_array_mut()
         .unwrap()
         .push(serde_json::json!({"codec_type":"audio"}));
-    assert!(encode::verify_metadata(&serde_json::to_vec(&audio).unwrap(), 66, 68, 24).is_err());
-    assert!(encode::verify_metadata(b"not-json", 66, 68, 24).is_err());
+    assert!(
+        encode::verify_metadata(
+            &serde_json::to_vec(&audio).unwrap(),
+            66,
+            68,
+            24,
+            VideoPreset::General
+        )
+        .is_err()
+    );
+    assert!(encode::verify_metadata(b"not-json", 66, 68, 24, VideoPreset::General).is_err());
+}
+
+#[test]
+fn preset_validation_accepts_only_the_requested_codec_and_chroma() {
+    for preset in [
+        VideoPreset::General,
+        VideoPreset::HighQuality,
+        VideoPreset::Text,
+        VideoPreset::Compact,
+    ] {
+        let codec = if preset == VideoPreset::Compact {
+            "hevc"
+        } else {
+            "h264"
+        };
+        let pixels = if preset == VideoPreset::Text {
+            "yuv444p"
+        } else {
+            "yuv420p"
+        };
+        let mut metadata = serde_json::json!({"streams":[{"codec_type":"video","codec_name":codec,"width":66,"height":68,
+            "pix_fmt":pixels,"nb_frames":"24","avg_frame_rate":"30/1","duration":"0.800000","color_range":"tv","color_space":"bt709"}]});
+        assert!(
+            encode::verify_metadata(&serde_json::to_vec(&metadata).unwrap(), 66, 68, 24, preset)
+                .is_ok()
+        );
+        metadata["streams"][0]["pix_fmt"] = serde_json::json!(if pixels == "yuv420p" {
+            "yuv444p"
+        } else {
+            "yuv420p"
+        });
+        assert!(
+            encode::verify_metadata(&serde_json::to_vec(&metadata).unwrap(), 66, 68, 24, preset)
+                .is_err()
+        );
+    }
 }
 
 #[test]
@@ -347,6 +408,49 @@ async fn real_mp4_pipeline_smoke() {
         0
     );
     eprintln!("real MP4 stats: {stats:?}");
+    for preset in [
+        VideoPreset::General,
+        VideoPreset::HighQuality,
+        VideoPreset::Text,
+        VideoPreset::Compact,
+    ] {
+        let runtime = crate::managed_runtime::ffmpeg::test_lease_at(temp.path());
+        let stats = export_mp4(
+            &task,
+            runtime,
+            Synthetic {
+                width: 65,
+                height: 67,
+                frames: 1,
+            },
+            VideoPlan {
+                width: 65,
+                height: 67,
+                frames: frames(&[100]),
+            },
+            VideoOptions {
+                preset: Some(preset),
+                ..Default::default()
+            },
+            temp.path().join(format!("preset-{preset:?}.mp4")),
+            tokio_util::sync::CancellationToken::new(),
+            Arc::new(|_| {}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (stats.width, stats.height, stats.written_frames),
+            (66, 68, 3)
+        );
+        assert_eq!(
+            stats.codec,
+            if preset == VideoPreset::Compact {
+                "hevc"
+            } else {
+                "h264"
+            }
+        );
+    }
     for (w, h, durations) in [(2560, 1600, vec![250; 4]), (64, 64, vec![6000])] {
         let runtime = crate::managed_runtime::ffmpeg::test_lease_at(temp.path());
         let count = durations.len() as u32;

@@ -88,6 +88,10 @@ export function exitGifRecordMode() {
     if (toolbar && !document.body.classList.contains('image-editor-mode')) {
         toolbar.classList.remove('hidden');
     }
+    if (!ss.sent) {
+        if (ss.selCss) positionToolbar({...ss.selCss}, true);
+        document.getElementById('btn-gif')?.focus({preventScroll: true});
+    }
 }
 
 /** 开始录制：读取当前（可能已拖动过的）选区 + 准备栏配置 → 后端流水线。 */
@@ -139,6 +143,13 @@ export async function startGifRecordingFromPrep() {
 
 /** 绑定准备栏按钮（index.js 初始化时调用一次）。 */
 export function bindGifPrepBar() {
+    // 在窗口捕获阶段消费准备态 Esc，避免控件/浮层先吞掉；开始录制后由控制条接管。
+    window.addEventListener('keydown', (event) => {
+        if (event.key !== 'Escape' || event.isComposing || !isGifPrepActive() || ss.sent) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        exitGifRecordMode();
+    }, true);
     document.getElementById('gif-prep-start')?.addEventListener('click', () => {
         startGifRecordingFromPrep();
     });

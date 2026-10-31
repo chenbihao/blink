@@ -128,7 +128,7 @@ Screenshots support annotation (rectangle, arrow, text, brush, blur, mosaic, etc
 Select a screenshot region, then choose from the toolbar:
 
 - **Scrolling capture** — Scroll the page to stitch a long screenshot, or enable automatic scrolling. Annotate, copy, or save when done.
-- **Record GIF** — Choose the frame rate and cursor option, then start, pause, or resume. After stopping, trim the ends, delete frames, adjust speed and frame duration, and export your walkthrough as GIF or MP4. MP4 uses the optional media engine, with a setup link in the export dialog, and produces a silent video.
+- **Record (GIF / MP4)** — Choose the frame rate and cursor option, then start, pause, or resume. After stopping, trim the ends, delete frames, adjust speed and frame duration, and export your walkthrough as GIF or MP4. MP4 uses the optional media engine, with a setup link in the export dialog, and produces a silent video.
 
 ---
 

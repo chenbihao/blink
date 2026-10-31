@@ -10,7 +10,7 @@ use std::{
 use tokio::{sync::mpsc, time::Instant};
 use tokio_util::sync::CancellationToken;
 
-/// 30fps BGRA → H.264 MP4。整个任务只保留一个缓存帧、一个排队帧和一个写入帧。
+/// 30fps BGRA → MP4。整个任务只保留一个缓存帧、一个排队帧和一个写入帧。
 pub async fn export_mp4<S: FrameSource>(
     _task: &TaskLease,
     runtime: RuntimeLease,
@@ -22,6 +22,7 @@ pub async fn export_mp4<S: FrameSource>(
     progress: ProgressCallback,
 ) -> Result<VideoStats, MediaError> {
     let started = std::time::Instant::now();
+    let preset = options.preset.unwrap_or_default();
     let deadline = Instant::now() + options.budget.timeout;
     let sampling = SamplingPlan::new(&plan.frames, source.frame_count(), &options.budget)?;
     let (width, height) = (plan.width, plan.height);
@@ -106,7 +107,7 @@ pub async fn export_mp4<S: FrameSource>(
         "pipe:0",
         "-an",
         "-c:v",
-        "libx264",
+        preset.encoder(),
         "-preset",
         "veryfast",
         "-tune",
@@ -116,10 +117,13 @@ pub async fn export_mp4<S: FrameSource>(
         "-filter_threads",
         "1",
         "-crf",
-        options.quality.crf(),
+        options
+            .preset
+            .map_or(options.quality.crf(), VideoPreset::crf),
         "-vf",
         &format!(
-            "scale={scaled_w}:{scaled_h}:flags=lanczos:in_range=full:out_range=tv:out_color_matrix=bt709,pad={out_w}:{out_h}:0:0:color=black,format=yuv420p"
+            "scale={scaled_w}:{scaled_h}:flags=lanczos:in_range=full:out_range=tv:out_color_matrix=bt709,pad={out_w}:{out_h}:0:0:color=black,format={}",
+            preset.pixel_format()
         ),
         "-color_range",
         "tv",
@@ -140,6 +144,15 @@ pub async fn export_mp4<S: FrameSource>(
         "-f",
         "mp4",
     ]);
+    if preset == VideoPreset::Compact {
+        // x265 的线程池不受通用 -threads 完整约束，显式限制，避免占满 CPU。
+        args.extend(process::args(&[
+            "-x265-params",
+            "pools=1:frame-threads=1:wpp=0",
+            "-tag:v",
+            "hvc1",
+        ]));
+    }
     args.push(temp.0.as_os_str().to_owned());
     let encoded = process::run(
         &runtime.ffmpeg,
@@ -192,7 +205,7 @@ pub async fn export_mp4<S: FrameSource>(
         },
     )
     .await?;
-    verify_metadata(&metadata, out_w, out_h, total)?;
+    verify_metadata(&metadata, out_w, out_h, total, preset)?;
     let decoded = Arc::new(AtomicU32::new(0));
     let decoded2 = decoded.clone();
     let callback = progress.clone();
@@ -267,6 +280,7 @@ pub async fn export_mp4<S: FrameSource>(
     .await
     .map_err(|_| MediaError::Process("提交文件任务失败"))??;
     tracing::info!(
+        ?preset,
         frames = total,
         width = out_w,
         height = out_h,
@@ -276,7 +290,7 @@ pub async fn export_mp4<S: FrameSource>(
     );
     Ok(VideoStats {
         format: "mp4",
-        codec: "h264",
+        codec: preset.codec(),
         width: out_w,
         height: out_h,
         source_frames: plan.frames.len() as u32,
@@ -294,6 +308,7 @@ pub(super) fn verify_metadata(
     width: u32,
     height: u32,
     frames: u32,
+    preset: VideoPreset,
 ) -> Result<(), MediaError> {
     let value: serde_json::Value =
         serde_json::from_slice(bytes).map_err(|_| MediaError::Verify("元数据格式"))?;
@@ -302,9 +317,9 @@ pub(super) fn verify_metadata(
         .filter(|s| s.len() == 1)
         .and_then(|s| s.first());
     if !stream.is_some_and(|s| {
-        s["codec_name"] == "h264"
+        s["codec_name"] == preset.codec()
             && s["codec_type"] == "video"
-            && s["pix_fmt"] == "yuv420p"
+            && s["pix_fmt"] == preset.pixel_format()
             && s["width"] == width
             && s["height"] == height
             && s["nb_frames"] == frames.to_string()
