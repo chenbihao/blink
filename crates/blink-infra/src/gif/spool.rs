@@ -301,16 +301,27 @@ impl SpoolReader {
 
     /// 按需解码单帧（随机访问；校验长度）。
     pub fn read_frame(&self, idx: u32) -> Result<Vec<u8>, SpoolError> {
+        self.read_frame_bounded(idx, 16 << 20)
+    }
+
+    /// 解压前校验索引预算，解压时限制输出，损坏素材不能突破帧缓冲上限。
+    pub fn read_frame_bounded(&self, idx: u32, max_bytes: usize) -> Result<Vec<u8>, SpoolError> {
         let Some(entry) = self.index.get(idx as usize) else {
             return Err(SpoolError::FrameOutOfRange(idx, self.index.len() as u32));
         };
+        if entry.r as usize > max_bytes || entry.c as usize > max_bytes + (1 << 20) {
+            return Err(SpoolError::CorruptFrame(idx));
+        }
         let mut f = File::open(self.dir.join("spool.bin"))?;
         f.seek(SeekFrom::Start(entry.o))?;
         let mut compressed = vec![0u8; entry.c as usize];
         f.read_exact(&mut compressed)?;
-        let raw = zstd::stream::decode_all(&compressed[..])
+        let decoder = zstd::stream::read::Decoder::new(&compressed[..])
             .map_err(|_| SpoolError::CorruptFrame(idx))?;
-        if raw.len() != entry.r as usize {
+        let mut raw = Vec::with_capacity(entry.r as usize);
+        decoder.take(max_bytes as u64 + 1).read_to_end(&mut raw)
+            .map_err(|_| SpoolError::CorruptFrame(idx))?;
+        if raw.len() != entry.r as usize || raw.len() > max_bytes {
             return Err(SpoolError::CorruptFrame(idx));
         }
         Ok(raw)

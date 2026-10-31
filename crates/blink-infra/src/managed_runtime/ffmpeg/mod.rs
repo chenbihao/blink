@@ -13,6 +13,10 @@ mod install;
 mod probe;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(crate) use tests::test_archive_lease;
+#[cfg(test)]
+pub(crate) fn test_lease_at(root: &Path) -> RuntimeLease { acquire_at(root).unwrap() }
 
 pub const KIND: &str = "ffmpeg";
 pub const NOTICE: &str = include_str!("../../../../../resources/runtimes/ffmpeg-NOTICE.txt");
@@ -210,6 +214,10 @@ pub struct RuntimeLease {
     pub ffprobe: PathBuf,
     _guard: File,
     slot: String,
+}
+
+impl RuntimeLease {
+    pub fn build_id(&self) -> &str { &self.slot }
 }
 
 pub fn acquire() -> Result<RuntimeLease, Error> {

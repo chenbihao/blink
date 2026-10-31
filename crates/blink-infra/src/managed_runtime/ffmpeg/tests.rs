@@ -204,6 +204,19 @@ fn archive_selects_required_files_and_rejects_bombs_escapes_and_cancellation() {
 }
 
 struct Silent;
+pub(crate) async fn test_archive_lease(root: &Path) -> RuntimeLease {
+    use sha2::{Digest, Sha256};
+    let archive = PathBuf::from(std::env::var_os("BLINK_FFMPEG_TEST_ARCHIVE").expect("指定真实发行包"));
+    let lock = lock().unwrap();
+    let mut input = File::open(&archive).unwrap(); let mut hash = Sha256::new();
+    std::io::copy(&mut input, &mut hash).unwrap();
+    assert_eq!(format!("{:x}", hash.finalize()), lock.runtime.sha256);
+    let staging = root.join("fixture-stage"); std::fs::create_dir_all(&staging).unwrap();
+    let cancel = CancellationToken::new();
+    install::prepare_archive(&lock, archive, &staging, &cancel, &Silent).await.unwrap();
+    install::publish(root, &staging.join("payload"), &lock, "media-test", &cancel).unwrap();
+    acquire_at(root).unwrap()
+}
 impl InstallReporter for Silent {
     fn on_stage(&self, stage: &str) {
         tracing::info!(stage, "媒体运行时冒烟阶段");

@@ -20,6 +20,15 @@ where
     let mut child = command
         .spawn()
         .map_err(|_| Error::SelfTestFailed("无法启动 FFmpeg 自检程序".into()))?;
+    #[cfg(windows)]
+    let _job = match child.id().and_then(|pid| crate::platform::process::assign_job_object(pid).ok()) {
+        Some(job) => Some(job),
+        None if child.try_wait()?.is_some() => None,
+        None => {
+            let _ = child.kill().await;
+            return Err(Error::SelfTestFailed("无法监管 FFmpeg 自检进程树".into()));
+        }
+    };
     let mut stdout = child
         .stdout
         .take()

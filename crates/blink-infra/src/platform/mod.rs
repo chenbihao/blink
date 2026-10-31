@@ -63,3 +63,11 @@ pub fn no_window_tokio(mut cmd: tokio::process::Command) -> tokio::process::Comm
 pub fn no_window_tokio(cmd: tokio::process::Command) -> tokio::process::Command {
     cmd
 }
+
+/// 媒体计算使用低于普通交互的优先级，保护快捷键与输入线程。
+pub fn background_media_command(cmd: tokio::process::Command) -> tokio::process::Command {
+    let mut cmd = no_window_tokio(cmd);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW | 0x00004000); // BELOW_NORMAL_PRIORITY_CLASS
+    cmd
+}
