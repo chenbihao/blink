@@ -252,7 +252,7 @@ pub fn get_license_notices() -> Vec<LicenseNotice> {
     let version = managed_runtime::lock_entry(KIND_EVERYTHING)
         .ok()
         .map(|e| e.version);
-    vec![LicenseNotice {
+    let mut notices = vec![LicenseNotice {
         id: KIND_EVERYTHING.to_string(),
         name: "Everything (voidtools)".to_string(),
         version,
@@ -260,5 +260,17 @@ pub fn get_license_notices() -> Vec<LicenseNotice> {
         homepage: Some("https://www.voidtools.com/".to_string()),
         installed_path,
         body: managed_runtime::EVERYTHING_LICENSE_TXT.to_string(),
-    }]
+    }];
+    if let Ok(lock) = managed_runtime::ffmpeg::lock() {
+        notices.push(LicenseNotice {
+            id: managed_runtime::ffmpeg::KIND.into(),
+            name: "FFmpeg (Gyan Windows static build)".into(),
+            version: Some(lock.runtime.version),
+            license: lock.license,
+            homepage: Some(lock.homepage),
+            installed_path: managed_runtime::ffmpeg::license_path().map(|p| p.display().to_string()),
+            body: format!("{}\n{}\nSource: {}\nBuild: {}", managed_runtime::ffmpeg::NOTICE, managed_runtime::ffmpeg::LICENSE, lock.source_url, lock.build_source_url),
+        });
+    }
+    notices
 }

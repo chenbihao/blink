@@ -355,6 +355,7 @@ export function initManagedEverything({refreshStatus: refresh}) {
     });
 
     listen(EVENTS.MANAGED_RUNTIME_INSTALL, (event) => {
+        if (event.payload?.kind !== "everything") return;
         handleInstallEvent(event.payload);
     });
     void refreshStatus();

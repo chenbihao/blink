@@ -28,6 +28,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+mod archive;
+pub mod ffmpeg;
+
 /// 编译期嵌入的运行时锁文件（版本 + URL + SHA-256 + 大小的 single source of truth）。
 pub const MANAGED_RUNTIME_LOCK_JSON: &str =
     include_str!("../../../resources/runtimes/everything-asset-lock.json");
@@ -39,7 +42,7 @@ pub const EVERYTHING_LICENSE_TXT: &str =
 /// artifact 目录内许可文件名（与官方发行包惯例一致）。
 const LICENSE_FILE_NAME: &str = "License.txt";
 
-/// 托管运行时种类（当前仅 Everything；新增成员在此扩展）。
+/// Everything 常驻运行时；FFmpeg 的安装/任务策略位于 `ffmpeg` 子模块。
 pub const KIND_EVERYTHING: &str = "everything";
 
 // ── 错误 ───────────────────────────────────────────────────────────────────
@@ -105,7 +108,7 @@ pub struct RuntimeLockEntry {
     pub sha256: String,
     pub size_bytes: u64,
     pub exe_relpath: String,
-    /// exe 文件头 magic 前缀（GUI 程序无 --version 输出，见模块注释）。
+    /// 由种类适配器解释：Everything 为 PE magic，FFmpeg 为版本输出前缀。
     pub version_check: String,
 }
 
@@ -118,8 +121,10 @@ impl RuntimeLockEntry {
 
 /// 解析嵌入的锁文件。
 pub fn parse_lock() -> Result<ManagedRuntimeLock, ManagedRuntimeError> {
-    serde_json::from_str(MANAGED_RUNTIME_LOCK_JSON)
-        .map_err(|e| ManagedRuntimeError::LockParse(e.to_string()))
+    let mut lock: ManagedRuntimeLock = serde_json::from_str(MANAGED_RUNTIME_LOCK_JSON)
+        .map_err(|e| ManagedRuntimeError::LockParse(e.to_string()))?;
+    lock.runtimes.push(ffmpeg::lock()?.runtime);
+    Ok(lock)
 }
 
 /// 取指定种类的锁定条目。
@@ -128,9 +133,7 @@ pub fn lock_entry(kind: &str) -> Result<RuntimeLockEntry, ManagedRuntimeError> {
     lock.runtimes
         .into_iter()
         .find(|e| e.kind == kind)
-        .ok_or_else(|| {
-            ManagedRuntimeError::LockParse(format!("锁文件缺少 {kind} 条目"))
-        })
+        .ok_or_else(|| ManagedRuntimeError::LockParse(format!("锁文件缺少 {kind} 条目")))
 }
 
 // ── 路径与状态 ───────────────────────────────────────────────────────────────
@@ -151,6 +154,9 @@ fn artifact_dir(kind: &str) -> Result<PathBuf, ManagedRuntimeError> {
 /// 未安装返回 None——调用方转为「未安装」状态/错误项，不回退系统 PATH：
 /// 版本锁定与系统隔离是托管体系的核心语义。
 pub fn resolve(kind: &str) -> Option<PathBuf> {
+    if kind == ffmpeg::KIND {
+        return ffmpeg::resolve();
+    }
     let entry = lock_entry(kind).ok()?;
     let exe = root().join(entry.artifact_id()).join(&entry.exe_relpath);
     exe.is_file().then_some(exe)
@@ -158,6 +164,9 @@ pub fn resolve(kind: &str) -> Option<PathBuf> {
 
 /// 已安装 artifact 内许可文件路径（不存在安装则 None；文件是否已落地另查）。
 pub fn license_path(kind: &str) -> Option<PathBuf> {
+    if kind == ffmpeg::KIND {
+        return ffmpeg::license_path();
+    }
     let entry = lock_entry(kind).ok()?;
     let dir = root().join(entry.artifact_id());
     dir.is_dir().then(|| dir.join(LICENSE_FILE_NAME))
@@ -168,6 +177,9 @@ pub fn license_path(kind: &str) -> Option<PathBuf> {
 /// 覆盖两类场景：新安装事务在 promote 后调用；0.26.19 之前的老安装由
 /// 调用方（关于页许可查询等低频路径）补偿调用。未安装返回 Ok(None)。
 pub fn ensure_license(kind: &str) -> Result<Option<PathBuf>, ManagedRuntimeError> {
+    if kind == ffmpeg::KIND {
+        return Ok(ffmpeg::license_path());
+    }
     let Some(path) = license_path(kind) else {
         return Ok(None);
     };
@@ -191,7 +203,11 @@ pub fn acquire_instance_lease(kind: &str) -> Result<std::fs::File, ManagedRuntim
 
 fn acquire_instance_lease_at(path: &Path) -> Result<std::fs::File, ManagedRuntimeError> {
     let file = std::fs::OpenOptions::new()
-        .read(true).write(true).create(true).truncate(false).open(path)?;
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
     file.try_lock().map_err(|error| match error {
         std::fs::TryLockError::WouldBlock => ManagedRuntimeError::InstanceBusy,
         std::fs::TryLockError::Error(error) => ManagedRuntimeError::Io(error),
@@ -245,6 +261,10 @@ pub async fn install(
     cancel_token: Option<&tokio_util::sync::CancellationToken>,
     reporter: &dyn InstallReporter,
 ) -> Result<(), ManagedRuntimeError> {
+    if kind == ffmpeg::KIND {
+        let cancel = cancel_token.cloned().unwrap_or_default();
+        return ffmpeg::install(false, &cancel, reporter).await;
+    }
     {
         let mut guard = INSTALLING.lock().expect("INSTALLING 锁中毒");
         let key: &'static str = KIND_EVERYTHING;
@@ -345,7 +365,9 @@ async fn install_inner(
     }
     if let Err(e) = std::fs::rename(&extract_dir, &target) {
         cleanup(&staging);
-        return Err(ManagedRuntimeError::InstallFailed(format!("promote 失败: {e}")));
+        return Err(ManagedRuntimeError::InstallFailed(format!(
+            "promote 失败: {e}"
+        )));
     }
     cleanup(&staging);
 
@@ -355,10 +377,7 @@ async fn install_inner(
     }
 
     reporter.on_stage("done");
-    reporter.on_log(
-        "info",
-        &format!("Everything {} 安装完成", entry.version),
-    );
+    reporter.on_log("info", &format!("Everything {} 安装完成", entry.version));
     tracing::info!(
         kind,
         version = %entry.version,
@@ -403,16 +422,19 @@ async fn download_archive(
                 if has_next {
                     reporter.on_log(
                         "warn",
-                        &format!("下载失败（{e}），切换下载源 {}/{}", idx + 2, candidates.len()),
+                        &format!(
+                            "下载失败（{e}），切换下载源 {}/{}",
+                            idx + 2,
+                            candidates.len()
+                        ),
                     );
                 }
                 last_err = Some(e);
             }
         }
     }
-    Err(last_err.unwrap_or_else(|| {
-        ManagedRuntimeError::Download(format!("无可用下载源 ({})", entry.url))
-    }))
+    Err(last_err
+        .unwrap_or_else(|| ManagedRuntimeError::Download(format!("无可用下载源 ({})", entry.url))))
 }
 
 /// 单候选源下载 + 全量 SHA-256 校验（流式 hash，覆盖写 staging 独占文件）。
@@ -451,6 +473,12 @@ async fn download_once(
         )));
     }
 
+    if response
+        .content_length()
+        .is_some_and(|n| n > entry.size_bytes)
+    {
+        return Err(ManagedRuntimeError::Download("下载超过锁定大小".into()));
+    }
     let progress_total = response.content_length().or(Some(entry.size_bytes));
     let mut hasher = Sha256::new();
     let mut stream = response.bytes_stream();
@@ -459,9 +487,13 @@ async fn download_once(
     let mut file = tokio::fs::File::create(dest).await?;
     loop {
         tokio::select! {
-            chunk = stream.next() => {
+            chunk = tokio::time::timeout(std::time::Duration::from_secs(30), stream.next()) => {
+                let chunk = chunk.map_err(|_| ManagedRuntimeError::Download("下载响应体连续 30 秒无进度".into()))?;
                 match chunk {
                     Some(Ok(bytes)) => {
+                        if bytes.len() as u64 > entry.size_bytes.saturating_sub(written) {
+                            return Err(ManagedRuntimeError::Download("下载超过锁定大小".into()));
+                        }
                         hasher.update(&bytes);
                         file.write_all(&bytes).await?;
                         written += bytes.len() as u64;
@@ -483,6 +515,9 @@ async fn download_once(
         }
     }
     file.flush().await?;
+    if written != entry.size_bytes {
+        return Err(ManagedRuntimeError::Download("下载大小与锁定值不符".into()));
+    }
 
     let actual = format!("{:x}", hasher.finalize());
     if actual != entry.sha256.to_lowercase() {
@@ -498,33 +533,7 @@ async fn download_once(
 
 /// 解压 zip 全部 entry 到 `dest`（zip slip 防护：拒绝绝对路径 / 盘符 / `..` 段）。
 fn extract_zip(archive: &Path, dest: &Path) -> Result<(), ManagedRuntimeError> {
-    let file = std::fs::File::open(archive)?;
-    let mut zip = zip::ZipArchive::new(file)
-        .map_err(|e| ManagedRuntimeError::InstallFailed(format!("ZIP 打开失败: {e}")))?;
-
-    std::fs::create_dir_all(dest)?;
-    for i in 0..zip.len() {
-        let mut entry = zip
-            .by_index(i)
-            .map_err(|e| ManagedRuntimeError::InstallFailed(format!("ZIP entry 读取失败: {e}")))?;
-        let name = entry.name().replace('\\', "/");
-        let Some(safe_rel) = safe_entry_relpath(&name) else {
-            return Err(ManagedRuntimeError::InstallFailed(format!(
-                "ZIP entry 路径不安全，拒绝解压: {name}"
-            )));
-        };
-        let out_path = dest.join(&safe_rel);
-        if entry.is_dir() {
-            std::fs::create_dir_all(&out_path)?;
-            continue;
-        }
-        if let Some(parent) = out_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let mut out = std::fs::File::create(&out_path)?;
-        std::io::copy(&mut entry, &mut out)?;
-    }
-    Ok(())
+    archive::extract(archive, dest, 4096, 64 << 20, None, None)
 }
 
 /// zip entry 相对路径安全化：绝对路径、盘符、`..` 段返回 None（fail-closed）。
@@ -538,7 +547,7 @@ fn safe_entry_relpath(name: &str) -> Option<PathBuf> {
             "" | "." => continue,
             ".." => return None,
             s => {
-                if s.len() >= 2 && s.as_bytes()[1] == b':' {
+                if s.contains(':') || s.ends_with(['.', ' ']) {
                     return None;
                 }
                 parts.push(s);
@@ -578,6 +587,9 @@ fn self_test(exe: &Path, magic: &str) -> Result<(), ManagedRuntimeError> {
 /// exe 正被托管实例占用时 Windows 删除失败——如实返回错误，
 /// 由前端提示停止实例/重启后重试。
 pub fn uninstall(kind: &str) -> Result<(), ManagedRuntimeError> {
+    if kind == ffmpeg::KIND {
+        return ffmpeg::uninstall();
+    }
     let dir = artifact_dir(kind)?;
     if !dir.exists() {
         return Ok(()); // 幂等
@@ -597,9 +609,10 @@ pub fn uninstall(kind: &str) -> Result<(), ManagedRuntimeError> {
 /// 活跃保护：跳过正在安装中的 kind 的 staging（防并发安装互删，
 /// 0.25.20 的教训；单实例应用，跨进程并发可接受）。
 pub fn sweep_staging() -> usize {
+    let media_cleaned = ffmpeg::sweep_staging();
     let root = root();
     let Ok(entries) = std::fs::read_dir(&root) else {
-        return 0;
+        return media_cleaned;
     };
     let actives: Vec<String> = INSTALLING
         .lock()
@@ -621,7 +634,7 @@ pub fn sweep_staging() -> usize {
             cleaned += 1;
         }
     }
-    cleaned
+    cleaned + media_cleaned
 }
 
 // ── 测试 ───────────────────────────────────────────────────────────────────
@@ -635,7 +648,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("instance.lock");
         let first = acquire_instance_lease_at(&path).unwrap();
-        assert!(matches!(acquire_instance_lease_at(&path), Err(ManagedRuntimeError::InstanceBusy)));
+        assert!(matches!(
+            acquire_instance_lease_at(&path),
+            Err(ManagedRuntimeError::InstanceBusy)
+        ));
         drop(first);
         let _next = acquire_instance_lease_at(&path).expect("内核释放租约后可恢复孤儿");
     }
@@ -644,7 +660,8 @@ mod tests {
     fn embedded_lock_parses_with_everything_entry() {
         let lock = parse_lock().expect("嵌入锁文件必须可解析");
         assert_eq!(lock.schema_version, 1);
-        assert_eq!(lock.runtimes.len(), 1);
+        assert_eq!(lock.runtimes.len(), 2);
+        assert!(lock.runtimes.iter().any(|r| r.kind == ffmpeg::KIND));
         let e = lock_entry(KIND_EVERYTHING).unwrap();
         assert_eq!(e.artifact_id(), "everything-1.4.1.1032");
         assert_eq!(e.sha256.len(), 64);
@@ -666,7 +683,9 @@ mod tests {
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
-        let err = rt.block_on(install("wget", None, &NullReporter)).unwrap_err();
+        let err = rt
+            .block_on(install("wget", None, &NullReporter))
+            .unwrap_err();
         assert!(matches!(err, ManagedRuntimeError::UnknownKind(_)));
     }
 
@@ -681,7 +700,7 @@ mod tests {
         // 隔离根（runtimes_root 的 cfg(test) 临时目录）下无安装。
         assert!(resolve(KIND_EVERYTHING).is_none());
         let st = status();
-        assert_eq!(st.len(), 1);
+        assert_eq!(st.len(), 2);
         assert!(!st[0].installed);
         assert!(st[0].exe_path.is_none());
     }
@@ -781,7 +800,10 @@ mod tests {
         }
         let out = dir.join("out");
         extract_zip(&normal, &out).expect("正常 zip 应解压成功");
-        assert_eq!(std::fs::read(out.join("everything.exe")).unwrap(), b"MZfake");
+        assert_eq!(
+            std::fs::read(out.join("everything.exe")).unwrap(),
+            b"MZfake"
+        );
 
         let evil = dir.join("evil.zip");
         {

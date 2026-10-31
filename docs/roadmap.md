@@ -4,7 +4,7 @@
 >
 > **维护规则**：只保留尚未完成的方向；已立项内容迁入 `phases/`，已完成内容直接移出本文件。
 >
-> **当前判断**：**WebDAV 配置同步、轻量 GIF 录制与编辑**已随 [0.28 插件专项](phases/0.28-plugin-platform-and-tools.md) 实现，并于 0.28.8 完成真机验收；0.28 全部子版本已于 2026-10-29 按用户确认收口。背单词仅记录记忆曲线与四六级等词包方向，不进 0.28。插件系统升级 [0.26](phases/0.26-plugin-system-upgrade.md) 已收尾；跨 Provider 深度思考与 OpenAI-compatible 方言适配已迁入 [0.27 §5.14–§5.15](phases/0.27-ai-interaction-enhancement.md)，以 §5.13 的 rig 0.45 升级为前置，三项仍为补充规划。RAG、向量数据库与记忆向量化继续保持远期观察。
+> **当前判断**：**WebDAV 配置同步、轻量 GIF 录制与编辑**已随 [0.28](phases/0.28-plugin-platform-and-tools.md) 实现并完成验收；2026-10-31 追加媒体工具批次，0.28.17 FFmpeg 托管运行时已实现并通过自动化/真实安装冒烟，后续共享媒体任务与无声 MP4 导出尚未实现，范围及 GUI/资源验收边界统一在 phase 维护。录音机、剪贴板音频和轻量文件预览仍为下列条件候选，视频预览播放未立项。背单词仅记录记忆曲线与四六级等词包方向，不进 0.28。插件系统升级 [0.26](phases/0.26-plugin-system-upgrade.md) 已收尾；跨 Provider 深度思考与 OpenAI-compatible 方言适配已迁入 [0.27 §5.14–§5.15](phases/0.27-ai-interaction-enhancement.md)，以 §5.13 的 rig 0.45 升级为前置，三项仍为补充规划。RAG、向量数据库与记忆向量化继续保持远期观察。
 
 ---
 
@@ -25,7 +25,7 @@
 
 ### 2.1 近期预选
 
-当前没有额外的近期预选。WebDAV 配置同步与轻量 GIF 已迁入 [0.28](phases/0.28-plugin-platform-and-tools.md)，对应方案与准入条件在 phase 维护，不在候选池重复拆分。
+当前没有额外的近期预选。WebDAV 配置同步、轻量 GIF 与 FFmpeg 托管已实现；共享媒体任务与 MP4 导出继续在 [0.28 phase §3.7–§3.9](phases/0.28-plugin-platform-and-tools.md) 推进，不在候选池重复拆分。
 
 ### 2.2 优化项
 
@@ -70,6 +70,8 @@
 ## 三、近期预选
 
 WebDAV 配置同步、轻量 GIF 录制与编辑已在 [0.28 插件专项](phases/0.28-plugin-platform-and-tools.md) 实现并完成 0.28.8 真机验收，不再列为近期候选；最终方案与维护入口见 phase §3.5/§3.6。
+
+FFmpeg 托管与 MP4 导出的追加计划见同一 phase §3.7–§3.9 / §5.1–§5.4 / §6.4。后续音频/视频候选可复用该媒体服务，但安装 FFmpeg 不等于这些候选功能已立项或可用。
 
 ---
 

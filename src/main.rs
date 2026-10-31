@@ -2274,6 +2274,9 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
         // 0.26.14：托管 Everything 运行时
         app::commands::get_file_search_status,
         app::commands::install_managed_everything,
+        app::commands::get_ffmpeg_runtime_status,
+        app::commands::begin_ffmpeg_runtime_operation,
+        app::commands::cancel_ffmpeg_runtime_operation,
         app::commands::uninstall_managed_everything,
         app::commands::start_managed_everything,
         app::commands::stop_managed_everything,

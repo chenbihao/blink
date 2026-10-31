@@ -574,7 +574,7 @@
 
         <div class="panel" id="managed-engines">
             <h2 data-i18n="panel.managed_engines">托管引擎</h2>
-            <p class="panel-lede" data-i18n="managed_engines.lede">管理 Everything、脚本运行环境与本地模型的安装、运行和存储。</p>
+            <p class="panel-lede" data-i18n="managed_engines.lede">管理 Everything、媒体引擎、脚本运行环境与本地模型的安装、运行和存储。</p>
             <!-- 文件搜索引擎（Blink 托管 Everything，0.26.14/0.26.15：分组标题 + le-card-primary 主操作） -->
             <h3 class="section-heading" data-i18n="engines.section.file_search">文件搜索引擎</h3>
             <p class="section-desc" data-i18n="engines.section.file_search.desc">Everything 便携版由 Blink 下载到独立目录并以独立实例运行，不读取、不修改你已安装的
@@ -608,6 +608,34 @@
                         <button class="btn-small" data-i18n="engine.managed.service.install" id="managed-everything-service" type="button">安装服务（UAC）</button>
                     </div>
                     <p class="extension-desc" data-i18n="engine.managed.service_guidance">全盘 NTFS 索引需要索引服务。未安装服务时，自动模式使用本地目录扫描；托管端口由 Blink 自动分配。安装的索引服务独立运行，退出 Blink 后仍会保留。</p>
+                </div>
+            </div>
+            <h3 class="section-heading" data-i18n="engine.media.section">媒体引擎</h3>
+            <div class="extension-card" id="media-runtime-card">
+                <div class="extension-header le-card-head">
+                    <div class="extension-icon"><svg aria-hidden="true" class="icon"><use href="#icon-play"/></svg></div>
+                    <div class="extension-info">
+                        <h3 data-i18n="engine.media.title">FFmpeg 媒体引擎</h3>
+                        <p class="extension-desc" data-i18n="engine.media.desc">为媒体功能提供可选编解码支持，安装后仅在任务执行时运行。</p>
+                    </div>
+                    <div class="le-card-primary">
+                        <button class="btn btn-primary btn-small le-action-btn le-primary-btn" disabled id="media-runtime-action" type="button" data-i18n="engine.media.action.install">安装</button>
+                    </div>
+                </div>
+                <div class="extension-body">
+                    <div class="setting-row">
+                        <label class="setting-label" data-i18n="engine.script_runtime.status">当前状态</label>
+                        <span class="status-badge status-unknown" id="media-runtime-status">…</span>
+                        <button class="btn-small" hidden id="media-runtime-repair" type="button" data-i18n="engine.media.action.repair">修复</button>
+                        <button class="btn-small" hidden id="media-runtime-uninstall" type="button" data-i18n="engine.media.action.uninstall">卸载</button>
+                        <button class="btn-small" hidden id="media-runtime-cancel" type="button" data-i18n="engine.media.action.cancel">取消</button>
+                    </div>
+                    <p class="extension-desc" id="media-runtime-detail"></p>
+                    <p class="extension-desc" hidden id="media-runtime-error" role="status"></p>
+                    <div class="download-progress" hidden id="media-runtime-progress">
+                        <div class="download-progress__bar"><div class="download-progress__fill"></div></div>
+                        <span class="download-progress__text"></span>
+                    </div>
                 </div>
             </div>
             <!-- 脚本运行时（Blink 托管，0.25.20） -->

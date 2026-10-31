@@ -12,6 +12,7 @@ import {saveConfig} from "../../shared/config-keys.js";
 import {EVENTS} from "../../shared/event-names.js";
 import {formatBytes, progressPercent} from "../../shared/download-progress.js";
 import {initApplicationSearch} from "./application-search.js";
+import {initMediaRuntime} from "./engines/media-runtime.js";
 import {
     initManagedEverything,
     refreshBadgeText as refreshManagedEverythingBadgeText,
@@ -43,6 +44,7 @@ export function initEnginesTab(cfg) {
 }
 
 export function initManagedEnginesTab() {
+    initMediaRuntime();
     initScriptRuntime();
     initManagedEverything({refreshStatus: refreshFileSearchStatus});
 }

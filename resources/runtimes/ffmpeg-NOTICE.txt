@@ -1,0 +1,14 @@
+FFmpeg media runtime (optional download)
+
+Binary distributor: Gyan Doshi, https://www.gyan.dev/ffmpeg/builds/
+Pinned build: 9.0.2-essentials_build-www.gyan.dev, Windows x64 static
+License: GPL version 3 or later. See the unmodified LICENSE in the installed package.
+Build configuration and external-library versions: installed README.txt and ffmpeg -buildconf.
+Release and build information: https://github.com/GyanD/codexffmpeg/releases/tag/9.0.2
+FFmpeg source: https://github.com/FFmpeg/FFmpeg/commit/946fcce07b
+FFmpeg licensing: https://ffmpeg.org/legal.html
+
+Blink downloads the original locked archive from the distributor on explicit request.
+Only ffmpeg.exe, ffprobe.exe, LICENSE and README.txt are installed; ffplay is excluded.
+FFmpeg runs as a separate executable. It is not linked into the Blink executable.
+No system codecs, file associations or PATH entries are installed or changed.
