@@ -11,6 +11,7 @@ workspace = true
 # 依赖对齐根 Cargo.toml（版本/feature 同源，workspace 统一解析）；
 # windows 的 feature 集与 bin 完全一致，保证 `cargo test -p blink-infra` 单独构建时 API 齐全。
 [dependencies]
+rqrr = "0.11"
 async-trait = "0.1"
 bytes = "1"
 chrono = "0.4.45"
@@ -106,3 +107,7 @@ sevenz-rust2 = { version = "=0.24.2", default-features = false }
 [dev-dependencies]
 tempfile = "3"
 sevenz-rust2 = { version = "=0.24.2", default-features = false, features = ["compress"] }
+
+[dev-dependencies.qrcode]
+version = "0.14"
+default-features = false

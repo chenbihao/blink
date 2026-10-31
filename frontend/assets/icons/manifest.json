@@ -1,6 +1,6 @@
 {
   "lucideVersion": "1.25.0",
-  "generatedAt": "2026-10-27T13:38:30Z",
+  "generatedAt": "2026-11-01T07:57:26Z",
   "icons": [
     "aperture",
     "app-window",
@@ -44,6 +44,7 @@
     "ghost",
     "globe",
     "grid-3x3",
+    "grip-vertical",
     "hand-grab",
     "image",
     "languages",
@@ -79,6 +80,7 @@
     "refresh-cw",
     "rotate-ccw",
     "save",
+    "scan-qr-code",
     "scan-text",
     "search",
     "send",

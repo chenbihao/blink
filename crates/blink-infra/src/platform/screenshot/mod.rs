@@ -82,7 +82,7 @@ pub struct ScreenCaptureMeta {
 /// 快路径（copy_region / pin_region）完全不经过 session_png()，省掉 ~165ms 编码。
 struct Session {
     /// BGRA、top-down、每行 `width * 4` 字节。
-    pixels: Vec<u8>,
+    pixels: Arc<Vec<u8>>,
     /// 延迟编码的 PNG 字节（首次 `session_png()` 调用时编码）。
     /// `OnceLock` 允许在只读锁下 lazy init，不需要升级为写锁。
     png_bytes: std::sync::OnceLock<Arc<Vec<u8>>>,
@@ -213,7 +213,7 @@ pub fn begin_session() -> Result<ScreenCaptureMeta, String> {
     *SESSION
         .write()
         .map_err(|e| format!("SESSION 写锁失败: {e}"))? = Some(Session {
-        pixels,
+        pixels: Arc::new(pixels),
         png_bytes: std::sync::OnceLock::new(),
         meta,
     });
@@ -306,6 +306,17 @@ pub fn crop(x: i32, y: i32, w: u32, h: u32) -> Option<(Vec<u8>, u32, u32)> {
     let s = guard.as_ref()?;
     let (bgra, cw, ch) = crop_rgba(&s.pixels, s.meta.width, s.meta.height, x, y, w, h)?;
     Some((bgra, cw, ch))
+}
+
+/// Immutable original pixels for asynchronous consumers; survives session cleanup/replacement.
+pub fn owned_snapshot() -> Option<(Arc<Vec<u8>>, u32, u32)> {
+    let guard = SESSION.read().ok()?;
+    let session = guard.as_ref()?;
+    Some((
+        session.pixels.clone(),
+        session.meta.width,
+        session.meta.height,
+    ))
 }
 
 /// 返回 SESSION 的元数据（虚拟屏幕坐标 + 尺寸）。

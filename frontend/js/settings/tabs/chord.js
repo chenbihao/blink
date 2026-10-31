@@ -1,3 +1,4 @@
+import {openLayoutEditor} from '../../shared/screenshot-layout-editor.js';
 /**
  * Chord 动作 Tab 模块（0.10.7 展开式改造 · 0.10.7.1 视觉与录制链路重写）。
  *
@@ -62,7 +63,7 @@ export function initChordTab() {
     // 必须消费后端配置广播，否则首次加载出的 4 项会一直保留到窗口重建。
     listen(EVENTS.CONFIG_CHANGED, (event) => {
         const key = event.payload?.key;
-        if (key === "ai_config" || key === "stt:config" || key === "clipboard:config") {
+        if (key === "ai_config" || key === "stt:config" || key === "clipboard:config" || key === "screenshot:config") {
             loadChordActions();
         }
     }).then(loadChordActions).catch((e) => console.error("listen config-changed for chord failed:", e));
@@ -764,6 +765,7 @@ function renderScreenshotDetail(cfg) {
         preselectionCutout: true,
     };
     return `<div class="chord-screenshot-detail">
+<button class="btn-small screenshot-customize" type="button">${t("ss.customize")}</button>
 <div class="chord-field">
 <label class="setting-label chord-field-label">${t("chord.screenshot.prewarm_ocr.label")}
 <span class="field-hint-icon" title="${escapeAttr(t("chord.screenshot.prewarm_ocr.hint"))}">ⓘ</span>
@@ -854,6 +856,7 @@ function renderScreenshotDetail(cfg) {
  * 绑定行内事件：展开/收起、启用开关、键位录制、键位重置、剪贴板字段自动保存。
  */
 function bindRowEvents(container) {
+    container.querySelector(".screenshot-customize")?.addEventListener("click", () => openLayoutEditor());
     // ── 启用/禁用开关 ──
     // 注意：开关在 header 内，必须 stopPropagation 防止点开关也触发展开。
     function saveDisabled() {

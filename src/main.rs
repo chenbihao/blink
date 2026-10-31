@@ -2149,6 +2149,8 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
         app::commands::screenshot_forward_wheel,
         app::commands::list_system_fonts,
         app::commands::ocr_image,
+        app::commands::screenshot_decode_qr,
+        app::commands::screenshot_qr_target,
         app::commands::cancel_ocr_request, // 0.22.4
         app::commands::ocr_diagnose,
         app::commands::get_ocr_config, // 0.22.4

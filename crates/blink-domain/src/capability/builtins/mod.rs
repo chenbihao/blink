@@ -29,6 +29,7 @@ pub mod analyze_image_palette;
 pub mod copy_clipboard_file_paths;
 pub mod copy_clipboard_files;
 pub mod create_sticky;
+pub mod decode_qr;
 pub mod diagnostics;
 pub mod edit_clipboard_image;
 pub mod get_settings;

@@ -312,6 +312,8 @@ export function doIdentifySelection() {
  * 点[翻译]——OCR + 翻译 → 面板（译文 tab）+ overlay 嵌译文。
  */
 export function doOverlayTranslate() {
+    ss.resultPanel = 'ocr';
+    ss._closeQrPanel?.();
     if (!ss.selCss) return;
     const existingPanel = document.getElementById('ocr-panel');
     if (existingPanel && ss.ocrResultCache) {
@@ -570,6 +572,8 @@ export async function doTranslateAndPin() {
 
 /** E 键召唤/关闭面板抽屉 */
 export function doPanelToggle() {
+    ss.resultPanel = 'ocr';
+    ss._closeQrPanel?.();
     const panel = document.getElementById('ocr-panel');
     if (panel) {
         panel.remove();
@@ -803,6 +807,8 @@ async function translateOverlayLines(targetLang, revision = ++ss.translationRevi
 // ════════════════════════════════════════════════════════════
 
 export function showOcrResult(result, options = {}) {
+    if (ss.resultPanel === 'qr') return;
+    ss._closeQrPanel?.();
     const old = document.getElementById('ocr-panel');
     if (old) old.remove();
 

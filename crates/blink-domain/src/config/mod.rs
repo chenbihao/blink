@@ -21,6 +21,8 @@ pub mod managed_settings;
 pub mod ocr_config; // 0.22.4：OCR 配置分片（第 9 KV）
 pub mod plugin_config;
 pub mod shards;
+pub mod screenshot_layout;
+pub use screenshot_layout::ScreenshotToolbarLayout;
 pub use blink_domain_config::store; // 0.25.2 拆至 blink-domain-config crate，re-export 保持旧路径
 pub use blink_domain_config::stt_config; // 0.25.2 拆至 blink-domain-config crate，re-export 保持旧路径
 

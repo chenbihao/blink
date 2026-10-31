@@ -148,9 +148,13 @@ export function positionToolbar(rect, immediate = false) {
     const meta = window.__blinkScreenMeta || {vx: 0, vy: 0};
     const anchorX = rect.x + Math.max(0, rect.w - 1);
     const anchorY = rect.y + Math.max(0, rect.h - 1);
-    const uiScale = uiScaleAtCss(anchorX, anchorY, meta);
+    let uiScale = uiScaleAtCss(anchorX, anchorY, meta);
     toolbar.dataset.uiScale = String(uiScale);
     toolbar.style.transformOrigin = 'top left';
+    toolbar.style.transform = `scale(${uiScale})`;
+    const actionMonitor = findDisplayCssAt(anchorX, anchorY);
+    uiScale *= ss._refreshActionLayout?.((actionMonitor.w - 16) / uiScale) ?? 1;
+    toolbar.dataset.uiScale = String(uiScale);
     toolbar.style.transform = `scale(${uiScale})`;
 
     // 用户已手动拖动过：保留位置但重新 clamp 到当前屏

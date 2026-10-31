@@ -51,6 +51,7 @@ tokio = { version = "1.52.3", features = ["sync", "time", "process", "io-util", 
 tokio-util = "0.7"
 tracing = "0.1"
 unicode-normalization = "0.1"
+url = "2"
 urlencoding = "2.1"
 walkdir = "2.5"
 zeroize = { version = "1.9", features = ["derive"] }

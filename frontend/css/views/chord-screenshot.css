@@ -370,8 +370,8 @@ body.image-editor-mode #canvas.long-image-editing {
     align-items: center;
     gap: 2px; /* 0.15.8-fix：3 → 2 紧凑化 */
     padding: 3px 5px; /* 0.15.8-fix：4/6 → 3/5 紧凑化 */
-    background: rgba(30, 30, 30, 0.92);
-    border: 1px solid rgba(255, 255, 255, 0.15);
+    background: var(--screenshot-toolbar-bg);
+    border: 1px solid var(--screenshot-border);
     /* 0.11.8-a：整体圆润化（PixPin 风格）——外壳 12→10 圆角随尺寸缩 */
     border-radius: 10px;
     box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
@@ -976,11 +976,11 @@ body.image-editor-mode #canvas.long-image-editing {
     left: 0;
     display: none;
     flex-direction: column;
-    background: rgba(30, 30, 30, 0.96);
-    border: 1px solid rgba(255, 255, 255, 0.15);
+    background: var(--screenshot-panel-bg);
+    border: 1px solid var(--screenshot-border);
     /* 0.11.8-a：dropdown 面板圆润化，与工具栏外壳呼应 */
     border-radius: 10px;
-    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+    box-shadow: 0 6px 20px var(--screenshot-shadow);
     padding: 4px;
     min-width: 90px;
     z-index: calc(var(--z-dropdown) + 10);

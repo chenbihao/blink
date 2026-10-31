@@ -18,6 +18,14 @@
 export const PANEL_MIN_W = 280;
 export const PANEL_MIN_H = 240;
 
+/** Compact action menus stay anchored to their trigger, with monitor-edge flipping. */
+export function placeActionMenu(anchor, width, height, monitor, margin = 8, gap = 4) {
+    const left = Math.max(monitor.x + margin, Math.min(anchor.right - width, monitor.x + monitor.w - width - margin));
+    const below = anchor.bottom + gap;
+    const top = below + height <= monitor.y + monitor.h - margin ? below : anchor.top - height - gap;
+    return {left, top: Math.max(monitor.y + margin, Math.min(top, monitor.y + monitor.h - height - margin))};
+}
+
 /**
  * 钳制面板新尺寸到最小范围。
  *

@@ -1,0 +1,109 @@
+.ss-action-menu, .screenshot-layout-editor, .ss-qr-panel {
+    --ss-panel-bg: var(--surface);
+    --ss-panel-border: var(--surface-2);
+    --ss-panel-text: var(--text);
+    --ss-panel-hover: var(--surface-2);
+    --ss-panel-control: var(--bg);
+    position: fixed;
+    z-index: 2000;
+    padding: 10px;
+    border: 1px solid var(--ss-panel-border);
+    border-radius: var(--radius-lg);
+    background: var(--ss-panel-bg);
+    color: var(--ss-panel-text);
+    box-shadow: 0 8px 24px var(--shadow);
+    font-style: normal;
+    font-size: 13px;
+    overflow: auto;
+    pointer-events: auto;
+}
+.ss-action-menu, .ss-qr-panel, .screenshot-layout-editor.ss-toolbar-surface {
+    --ss-panel-bg: var(--screenshot-panel-bg);
+    --ss-panel-border: var(--screenshot-border);
+    --ss-panel-text: var(--screenshot-text);
+    --ss-panel-hover: var(--screenshot-hover-bg);
+    --ss-panel-control: var(--screenshot-toolbar-bg);
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    box-shadow: 0 6px 20px var(--screenshot-shadow);
+}
+.ss-action-menu[hidden] { display: none; }
+.ss-action-menu { width: 180px; min-width: 0; padding: 4px; border-radius: 10px; font-size: 12px; }
+.ss-action-menu hr { height: 1px; border: 0; margin: 4px; background: var(--ss-panel-border); }
+.ss-action-label { display: none; }
+.ss-action-shortcut { display: none; }
+.ss-action-menu .ss-action-shortcut { display: inline-flex; margin-left: auto; }
+.ss-action-menu .ss-menu-action, .ss-action-menu #ss-customize {
+    display: flex;
+    width: 100%;
+    gap: 10px;
+    align-items: center;
+    justify-content: flex-start;
+    padding: 5px 8px;
+    border: 0;
+    border-radius: var(--radius-md);
+    background: transparent;
+    color: var(--ss-panel-text);
+    font-family: inherit;
+    font-size: inherit;
+    line-height: 18px;
+    min-height: 30px;
+    min-width: 0;
+    text-align: start;
+    height: auto;
+}
+.ss-action-menu .ss-menu-action .icon { width: 18px; height: 18px; flex: 0 0 18px; }
+.ss-action-menu #ss-customize { padding-inline-start: 36px; }
+.ss-action-menu .ss-menu-action.hidden { display: none; }
+.ss-action-menu .ss-action-label { display: block; flex: 1; text-align: start; white-space: nowrap; }
+.ss-action-menu button:hover:not(:disabled), .ss-action-menu button:focus-visible { background: var(--ss-panel-hover); color: var(--screenshot-hover-text); }
+.ss-action-menu button:disabled { opacity: 0.6; }
+.ss-action-menu button:focus-visible, .screenshot-layout-editor button:focus-visible, .ss-qr-panel button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+}
+.screenshot-layout-editor {
+    left: max(16px, calc((100vw - 380px) / 2)); top: 15%;
+    width: min(380px, calc(100vw - 32px)); max-height: calc(100vh - 32px);
+    display: flex; flex-direction: column; overflow: hidden;
+    padding: 8px; border-radius: 10px; font-size: 12px; line-height: 18px;
+    -webkit-app-region: no-drag;
+}
+/* Screenshot sizing is capped in monitor CSS coordinates after UI-scale compensation. */
+.screenshot-layout-editor.ss-toolbar-surface { width: 380px; }
+.ss-layout-header, .ss-layout-status, .ss-layout-footer { flex-shrink: 0; }
+.ss-layout-lists { min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--ss-panel-border) transparent; }
+.screenshot-layout-editor h3, .screenshot-layout-editor h4 { margin: 4px 0; font-size: inherit; line-height: inherit; }
+.ss-layout-zone { min-height: 60px; padding: 0 2px 4px; border: 1px solid transparent; border-radius: var(--radius-md); }
+.ss-layout-zone + .ss-layout-zone { border-top-color: var(--ss-panel-border); border-top-left-radius: 0; border-top-right-radius: 0; padding-top: 4px; margin-top: 4px; }
+.ss-layout-drag-hint { margin: 0 0 4px; font-size: 11px; opacity: 0.7; }
+.ss-layout-row, .ss-layout-footer { display: flex; gap: 4px; align-items: center; margin-block: 3px; }
+.ss-layout-row { position: relative; min-height: 30px; padding: 2px 6px; background: var(--ss-panel-control); border-color: var(--ss-panel-border); color: var(--ss-panel-text); touch-action: none; }
+.ss-layout-row:hover, .ss-layout-row:focus-within { background: var(--ss-panel-hover); }
+.ss-layout-label { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.ss-layout-label.sortable-label, .ss-layout-grip.sortable-handle { color: inherit; }
+.ss-layout-label.sortable-label { font: inherit; }
+.ss-layout-grip { display: inline-flex; flex: 0 0 12px; opacity: 0.65; }
+.ss-layout-grip .icon { width: 12px; height: 12px; }
+.ss-layout-row.dragging { opacity: 0.35; background: var(--accent-bg); border-color: var(--accent); border-style: dashed; }
+.ss-layout-row.sortable-drag-preview { margin: 0; opacity: 0.9; border-color: var(--accent); font-family: "Segoe UI", "Microsoft YaHei", sans-serif; }
+.is-layout-dragging, .is-layout-dragging * { cursor: grabbing; }
+.ss-layout-zone.is-drop-target { background: var(--accent-bg); outline: 1px dashed var(--accent); outline-offset: -1px; }
+.ss-layout-row.ss-drop-before::before, .ss-layout-row.ss-drop-after::after { content: ''; position: absolute; left: 0; right: 0; height: 2px; background: var(--accent); pointer-events: none; }
+.ss-layout-row.ss-drop-before::before { top: -3px; }
+.ss-layout-row.ss-drop-after::after { bottom: -3px; }
+.ss-layout-row button, .ss-layout-footer button, .ss-qr-panel button {
+    background: var(--ss-panel-control);
+    color: var(--ss-panel-text);
+    border: 1px solid var(--ss-panel-border);
+    border-radius: var(--radius-md);
+    padding: 5px 8px;
+}
+.ss-layout-row button, .ss-layout-footer button { flex-shrink: 0; font: inherit; padding: 3px 6px; white-space: nowrap; cursor: pointer; }
+.ss-layout-row button:disabled { opacity: 0.55; cursor: default; }
+.ss-layout-footer { justify-content: flex-end; flex-wrap: wrap; margin-bottom: 0; }
+.ss-qr-panel { width: 360px; height: 320px; min-width: 240px; min-height: 180px; resize: both; display: flex; flex-direction: column; gap: 8px; }
+.ss-qr-panel header { display: flex; align-items: center; justify-content: space-between; cursor: move; }
+.ss-qr-panel textarea { flex: 1; min-height: 60px; width: 100%; resize: none; background: var(--ss-panel-control); color: var(--ss-panel-text); user-select: text; font-style: normal; }
+.ss-qr-panel footer { display: flex; flex-wrap: wrap; gap: 6px; }
+.ss-qr-status { overflow-wrap: anywhere; }
+.screenshot-session-inactive .ss-action-menu, .screenshot-session-inactive .screenshot-layout-editor, .screenshot-session-inactive .ss-qr-panel { display: none; }

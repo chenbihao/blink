@@ -31,6 +31,10 @@
 //! - 标注坐标使用物理像素相对裁剪区
 //! - 0.23.15：拖动期间只有实时 DOM 层逐帧变化，interaction-canvas 零绘制
 
+import {applyActionLayout, closeActionMenu} from './ss-action-menu.js';
+import {runScreenshotAction} from './ss-actions.js';
+import {resetQrPanel, closeQrPanel, qrPanelVisible} from './ss-qr.js';
+import {closeLayoutEditor} from '../shared/screenshot-layout-editor.js';
 import {copyToClipboard, hideScreenshotOverlay, invoke, ocrImage, screenshotSetAnnotationMode,} from "../shared/api.js";
 import {normalizeError} from "../shared/tauri.js";
 import * as annot from "./annotation-engine.js";
@@ -89,7 +93,6 @@ import {copyReadingSelection, exitReadingMode, getReadingSelectionText, showRead
 import {
     activateSilentOcrReading,
     cancelActiveOcr,
-    doPanelToggle,
     hideSelLoading,
     showOcrResult,
     showTransientHint,
@@ -270,6 +273,7 @@ window.addEventListener('resize', () => {
             scaleY: meta.renderScaleY
         });
     }
+    if (ss.selCss && !ss.toolbar.classList.contains('hidden')) positionToolbar(ss.selCss, true);
 });
 
 const SCREENSHOT_RAW_TIMEOUT_MS = 1500;
@@ -504,6 +508,9 @@ function cleanupSessionVisuals() {
 
 /** 完全重置前端状态——每次 overlay 显示时都要走一遍 */
 function resetState() {
+    resetQrPanel();
+    ss.resultPanel = null;
+    ++editorConfigRevision;
     clearShortcutHints();
     const _t0 = performance.now();
     console.debug('[screenshot] resetState start');
@@ -971,15 +978,19 @@ function refreshAskAiVisibility() {
         .catch((e) => console.debug('[screenshot] app.ai read failed', e));
 }
 
+let editorConfigRevision = 0;
 function loadEditorConfig(includeCaptureHints) {
+    const revision = ++editorConfigRevision;
     const _t0 = performance.now();
     invoke('get_config_section', {key: 'screenshot:config'})
         .then((val) => {
+            if (revision !== editorConfigRevision) return;
             console.debug('[screenshot] loadEditorConfig done', {
                 ms: Math.round(performance.now() - _t0),
                 hasVal: !!val
             });
             if (val && typeof val === 'object') {
+                applyActionLayout(val.toolbarLayout);
                 ss.screenshotConfig.prewarmOcr = val.prewarmOcr !== false;
                 ss.screenshotConfig.scrollDebug = val.scrollDebug === true;
                 ss.screenshotConfig.ocrDebug = val.ocrDebug === true;
@@ -993,6 +1004,7 @@ function loadEditorConfig(includeCaptureHints) {
                 ss.screenshotConfig.preselectionCutout = val.preselectionCutout !== false;
                 refreshDiagnosticsVisibility();
                 refreshOcrDiagnosticsVisibility();
+                if (ss.isAnnotating && ss.selCss) positionToolbar({...ss.selCss}, true);
                 // 0.18.x：配置加载完成，触发统一门控
                 configReady = true;
                 maybeStartCaptureHints();
@@ -1004,6 +1016,7 @@ function loadEditorConfig(includeCaptureHints) {
             }
         })
         .catch((e) => {
+            if (revision !== editorConfigRevision) return;
             console.warn('[image-editor] 读 screenshot:config 失败,用默认值', e);
             console.debug('[screenshot] loadEditorConfig failed', {ms: Math.round(performance.now() - _t0)});
             // 配置加载失败也需放行门控（使用默认配置）
@@ -1340,6 +1353,7 @@ function exitAnnotationMode() {
     ss.isAnnotating = false;
     ss.selCss = null;
     ss.selectionInteraction = null;
+    resetQrPanel();
     ss.selectionRevision++;
     ss.translationRevision++;
     canvas.style.cursor = 'crosshair';
@@ -1367,6 +1381,7 @@ function exitAnnotationMode() {
 /** 选区内容失效（移动/缩放/重框后清 OCR/阅读/overlay） */
 function invalidateSelectionContent() {
     const {annotCanvas, toolbar, sizeHint} = ss;
+    resetQrPanel();
     ss.selectionRevision++;
     ss.translationRevision++;
     ss.ocrPrewarm = null;
@@ -2115,6 +2130,7 @@ function flushSelectionNudge() {
             console.warn('[screenshot] 方向键移动选区后裁剪失败', err);
         }
     }
+    resetQrPanel();
     ss.selectionRevision++;
     // P1-4 fix：移动后更新 nudgeSelectionRevision 为最新值。
     // queueSelectionNudge 捕获的是移动前的 revision，flushSelectionNudge
@@ -2150,6 +2166,7 @@ function queueSelectionNudge(dx, dy) {
 // 0.23.19：isTextEntryTarget（文本输入类控件判定）移至 ss-editor-policy.js（纯函数，行为测试）
 
 document.addEventListener('keydown', (e) => {
+    if (e.defaultPrevented || e.target?.closest?.('#screenshot-layout-editor, #qr-panel, #ss-action-menu')) return;
     const operation = annotationOperationShortcut(e, ss);
     if (operation) {
         e.preventDefault();
@@ -2287,6 +2304,10 @@ document.addEventListener('keydown', (e) => {
     }
 
     if (e.key === 'Escape') {
+        if (!e.isComposing && !e.target?.classList?.contains('text-annot-input') &&
+            (closeLayoutEditor() || closeActionMenu({focus: true}) || closeQrPanel({focus: true}))) {
+            e.preventDefault(); return;
+        }
         // 准备态优先退回截图，不能因控件持有焦点而永久忽略 Esc。
         if (isGifPrepActive()) {
             e.preventDefault();
@@ -2333,7 +2354,7 @@ document.addEventListener('keydown', (e) => {
         const tgt = e.target;
         if (tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable)) return;
         e.preventDefault();
-        doPanelToggle();
+        runScreenshotAction('ocr');
     }
 });
 
@@ -2355,6 +2376,7 @@ const imageEditorEscExempt = (e) => editorEscExempt(e, {eyedropperActive: ss.eye
 window.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
     if (!document.body.classList.contains('image-editor-mode')) return;
+    if (document.getElementById('screenshot-layout-editor') || qrPanelVisible() || ss._actionMenuVisible?.()) return;
     if (imageEditorEscExempt(e)) return;
     if (isScrollCaptureActive() || isGifPrepActive()) return;
     e.preventDefault();
@@ -2385,6 +2407,7 @@ window.addEventListener('mousemove', (e) => {
 
 // 0.15.7：长图编辑——Space 或中键拖拽平移超长图（_spaceDown 已在文件顶部声明）
 window.addEventListener('keydown', (e) => {
+    if (e.target?.closest?.('#screenshot-layout-editor, #qr-panel, #ss-action-menu')) return;
     if (e.code === 'Space' && ss._imagePan && !ss._imagePan.dragging) {
         const tgt = e.target;
         if (tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable)) return;
@@ -2467,6 +2490,7 @@ window.addEventListener('blur', () => {
 //  工具栏绑定
 // ════════════════════════════════════════════════════════════
 
+ss._reloadScreenshotConfig = () => loadEditorConfig(false);
 bindToolbar();
 // 0.28.7：GIF 录制准备栏（两段式录制第一段）
 bindGifPrepBar();

@@ -45,6 +45,9 @@ import {enterGifRecordMode} from './ss-gif-prep.js';
 export function cleanupCanvasVisuals() {
     // 先关闭整个 session 的可见性，再逐层清理。即使后端立即 cloak/hide，
     // 下次 show 也会保持隐藏，直到新 session reset 完成。
+    ss._resetQrPanel?.();
+    ss._closeActionMenu?.();
+    ss._closeLayoutEditor?.();
     document.documentElement.classList.add('screenshot-session-inactive');
     const {canvas, ctx, annotCanvas, annotCtx, toolbar, sizeHint, errorHint} = ss;
     // 清主 canvas
@@ -590,6 +593,7 @@ export function doCancel() {
 
 /** 判断是否有主动召唤出的交互面板/输入态。 */
 export function hasActivePanel() {
+    if (document.getElementById('qr-panel') || document.getElementById('screenshot-layout-editor') || ss._actionMenuVisible?.()) return true;
     if (document.getElementById('ocr-panel')) return true;
     if (document.querySelector('.text-annot-input')) return true;
     // 0.15.11：水印/文字配置移至 sub-panel，检查 sub-panel 是否可见

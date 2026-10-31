@@ -27,6 +27,15 @@
     --preselection-window: #3478d4;
     --preselection-control: #7fc4ff;
 
+    /* Screenshot chrome stays neutral over arbitrary image content in every app theme. */
+    --screenshot-toolbar-bg: rgba(30, 30, 30, 0.92);
+    --screenshot-panel-bg: rgba(30, 30, 30, 0.96);
+    --screenshot-border: rgba(255, 255, 255, 0.15);
+    --screenshot-text: #ddd;
+    --screenshot-hover-text: #fff;
+    --screenshot-hover-bg: rgba(255, 255, 255, 0.08);
+    --screenshot-shadow: rgba(0, 0, 0, 0.5);
+
     /* 状态色 */
     --green: #a6e3a1;
     --green-bg: #2a3f4e;

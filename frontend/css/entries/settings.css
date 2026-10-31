@@ -38,6 +38,9 @@
 @import '../components/download-progress.css';
 
 /* views（设置页视图：布局+通用组件+插件 / 调试 / AI modal） */
+@import '../components/sortable.css';
+@import '../components/screenshot-actions.css';
+
 @import '../views/settings/settings.css';
 @import '../views/settings/settings-debug.css';
 @import '../views/settings/settings-ai.css';

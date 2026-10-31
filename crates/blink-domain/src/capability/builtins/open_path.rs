@@ -69,12 +69,12 @@ impl Capability for OpenPath {
                 detail: "open_path: 缺少 path 参数".into(),
             })?;
 
-        tracing::debug!(%path, "open_path capability: 打开路径");
+        tracing::debug!("open_path capability: 打开路径");
 
         if let Err(e) = open::that(path) {
-            tracing::error!(error = %e, %path, "打开路径失败");
+            tracing::error!(error_kind = ?e.kind(), "打开路径失败");
             return Err(CapabilityError::Internal {
-                detail: format!("打开路径失败: {e}"),
+                detail: "系统未受理打开路径操作".into(),
             });
         }
 

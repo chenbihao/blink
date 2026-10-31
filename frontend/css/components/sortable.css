@@ -1,0 +1,63 @@
+/* 可拖动排序列表 */
+.sortable-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    width: 220px;
+    flex-shrink: 0;
+}
+
+.sortable-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    background: var(--surface);
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-md);
+    cursor: grab;
+    transition: background var(--transition-base), border-color var(--transition-base), box-shadow var(--transition-base);
+    user-select: none;
+}
+
+.sortable-item:hover {
+    border-color: var(--text-faint);
+}
+
+.sortable-item:active {
+    cursor: grabbing;
+}
+
+.sortable-item.dragging {
+    opacity: 0.35;
+    background: var(--accent-bg);
+    border-color: var(--accent);
+    border-style: dashed;
+}
+
+.sortable-list.is-dragging .sortable-item:not(.dragging) {
+    transition: transform var(--transition-base), background var(--transition-base), border-color var(--transition-base);
+}
+
+.sortable-drag-preview {
+    position: fixed;
+    pointer-events: none;
+    z-index: 99999;
+    opacity: 0.9;
+    border-color: var(--accent);
+    box-shadow: var(--shadow-modal);
+    cursor: grabbing;
+}
+
+.sortable-handle {
+    display: inline-flex;
+    color: var(--text-faint);
+    font-size: var(--text-lg);
+    line-height: var(--leading-none);
+    flex-shrink: 0;
+}
+
+.sortable-label {
+    font-size: var(--text-md);
+    color: var(--text);
+}

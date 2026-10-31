@@ -66,6 +66,28 @@ pub fn probe_content_access(path: &str) -> ContentAccess {
     }
 }
 
+/// QR local file/folder projection. Reuses the root-to-leaf network/reparse guard.
+/// Must run in a bounded blocking task. No file contents are opened.
+pub fn probe_local_target(path: &str) -> Result<bool, DenyReason> {
+    #[cfg(target_os = "windows")]
+    {
+        probe_windows_path(std::path::Path::new(path), 0, false)?;
+        let meta = std::fs::metadata(path).map_err(|_| DenyReason::Missing)?;
+        if meta.is_dir() {
+            Ok(true)
+        } else if meta.is_file() {
+            Ok(false)
+        } else {
+            Err(DenyReason::Missing)
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = path;
+        Err(DenyReason::Missing)
+    }
+}
+
 /// 是否为 UNC 路径（`\\server\share` 或 `\\?\UNC\...`）。
 fn is_unc_path(path: &str) -> bool {
     if path.starts_with(r"\\?\UNC\") {

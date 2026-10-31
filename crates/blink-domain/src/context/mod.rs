@@ -8,4 +8,5 @@
 //! 避免两处独立实现 URL / 文件路径判定。
 
 pub mod probe;
+pub mod qr_target;
 pub mod trigger;

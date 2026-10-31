@@ -32,7 +32,7 @@
 //!
 //! 留本机：auto_start/log_level/ai_http_body_log/onboarding_version、network、
 //! stt:config、app.update、app.ai_permission、ai.capability_access、
-//! screenshot:config、context:config、engine:*、clipboard:config、历史/剪贴板内容。
+//! screenshot:config（toolbarLayout 除外）、context:config、engine:*、clipboard:config、历史/剪贴板内容。
 //! hotkey/search/suggestion/disable/bookmarks 规格明确「整分片」逐字段；chord 与
 //! app.ai 走字段白名单——新增字段不进白名单即不漫游，防止未来本机字段静默进快照。
 //!
@@ -120,6 +120,7 @@ const FIXED_SHARDS: &[&str] = &[
     "app.weblinks",
     "app.bookmarks",
     "app.ai",
+    "screenshot:config",
 ];
 
 /// appearance 中可漫游的字段（其余 auto_start/log_level/ai_http_body_log/
@@ -263,6 +264,7 @@ fn default_shard(kv: &str) -> Result<Value, SyncError> {
         "app.weblinks" => serde_json::to_value(WebLinksConfig::default()),
         "app.bookmarks" => serde_json::to_value(BookmarksConfig::default()),
         "app.ai" => serde_json::to_value(AIConfig::default()),
+        "screenshot:config" => serde_json::to_value(crate::config::ScreenshotConfig::default()),
         _ => {
             return Ok(Value::Null);
         }
@@ -299,6 +301,20 @@ pub fn items_from_raw(raw: &RawLocal) -> Result<ItemMap, SyncError> {
             continue;
         };
         match kv.as_str() {
+            "screenshot:config" => {
+                let layout = obj.get("toolbarLayout").cloned().unwrap_or_else(|| {
+                    serde_json::to_value(crate::config::ScreenshotToolbarLayout::default()).unwrap()
+                });
+                let layout: crate::config::ScreenshotToolbarLayout = serde_json::from_value(layout)
+                    .map_err(|_| SyncError::Unknown {
+                        message: "Invalid screenshot layout".into(),
+                    })?;
+                items.insert(
+                    format!("{kv}#toolbarLayout"),
+                    serde_json::to_value(layout).unwrap(),
+                );
+            }
+
             "app.appearance" => {
                 for field in APPEARANCE_PORTABLE {
                     copy_field(&mut items, kv, obj, field);
@@ -451,6 +467,27 @@ pub fn build_apply_ops(
     let mut ops = Vec::new();
     for (shard, items) in &changed {
         match shard.as_str() {
+            "screenshot:config" => {
+                let item = "screenshot:config#toolbarLayout";
+                if let Some(layout) = merged.get(item) {
+                    let expected = raw
+                        .shards
+                        .get("screenshot:config")
+                        .and_then(|v| v.get("toolbarLayout"))
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            serde_json::to_value(crate::config::ScreenshotToolbarLayout::default())
+                                .unwrap()
+                        });
+                    ops.push(ApplyOp::SetConfig {
+                        shard: shard.clone(),
+                        key: "screenshot_toolbar_layout".into(),
+                        value: serde_json::json!({"layout":layout,"expected":expected}),
+                        items: vec![item.into()],
+                    });
+                }
+            }
+
             PROMPT_SHARD => build_prompt_ops(&items, merged, raw, &mut ops)?,
             kv if kv.starts_with("plugin:") => {
                 build_plugin_op(kv, items, merged, raw, &mut ops)?
@@ -1007,6 +1044,31 @@ mod tests {
             ApplyOp::SetConfig { shard, .. } => shard != "app.future",
             _ => true,
         }));
+    }
+
+    #[test]
+    fn screenshot_layout_sync_is_field_scoped_and_has_a_cas_precondition() {
+        let default =
+            serde_json::to_value(crate::config::ScreenshotToolbarLayout::default()).unwrap();
+        let raw = raw_with(
+            vec![(
+                "screenshot:config",
+                json!({"toolbarLayout":default,"ocrDebug":true,"controlSnap":false,"qrResults":["private"]}),
+            )],
+            vec![],
+        );
+        let local = items_from_raw(&raw).unwrap();
+        assert_eq!(local.len(), 1);
+        assert_eq!(local["screenshot:config#toolbarLayout"], default);
+        let mut merged = local.clone();
+        merged.insert(
+            "screenshot:config#toolbarLayout".into(),
+            json!({"toolbar":["qr"],"more":[]}),
+        );
+        let ops = build_apply_ops(&merged, &raw, &local).unwrap();
+        assert!(
+            matches!(&ops[..], [ApplyOp::SetConfig {key,value,..}] if key=="screenshot_toolbar_layout" && value["expected"]==default && value.get("ocrDebug").is_none())
+        );
     }
 
     #[test]

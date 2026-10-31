@@ -34,7 +34,8 @@ let pendingAnchor = null;
 function anchorOf(node) {
     // 同时匹配 [title] 与 [data-tip]——后者是迁移后的存放处；前者兜底
     // observer 尚未处理的瞬时窗口（同一 tick 内动态设置的 title）。
-    return node && node.closest ? node.closest('[title], [data-tip]') : null;
+    const anchor = node && node.closest ? node.closest('[title], [data-tip]') : null;
+    return anchor?.classList.contains('ss-menu-action') && !anchor.disabled ? null : anchor;
 }
 
 /** 把单个元素的 title 属性迁移为 data-tip（抑制原生提示的唯一真源动作）。 */

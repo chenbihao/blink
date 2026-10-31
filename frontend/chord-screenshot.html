@@ -541,6 +541,9 @@
                 <use href="#icon-pin"/>
             </svg>
         </button>
+        <button class="tool-btn" id="btn-qr" title="识别二维码" aria-label="识别二维码"><svg class="icon" aria-hidden="true"><use href="#icon-scan-qr-code"/></svg></button>
+        <div class="toolbar-divider" id="ss-more-divider" role="separator" aria-orientation="vertical"></div>
+        <button class="tool-btn" id="btn-more" title="更多" aria-label="更多" aria-haspopup="menu" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#icon-ellipsis"/></svg></button>
         <button class="tool-btn tool-btn-primary" id="btn-copy" title="复制截图 (双击选区)">
             <svg aria-hidden="true" class="icon">
                 <use href="#icon-check"/>
@@ -553,6 +556,8 @@
         </button>
     </div>
 </div>
+
+<div id="ss-action-menu" class="ss-action-menu" role="menu" hidden><hr><button id="ss-customize" role="menuitem">自定义工具栏…</button></div>
 
 <!-- 0.15.12：二级面板——水印表单/文字配置直接显示在工具组下方，支持关闭 -->
 <div aria-label="二级菜单" class="sub-panel hidden" id="sub-panel" role="region">

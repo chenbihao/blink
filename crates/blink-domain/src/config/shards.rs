@@ -691,6 +691,8 @@ impl ContextConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScreenshotConfig {
+    #[serde(default)]
+    pub toolbar_layout: super::screenshot_layout::ScreenshotToolbarLayout,
     #[serde(default = "default_true")]
     pub prewarm_ocr: bool,
     /// 长截图诊断开关（0.17.x 从 localStorage 迁移到 SQLite 配置库）。
@@ -728,6 +730,7 @@ pub struct ScreenshotConfig {
 impl Default for ScreenshotConfig {
     fn default() -> Self {
         Self {
+            toolbar_layout: Default::default(),
             prewarm_ocr: true,
             scroll_debug: false,
             ocr_debug: false,

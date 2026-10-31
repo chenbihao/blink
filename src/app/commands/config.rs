@@ -3,6 +3,8 @@
 use crate::domain::event_names::EventNames;
 use tauri::{Emitter, Manager};
 
+static SCREENSHOT_UPDATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 static APP_SEARCH_UPDATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 static INPUT_BINDING_UPDATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -766,9 +768,33 @@ async fn set_config_value(
         //
         // 截图 overlay 行为分片。目前只承载 prewarm_ocr;写完不需要热更新任何
         // 内存副本,前端每次 overlay 显示时按需读取(读路径:`get_config_section`)。
+        "screenshot_toolbar_layout" => {
+            use crate::domain::config::{ConfigStore, ScreenshotConfig, ScreenshotToolbarLayout};
+            let _guard = SCREENSHOT_UPDATE_LOCK.lock().await;
+            let mut sc = ConfigStore::get_checked::<ScreenshotConfig>(pool).await?;
+            let expected = expected
+                .or_else(|| value.get("expected").cloned())
+                .ok_or("config_conflict: missing expected layout")?;
+            let expected: ScreenshotToolbarLayout =
+                serde_json::from_value(expected).map_err(|e| e.to_string())?;
+            if expected != sc.toolbar_layout {
+                return Err("config_conflict: screenshot toolbar layout changed".into());
+            }
+            let layout = value.get("layout").unwrap_or(&value).clone();
+            sc.toolbar_layout = serde_json::from_value(layout).map_err(|e| e.to_string())?;
+            ConfigStore::set(pool, &sc).await?;
+            tracing::info!("Screenshot toolbar layout updated");
+        }
         "screenshot_config" => {
-            let sc: crate::app::config::ScreenshotConfig =
+            let _guard = SCREENSHOT_UPDATE_LOCK.lock().await;
+            let current = crate::app::config::ConfigStore::get_checked::<
+                crate::app::config::ScreenshotConfig,
+            >(pool)
+            .await?;
+            let mut sc: crate::app::config::ScreenshotConfig =
                 serde_json::from_value(value).map_err(|e| e.to_string())?;
+            // Legacy settings writers own other fields; layout writes use the CAS branch above.
+            sc.toolbar_layout = current.toolbar_layout;
             crate::app::config::ConfigStore::set(pool, &sc).await?;
             tracing::info!(
                 prewarm_ocr = sc.prewarm_ocr,
@@ -788,6 +814,7 @@ async fn set_config_value(
         "language" | "log_level" | "ai_http_body_log" | "onboarding_version" => {
             Some("app.appearance")
         }
+        "screenshot_config" | "screenshot_toolbar_layout" => Some("screenshot:config"),
         "start_menu_config" => Some("engine:start_menu"),
         "weblinks" => Some("app.weblinks"),
         "bookmarks" => Some("app.bookmarks"),

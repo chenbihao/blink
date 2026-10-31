@@ -8,6 +8,7 @@ pub mod managed_runtime; // 0.26.14：托管外部运行时分发（Everything a
 pub mod media; // 0.28.18：有界媒体任务、软件 H.264 与产物验证
 pub mod net; // 0.27.4：统一网络策略工厂（代理快照 + generation + 分类 client）
 pub mod platform;
+pub mod qr;
 pub mod plugin_storage; // 0.28.1：插件安装记录与包/数据/缓存/词库分目录存储
 pub mod script_interpreter; // 0.25.20：脚本插件解释器托管分发（锁文件+下载事务+resolver）
 pub mod stt; // 0.22.9 Handoff 06：VAD frontend port 实现（EnergyVad adapter + FSMN-VAD ONNX）

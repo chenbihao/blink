@@ -73,8 +73,8 @@ impl Capability for RevealInExplorer {
         let paths = parse_reveal_paths(&args)?;
         let groups = group_paths_by_parent(&paths)?;
 
-        for (parent, group_paths) in &groups {
-            tracing::debug!(dir = %parent, count = group_paths.len(), "reveal_in_explorer capability: 在资源管理器中显示");
+        for group_paths in groups.values() {
+            tracing::debug!(count = group_paths.len(), "reveal_in_explorer capability: 在资源管理器中显示");
             #[cfg(target_os = "windows")]
             {
                 // explorer /select,p1,p2,...：同组（同目录）路径一次定位多选。
@@ -92,9 +92,9 @@ impl Capability for RevealInExplorer {
                             .arg(select_arg)
                             .spawn();
                     if let Err(e) = status {
-                        tracing::error!(error = %e, dir = %parent, "调用 explorer.exe 失败");
+                        tracing::error!(error_kind = ?e.kind(), "调用 explorer.exe 失败");
                         return Err(CapabilityError::Internal {
-                            detail: format!("调用 explorer.exe 失败: {e}"),
+                            detail: "系统未受理文件定位操作".into(),
                         });
                     }
                 }

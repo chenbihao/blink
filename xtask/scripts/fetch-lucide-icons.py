@@ -78,6 +78,8 @@ ICON_LIST = [
     "command",          # settings.html 快捷键 ⌘
 
     # 截图 overlay 工具按钮
+    "grip-vertical",    # 截图自定义布局：与插件排序相同的点阵提示
+    "scan-qr-code",     # 二维码识别（0.28.22）
     "scan-text",        # OCR 🔍
     "pin",              # 钉图 📌
     "bookmark-check",   # 翻译并 pin（旧，0.26.19 换 receipt-text，保留兼容）

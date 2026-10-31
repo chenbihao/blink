@@ -71,13 +71,13 @@ impl Capability for OpenUrl {
                 detail: "open_url: 缺少 url 参数".into(),
             })?;
 
-        tracing::debug!(%url, "open_url capability: 打开链接");
+        tracing::debug!("open_url capability: 打开链接");
 
         // open::that 在 Windows 上走 ShellExecute，是非阻塞的
         if let Err(e) = open::that(url) {
-            tracing::error!(error = %e, %url, "打开链接失败");
+            tracing::error!(error_kind = ?e.kind(), "打开链接失败");
             return Err(CapabilityError::Internal {
-                detail: format!("打开链接失败: {e}"),
+                detail: "系统未受理打开链接操作".into(),
             });
         }
 

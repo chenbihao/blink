@@ -54,6 +54,7 @@ export const ss = {
     annotCurrentX: 0, annotCurrentY: 0,
 
     // ── OCR / 翻译状态 ────────────────────────────────────────
+    resultPanel: null,         // Explicit OCR/QR panel preference; reading overlays stay independent.
     ocrBusy: false,            // 显式 OCR 请求门禁
     translationBusy: false,    // 图上译文请求中
     ocrPrewarm: null,          // Promise<OcrResult> | null

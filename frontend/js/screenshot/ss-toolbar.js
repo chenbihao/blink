@@ -7,6 +7,9 @@
 //! - showTextInput()：文本标注输入框
 //! - updateUndoRedoButtons()：撤销/重做按钮状态
 
+import {registerScreenshotAction, runScreenshotAction} from './ss-actions.js';
+import {bindActionMenu} from './ss-action-menu.js';
+import {doQrSelection} from './ss-qr.js';
 import {ss, TOOL_CAPS} from './ss-state.js';
 import {bindSizeControls, syncSizeControls} from './ss-brush-controls.js';
 import {applyFloatingUiScale, findDisplayCssAt} from './ss-display.js';
@@ -15,7 +18,7 @@ import {updateSelectionCursor} from './ss-interaction.js';
 import {doAskAiSelection, doCancel, doCopySelection, doGifRecord, doPinSelection, doSaveSelection} from './ss-output.js';
 // 0.15.7：长截图
 import {enterScrollCapture} from './scroll/index.js';
-import {doOcrSelection, doTranslateAndPin, doTranslateSelection} from './ss-ocr.js';
+import {doPanelToggle, doTranslateAndPin, doTranslateSelection} from './ss-ocr.js';
 import {doOcrDiagnostics} from './ss-ocr-diagnostics.js';
 import * as annot from './annotation-engine.js';
 import {initColorPicker, syncFromAnnot} from './ss-color-picker.js';
@@ -238,6 +241,7 @@ function closeAllDropdowns(opts = {}) {
 }
 
 function setDropdownOpen(dropdown, open) {
+    if (open) ss._closeActionMenu?.();
     dropdown.setAttribute('data-open', open ? 'true' : 'false');
     // 0.23.19：颜色面板的"点击固定"标记随关闭一并清除——下次悬浮打开重新走悬浮逻辑
     if (!open && dropdown.id === 'color-dropdown') delete dropdown.dataset.pinned;
@@ -378,6 +382,8 @@ function toggleDropdown(dropdown) {
 
 /** 新截图会话开始时关闭所有菜单，并让颜色面板重新跟随工具栏定位。 */
 export function resetToolbarDropdowns() {
+    ss._closeActionMenu?.();
+    ss._closeLayoutEditor?.();
     closeAllDropdowns();
     // 0.23.19：会话重置时同步取消 flash 定时器——旧会话的定时回调不得
     // 在新一轮会话里触发（虽然只做关闭动作，仍避免跨会话触碰下拉状态）。
@@ -1065,34 +1071,21 @@ export function bindToolbar() {
         document.getElementById(`btn-${operation}`)?.addEventListener('click', () => runAnnotationOperation(operation));
     }
 
-    // 输出/取消
-    const bind = (id, fn) => {
-        const el = document.getElementById(id);
-        if (el) el.addEventListener('click', fn);
+    const handlers = {
+        cancel: doCancel, copy: doCopySelection, pin: doPinSelection,
+        save: doSaveSelection, 'ask-ai': doAskAiSelection,
+        ocr: doPanelToggle, qr: doQrSelection,
+        translate: doTranslateSelection, 'translate-pin': doTranslateAndPin,
+        'ocr-diag': doOcrDiagnostics,
+        scroll: () => { if (ss.selCss && !ss.sent) enterScrollCapture(ss.selCss).catch(() => console.error('[screenshot] scroll failed')); },
+        gif: () => { if (annot.getTool() !== 'select') selectTool('select'); doGifRecord(); },
     };
-    bind('btn-cancel', doCancel);
-    // 0.15.7：长截图入口——只在选区已定时可用（disabled 属性在 index.js 控制）
-    bind('btn-scroll', () => {
-        if (ss.selCss && !ss.sent) {
-            // 0.23.11：enterScrollCapture 内部有静默 abort 出口，reject 也曾无人接——
-            // 用户视角"点了没反应"，至少落 error 日志留痕
-            enterScrollCapture(ss.selCss).catch((e) => console.error('[screenshot] enterScrollCapture 失败', e));
-        }
-    });
-    bind('btn-pin', doPinSelection);
-    // 0.28.7：GIF 录制——同长截图，只在选区已定时动作。准备模式的选区
-    // 移动交互依赖选取工具，从非 select 工具进入时先切回（否则拖选区=画图）
-    bind('btn-gif', () => {
-        if (annot.getTool() !== 'select') selectTool('select');
-        doGifRecord();
-    });
-    bind('btn-ocr', doOcrSelection);
-    bind('btn-ocr-diag', doOcrDiagnostics);
-    bind('btn-translate', doTranslateSelection);
-    bind('btn-translate-pin', doTranslateAndPin);
-    bind('btn-save', doSaveSelection);
-    bind('btn-ask-ai', doAskAiSelection);
-    bind('btn-copy', doCopySelection);
+    for (const [id, handler] of Object.entries(handlers)) {
+        registerScreenshotAction(id, handler);
+        document.getElementById(`btn-${id}`)?.addEventListener('click', () => runScreenshotAction(id));
+    }
+    ss._closeToolDropdowns = closeAllDropdowns;
+    bindActionMenu();
 
     // 拖动 handle
     const dragHandle = document.getElementById('toolbar-drag');

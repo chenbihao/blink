@@ -886,6 +886,9 @@ fn summarize(
 
 /// 未知 = 分片前缀不在固定清单、不是 plugin:*、不是提示词库。
 fn is_unknown_shard_item(key: &str) -> bool {
+    if key == "screenshot:config#toolbarLayout" {
+        return false;
+    }
     let Some((shard, _)) = key.split_once('#') else {
         return true;
     };
@@ -926,6 +929,12 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap as Map;
     use std::sync::Mutex;
+
+    #[test]
+    fn screenshot_layout_is_known_but_other_screenshot_fields_stay_unknown() {
+        assert!(!is_unknown_shard_item("screenshot:config#toolbarLayout"));
+        assert!(is_unknown_shard_item("screenshot:config#qrResults"));
+    }
 
     // ── 内存 mock store ─────────────────────────────────────────────────────
 
