@@ -51,7 +51,7 @@ async fn prepare(
     reporter: &dyn InstallReporter,
 ) -> Result<(), Error> {
     reporter.on_stage("downloading");
-    let archive = staging.join("archive.zip");
+    let archive = staging.join(format!("archive.{}", lock.archive_format.extension()));
     let download = async {
         match super::super::download_archive(&lock.runtime, &archive, Some(cancel), reporter).await
         {
@@ -84,14 +84,29 @@ pub(super) async fn prepare_archive(
     let destination = payload.clone();
     let token = cancel.clone();
     tokio::task::spawn_blocking(move || {
-        super::super::archive::extract(
+        use crate::utils::archive::{
+            ExtractLimits, ExtractOptions, ExtractSelection, extract_archive,
+        };
+        extract_archive(
             &archive,
             &destination,
-            owned_lock.max_entries,
-            owned_lock.max_expanded_bytes,
-            Some((&owned_lock.archive_prefix, &owned_lock.files)),
+            &ExtractOptions {
+                format: owned_lock.archive_format,
+                limits: ExtractLimits {
+                    max_entries: owned_lock.max_entries,
+                    max_total_bytes: owned_lock.max_expanded_bytes,
+                    ..Default::default()
+                },
+                selection: Some(ExtractSelection {
+                    prefix: &owned_lock.archive_prefix,
+                    files: &owned_lock.files,
+                }),
+                expected_sha256: Some(&owned_lock.runtime.sha256),
+            },
             Some(&token),
         )
+        .map(|_| ())
+        .map_err(super::super::archive::map_error)
     })
     .await
     .map_err(|e| Error::InstallFailed(format!("解压线程失败: {e}")))??;

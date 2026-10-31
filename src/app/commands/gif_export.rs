@@ -15,7 +15,7 @@ use std::{
     sync::{Arc, atomic::Ordering},
     time::Duration,
 };
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter};
 
 #[derive(Clone, Copy, Debug, serde::Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -76,13 +76,7 @@ fn validate(request: &ExportRequest) -> Result<(), CommandError> {
             false,
         ));
     }
-    if request.session_id.is_empty()
-        || request.session_id.len() > 100
-        || !request
-            .session_id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-    {
+    if !infra_gif::spool::is_valid_session_id(&request.session_id) {
         return Err(CommandError::new("gif_session", "素材会话标识无效", false));
     }
     if request.max_width.is_some_and(|w| !(80..=2560).contains(&w)) {

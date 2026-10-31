@@ -165,7 +165,8 @@ Select a screenshot region, click **Record GIF**, choose the frame rate and whet
 | Preview | `Space` to play / pause; `←` / `→` to step | Find the frames you want to edit |
 | Trim / delete frames | Set start / end; select frames and press `Delete` | `Shift+click` selects a range; `Ctrl+click` toggles individual frames |
 | Adjust pacing | Speed, frame duration, and loop controls | Hold key moments longer; toolbar buttons undo and redo edits |
-| Export | Top-right **Export** button | Choose size, quality, and where to save |
+| Export | Top-right **Export** button | Choose GIF / MP4, size, quality, and where to save. MP4 is silent and plays once; loop settings apply to GIF only |
+| Install the media engine | Choose MP4, then **Manage media engine** | Install FFmpeg, return to the editor, and export again; your edits are preserved. You can also manage it under Settings → Managed engines → Media engine |
 
 Tip: record a smaller region and choose a smaller export size for a lightweight walkthrough.
 

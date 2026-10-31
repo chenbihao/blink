@@ -13,10 +13,9 @@ use std::sync::Arc;
 
 use base64::Engine;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 
 use blink_domain::gif::EditCommand;
-use blink_infra::event_names::EventNames;
 use blink_infra::gif::{
     self as infra_gif, CaptureCommand, SpoolReader,
 };

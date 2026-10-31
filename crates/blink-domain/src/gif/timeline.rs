@@ -364,6 +364,9 @@ impl Timeline {
     /// 逐帧导出视图（应用全部编辑；dur 未量化，供前端预览播放）。
     pub fn effective_frames(&self) -> Vec<FrameView> {
         let mut out = Vec::new();
+        if self.frame_count == 0 {
+            return out;
+        }
         for i in self.core.trim_start..=self.core.trim_end {
             if self.core.deleted.contains(&i) {
                 continue;
@@ -432,6 +435,15 @@ mod tests {
         assert_eq!(v[0].dur_ms, 100);
         assert_eq!(t.effective_total_ms(), 500);
         assert_eq!(t.revision(), 1);
+    }
+
+    #[test]
+    fn empty_recording_has_no_export_frames_instead_of_indexing_frame_zero() {
+        let timeline = Timeline::from_durations(Vec::new());
+        assert!(timeline.effective_frames().is_empty());
+        assert_eq!(timeline.effective_total_ms(), 0);
+        assert!(timeline.export_snapshot(640, 480).frames.is_empty());
+        assert!(timeline.export_plan(640, 480).frames.is_empty());
     }
 
     #[test]

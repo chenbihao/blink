@@ -25,7 +25,8 @@ where
         Some(job) => Some(job),
         None if child.try_wait()?.is_some() => None,
         None => {
-            let _ = child.kill().await;
+            let _ = child.start_kill();
+            let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
             return Err(Error::SelfTestFailed("无法监管 FFmpeg 自检进程树".into()));
         }
     };
@@ -53,8 +54,8 @@ where
         } => result,
     };
     if result.is_err() {
-        let _ = child.kill().await;
-        let _ = child.wait().await;
+        let _ = child.start_kill();
+        let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
     }
     result?;
     Ok(out)

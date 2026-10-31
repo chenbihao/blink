@@ -27,6 +27,9 @@ const LOCK: &str = include_str!("../../../../../resources/runtimes/ffmpeg-asset-
 pub struct MediaLock {
     pub schema_version: u32,
     pub runtime: RuntimeLockEntry,
+    pub archive_format: crate::utils::archive::ArchiveFormat,
+    #[serde(default)]
+    pub compatible_archive_sha256: Vec<String>,
     pub archive_prefix: String,
     pub fallback_url: String,
     pub files: Vec<String>,
@@ -44,6 +47,10 @@ pub fn lock() -> Result<MediaLock, Error> {
     if lock.schema_version != 1
         || lock.runtime.kind != KIND
         || lock.runtime.sha256.len() != 64
+        || !lock.runtime.sha256.bytes().all(|b| b.is_ascii_hexdigit())
+        || lock.compatible_archive_sha256.iter().any(|hash| {
+            hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit())
+        })
         || lock.runtime.size_bytes == 0
         || lock.max_entries == 0
         || lock.max_expanded_bytes < lock.runtime.size_bytes
@@ -164,7 +171,10 @@ fn status_at(root: &Path) -> Result<RuntimeStatus, Error> {
     if !complete || record.verification_failed {
         result.state = "corrupt".into();
         result.message = Some("安装文件缺失或已变化，请修复".into());
-    } else if record.build != lock.runtime.sha256 {
+    } else if record.version != lock.runtime.version
+        || (record.build != lock.runtime.sha256
+            && !lock.compatible_archive_sha256.contains(&record.build))
+    {
         result.state = "outdated".into();
     } else {
         result.state = "ready".into();

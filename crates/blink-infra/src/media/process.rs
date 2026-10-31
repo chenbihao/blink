@@ -127,7 +127,8 @@ pub(super) async fn run(
         Ok(job) => Some(job),
         Err(_) => {
             if child.try_wait()?.is_none() {
-                let _ = child.kill().await;
+                let _ = child.start_kill();
+                let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
                 return Err(MediaError::Process("无法监管子进程树"));
             }
             None // 极短命令已结束，仍需读取其输出。
@@ -219,5 +220,41 @@ impl TempOutput {
 impl Drop for TempOutput {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn progress_is_structured_and_output_buffers_are_bounded() {
+        let values = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = values.clone();
+        let callback: ProgressCallback = Arc::new(move |p| {
+            sink.lock()
+                .unwrap()
+                .push((p.stage, p.frames_done, p.frames_total))
+        });
+        let output = stdout(
+            &b"frame=2\nunknown=field\nframe=18\nprogress=end\n"[..],
+            Some((callback, "encoding", 18)),
+        )
+        .await
+        .unwrap();
+        assert!(output.is_empty());
+        assert_eq!(
+            *values.lock().unwrap(),
+            vec![("encoding", 2, 18), ("encoding", 18, 18)]
+        );
+        let long = vec![b'x'; 1025];
+        assert!(
+            stdout(&long[..], Some((Arc::new(|_| {}), "encoding", 1)))
+                .await
+                .is_err()
+        );
+        let large = vec![b'x'; 65537];
+        assert!(stdout(&large[..], None).await.is_err());
+        assert_eq!(stdout(&large[..65536], None).await.unwrap().len(), 65536);
+        assert_eq!(drain(&large[..]).await.unwrap(), 65537);
     }
 }

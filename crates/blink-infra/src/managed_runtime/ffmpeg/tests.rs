@@ -16,7 +16,11 @@ fn fixture(root: &Path, id: &str) -> PathBuf {
 #[test]
 fn lock_is_fixed_and_installs_only_codec_tools_and_notices() {
     let lock = lock().unwrap();
-    assert_eq!(lock.runtime.size_bytes, 114768076);
+    assert_eq!(lock.runtime.size_bytes, 35430500);
+    assert_eq!(
+        lock.archive_format,
+        crate::utils::archive::ArchiveFormat::SevenZip
+    );
     assert!(!lock.runtime.url.contains("latest"));
     assert!(!lock.files.iter().any(|p| p.contains("ffplay")));
     assert!(lock.files.contains(&"bin/ffprobe.exe".into()));
@@ -41,6 +45,30 @@ fn status_is_read_only_and_checks_all_artifact_identities() {
     std::fs::write(slot.join("bin/ffprobe.exe"), b"corrupt").unwrap();
     assert_eq!(status_at(&root).unwrap().state, "corrupt");
     assert!(acquire_at(&root).is_err());
+}
+
+#[test]
+fn archive_format_switch_keeps_verified_zip_installations_ready() {
+    let temp = tempfile::tempdir().unwrap();
+    fixture(temp.path(), "zip");
+    let mut record = read_record(temp.path()).unwrap().unwrap();
+    record.build = lock().unwrap().compatible_archive_sha256[0].clone();
+    let write = |record: &Record| {
+        std::fs::write(
+            temp.path().join("active.json"),
+            serde_json::to_vec(record).unwrap(),
+        )
+        .unwrap();
+    };
+    write(&record);
+    assert_eq!(status_at(temp.path()).unwrap().state, "ready");
+    record.version = "old-version".into();
+    write(&record);
+    assert_eq!(status_at(temp.path()).unwrap().state, "outdated");
+    record.version = lock().unwrap().runtime.version;
+    record.build = "0".repeat(64);
+    write(&record);
+    assert_eq!(status_at(temp.path()).unwrap().state, "outdated");
 }
 
 #[test]

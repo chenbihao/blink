@@ -232,6 +232,13 @@ fn write_session_json(dir: &Path, meta: &SessionMeta) -> Result<(), SpoolError> 
     Ok(())
 }
 
+/// 会话 ID 是单个目录名，读取与导出共用同一边界。
+pub fn is_valid_session_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 100
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 /// 素材读取器（编辑器/导出按需解码）。
 pub struct SpoolReader {
     dir: PathBuf,
@@ -242,7 +249,7 @@ pub struct SpoolReader {
 impl SpoolReader {
     /// 打开会话：读元数据 + 索引（丢崩溃残行/越界尾块），校验格式版本。
     pub fn open(root: &Path, id: &str) -> Result<Self, SpoolError> {
-        if id.is_empty() || id.len() > 100 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+        if !is_valid_session_id(id) {
             return Err(SpoolError::InvalidSession("会话标识无效".into()));
         }
         let dir = session_dir(root, id);
@@ -319,7 +326,9 @@ impl SpoolReader {
         f.seek(SeekFrom::Start(entry.o))?;
         let mut compressed = vec![0u8; entry.c as usize];
         f.read_exact(&mut compressed)?;
-        let decoder = zstd::stream::read::Decoder::new(&compressed[..])
+        let mut decoder = zstd::stream::read::Decoder::new(&compressed[..])
+            .map_err(|_| SpoolError::CorruptFrame(idx))?;
+        decoder.window_log_max(24)
             .map_err(|_| SpoolError::CorruptFrame(idx))?;
         let mut raw = Vec::with_capacity(entry.r as usize);
         decoder.take(max_bytes as u64 + 1).read_to_end(&mut raw)
@@ -423,6 +432,29 @@ mod tests {
             *b = (idx as u8).wrapping_add(i as u8);
         }
         v
+    }
+
+    #[test]
+    fn session_id_cannot_escape_its_directory() {
+        assert!(is_valid_session_id("rec-20261031_1"));
+        for id in ["", "..", "../escape", "x/y", "x\\y", "x:y", " x", "x."] {
+            assert!(!is_valid_session_id(id), "{id}");
+        }
+        assert!(!is_valid_session_id(&"a".repeat(101)));
+    }
+
+    #[test]
+    fn frame_budget_checks_both_index_and_actual_expansion() {
+        let root = tempfile::tempdir().unwrap();
+        let meta = meta(8, 8);
+        let id = meta.id.clone();
+        let mut writer = SpoolWriter::create(root.path(), meta).unwrap();
+        writer.append_frame(0, &frame(0, 8, 8)).unwrap();
+        writer.finalize("user").unwrap();
+        let mut reader = SpoolReader::open(root.path(), &id).unwrap();
+        assert!(matches!(reader.read_frame_bounded(0, 128), Err(SpoolError::CorruptFrame(0))));
+        reader.index[0].r = 1; // 索引谎报小值，仍不能绕过解压流的真实输出上限。
+        assert!(matches!(reader.read_frame_bounded(0, 128), Err(SpoolError::CorruptFrame(0))));
     }
 
     #[test]

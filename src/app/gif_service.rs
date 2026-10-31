@@ -86,7 +86,11 @@ impl GifService {
     }
 
     pub fn root() -> PathBuf {
-        blink_infra::utils::paths::app_data_dir().join("gif")
+        if blink_infra::runtime_mode::is_production() {
+            blink_infra::utils::paths::app_data_dir().join("gif")
+        } else {
+            blink_infra::local_engine::runtime::runtimes_root().join("test-gif")
+        }
     }
 
     /// 启动清理：过期素材回收（main.rs spawn_blocking 调用）。
@@ -806,5 +810,17 @@ pub fn to_encode_plan(plan: &blink_domain::gif::ExportPlan) -> EncodePlan {
                 delay_cs: f.delay_cs,
             })
             .collect(),
+    }
+}
+
+#[cfg(test)]
+mod media_storage_tests {
+    #[test]
+    fn gif_test_storage_uses_the_isolated_runtime_root() {
+        assert!(!blink_infra::runtime_mode::is_production());
+        assert_eq!(
+            super::GifService::root(),
+            blink_infra::local_engine::runtime::runtimes_root().join("test-gif")
+        );
     }
 }

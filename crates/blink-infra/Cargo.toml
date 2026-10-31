@@ -100,6 +100,9 @@ windows = { version = "0.62.2", features = [
     "Foundation_Collections",
 ] }
 zip = "2.2"
+# 仅解码 LZMA/LZMA2 与 BCJ 过滤器，安装包解压不带 AES/PPMd/BZip2 等可选组件。
+sevenz-rust2 = { version = "=0.24.2", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"
+sevenz-rust2 = { version = "=0.24.2", default-features = false, features = ["compress"] }

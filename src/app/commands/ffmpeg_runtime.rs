@@ -39,6 +39,33 @@ struct OperationState {
     operation: Option<MediaRuntimeOperation>,
     last_error: Option<String>,
 }
+impl OperationState {
+    /// 应用退出不同于 UI 取消：请求协作停止，等待在途提交/清理完成。
+    fn request_shutdown(&self) -> bool {
+        if let Some(operation) = &self.operation {
+            operation.cancel.cancel();
+            false
+        } else {
+            true
+        }
+    }
+}
+
+pub async fn shutdown_ffmpeg_runtime() {
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if STATE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .request_shutdown()
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await;
+}
 static STATE: LazyLock<Arc<Mutex<OperationState>>> =
     LazyLock::new(|| Arc::new(Mutex::new(OperationState::default())));
 static EPOCH: LazyLock<String> = LazyLock::new(|| {
@@ -255,5 +282,33 @@ fn ensure_settings(window: &tauri::WebviewWindow) -> Result<(), CommandError> {
             "媒体运行时管理仅限设置窗口",
             false,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn shutdown_cancels_work_without_pretending_cleanup_is_finished() {
+        let mut state = OperationState::default();
+        assert!(state.request_shutdown());
+        let cancel = CancellationToken::new();
+        state.operation = Some(MediaRuntimeOperation {
+            id: "one".into(),
+            action: MediaRuntimeAction::Install,
+            stage: "promoting".into(),
+            downloaded: 1,
+            total: Some(1),
+            cancellable: false,
+            cancel: cancel.clone(),
+        });
+        assert!(!state.request_shutdown());
+        assert!(cancel.is_cancelled());
+        assert!(
+            state.operation.is_some(),
+            "等 worker 回收并提交真实终态，而非先清除 busy"
+        );
+        state.operation = None;
+        assert!(state.request_shutdown());
     }
 }

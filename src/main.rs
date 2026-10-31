@@ -411,10 +411,11 @@ fn main() {
                 }
             }
             if let tauri::RunEvent::Exit = event {
-                tauri::async_runtime::block_on(crate::app::media_service::shutdown());
                 // 0.16.11：标记应用正在退出——便签窗口的 CloseRequested handler
                 // 据此跳过 set_visible(false)，保证退出不把所有便签写成 hidden
                 crate::infra::platform::window::set_app_exiting();
+                tauri::async_runtime::block_on(crate::app::media_service::shutdown());
+                tauri::async_runtime::block_on(crate::app::commands::shutdown_ffmpeg_runtime());
 
                 // 0.16.11：退出前 flush 所有便签窗口的未保存内容（防抖 500ms 内的编辑）
                 let flushed = crate::infra::platform::window::flush_all_sticky_windows(_app);

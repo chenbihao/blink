@@ -1,6 +1,7 @@
 //! 通用工具层：HTTP 日志、日志、性能、文本处理、路径、文件系统
 
 pub mod fs;
+pub mod archive;
 pub mod http_log;
 pub(crate) mod image_metadata;
 pub mod logging;
