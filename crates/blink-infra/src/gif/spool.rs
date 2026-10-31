@@ -242,6 +242,9 @@ pub struct SpoolReader {
 impl SpoolReader {
     /// 打开会话：读元数据 + 索引（丢崩溃残行/越界尾块），校验格式版本。
     pub fn open(root: &Path, id: &str) -> Result<Self, SpoolError> {
+        if id.is_empty() || id.len() > 100 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+            return Err(SpoolError::InvalidSession("会话标识无效".into()));
+        }
         let dir = session_dir(root, id);
         let meta_path = dir.join("session.json");
         if !meta_path.is_file() {

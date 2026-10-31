@@ -191,15 +191,28 @@ async fn real_mp4_pipeline_smoke() {
         height: 67,
         frames: frames(&[33, 66, 700]),
     };
+    use crate::gif::{CaptureRegion, SessionMeta, SpoolReader, SpoolWriter, EncodePlan, EncodeFrame, ExportOptions};
+    let spool_root = temp.path().join("spool"); let id = "shared-snapshot";
+    let meta = SessionMeta { spool_version: crate::gif::spool::SPOOL_VERSION, id:id.into(),
+        region:CaptureRegion{x:0,y:0,w:65,h:67}, fps:30, show_cursor:false, created_at:0, state:"recording".into(),
+        ts_ms:Vec::new(), last_dur_ms:700, spool_bytes:0, stop_reason:None };
+    let mut writer = SpoolWriter::create(&spool_root,meta).unwrap();
+    let mut synth = Synthetic{width:65,height:67,frames:3};
+    for (i,ts) in [0,33,99].into_iter().enumerate() { writer.append_frame(ts,&synth.read_bgra(i as u32).unwrap()).unwrap(); }
+    writer.finalize("user").unwrap();
+    let reader = SpoolReader::open(&spool_root,id).unwrap();
+    let gif_plan = EncodePlan {src_w:65,src_h:67,loop_count:Some(3),frames:plan.frames.iter().map(|f|EncodeFrame{src_idx:f.src_idx,delay_cs:(f.duration_ms/10).clamp(2,600)}).collect()};
+    let gif_path = temp.path().join("same-snapshot.gif");
+    let gif_stats = crate::gif::export_gif(&reader,&gif_plan,&ExportOptions::default(),&gif_path,&std::sync::atomic::AtomicBool::new(false),&|_,_,_|{}).unwrap();
+    assert_eq!((gif_stats.width,gif_stats.height,gif_stats.written_frames),(65,67,3));
+    let mut decoder = gif::DecodeOptions::new().read_info(std::fs::File::open(gif_path).unwrap()).unwrap();
+    let mut delay = 0; while let Some(frame) = decoder.read_next_frame().unwrap() { delay += frame.delay as u32; }
+    assert_eq!(delay,79,"GIF 保留原来的百分之一秒量化；MP4 使用毫秒累计时钟");
     let target = temp.path().join("中文 with space.mp4");
     let stats = export_mp4(
         &task,
         lease,
-        Synthetic {
-            width: 65,
-            height: 67,
-            frames: 3,
-        },
+        reader,
         plan,
         VideoOptions::default(),
         target.clone(),
@@ -281,6 +294,25 @@ async fn real_mp4_pipeline_smoke() {
     .await;
     assert!(result.is_err());
     assert!(!rejected.exists());
+    for scenario in ["cancel-verify", "target-race", "timeout"] {
+        let runtime = crate::managed_runtime::ffmpeg::test_lease_at(temp.path());
+        let target = temp.path().join(format!("{scenario}.mp4"));
+        let token = tokio_util::sync::CancellationToken::new();
+        let callback_token = token.clone(); let callback_target = target.clone();
+        let mut options = VideoOptions::default();
+        if scenario == "timeout" { options.budget.timeout = std::time::Duration::from_millis(1); }
+        let result = export_mp4(&task, runtime, Synthetic {width:65,height:67,frames:1},
+            VideoPlan {width:65,height:67,frames:frames(&[500])}, options, target.clone(), token,
+            Arc::new(move |p| {
+                if scenario == "cancel-verify" && p.stage == "verifying" { callback_token.cancel(); }
+                if scenario == "target-race" && p.stage == "committing" { std::fs::write(&callback_target,b"keep").unwrap(); }
+            })).await;
+        match scenario {
+            "cancel-verify" => { assert!(matches!(result,Err(MediaError::Cancelled))); assert!(!target.exists()); }
+            "target-race" => { assert!(result.is_err()); assert_eq!(std::fs::read(&target).unwrap(),b"keep"); }
+            _ => { assert!(matches!(result,Err(MediaError::Timeout))); assert!(!target.exists()); }
+        }
+    }
     assert_eq!(
         std::fs::read_dir(temp.path())
             .unwrap()

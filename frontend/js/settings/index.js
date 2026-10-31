@@ -780,6 +780,12 @@ window.addEventListener("beforeunload", () => {
     disposeLocalRuntime();
 });
 
+// 编辑器的媒体引擎深链：复用初始化 single-flight 与统一导航。
+window.openBlinkMediaSettings = async () => {
+    await init();
+    if (configReady) return navigateSettings({tabId: "managed-engines", target: "#media-runtime-card"});
+};
+
 // ── 启动 ─────────────────────────────────────────────────────────────────────
 
 init();

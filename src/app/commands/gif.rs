@@ -18,7 +18,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use blink_domain::gif::EditCommand;
 use blink_infra::event_names::EventNames;
 use blink_infra::gif::{
-    self as infra_gif, CaptureCommand, ExportOptions, ExportQuality, SpoolReader,
+    self as infra_gif, CaptureCommand, SpoolReader,
 };
 
 use crate::app::command_error::CommandError;
@@ -33,7 +33,7 @@ fn io_err(e: std::io::Error) -> CommandError {
 }
 
 /// 打开（或重建）会话时间轴，返回其 reader 元数据与视图。
-fn with_session(
+pub(super) fn with_session(
     app: &AppHandle,
     session_id: &str,
 ) -> Result<(SpoolReader, Arc<GifService>), CommandError> {
@@ -45,7 +45,7 @@ fn with_session(
 }
 
 /// 确保内存时间轴存在（编辑器重开 / 崩溃后重建）。
-fn ensure_timeline(service: &Arc<GifService>, reader: &SpoolReader, session_id: &str) {
+pub(super) fn ensure_timeline(service: &Arc<GifService>, reader: &SpoolReader, session_id: &str) {
     let mut timelines = service.timelines.lock().unwrap_or_else(|e| e.into_inner());
     timelines
         .entry(session_id.to_string())
@@ -186,6 +186,8 @@ pub fn gif_list_sessions() -> Result<Vec<GifSessionSummary>, CommandError> {
 /// 丢弃会话素材（录制中会话拒绝——先停止/取消）。
 #[tauri::command]
 pub fn gif_discard_session(app: AppHandle, session_id: String) -> Result<(), CommandError> {
+    let _task = blink_infra::media::acquire_task_lease().map_err(|e| CommandError::new(e.code(), e.to_string(), true))?;
+    let _ = with_session(&app, &session_id)?;
     let service = app.state::<Arc<GifService>>();
     {
         let rec = service.recording.lock().unwrap_or_else(|e| e.into_inner());
@@ -339,157 +341,17 @@ pub fn gif_edit(
     Ok(gif_service::timeline_view(tl))
 }
 
-// ── 导出 ────────────────────────────────────────────────────────────────────
-
-fn quality_from_str(q: Option<String>) -> ExportQuality {
-    match q.as_deref() {
-        Some("high") => ExportQuality::High,
-        Some("low") => ExportQuality::Low,
-        _ => ExportQuality::Medium,
-    }
-}
-
-/// 导出 GIF：冻结当前 revision 快照 → 流式编码 → 独立解码验证 → 原子提交。
-/// 进度经 `blink://gif-export-progress` 事件（编码线程节流）。
-#[tauri::command]
-pub async fn gif_export(
-    app: AppHandle,
-    session_id: String,
-    path: String,
-    max_width: Option<u32>,
-    quality: Option<String>,
-    overwrite: Option<bool>,
-) -> Result<serde_json::Value, CommandError> {
-    let (reader, service) = with_session(&app, &session_id)?;
-    ensure_timeline(&service, &reader, &session_id);
-    let plan = {
-        let timelines = service.timelines.lock().unwrap_or_else(|e| e.into_inner());
-        let tl = timelines.get(&session_id).ok_or_else(|| {
-            CommandError::new("gif_session", "时间轴构建失败", false)
-        })?;
-        gif_service::to_encode_plan(&tl.export_plan(reader.meta.region.w, reader.meta.region.h))
-    };
-    let opts = ExportOptions {
-        max_width: max_width.filter(|w| *w >= 80),
-        quality: quality_from_str(quality),
-        overwrite: overwrite.unwrap_or(false),
-    };
-    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    {
-        let mut exports = service.exports.lock().unwrap_or_else(|e| e.into_inner());
-        if exports.contains_key(&session_id) {
-            return Err(CommandError::new("gif_export_busy", "该会话正在导出，请等待完成或取消", true));
-        }
-        exports.insert(session_id.clone(), Arc::clone(&cancel));
-    }
-    // reader 跨线程：SpoolReader 只含路径与索引（Send）
-    let app2 = app.clone();
-    let sid = session_id.clone();
-    let total_frames = plan.frames.len() as u32;
-    let cancel2 = Arc::clone(&cancel);
-    let raw_result = tauri::async_runtime::spawn_blocking(move || {
-        let progress = |stage: infra_gif::ExportStage, done: u32, total: u32| {
-            // 节流：每帧都发会刷屏（≤1800 帧）；每 5% 或完成时发
-            let step = (total / 20).max(1);
-            if done == total || done % step == 0 {
-                let _ = app2.emit(
-                    EventNames::GIF_EXPORT_PROGRESS,
-                    serde_json::json!({
-                        "sessionId": sid,
-                        "stage": stage.as_str(),
-                        "framesDone": done,
-                        "framesTotal": total,
-                    }),
-                );
-            }
-        };
-        infra_gif::export_gif(
-            &reader,
-            &plan,
-            &opts,
-            std::path::Path::new(&path),
-            &cancel2,
-            &progress,
-        )
-    })
-    .await
-    .map_err(|e| CommandError::new("gif_export", format!("导出线程失败: {e}"), false));
-
-    service
-        .exports
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(&session_id);
-
-    let cancelled = matches!(
-        &raw_result,
-        Ok(Err(infra_gif::ExportError::Cancelled))
-    );
-    let result: Result<infra_gif::ExportStats, CommandError> = match raw_result {
-        Ok(Ok(stats)) => Ok(stats),
-        Ok(Err(e)) => Err(CommandError::new(
-            "gif_export",
-            e.to_string(),
-            false,
-        )),
-        Err(e) => Err(e),
-    };
-
-    match &result {
-        Ok(stats) => {
-            let _ = app.emit(
-                EventNames::GIF_EXPORT_PROGRESS,
-                serde_json::json!({
-                    "sessionId": session_id,
-                    "stage": "done",
-                    "framesDone": total_frames,
-                    "framesTotal": total_frames,
-                    "stats": stats,
-                }),
-            );
-        }
-        Err(e) => {
-            let stage = if cancelled { "cancelled" } else { "failed" };
-            let _ = app.emit(
-                EventNames::GIF_EXPORT_PROGRESS,
-                serde_json::json!({
-                    "sessionId": session_id,
-                    "stage": stage,
-                    "error": e.to_string(),
-                }),
-            );
-        }
-    }
-    let stats = result?;
-    Ok(serde_json::to_value(stats).unwrap_or_default())
-}
-
-/// 取消导出（编码线程在下一帧边界退出并清理 tmp）。
-#[tauri::command]
-pub fn gif_export_cancel(app: AppHandle, session_id: String) -> Result<(), CommandError> {
-    let service = app.state::<Arc<GifService>>();
-    if let Some(cancel) = service
-        .exports
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(&session_id)
-    {
-        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-    }
-    Ok(())
-}
-
 /// 在资源管理器中定位导出文件（explorer /select）。
 #[tauri::command]
 pub fn gif_open_containing_folder(path: String) -> Result<(), CommandError> {
-    if !path.ends_with(".gif") {
-        return Err(CommandError::new("gif_path", "仅支持定位 GIF 成品", false));
+    if !std::path::Path::new(&path).extension().and_then(|v| v.to_str()).is_some_and(|v| v.eq_ignore_ascii_case("gif") || v.eq_ignore_ascii_case("mp4")) {
+        return Err(CommandError::new("gif_path", "仅支持定位 GIF / MP4 成品", false));
     }
     let p = std::path::Path::new(&path);
     if !p.is_file() {
         return Err(CommandError::new("gif_path", "文件不存在", false));
     }
-    std::process::Command::new("explorer.exe")
+    blink_infra::platform::no_window(std::process::Command::new("explorer.exe"))
         .arg("/select,")
         .arg(p)
         .spawn()

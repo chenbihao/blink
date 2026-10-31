@@ -465,3 +465,20 @@ progress {
     gap: 8px;
     margin-top: 8px;
 }
+
+.export-note, .export-engine {
+    max-width: 420px;
+    margin-bottom: var(--space-md);
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.6;
+}
+
+.export-engine {
+    padding: var(--space-sm);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    background: var(--bg-base);
+}
+
+.export-engine .btn { margin-top: var(--space-sm); }

@@ -7,7 +7,7 @@
 //!
 //! **时长语义**：
 //! - 素材帧时长 `base_dur_ms` 来自录制时间戳差（暂停已剔除）；删除帧的时长
-//!   并入前一有效帧，总时长语义不因删帧跳变。
+//!   随画面一起移除，总时长缩短。
 //! - 单帧停留 `hold` 覆盖该帧计算值（不改素材）。
 //! - 导出 delay 量化为 GIF 的 1/100s 单位，最小 2（20ms——更小会被多数
 //!   浏览器按 100ms 以上回放），上限 6s（超长停留对演示无意义且兼容性差）。
@@ -72,6 +72,34 @@ pub struct ExportPlan {
     pub loop_count: Option<u16>,
 }
 
+/// 格式中立的毫秒快照。MP4 直接使用此时钟，GIF 单独适配量化与循环。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExportSnapshot {
+    pub revision: u64,
+    pub src_w: u32,
+    pub src_h: u32,
+    pub frames: Vec<FrameView>,
+    pub loop_count: Option<u16>,
+}
+impl ExportSnapshot {
+    pub fn gif_plan(&self) -> ExportPlan {
+        ExportPlan {
+            revision: self.revision,
+            src_w: self.src_w,
+            src_h: self.src_h,
+            frames: self
+                .frames
+                .iter()
+                .map(|f| PlanFrame {
+                    src_idx: f.src_idx,
+                    delay_cs: quantize_delay_ms(f.dur_ms),
+                })
+                .collect(),
+            loop_count: self.loop_count,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct PlanFrame {
     pub src_idx: u32,
@@ -85,7 +113,7 @@ struct Core {
     trim_start: u32,
     trim_end: u32,
     deleted: BTreeSet<u32>,
-    /// 删除帧时长并入后的有效素材时长（与 deleted 同步维护）。
+    /// 删除帧时长置零后的有效素材时长（与 deleted 同步维护）。
     base_dur_ms: Vec<u32>,
     speed: f32,
     holds: BTreeMap<u32, u32>,
@@ -357,19 +385,15 @@ impl Timeline {
 
     /// 冻结导出计划（revision 快照 + delay 量化到 1/100s）。
     pub fn export_plan(&self, src_w: u32, src_h: u32) -> ExportPlan {
-        let frames = self
-            .effective_frames()
-            .into_iter()
-            .map(|f| PlanFrame {
-                src_idx: f.src_idx,
-                delay_cs: quantize_delay_ms(f.dur_ms),
-            })
-            .collect();
-        ExportPlan {
+        self.export_snapshot(src_w, src_h).gif_plan()
+    }
+
+    pub fn export_snapshot(&self, src_w: u32, src_h: u32) -> ExportSnapshot {
+        ExportSnapshot {
             revision: self.revision,
             src_w,
             src_h,
-            frames,
+            frames: self.effective_frames(),
             loop_count: self.core.loop_count,
         }
     }
@@ -620,6 +644,30 @@ mod tests {
         t.apply(&EditCommand::SetSpeed { factor: 4.0 }).unwrap();
         assert_eq!(plan.frames[0].delay_cs, 6);
         assert_ne!(t.export_plan(800, 600).revision, plan.revision);
+    }
+
+    #[test]
+    fn neutral_snapshot_preserves_milliseconds_and_is_frozen() {
+        let mut t = Timeline::from_durations(vec![33, 33, 33, 33]);
+        t.apply(&EditCommand::DeleteFrame { frame: 1 }).unwrap();
+        t.apply(&EditCommand::SetSpeed { factor: 1.5 }).unwrap();
+        t.apply(&EditCommand::SetHold { frame: 2, ms: 777 })
+            .unwrap();
+        t.apply(&EditCommand::SetLoop { count: Some(3) }).unwrap();
+        let snapshot = t.export_snapshot(65, 67);
+        assert_eq!(
+            snapshot
+                .frames
+                .iter()
+                .map(|f| (f.src_idx, f.dur_ms))
+                .collect::<Vec<_>>(),
+            vec![(0, 22), (2, 777), (3, 22)]
+        );
+        assert_eq!(snapshot.gif_plan(), t.export_plan(65, 67));
+        assert_eq!(snapshot.gif_plan().frames[1].delay_cs, 77);
+        t.apply(&EditCommand::Reset).unwrap();
+        assert_eq!(snapshot.frames[1].dur_ms, 777);
+        assert_ne!(snapshot.revision, t.revision());
     }
 
     #[test]

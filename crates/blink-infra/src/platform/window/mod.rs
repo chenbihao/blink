@@ -44,7 +44,7 @@ pub use windows::{
     hide_for_screenshot, hide_image_editor_window, hide_screenshot_overlay, hide_sticky_window,
     hide_voice_overlay, install_sysmenu_blocker, is_app_exiting, is_left_button_down, is_main_ai_active, is_terminal_window,
     is_visible, last_external_foreground_hwnd, mark_pin_spare_ready, mark_spare_ready,
-    mark_window_page_loading, mark_window_page_ready, on_focused, open_settings, place_at_physical,
+    mark_window_page_loading, mark_window_page_ready, eval_when_window_ready, on_focused, open_settings, place_at_physical,
     preheat_secondary_windows, refresh_pin_image, refresh_pin_image_by_label, restore_foreground,
     restore_foreground_g2, set_app_exiting, set_context_menu_payload, set_last_external_hwnd,
     cursor_pos_virtual, show_main_window_with_placement,

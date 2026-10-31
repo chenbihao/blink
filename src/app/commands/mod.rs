@@ -8,6 +8,7 @@ mod attachments;
 mod clipboard;
 pub(crate) mod config; // set_config_internal 为同步应用服务复用
 mod config_sync; // 0.28.6：配置同步命令（WebDAV 设置/测试/同步/初始化）
+mod gif_export;
 mod gif; // 0.28.7：GIF 录制/编辑/导出命令
 mod content_editor;
 mod diagnostic;
@@ -35,6 +36,7 @@ pub use clipboard::*;
 pub use config::*;
 pub use config_sync::*;
 pub use gif::*;
+pub use gif_export::*;
 pub use content_editor::*;
 pub use diagnostic::*;
 pub use feature_catalog::*;

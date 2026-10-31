@@ -65,7 +65,6 @@ pub struct GifService {
     start_lock: Mutex<()>,
     pub(crate) recording: Mutex<Option<ActiveRecording>>,
     pub(crate) timelines: Mutex<HashMap<String, Timeline>>,
-    pub(crate) exports: Mutex<HashMap<String, Arc<AtomicBool>>>,
     /// 编辑器当前会话（复用窗口 + ready/pull）。
     pub(crate) editor_session: Mutex<Option<String>>,
 }
@@ -82,7 +81,6 @@ impl GifService {
             start_lock: Mutex::new(()),
             recording: Mutex::new(None),
             timelines: Mutex::new(HashMap::new()),
-            exports: Mutex::new(HashMap::new()),
             editor_session: Mutex::new(None),
         }
     }
@@ -683,10 +681,11 @@ pub fn open_editor(app: &AppHandle, session_id: &str) {
     use blink_infra::platform::window::get_or_create_window;
     {
         let service = app.state::<Arc<GifService>>();
-        *service
-            .editor_session
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(session_id.to_string());
+        let mut current = service.editor_session.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(previous) = current.as_deref().filter(|id| *id != session_id) {
+            crate::app::media_service::shared().cancel(Some(previous), None);
+        }
+        *current = Some(session_id.to_string());
     }
     let built = get_or_create_window(app, EDITOR_LABEL, || {
         WebviewWindowBuilder::new(
@@ -701,7 +700,16 @@ pub fn open_editor(app: &AppHandle, session_id: &str) {
         .build()
     });
     match built {
-        Ok((win, _created)) => {
+        Ok((win, created)) => {
+            if created {
+                let service = app.state::<Arc<GifService>>().inner().clone();
+                win.on_window_event(move |event| {
+                    if matches!(event, tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed) {
+                        let mut current = service.editor_session.lock().unwrap_or_else(|e| e.into_inner());
+                        if let Some(id) = current.take() { crate::app::media_service::shared().cancel(Some(&id), None); }
+                    }
+                });
+            }
             let _ = win.show();
             let _ = win.set_focus();
             let _ = app.emit_to(

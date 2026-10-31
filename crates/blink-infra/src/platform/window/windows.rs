@@ -638,6 +638,11 @@ where
     Ok(run_now)
 }
 
+/// 向就绪页面投递宿主脚本；冷建窗复用生命周期 pending 状态，禁止猜测加载延迟。
+pub fn eval_when_window_ready(app: &AppHandle, label: &str, script: String) -> Result<(), String> {
+    activate_window_when_ready(app, label, move |window| window.eval(&script).map_err(|e| e.to_string())).map(|_| ())
+}
+
 fn cancel_pending_window_activation(label: &str) {
     let cancelled = {
         let mut states = window_ready_states()

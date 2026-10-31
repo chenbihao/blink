@@ -16,8 +16,9 @@
 //!
 //! 键盘：Space 播放/暂停；←/→ 帧步进；Delete/Backspace 删除选中。
 
+import {createExportController} from './export-controller.js';
 import {ensureSpriteLoaded} from '../shared/icon.js';
-import {invoke, listen, normalizeError, saveDialog} from '../shared/tauri.js';
+import {invoke, listen, normalizeError} from '../shared/tauri.js';
 import {commands, formatFrameDur, formatSeconds, frameState, nextPlayStep, playToSrc, srcToPlayIndex} from './timeline-view.js';
 
 ensureSpriteLoaded();
@@ -55,14 +56,6 @@ const els = {
     redo: $('btn-redo'),
     exportBtn: $('btn-export'),
     dialog: $('export-dialog'),
-    exportPath: $('export-path'),
-    pickPath: $('btn-pick-path'),
-    exportConfirm: $('btn-export-confirm'),
-    exportCancelReq: $('btn-export-cancel-req'),
-    exportClose: $('btn-export-close'),
-    progressRow: $('export-progress-row'),
-    progress: $('export-progress'),
-    progressText: $('export-progress-text'),
     hint: $('editor-hint'),
     stopBanner: $('stop-reason-banner'),
     stopBannerText: $('stop-reason-text'),
@@ -106,7 +99,6 @@ const state = {
     /** 解码批次队列（串行执行，防并发 invoke 爆炸）。 */
     decoding: false,
     pendingBatches: [],
-    exporting: false,
     /** 瞬时提示定时器。 */
     hintTimer: 0,
 };
@@ -557,6 +549,7 @@ async function restoreSelected() {
 // ── 会话加载 ─────────────────────────────────────────────────────────────
 
 async function loadSession(sessionId) {
+    exportController.setSession(sessionId);
     if (!sessionId) return;
     const epoch = ++state.epoch;
     state.sessionId = sessionId;
@@ -778,6 +771,7 @@ function stepFrame(dir) {
 }
 
 document.addEventListener('keydown', ev => {
+    if (els.dialog.open) return;
     const tag = document.activeElement?.tagName;
     if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
     switch (ev.code) {
@@ -839,77 +833,8 @@ els.durClear?.addEventListener('click', () => {
     edit(commands.setHoldMany(sel, 0));
 });
 
-// ── 导出 ─────────────────────────────────────────────────────────────────
-
-els.exportBtn.addEventListener('click', () => {
-    els.progressRow.classList.add('hidden');
-    els.dialog.showModal();
-});
-els.pickPath.addEventListener('click', async () => {
-    const path = await saveDialog({
-        title: '导出 GIF',
-        defaultPath: defaultExportName(),
-        filters: [{name: 'GIF', extensions: ['gif']}],
-    });
-    if (path) els.exportPath.value = path;
-});
-function defaultExportName() {
-    const d = new Date();
-    const pad = n => String(n).padStart(2, '0');
-    return `blink-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}.gif`;
-}
-
-els.exportConfirm.addEventListener('click', async () => {
-    const path = els.exportPath.value.trim();
-    if (!path) {
-        els.progressText.textContent = '请先选择目标文件';
-        els.progressRow.classList.remove('hidden');
-        return;
-    }
-    if (state.exporting) return;
-    state.exporting = true;
-    els.progressRow.classList.remove('hidden');
-    els.progress.value = 0;
-    els.progressText.textContent = '准备调色板…';
-    try {
-        const stats = await invoke('gif_export', {
-            sessionId: state.sessionId,
-            path,
-            maxWidth: $('export-size').value === '' ? null : parseInt($('export-size').value, 10),
-            quality: $('export-quality').value,
-        });
-        els.progressText.textContent =
-            `完成：${stats.width}×${stats.height} · ${stats.writtenFrames} 帧 · ${(stats.bytes / 1024).toFixed(0)} KB · ${(stats.encodeMs / 1000).toFixed(1)}s`;
-        els.progress.value = 100;
-    } catch (err) {
-        els.progressText.textContent = `导出失败：${normalizeError(err).message}`;
-    } finally {
-        state.exporting = false;
-    }
-});
-els.exportCancelReq.addEventListener('click', () => {
-    invoke('gif_export_cancel', {sessionId: state.sessionId}).catch(() => {});
-});
-els.exportClose.addEventListener('click', () => els.dialog.close());
-
-listen('blink://gif-export-progress', event => {
-    const p = event.payload;
-    if (!p || p.sessionId !== state.sessionId) return;
-    if (p.stage === 'preparing') {
-        els.progressRow.classList.remove('hidden');
-        els.progress.value = p.framesTotal ? Math.round((p.framesDone / p.framesTotal) * 50) : 0;
-        els.progressText.textContent = `准备调色板 ${p.framesDone}/${p.framesTotal}`;
-    } else if (p.stage === 'quantizing') {
-        els.progressText.textContent = '量化调色板…';
-        els.progress.value = 50;
-    } else if (p.stage === 'encoding') {
-        els.progressRow.classList.remove('hidden');
-        els.progress.value = 50 + (p.framesTotal ? Math.round((p.framesDone / p.framesTotal) * 50) : 0);
-        els.progressText.textContent = `编码中 ${p.framesDone}/${p.framesTotal}`;
-    } else if (p.stage === 'cancelled') {
-        els.progressText.textContent = '已取消';
-    }
-});
+const exportController = createExportController();
+window.addEventListener('beforeunload', () => exportController.dispose());
 
 listen('blink://gif-editor-session', event => {
     const sid = event.payload?.sessionId;

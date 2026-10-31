@@ -30,7 +30,7 @@
             <span class="meta" id="session-meta"></span>
         </div>
         <div class="topbar-actions">
-            <button class="btn" id="btn-export" title="导出 GIF 文件" type="button">
+            <button class="btn" id="btn-export" title="导出 GIF 或 MP4 文件" type="button">
                 <svg aria-hidden="true" class="icon"><use href="#icon-save"/></svg>
                 <span>导出</span>
             </button>
@@ -105,7 +105,7 @@
             <span class="spacer"></span>
             <button class="btn" id="btn-trim-start" title="把当前预览帧设为起点" type="button">设为起点</button>
             <button class="btn" id="btn-trim-end" title="把当前预览帧设为终点" type="button">设为终点</button>
-            <button class="btn" id="btn-delete-frame" title="删除选中帧（时长并入前一帧）" type="button">
+            <button class="btn" id="btn-delete-frame" title="删除选中帧及其时长" type="button">
                 <svg aria-hidden="true" class="icon"><use href="#icon-trash-2"/></svg>
                 <span>删帧</span>
             </button>
@@ -126,7 +126,20 @@
 <!-- 导出对话框 -->
 <dialog id="export-dialog">
     <form method="dialog">
-        <h3>导出 GIF</h3>
+        <h3>导出录制</h3>
+        <div class="form-row">
+            <label>格式
+                <select id="export-format">
+                    <option value="gif" selected>GIF 动图</option>
+                    <option value="mp4">MP4 视频</option>
+                </select>
+            </label>
+        </div>
+        <p class="export-note" id="export-note"></p>
+        <div class="export-engine hidden" id="export-engine">
+            <p id="export-engine-text"></p>
+            <button class="btn" id="btn-export-install" type="button">管理媒体引擎…</button>
+        </div>
         <div class="form-row">
             <label>目标文件
                 <div class="path-row">
@@ -157,6 +170,7 @@
             <span id="export-progress-text">编码中…</span>
         </div>
         <div class="dialog-actions">
+            <button class="btn hidden" id="btn-export-folder" type="button">打开文件夹</button>
             <button class="btn" id="btn-export-cancel-req" type="button">取消导出</button>
             <button class="btn" id="btn-export-close" type="button">关闭</button>
             <button class="btn btn-primary" id="btn-export-confirm" type="button">导出</button>

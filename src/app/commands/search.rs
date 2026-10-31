@@ -421,6 +421,7 @@ pub async fn open_settings_tab(app: tauri::AppHandle, tab: String) -> Result<(),
     // 0.12.8: 白名单校验——eval 字符串拼接存在注入风险
     // 0.28.9: 移除 "sync"——配置同步已合入 storage tab（无既有调用方传 sync）
     const ALLOWED_TABS: &[&str] = &[
+        "media",
         "general",
         "engines",
         "plugins",
@@ -441,6 +442,10 @@ pub async fn open_settings_tab(app: tauri::AppHandle, tab: String) -> Result<(),
     }
 
     crate::infra::platform::window::open_settings(&app);
+    if tab == "media" {
+        return crate::infra::platform::window::eval_when_window_ready(&app, "settings",
+            "import('./js/settings/index.js').then(() => window.openBlinkMediaSettings?.()).catch(error => console.error('media settings navigation failed', error))".to_owned());
+    }
     if let Some(w) = app.get_webview_window("settings") {
         let js = format!(
             "setTimeout(() => document.querySelector('.tab[data-tab=\"{}\"]')?.click(), 300)",

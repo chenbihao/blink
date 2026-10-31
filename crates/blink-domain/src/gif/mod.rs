@@ -10,6 +10,6 @@
 pub mod timeline;
 
 pub use timeline::{
-    quantize_delay_ms, EditCommand, EditError, ExportPlan, FrameView, PlanFrame, Timeline,
+    quantize_delay_ms, EditCommand, EditError, ExportPlan, ExportSnapshot, FrameView, PlanFrame, Timeline,
     MAX_DELAY_CS, MIN_DELAY_CS,
 };

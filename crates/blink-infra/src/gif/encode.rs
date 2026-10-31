@@ -132,6 +132,8 @@ pub enum ExportStage {
     Quantizing,
     /// 逐帧编码写盘。
     Encoding,
+    Verifying,
+    Committing,
 }
 
 impl ExportStage {
@@ -140,6 +142,8 @@ impl ExportStage {
             ExportStage::Preparing => "preparing",
             ExportStage::Quantizing => "quantizing",
             ExportStage::Encoding => "encoding",
+            ExportStage::Verifying => "verifying",
+            ExportStage::Committing => "committing",
         }
     }
 }
@@ -180,9 +184,12 @@ pub fn export_gif(
         "GIF 导出开始"
     );
 
-    let tmp_path = out_path.with_extension("gif.tmp");
-    // 清理上次残留 tmp
-    let _ = fs::remove_file(&tmp_path);
+    let tmp_path = out_path.with_file_name(format!(".blink-gif-{}-{}.tmp", std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos()));
+    fs::OpenOptions::new().create_new(true).write(true).open(&tmp_path)?;
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup { fn drop(&mut self) { let _ = fs::remove_file(&self.0); } }
+    let _cleanup = Cleanup(tmp_path.clone());
 
     let result = encode_to_tmp(reader, plan, opts, &tmp_path, out_w, out_h, cancel, progress);
     if cancel.load(std::sync::atomic::Ordering::Relaxed) {
@@ -198,16 +205,20 @@ pub fn export_gif(
     };
     // 独立解码验证：帧数、逻辑尺寸、总 delay。
     let t_verify = std::time::Instant::now();
-    let verify = verify_gif(&tmp_path, total_delay_cs(plan), out_w, out_h);
+    progress(ExportStage::Verifying, 0, stats.written);
+    let verify = verify_gif_inner(&tmp_path, total_delay_cs(plan), out_w, out_h, Some(cancel));
     tracing::debug!(
         verify_ms = t_verify.elapsed().as_millis() as u64,
         "GIF 导出：独立解码验证完成"
     );
+    if cancel.load(std::sync::atomic::Ordering::Relaxed) { return Err(ExportError::Cancelled); }
     if let Err(e) = verify {
         let _ = fs::remove_file(&tmp_path);
         return Err(ExportError::VerifyFailed(e));
     }
     // 原子提交时复核不覆盖语义，编码期间新建的目标文件也必须保留。
+    progress(ExportStage::Committing, stats.written, stats.written);
+    if cancel.load(std::sync::atomic::Ordering::Relaxed) { return Err(ExportError::Cancelled); }
     let commit = crate::utils::fs::commit_file(&tmp_path, out_path, opts.overwrite);
     if let Err(error) = commit {
         let _ = fs::remove_file(&tmp_path);
@@ -538,7 +549,11 @@ fn total_delay_cs(plan: &EncodePlan) -> u64 {
 
 /// 独立解码验证：帧数、逻辑尺寸、总 delay 与计划一致（重复帧合并会改变
 /// 「GIF 帧数」，故只验证 delay 总和与尺寸；帧数 ≤ 计划数由合并保证）。
+#[cfg(test)]
 fn verify_gif(path: &Path, expect_delay_cs: u64, expect_w: u32, expect_h: u32) -> Result<(), String> {
+    verify_gif_inner(path, expect_delay_cs, expect_w, expect_h, None)
+}
+fn verify_gif_inner(path: &Path, expect_delay_cs: u64, expect_w: u32, expect_h: u32, cancel: Option<&AtomicBool>) -> Result<(), String> {
     let file = BufReader::new(File::open(path).map_err(|e| e.to_string())?);
     let mut opts = gif::DecodeOptions::new();
     opts.set_color_output(gif::ColorOutput::RGBA);
@@ -553,6 +568,7 @@ fn verify_gif(path: &Path, expect_delay_cs: u64, expect_w: u32, expect_h: u32) -
         .read_next_frame()
         .map_err(|e| format!("解码失败于帧 {frames}: {e}"))?
     {
+        if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed)) { return Err("已取消".into()); }
         frames += 1;
         delay_sum += frame.delay as u64;
     }
@@ -659,6 +675,34 @@ mod tests {
         assert!(stats.bytes > 0);
         assert!(out.exists());
         assert!(!out.with_extension("gif.tmp").exists(), "tmp 已提交清理");
+    }
+
+    #[test]
+    fn cancel_during_verification_cleans_unique_temp_and_keeps_source() {
+        let frames = vec![synth_frame(8,8,30,false),synth_frame(8,8,50,true)];
+        let (root,id) = build_session(8,8,&frames,&[0,100]);
+        let reader = SpoolReader::open(root.path(),&id).unwrap();
+        let plan = plan_from(&frames,8,8,&[10,10]);
+        let out = root.path().join("cancel.gif"); let cancel = AtomicBool::new(false);
+        let result = export_gif(&reader,&plan,&ExportOptions::default(),&out,&cancel,&|stage,_,_| {
+            if stage == ExportStage::Verifying { cancel.store(true,std::sync::atomic::Ordering::Relaxed); }
+        });
+        assert!(matches!(result,Err(ExportError::Cancelled))); assert!(!out.exists());
+        assert!(reader.read_frame(0).is_ok());
+        assert!(!fs::read_dir(root.path()).unwrap().filter_map(Result::ok).any(|f| f.file_name().to_string_lossy().starts_with(".blink-gif-")));
+    }
+
+    #[test]
+    fn target_created_during_encode_is_not_overwritten() {
+        let frames = vec![synth_frame(8,8,30,false)];
+        let (root,id) = build_session(8,8,&frames,&[0]);
+        let reader = SpoolReader::open(root.path(),&id).unwrap();
+        let plan = plan_from(&frames,8,8,&[10]); let out = root.path().join("race.gif");
+        let result = export_gif(&reader,&plan,&ExportOptions::default(),&out,&AtomicBool::new(false),&|stage,_,_| {
+            if stage == ExportStage::Committing { fs::write(&out,b"keep").unwrap(); }
+        });
+        assert!(result.is_err()); assert_eq!(fs::read(&out).unwrap(),b"keep");
+        assert!(!fs::read_dir(root.path()).unwrap().filter_map(Result::ok).any(|f| f.file_name().to_string_lossy().starts_with(".blink-gif-")));
     }
 
     #[test]
