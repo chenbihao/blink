@@ -2,11 +2,10 @@ import {ss} from './ss-state.js';
 import {ACTION_IDS, normalizeLayout, fitLayout} from '../shared/screenshot-layout.js';
 import {openLayoutEditor, closeLayoutEditor} from '../shared/screenshot-layout-editor.js';
 import {applyFloatingUiScale, findDisplayCssAt} from './ss-display.js';
-import {placeOcrPanel, placeActionMenu} from './ss-panel-resize.js';
+import {placeActionMenu} from './ss-panel-resize.js';
 import {t, applyI18nFromConfig} from '../i18n/index.js';
 import {listen} from '../shared/tauri.js';
 import {EVENTS} from '../shared/event-names.js';
-import {renderKey} from '../shared/kbd.js';
 
 let widthBudget = Infinity;
 let appliedLayoutKey = null;
@@ -23,9 +22,8 @@ export function positionActionPanel(panel) {
     const mon = findDisplayCssAt(anchor.left, anchor.top);
     panel.style.maxHeight = `${Math.max(1, (mon.h - 16) / scale)}px`;
     panel.style.maxWidth = `${Math.max(1, (mon.w - 16) / scale)}px`;
-    const p = panel === menu
-        ? placeActionMenu(anchor, panel.offsetWidth * scale, panel.offsetHeight * scale, mon)
-        : placeOcrPanel(anchor, panel.offsetWidth * scale, panel.offsetHeight * scale, mon, ss.selCss);
+    // 菜单和布局编辑器只跟随入口与屏幕边界，无须避让截图内容。
+    const p = placeActionMenu(anchor, panel.offsetWidth * scale, panel.offsetHeight * scale, mon);
     panel.style.left = `${p.left}px`; panel.style.top = `${p.top}px`;
 }
 export function applyActionLayout(value) {
@@ -43,7 +41,7 @@ export function refreshActionLayout(availableWidth = Infinity) {
     const layoutKey = JSON.stringify([layout, Math.floor(availableWidth), ss.toolbar.classList.contains('toolbar-mode-gif-prep'),
         ...[...Object.values(buttons), document.getElementById('btn-ocr-diag')].map(button => [button.hidden, button.classList.contains('hidden')])]);
     if (layoutKey === appliedLayoutKey) {
-        if (!menu.hidden) positionActionPanel(menu);
+        ss._reflowActionPanels?.();
         return Math.min(1, availableWidth / Math.max(1, ss.toolbar.offsetWidth));
     }
     appliedLayoutKey = layoutKey;
@@ -61,7 +59,7 @@ export function refreshActionLayout(availableWidth = Infinity) {
     for (let keep = count; keep > 0 && ss.toolbar.offsetWidth > availableWidth; keep--) {
         shown = fitLayout(layout, keep - 1); place(shown);
     }
-    if (!menu.hidden) positionActionPanel(menu);
+    ss._reflowActionPanels?.();
     // Extremely narrow screens may be smaller than the left tools plus completion area.
     // Only then reduce the whole bar's visual scale; its order and fixed actions stay intact.
     return Math.min(1, availableWidth / Math.max(1, ss.toolbar.offsetWidth));
@@ -75,9 +73,6 @@ export function bindActionMenu() {
         const label = document.createElement('span'); label.className = 'ss-action-label'; label.textContent = t(`ss.action.${id}`);
         buttons[id].append(label); buttons[id].setAttribute('aria-label', label.textContent);
     }
-    const ocrShortcut = renderKey('E');
-    ocrShortcut.classList.add('ss-action-shortcut');
-    buttons.ocr.append(ocrShortcut);
     applyI18nFromConfig().then(() => {
         for (const id of ACTION_IDS) {
             buttons[id].querySelector('.ss-action-label').textContent = t(`ss.action.${id}`);
@@ -88,16 +83,19 @@ export function bindActionMenu() {
     const customize = document.getElementById('ss-customize');
     let reflowFrame = 0;
     const reflow = () => {
-        if (reflowFrame || (menu.hidden && !document.getElementById('screenshot-layout-editor'))) return;
+        if (reflowFrame || (menu.hidden && !['screenshot-layout-editor', 'ocr-panel', 'qr-panel'].some(id => document.getElementById(id)))) return;
         reflowFrame = requestAnimationFrame(() => {
             reflowFrame = 0;
             if (!menu.hidden) positionActionPanel(menu);
             document.getElementById('screenshot-layout-editor')?._reposition();
+            document.getElementById('ocr-panel')?._reposition();
+            document.getElementById('qr-panel')?._reposition();
         });
     };
     // The toolbar owns DPI compensation; follow its final transform and monitor position.
     new MutationObserver(reflow).observe(ss.toolbar, {attributes: true, attributeFilter: ['style', 'data-ui-scale']});
     window.addEventListener('resize', reflow);
+    ss._reflowActionPanels = reflow;
     const open = () => {
         if (closeActionMenu()) return;
         ss._closeToolDropdowns?.();
@@ -113,8 +111,11 @@ export function bindActionMenu() {
         if (button && !button.disabled) closeActionMenu();
     });
     menu.addEventListener('keydown', e => {
+        // 未处理的按键也不冒泡到画布（方向键、标注和退出各有自己的语义）。
+        e.stopPropagation();
+        if (e.isComposing || e.keyCode === 229) return;
         if (!['ArrowDown', 'ArrowUp', 'Home', 'End', 'Escape', 'Tab'].includes(e.key)) return;
-        e.preventDefault(); e.stopPropagation();
+        e.preventDefault();
         if (e.key === 'Escape' || e.key === 'Tab') { closeActionMenu({focus: true}); return; }
         const items = [...menu.querySelectorAll('button')].filter(b => !b.disabled && !b.hidden && !b.classList.contains('hidden'));
         const index = items.indexOf(document.activeElement);

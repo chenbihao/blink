@@ -141,10 +141,9 @@ Summon: `Alt+A` in the main window (empty input; can be promoted to a global hot
 | Wheel tunes everything | Wheel over a tool group button / thickness step / intensity·font-size slider / hue·opacity bar / preset swatches / color format | Switches tools, adjusts thickness, steps sliders, tunes color, switches formats respectively |
 | Brush size on the canvas | Select a brush tool, then scroll inside the region | Scroll up for thicker strokes, down for thinner; the cursor shows the brush width |
 | Square constraint | Hold `Shift` while selecting / drawing rectangles or ellipses | Ratio constraint, applied live on press and release |
-| `E` key | Press `E` while annotating | Toggles the OCR panel |
 | Double-click full-screen copy | Double-click the dim overlay without a selection | Copies the whole screen |
 | Right-click has three meanings | No selection = cancel / annotating = copy region / selecting text = text menu | One right-click, three semantics |
-| Silent text layer | OCR runs in the background right after you select | Drag-select text, then press `Ctrl+C` to copy; right-click can copy all text. Double-click still confirms copying the screenshot. Recognition does not open the panel automatically; press `E` when needed |
+| Silent text layer | OCR runs in the background right after you select | Drag-select text, then press `Ctrl+C` to copy; right-click can copy all text. Double-click still confirms copying the screenshot. Recognition does not open the panel automatically; click "Extract text" when needed |
 | Pixel magnifier | Follows automatically during selection | Built-in hints: `Shift` toggles HEX/RGB/HSL, `C` copies the color |
 | Eyedropper | "Pick from screenshot" in the color panel | Full-screen click sampling; arrow keys fine-tune by 1px; `Esc` exits only the picker, not the screenshot |
 | Arrow-key nudge | Arrow keys in annotation mode | Moves the region by 1 physical pixel |
@@ -341,7 +340,7 @@ Click a spelling candidate to look it up; copy the word or senses from the entry
 1. **Drag the main window by its blank area** — no title bar needed.
 2. **Mix clipboard entry types in one selection**: `Ctrl+click` toggles entries; right-click for batch actions by type.
 3. **The screenshot wheel tunes everything**: brush size, tools, sliders, and colors. Hold `Alt` / `Ctrl` to see shortcut badges.
-4. **Select text directly on a screenshot**, then `Ctrl+C` to copy; `E` opens the OCR panel.
+4. **Select text directly on a screenshot**, then `Ctrl+C` to copy; click "Extract text" to open the OCR panel.
 5. **Double-click a pin to shrink it to mini**, again to restore; `Ctrl+wheel` changes a note's font size.
 6. **Hold a key GIF frame longer** to explain an important step without recording it again.
 7. **Double-click an unfamiliar English word in dictionary results** for a quick lookup card.
@@ -396,7 +395,6 @@ Click a spelling candidate to look it up; copy the word or senses from the entry
 | `Alt+1` ~ `Alt+5` | Switch tool groups (repeat to cycle within the group) |
 | Hold `Alt` | Show shortcut badges |
 | `Ctrl+Z` / `Ctrl+Y` (or `Ctrl+Shift+Z`) / `Ctrl+R` | Undo / redo / reset annotations |
-| `E` | Toggle the OCR panel |
 | `Shift` (while selecting / drawing) | Square / ratio constraint |
 | Arrow keys | Nudge the region by 1px (fine-tune the sampler in the eyedropper) |
 | `C` / `Shift` (magnifier visible) | Copy color / switch color format |

@@ -8,14 +8,14 @@
 
 import {ss} from './ss-state.js';
 import {redrawAnnotFull} from './ss-draw.js';
-import {applyFloatingUiScale, findDisplayCssAt} from './ss-display.js';
+import {applyFloatingUiScale, findDisplayCssAt, positionResultPanel} from './ss-display.js';
 import {cssPointToScreen, cssRectToBitmap, uiScaleAtCss} from './ss-selection-geometry.js';
 import {enterReadingMode} from './ss-reading.js';
 import * as annot from './annotation-engine.js';
 import {copyToClipboard, ocrImage, screenshotPinRefresh, translateLines, translateText,} from '../shared/api.js';
 import {commandErrorText, normalizeError} from '../shared/tauri.js';
 import {cleanupCanvasVisuals, composeTranslatedPinPng} from './ss-output.js';
-import {clampPanelToMonitor, computeResizedPanel, placeOcrPanel} from './ss-panel-resize.js';
+import {clampPanelToMonitor, computeResizedPanel} from './ss-panel-resize.js';
 import {updateOcrButtonBusy} from './ss-ocr-busy.js';
 
 // ════════════════════════════════════════════════════════════
@@ -570,7 +570,7 @@ export async function doTranslateAndPin() {
     }
 }
 
-/** E 键召唤/关闭面板抽屉 */
+/** 提取文字入口：打开/关闭 OCR 面板抽屉。 */
 export function doPanelToggle() {
     ss.resultPanel = 'ocr';
     ss._closeQrPanel?.();
@@ -892,19 +892,11 @@ export function showOcrResult(result, options = {}) {
 
     // 抽屉锚定触发按钮
     const MARGIN = 8;
-    const mon = findDisplayCssAt(ss.selCss.x + ss.selCss.w / 2, ss.selCss.y + ss.selCss.h / 2);
-    // 应用与工具栏一致的 UI scale
-    const uiScale = applyFloatingUiScale(panel);
-    const pw = panel.offsetWidth * uiScale;
-    const ph = panel.offsetHeight * uiScale;
-    const anchorBtn = document.getElementById('btn-ocr');
-    const anchorRect = anchorBtn ? anchorBtn.getBoundingClientRect() : ss.toolbar.getBoundingClientRect();
-
-    // 0.23.12：落位避让选区——工具栏翻到选区上方/浮入选区时，面板不再固定
-    // 从工具栏下弹压住选区内容（含嵌图译文），改为取第一个不压选区的候选位
-    const placed = placeOcrPanel(anchorRect, pw, ph, mon, ss.selCss, MARGIN);
-    panel.style.left = placed.left + 'px';
-    panel.style.top = placed.top + 'px';
+    let uiScale;
+    panel._reposition = () => {
+        uiScale = positionResultPanel(panel, initialTab === 'translated' ? 'translate' : 'ocr');
+    };
+    panel._reposition();
 
     panel.addEventListener('mousedown', (e) => e.stopPropagation());
     document.getElementById('ocr-close').addEventListener('click', () => {
@@ -923,6 +915,7 @@ export function showOcrResult(result, options = {}) {
             e.preventDefault();
             e.stopPropagation();
             dragging = true;
+            panel.dataset.userMoved = 'true';
             const rect = panel.getBoundingClientRect();
             offsetX = e.clientX - rect.left;
             offsetY = e.clientY - rect.top;
@@ -973,6 +966,7 @@ export function showOcrResult(result, options = {}) {
             e.preventDefault();
             e.stopPropagation();
             resizing = true;
+            panel.dataset.userMoved = 'true';
             rsStartW = panel.offsetWidth;
             rsStartH = panel.offsetHeight;
             rsStartX = e.clientX;

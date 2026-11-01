@@ -32,7 +32,6 @@
 //! - 0.23.15：拖动期间只有实时 DOM 层逐帧变化，interaction-canvas 零绘制
 
 import {applyActionLayout, closeActionMenu} from './ss-action-menu.js';
-import {runScreenshotAction} from './ss-actions.js';
 import {resetQrPanel, closeQrPanel, qrPanelVisible} from './ss-qr.js';
 import {closeLayoutEditor} from '../shared/screenshot-layout-editor.js';
 import {copyToClipboard, hideScreenshotOverlay, invoke, ocrImage, screenshotSetAnnotationMode,} from "../shared/api.js";
@@ -396,6 +395,7 @@ window.__blinkStartScreenshotSession = function (meta, activeDisplay) {
     window.__blinkClearScreenshotVisual();
     // resetState 已同步清理上一轮并画好暗罩，此时才允许 WebView 可见。
     document.documentElement.classList.remove('screenshot-session-inactive');
+    focusScreenshotCanvas();
     requestAnimationFrame(() => {
         requestAnimationFrame(() => window.__blinkReloadScreenshot());
     });
@@ -427,6 +427,7 @@ window.__blinkOpenImageEditor = function () {
     try {
         resetState();
         document.documentElement.classList.remove('screenshot-session-inactive');
+        focusScreenshotCanvas();
         loadEditorImage(window.__blinkEditorSource?.kind || IMAGE_SOURCE.CLIPBOARD);
     } catch (e) {
         console.error('[image-editor] 初始化失败', e);
@@ -439,6 +440,17 @@ window.__blinkOpenImageEditor = function () {
 // ════════════════════════════════════════════════════════════
 //  选区生命周期
 // ════════════════════════════════════════════════════════════
+
+/** 新会话/框选完成后由画布承接键盘，不沿用复用窗口中的旧按钮焦点。 */
+function focusScreenshotCanvas() {
+    const previous = document.activeElement;
+    if (previous === ss.canvas) return;
+    ss.canvas.focus({preventScroll: true});
+    console.debug('[screenshot] canvas focus handoff', {
+        previousTarget: previous?.id || previous?.tagName,
+        focused: document.activeElement === ss.canvas,
+    });
+}
 
 /**
  * 0.23.12：hide 前全量清场——清理 cleanupCanvasVisuals 画布/工具栏之外的
@@ -1112,6 +1124,7 @@ function loadEditorImage(source) {
 
 /** 进入标注模式：显示工具栏 + 定位标注 canvas + 通知后端 */
 function enterAnnotationMode(rect) {
+    focusScreenshotCanvas();
     const _t0 = performance.now();
     console.debug('[screenshot] enterAnnotationMode', rect);
     const {annotCanvas, screenshot} = ss;
@@ -1188,6 +1201,7 @@ function enterAnnotationMode(rect) {
  * @param {{x,y,w,h}|null} sourceMonitor - 来源显示器 CSS 矩形
  */
 function enterCanvasImageEditor(cropData, pw, ph, source = IMAGE_SOURCE.LONG_SCREENSHOT, sourceMonitor = null) {
+    focusScreenshotCanvas();
     console.debug('[image-editor] enterCanvasImageEditor', {source, pw, ph, sourceMonitor});
     const {annotCanvas, toolbar} = ss;
     // CSS 尺寸 = bitmap 尺寸 / renderScale
@@ -2349,12 +2363,6 @@ document.addEventListener('keydown', (e) => {
         }
         doCancel();
         return;
-    }
-    if ((e.key === 'e' || e.key === 'E') && !e.ctrlKey && !e.metaKey && !e.altKey && ss.isAnnotating) {
-        const tgt = e.target;
-        if (tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable)) return;
-        e.preventDefault();
-        runScreenshotAction('ocr');
     }
 });
 

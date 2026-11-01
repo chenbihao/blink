@@ -73,6 +73,8 @@ body.image-editor-mode #canvas.long-image-editing {
     width: 100%;
     height: 100%;
     cursor: crosshair;
+    /* 画布承接截图快捷键，不在整张截图上绘制浏览器焦点框。 */
+    outline: none;
 }
 
 /* 选取工具由 JS 根据热区切换 move/resize/crosshair；标注工具统一回到准星。 */

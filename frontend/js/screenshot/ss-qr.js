@@ -6,8 +6,7 @@ import {normalizeError} from '../shared/tauri.js';
 import {t} from '../i18n/index.js';
 import {doCancel} from './ss-output.js';
 import {showTransientHint} from './ss-ocr.js';
-import {positionActionPanel} from './ss-action-menu.js';
-import {findDisplayCssAt, getToolbarUiScale} from './ss-display.js';
+import {findDisplayCssAt, getToolbarUiScale, positionResultPanel} from './ss-display.js';
 import {clampPanelToMonitor} from './ss-panel-resize.js';
 import {QrSession, createLatestQrResolver, qrActionAllowed} from './qr-session.js';
 
@@ -33,9 +32,14 @@ ss._resetQrPanel = resetQrPanel;
 ss._closeQrPanel = closeQrPanel;
 
 function bindPanelGeometry(element, header) {
+    // 原生 resize 把 pointerdown 发给面板自身；后续布局刷新保留用户位置。
+    element.addEventListener('pointerdown', e => {
+        if (e.button === 0 && e.target === element) element.dataset.userMoved = 'true';
+    });
     header.addEventListener('pointerdown', e => {
         if (e.button !== 0 || e.target.closest('button')) return;
         e.preventDefault(); header.setPointerCapture(e.pointerId);
+        element.dataset.userMoved = 'true';
         const rect = element.getBoundingClientRect(); const start = {x:e.clientX,y:e.clientY,left:rect.left,top:rect.top};
         const move = event => {
             const mon = findDisplayCssAt(event.clientX,event.clientY); const scale = getToolbarUiScale();
@@ -75,6 +79,7 @@ export async function doQrSelection({fresh = false} = {}) {
     element.className = 'ss-qr-panel';
     element.setAttribute('role','region'); element.setAttribute('aria-label',t('ss.action.qr'));
     panel=element;
+    element._reposition = () => positionResultPanel(element, 'qr');
     for (const name of ['pointerdown','mousedown','keydown']) element.addEventListener(name,e => e.stopPropagation());
     element.addEventListener('keydown',e => { if (e.key==='Escape' && !e.isComposing) { e.preventDefault(); closeQrPanel({focus:true}); } });
     const header = document.createElement('header');
@@ -99,7 +104,7 @@ export async function doQrSelection({fresh = false} = {}) {
     const footer=document.createElement('footer');
     element.append(header, status, text, footer);
     document.body.append(element);
-    positionActionPanel(element);
+    element._reposition();
     bindPanelGeometry(element, header);
     close.focus();
     const bmp = cssRectToBitmap(ss.selCss, window.__blinkScreenMeta || {vx:0,vy:0});

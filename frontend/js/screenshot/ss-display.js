@@ -6,6 +6,36 @@
 
 import {ss} from './ss-state.js';
 import {screenRectToCss, uiScaleAtCss} from './ss-selection-geometry.js';
+import {placeOcrPanel} from './ss-panel-resize.js';
+
+/** 收纳动作始终锚定「更多」，避免隐藏菜单中的按钮返回零矩形。 */
+export function getActionAnchorRect(actionId) {
+    const button = document.getElementById(`btn-${actionId}`);
+    const anchor = button?.classList.contains('ss-menu-action')
+        ? document.getElementById('btn-more') : button;
+    const rect = anchor?.getBoundingClientRect();
+    return rect && rect.right > rect.left && rect.bottom > rect.top
+        ? rect : ss.toolbar.getBoundingClientRect();
+}
+
+/** 结果面板避让选区；用户拖动/缩放后保留位置，仅按视觉尺寸钳制。 */
+export function positionResultPanel(panel, actionId) {
+    const scale = applyFloatingUiScale(panel);
+    const anchor = getActionAnchorRect(actionId);
+    const moved = panel.dataset.userMoved === 'true';
+    const current = moved ? panel.getBoundingClientRect() : anchor;
+    const mon = findDisplayCssAt((current.left + current.right) / 2, (current.top + current.bottom) / 2);
+    panel.style.maxHeight = `${Math.max(1, (mon.h - 16) / scale)}px`;
+    panel.style.maxWidth = `${Math.max(1, (mon.w - 16) / scale)}px`;
+    const width = panel.offsetWidth * scale, height = panel.offsetHeight * scale;
+    const placed = moved ? {
+        left: Math.max(mon.x + 8, Math.min(current.left, mon.x + mon.w - width - 8)),
+        top: Math.max(mon.y + 8, Math.min(current.top, mon.y + mon.h - height - 8)),
+    } : placeOcrPanel(anchor, width, height, mon, ss.selCss);
+    panel.style.left = `${placed.left}px`;
+    panel.style.top = `${placed.top}px`;
+    return scale;
+}
 
 // M7 优化：缓存 getDisplays() 结果——renderScale 不变时 CSS 矩形不变
 let _displaysCache = null;

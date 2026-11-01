@@ -30,8 +30,6 @@
 .ss-action-menu { width: 180px; min-width: 0; padding: 4px; border-radius: 10px; font-size: 12px; }
 .ss-action-menu hr { height: 1px; border: 0; margin: 4px; background: var(--ss-panel-border); }
 .ss-action-label { display: none; }
-.ss-action-shortcut { display: none; }
-.ss-action-menu .ss-action-shortcut { display: inline-flex; margin-left: auto; }
 .ss-action-menu .ss-menu-action, .ss-action-menu #ss-customize {
     display: flex;
     width: 100%;

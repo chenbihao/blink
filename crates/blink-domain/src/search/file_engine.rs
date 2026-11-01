@@ -210,35 +210,40 @@ impl FileEngine {
     /// 更新配置（供 SearchService 调用）。
     pub async fn update_config(&self, config: FileSearchConfig) {
         let mut cfg = self.config.write().await;
+        let needs_probe = config.enabled
+            && matches!(
+                resolve_source_order(&config.data_source), SourceOrder::Auto | SourceOrder::UserOnly
+            )
+            && (!cfg.enabled
+                || cfg.everything_port != config.everything_port
+                || cfg.data_source != config.data_source);
         self.user_source.update_port(config.everything_port).await;
         *cfg = config;
-        self.user_source.request_probe();
         tracing::debug!("FileEngine 配置已更新: port={}", cfg.everything_port);
+        drop(cfg);
+        if needs_probe {
+            self.user_source.request_probe();
+        }
     }
 
-    /// 只消费已探测连接；未就绪时后台探测，本轮立即尝试托管来源。
+    /// 直接查询并更新连接状态；失败冷却/恢复由用户来源统一管理。
     async fn search_everything(
         &self,
         port: u16,
         query: &str,
         max_results: u32,
     ) -> Option<Vec<FileSearchHit>> {
-        let (_, available, _) = self.user_everything_state().await;
-        self.user_source.request_probe();
-        if available != Some(true) {
+        if self.runtime.port_if_running().await == Some(port) {
             return None;
         }
         // 此引擎在 Async 通道，不占首批结果。查询使用 HTTP 客户端的有界预算，
-        // 不把一个正常但超过 80ms 的复杂查询误判成来源失效并缓存 30 秒。
-        let result = self.everything_http_query(port, query, max_results).await;
-        self.user_source.record_query(port, result.is_some()).await;
-        result
+        // 不把一个正常但超过 80ms 的复杂查询误判成来源失效。
+        self.user_source.query(port, self.everything_http_query(port, query, max_results)).await
     }
 
     /// 直接查询指定端口的 Everything HTTP JSON（托管实例与用户实例共用）。
     ///
-    /// `is_user_instance`：连接失败时是否标记用户实例探测状态 Unavailable
-    /// （状态机只跟踪用户端口；托管实例就绪态归 runtime 治理，不进状态机）。
+    /// 用户来源的连接状态由调用侧更新；托管实例就绪态归 runtime 治理。
     async fn everything_http_query(
         &self,
         port: u16,
@@ -563,13 +568,8 @@ impl FileEngine {
             SourceOrder::UserOnly => {
                 tracing::debug!(query = %q, port = cfg.everything_port, "FileEngine: 仅用户 Everything");
                 {
-                    let result = self
-                        .everything_http_query(cfg.everything_port, q, cfg.max_results)
-                        .await;
-                    self.user_source
-                        .record_query(cfg.everything_port, result.is_some())
-                        .await;
-                    result.unwrap_or_default()
+                    self.search_everything(cfg.everything_port, q, cfg.max_results)
+                        .await.unwrap_or_default()
                 }
             }
             SourceOrder::ManagedOnly => {
@@ -678,23 +678,6 @@ impl SearchEngine for FileEngine {
     }
 
     fn start(&self) {
-        let source = self.user_source.clone();
-        let config = self.config.clone();
-        tokio::spawn(async move {
-            loop {
-                let cfg = config.read().await.clone();
-                if cfg.enabled
-                    && matches!(
-                        resolve_source_order(&cfg.data_source),
-                        SourceOrder::Auto | SourceOrder::UserOnly
-                    )
-                {
-                    source.refresh(false).await;
-                }
-                tokio::time::sleep(Duration::from_secs(30)).await;
-            }
-        });
-
         // 0.26.14：已安装且启用时启动即拉起托管实例——app 重启（含 dev 热重载）
         // 会终止实例，只在首搜懒启动会让「装好的引擎重启后消失」，实机反馈不佳；
         // 配置读取与就绪探测全部在 spawn 内 await（start() 跑在 runtime 线程，
@@ -711,19 +694,21 @@ impl SearchEngine for FileEngine {
                 )
                 && runtime.snapshot().installed;
             let auto = resolve_source_order(&cfg.data_source) == SourceOrder::Auto;
+            let probe_user = cfg.enabled && matches!(
+                resolve_source_order(&cfg.data_source), SourceOrder::Auto | SourceOrder::UserOnly
+            );
             drop(cfg);
-            if !needed {
-                return;
-            }
             // 必须先于外部来源判定：旧命名实例可能正在用户配置端口上响应。
-            if let Err(error) = runtime.recover_orphan().await {
+            if needed && let Err(error) = runtime.recover_orphan().await {
                 tracing::debug!(%error, "启动时旧托管实例恢复失败");
                 return;
             }
-            if auto {
-                user_source.refresh(true).await;
-                if user_source.snapshot().await.1 == Some(true) { return; }
+            // 启动只探测一次；闲置不轮询，后续由真实查询/配置变化/手动刷新更新。
+            if probe_user {
+                user_source.refresh(false).await;
+                if auto && user_source.snapshot().await.1 == Some(true) { return; }
             }
+            if !needed { return; }
             // 托管监听端口内部固定（0.26.23 单端口收敛），不再读用户配置。
             match runtime.ensure_started(super::everything_runtime::DEFAULT_MANAGED_PORT, TEST_START_BUDGET).await {
                 Ok(ready_port) => {
@@ -755,10 +740,12 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = tokio::spawn(async move {
-            for _ in 0..2 {
+            for _ in 0..4 {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut request = [0; 4096];
-                stream.read(&mut request).await.unwrap();
+                let len = stream.read(&mut request).await.unwrap();
+                let request = String::from_utf8_lossy(&request[..len]);
+                assert!(request.contains("search=needle"), "首搜应直接查询，不能额外探测: {request}");
                 // 超过旧 80ms 限制，但仍在真实 HTTP 查询预算内。
                 tokio::time::sleep(Duration::from_millis(120)).await;
                 let body = r#"{"totalResults":1,"results":[{"name":"needle.txt","path":"C:\\fixture"}]}"#;
@@ -766,17 +753,19 @@ mod tests {
                 stream.write_all(response.as_bytes()).await.unwrap();
             }
         });
-        let engine = FileEngine::with_config(FileSearchConfig {
-            everything_port: port, managed_everything_enabled: false, local_dirs: vec![],
-            ..Default::default()
-        });
-        engine.user_source.record_query(port, true).await;
-        for _ in 0..2 {
-            let hits = tokio::time::timeout(Duration::from_secs(2), engine.search_with_metadata("needle"))
-                .await.expect("查询必须有界");
-            assert_eq!(hits.len(), 1);
-            assert_eq!(hits[0].item.title, "needle.txt");
-            assert_eq!(engine.user_everything_state().await.1, Some(true));
+        for data_source in ["auto", "everything"] {
+            let engine = FileEngine::with_config(FileSearchConfig {
+                data_source: data_source.into(),
+                everything_port: port, managed_everything_enabled: false, local_dirs: vec![],
+                ..Default::default()
+            });
+            for _ in 0..2 {
+                let hits = tokio::time::timeout(Duration::from_secs(2), engine.search_with_metadata("needle"))
+                    .await.expect("查询必须有界");
+                assert_eq!(hits.len(), 1);
+                assert_eq!(hits[0].item.title, "needle.txt");
+                assert_eq!(engine.user_everything_state().await.1, Some(true));
+            }
         }
         tokio::time::timeout(Duration::from_secs(2), server).await.unwrap().unwrap();
     }
