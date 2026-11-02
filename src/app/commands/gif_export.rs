@@ -118,7 +118,8 @@ async fn start_export(
     validate(&request)?;
     let prepared = tauri::async_runtime::spawn_blocking(move || {
         let (reader, service) = super::gif::with_session(&app, &request.session_id)?;
-        super::gif::ensure_timeline(&service, &reader, &request.session_id);
+        // 首建即恢复草稿（与查看/编辑路径一致）；导出只需时间轴存在
+        let _ = super::gif::ensure_timeline(&service, &reader, &request.session_id);
         let runtime = if request.format == ExportFormat::Mp4 {
             Some(ffmpeg::acquire().map_err(|error| {
                 if matches!(

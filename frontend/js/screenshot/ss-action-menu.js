@@ -39,6 +39,7 @@ export function refreshActionLayout(availableWidth = Infinity) {
     const qrTitle = buttons.qr.disabled ? t('ss.qr.unsupported') : t('ss.action.qr');
     if ((buttons.qr.getAttribute('data-tip') || buttons.qr.title) !== qrTitle) buttons.qr.title = qrTitle;
     const layoutKey = JSON.stringify([layout, Math.floor(availableWidth), ss.toolbar.classList.contains('toolbar-mode-gif-prep'),
+        ss.toolbar.classList.contains('toolbar-mode-gif-rec'),
         ...[...Object.values(buttons), document.getElementById('btn-ocr-diag')].map(button => [button.hidden, button.classList.contains('hidden')])]);
     if (layoutKey === appliedLayoutKey) {
         ss._reflowActionPanels?.();

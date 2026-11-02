@@ -30,6 +30,7 @@ pub use encode::{
     ExportStage, ExportStats,
 };
 pub use spool::{
-    cleanup_expired, generate_session_id, list_session_ids, CaptureRegion, SessionMeta,
+    cleanup_expired, generate_session_id, list_session_ids, list_summaries, read_draft,
+    read_session_meta, read_summary, write_draft, CaptureRegion, SessionMeta, SessionSummary,
     SpoolError, SpoolReader, SpoolWriter, SPOOL_VERSION,
 };

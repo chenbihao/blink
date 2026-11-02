@@ -46,6 +46,7 @@ pub mod open_clipboard_mode;
 pub mod open_logs_data_dir;
 pub mod open_path;
 pub mod open_settings;
+pub mod open_gif_editor; // 0.28.23：录制编辑器统一入口（激活会话/最近录制首页）
 pub mod open_system_entry;
 pub mod open_url;
 pub mod pin_image;

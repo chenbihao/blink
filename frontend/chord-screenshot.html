@@ -40,7 +40,14 @@
     <div class="live-selection-border" id="live-border"></div>
 </div>
 
-<!-- 标注 canvas：覆盖在裁剪区上，显示标注内容（0.11.7-b） -->
+<!-- 0.28.23：录制范围框——overlay 录制叠层模式下替代原 gif-region 窗口。
+     边框画在录制区域外侧（窗口 DOM，不入 BitBlt 采集矩形内的成品——边框
+     中心线落在区域边界上、外半在区域外）；随区域移动由 JS 同步。 -->
+<div aria-hidden="true" class="gif-region-frame hidden" id="gif-region-frame"></div>
+
+<!-- 标注 canvas：覆盖在裁剪区上，显示标注内容（0.11.7-b）。
+     录制叠层模式下兼作实时涂画层：底图已清、透明区域透出桌面，
+     涂画内容经 DWM 合成进入采集帧（仅一次）。 -->
 <canvas class="hidden" id="annot-canvas"></canvas>
 
 <!-- OCR 命中 canvas（0.11.9-c）：阅读模式下画 word 高亮层 -->
@@ -167,6 +174,39 @@
             <svg aria-hidden="true" class="icon">
                 <use href="#icon-x"/>
             </svg>
+        </button>
+    </div>
+
+    <!-- 0.28.23：录制面（宿主的第三形态）——录制中/已暂停共用。左侧共享标注
+         工具（依赖底图的效果由 CSS/逻辑禁用），此处只放录制控制与状态：
+         状态显示（REC/已暂停 · 有效时长 · 帧数）、涂画/操作桌面切换、移动区域、
+         暂停/继续、停止并编辑、受保护的取消（二次确认）。 -->
+    <div id="gif-rec-bar">
+        <span class="gif-rec-dot" id="gif-rec-dot"></span>
+        <span class="gif-rec-state" id="gif-rec-state">录制中</span>
+        <span class="gif-rec-time" id="gif-rec-time">0:00.0</span>
+        <span class="gif-rec-frames" id="gif-rec-frames">0 帧</span>
+        <div class="toolbar-divider"></div>
+        <button class="tool-btn" id="gif-rec-mode" title="切换涂画 / 操作桌面模式">
+            <svg aria-hidden="true" class="icon"><use href="#icon-pencil"/></svg>
+            <svg aria-hidden="true" class="icon hidden"><use href="#icon-mouse-pointer-2"/></svg>
+            <span id="gif-rec-mode-label">涂画</span>
+        </button>
+        <button class="tool-btn" id="gif-rec-move" title="按住拖动录制区域（录制中移动会录入过程；先暂停可跳过）">
+            <svg aria-hidden="true" class="icon"><use href="#icon-hand-grab"/></svg>
+            <span>移动区域</span>
+        </button>
+        <div class="toolbar-divider"></div>
+        <button class="tool-btn" id="gif-rec-pause" title="暂停 / 继续录制">
+            <svg aria-hidden="true" class="icon"><use href="#icon-pause"/></svg>
+            <svg aria-hidden="true" class="icon hidden"><use href="#icon-play"/></svg>
+        </button>
+        <button class="tool-btn tool-btn-primary" id="gif-rec-stop" title="停止并打开录制编辑器">
+            <svg aria-hidden="true" class="icon"><use href="#icon-square"/></svg>
+            <span>停止</span>
+        </button>
+        <button class="tool-btn" id="gif-rec-cancel" title="取消并丢弃本次录制（需再次点击确认）">
+            <svg aria-hidden="true" class="icon"><use href="#icon-x"/></svg>
         </button>
     </div>
 

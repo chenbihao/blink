@@ -145,6 +145,18 @@ impl MediaService {
             finished: false,
         })
     }
+    /// 会话是否有在途（非终态）媒体任务——编辑器切换会话前的显式保护
+    /// （0.28.23：有导出在途时切换须先完成或显式取消，不静默取消）。
+    pub fn has_active_job(&self, session: &str) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .active
+            .as_ref()
+            .map(|a| a.snapshot.session_id == session && !a.snapshot.terminal())
+            .unwrap_or(false)
+    }
+
     pub fn snapshot(&self, session: Option<&str>, job_id: Option<&str>) -> Option<JobSnapshot> {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let matches = |s: &&JobSnapshot| {

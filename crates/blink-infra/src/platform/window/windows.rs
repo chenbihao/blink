@@ -358,6 +358,14 @@ static MAIN_WINDOW_AI_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// 编辑器被误关。编辑器关闭（cancel/copy/pin/save）时设回 false。
 static IMAGE_EDITOR_ACTIVE: AtomicBool = AtomicBool::new(false);
 
+/// 0.28.23：录制叠层模式标志。
+///
+/// GIF/MP4 录制期间 chord-screenshot overlay 不隐藏，而是转为透明叠层
+/// （静态截图层隐藏、保留统一浮栏与实时涂画层，桌面持续可见/可操作）。
+/// 用户点击被录应用时前台必然离开本进程，watchdog 据此跳过 overlay 失焦
+/// 隐藏；录制停止/取消时清除并走正常隐藏链。
+static OVERLAY_RECORD_ACTIVE: AtomicBool = AtomicBool::new(false);
+
 // ── 0.19：chat prefill 暂存（infra 层，带 revision） ──────────────────────
 //
 // show_chat_window 先 set_chat_prefill(data) 拿到 revision R，再 emit {R, ...data}。
@@ -1071,7 +1079,9 @@ pub fn start_watchdog(app: AppHandle) {
             //
             // 0.20.4：图片编辑器活跃时跳过——编辑器复用 chord-screenshot 窗口，
             // 主窗口关闭导致的焦点瞬态切换不应触发编辑器关闭。
+            // 0.28.23：录制叠层模式同样跳过——录制中操作桌面必然失焦。
             if !IMAGE_EDITOR_ACTIVE.load(Ordering::Relaxed)
+                && !OVERLAY_RECORD_ACTIVE.load(Ordering::Relaxed)
                 && let Some(ss_win) = app.get_webview_window("chord-screenshot")
                 && ss_win.is_visible().unwrap_or(false)
             {
@@ -2578,6 +2588,18 @@ pub fn set_image_editor_active(active: bool) {
     tracing::debug!(active, "set_image_editor_active: IMAGE_EDITOR_ACTIVE");
 }
 
+/// 0.28.23：录制叠层模式开关（见 `OVERLAY_RECORD_ACTIVE`）。
+/// 录制开始置 true；录制结束（stop/cancel）置 false 后再走 `hide_screenshot_overlay`。
+pub fn set_overlay_record_active(active: bool) {
+    OVERLAY_RECORD_ACTIVE.store(active, Ordering::SeqCst);
+    tracing::debug!(active, "set_overlay_record_active: OVERLAY_RECORD_ACTIVE");
+}
+
+/// 录制叠层模式是否活跃（hide 路径兜底清理用）。
+pub fn is_overlay_record_active() -> bool {
+    OVERLAY_RECORD_ACTIVE.load(Ordering::Relaxed)
+}
+
 /// 0.16.11：退出前 flush 所有便签窗口的未保存内容。
 ///
 /// 前端有 500ms 内容防抖和 300ms 几何防抖。退出时 eval flush JS，
@@ -3520,6 +3542,15 @@ fn unpin_screenshot_overlay_geometry() {
 pub fn hide_screenshot_overlay(app: &AppHandle) {
     super::scroll_capture::reset_capture_input(app);
     cancel_pending_window_activation("chord-screenshot");
+    // 0.28.23：录制叠层模式的窗口属性（不可聚焦/鼠标穿透）在任何隐藏路径
+    // 都复位，下一轮截图会话不继承；标志本身由录制服务在 stop/cancel 清除，
+    // 此处兜底防止异常路径残留。
+    if OVERLAY_RECORD_ACTIVE.swap(false, Ordering::SeqCst)
+        && let Some(win) = app.get_webview_window("chord-screenshot")
+    {
+        let _ = win.set_ignore_cursor_events(false);
+        let _ = win.set_focusable(true);
+    }
     // 会话结束：解除 WM_DPICHANGED 钉扎（窗口 hide 后几何交还 tao 默认处理）
     unpin_screenshot_overlay_geometry();
     if let Some(win) = app.get_webview_window("chord-screenshot") {

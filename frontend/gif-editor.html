@@ -2,16 +2,19 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8"/>
-    <title>Blink GIF 编辑器</title>
+    <title>Blink 录制编辑器</title>
     <link href="css/entries/gif-editor.css" rel="stylesheet"/>
 </head>
 <body>
 <!--
-  0.28.7 GIF 编辑器（gif-editor 窗口，单例复用）。
+  录制编辑器（0.28.7 建；0.28.23 改名并加进度定位——窗口 label / 文件名 / IPC
+  仍沿用历史 `gif-editor` / `gif_*`，不为改名机械迁移）。
   - 会话：加载后 `gif_editor_current` 拉取；复用窗口换会话走
     `blink://gif-editor-session` 事件。
   - 预览：canvas 逐帧播放（帧按需 `gif_get_frames` 解码，PNG base64）；
     时间轴分页缩略图懒加载，不整段驻内存。
+  - 进度条：可聚焦滑块——单击定位 / 按住拖动连续浏览 / 方向键与 Home/End /
+    悬浮显示目标帧与时间；定位按编辑后有效时长前缀和映射，不改编辑多选。
   - 编辑：全部非破坏（后端 domain Timeline 投影）；本页只发命令 + 重拉视图。
   - 导出：dialog 选路径 → `gif_export`（进度事件）→ 打开所在文件夹。
 -->
@@ -19,20 +22,24 @@
     <!-- 非用户主动停止的提示横幅（预算到顶/过载/采集失败；可关闭） -->
     <div class="stop-reason-banner hidden" id="stop-reason-banner">
         <span id="stop-reason-text"></span>
-        <button class="banner-close" id="stop-reason-close" title="关闭" type="button">
+        <button class="banner-close" data-i18n-title="gif.editor.close" id="stop-reason-close" title="关闭" type="button">
             <svg aria-hidden="true" class="icon"><use href="#icon-x"/></svg>
         </button>
     </div>
     <!-- 顶栏：会话信息 + 导出 -->
     <header class="topbar">
         <div class="title">
-            <span id="session-title">GIF 编辑器</span>
+            <span data-i18n="gif.editor.title" id="session-title">录制编辑器</span>
             <span class="meta" id="session-meta"></span>
         </div>
         <div class="topbar-actions">
-            <button class="btn" id="btn-export" title="导出 GIF 或 MP4 文件" type="button">
+            <button class="btn" data-i18n-title="gif.recent.title" id="btn-recent" title="最近录制" type="button">
+                <svg aria-hidden="true" class="icon"><use href="#icon-list"/></svg>
+                <span data-i18n="gif.recent.title">最近录制</span>
+            </button>
+            <button class="btn" data-i18n-title="gif.editor.export.title" id="btn-export" title="导出 GIF 或 MP4 文件" type="button">
                 <svg aria-hidden="true" class="icon"><use href="#icon-save"/></svg>
-                <span>导出</span>
+                <span data-i18n="gif.editor.export">导出</span>
             </button>
         </div>
     </header>
@@ -41,16 +48,31 @@
     <section class="preview" id="preview-pane">
         <div class="preview-stage" id="preview-stage">
             <canvas id="preview-canvas"></canvas>
-            <div class="preview-empty hidden" id="preview-empty">暂无帧</div>
+            <div class="preview-empty hidden" data-i18n="gif.editor.noFrames" id="preview-empty">暂无帧</div>
+        </div>
+        <!-- 播放进度定位条（0.28.23）：独立一行给足点击热区；role=slider 可聚焦。
+             轨道/填充/播放头 + 悬浮预览小窗（目标帧缩略图与时间，不改播放状态）。 -->
+        <div aria-valuemax="0" aria-valuemin="0" aria-valuenow="0" aria-valuetext="0:00.0"
+             class="play-progress" data-i18n-aria-label="gif.editor.seek.label" id="play-progress"
+             role="slider" tabindex="0">
+            <div class="play-progress-track" id="play-progress-track">
+                <div class="play-progress-fill" id="play-progress-fill"></div>
+                <div class="play-progress-thumb" id="play-progress-thumb"></div>
+            </div>
+            <div aria-hidden="true" class="seek-preview hidden" id="seek-preview">
+                <img alt="" id="seek-preview-img"/>
+                <span class="seek-preview-label" id="seek-preview-label"></span>
+            </div>
         </div>
         <!-- 预览信息行 + 播放参数（0.28.7 优化：与 transport 分离，参数贴近预览） -->
         <div class="preview-bar">
+            <span class="seek-time" id="seek-time">0:00.0</span>
             <span class="preview-pos" id="preview-pos">0 / 0</span>
             <span class="preview-dur" id="preview-dur"></span>
             <span class="total-dur" id="total-dur">总时长 0.0s</span>
             <span class="spacer"></span>
-            <label class="param" title="全局速度因子">
-                <span>速度</span>
+            <label class="param" data-i18n-title="gif.editor.speed.title" title="全局速度因子">
+                <span data-i18n="gif.editor.speed">速度</span>
                 <select id="sel-speed">
                     <option value="0.5">0.5×</option>
                     <option value="1" selected>1×</option>
@@ -59,23 +81,21 @@
                     <option value="4">4×</option>
                 </select>
             </label>
-            <label class="param" title="所选帧的显示时长（ms，10–6000；多选批量应用，单次撤销）">
-                <span>帧时长</span>
+            <label class="param" data-i18n-title="gif.editor.frameDur.title" title="所选帧的显示时长（ms，10–6000；多选批量应用，单次撤销）">
+                <span data-i18n="gif.editor.frameDur">帧时长</span>
                 <input id="inp-dur" max="6000" min="10" placeholder="—" step="10" type="number"/>
-                <button class="btn btn-icon" id="btn-dur-clear" title="恢复自动时长（清除手动设置）" type="button">
+                <button class="btn btn-icon" data-i18n-title="gif.editor.frameDur.clear" id="btn-dur-clear" title="恢复自动时长（清除手动设置）" type="button">
                     <svg aria-hidden="true" class="icon"><use href="#icon-x"/></svg>
                 </button>
             </label>
-            <label class="param" title="循环次数">
-                <span>循环</span>
+            <label class="param" data-i18n-title="gif.editor.loop.title" title="循环次数">
+                <span data-i18n="gif.editor.loop">循环</span>
                 <select id="sel-loop">
-                    <option value="" selected>无限</option>
-                    <option value="1">1 次</option>
-                    <option value="3">3 次</option>
+                    <option data-i18n="gif.editor.loop.infinite" selected value="">无限</option>
+                    <option data-i18n="gif.editor.loop.once" value="1">1 次</option>
+                    <option data-i18n="gif.editor.loop.thrice" value="3">3 次</option>
                 </select>
             </label>
-            <!-- 播放进度（按时间实时走——帧时长不均时给视觉连续性，缓解"卡顿/错位"感） -->
-            <div class="play-progress" id="play-progress"><div class="play-progress-fill" id="play-progress-fill"></div></div>
         </div>
     </section>
 
@@ -89,36 +109,58 @@
              与帧编辑按钮同排）+ 帧计数 + 编辑操作 -->
         <div class="timeline-bar">
             <div class="transport">
-                <button class="btn btn-icon" id="btn-prev" title="上一帧" type="button">
+                <button class="btn btn-icon" data-i18n-title="gif.editor.prevFrame" id="btn-prev" title="上一帧" type="button">
                     <svg aria-hidden="true" class="icon"><use href="#icon-chevron-left"/></svg>
                 </button>
-                <button class="btn btn-icon" id="btn-play" title="播放/暂停预览（空格）" type="button">
+                <button class="btn btn-icon" data-i18n-title="gif.editor.playPause" id="btn-play" title="播放/暂停预览（空格）" type="button">
                     <svg aria-hidden="true" class="icon"><use href="#icon-play"/></svg>
                     <svg aria-hidden="true" class="icon hidden"><use href="#icon-pause"/></svg>
                 </button>
-                <button class="btn btn-icon" id="btn-next" title="下一帧" type="button">
+                <button class="btn btn-icon" data-i18n-title="gif.editor.nextFrame" id="btn-next" title="下一帧" type="button">
                     <svg aria-hidden="true" class="icon"><use href="#icon-chevron-right"/></svg>
                 </button>
             </div>
             <div class="toolbar-divider"></div>
             <span class="page-ind" id="frame-count-ind">0 帧</span>
             <span class="spacer"></span>
-            <button class="btn" id="btn-trim-start" title="把当前预览帧设为起点" type="button">设为起点</button>
-            <button class="btn" id="btn-trim-end" title="把当前预览帧设为终点" type="button">设为终点</button>
-            <button class="btn" id="btn-delete-frame" title="删除选中帧及其时长" type="button">
+            <button class="btn" data-i18n="gif.editor.trimStart" data-i18n-title="gif.editor.trimStart.title" id="btn-trim-start" title="把当前预览帧设为起点" type="button">设为起点</button>
+            <button class="btn" data-i18n="gif.editor.trimEnd" data-i18n-title="gif.editor.trimEnd.title" id="btn-trim-end" title="把当前预览帧设为终点" type="button">设为终点</button>
+            <button class="btn" data-i18n-title="gif.editor.deleteFrame.title" id="btn-delete-frame" title="删除选中帧及其时长" type="button">
                 <svg aria-hidden="true" class="icon"><use href="#icon-trash-2"/></svg>
-                <span>删帧</span>
+                <span data-i18n="gif.editor.deleteFrame">删帧</span>
             </button>
-            <button class="btn btn-icon" id="btn-undo" title="撤销" type="button">
+            <button class="btn btn-icon" data-i18n-title="gif.editor.undo" id="btn-undo" title="撤销" type="button">
                 <svg aria-hidden="true" class="icon"><use href="#icon-undo-2"/></svg>
             </button>
-            <button class="btn btn-icon" id="btn-redo" title="重做" type="button">
+            <button class="btn btn-icon" data-i18n-title="gif.editor.redo" id="btn-redo" title="重做" type="button">
                 <svg aria-hidden="true" class="icon"><use href="#icon-redo-2"/></svg>
             </button>
-            <button class="btn" id="btn-reset" title="重置全部编辑" type="button">重置</button>
+            <button class="btn" data-i18n="gif.editor.reset" data-i18n-title="gif.editor.reset.title" id="btn-reset" title="重置全部编辑" type="button">重置</button>
         </div>
     </section>
 </div>
+
+<!-- 最近录制（0.28.23 §5.7.4）：无会话首页 / 显式进入的列表视图。
+     分页读轻量摘要 + 可见项按需缩略图；打开/删除为显式操作，当前编辑会话不可删。 -->
+<section class="recent-pane hidden" id="recent-pane">
+    <header class="recent-header">
+        <div class="recent-title">
+            <h2 data-i18n="gif.recent.title">最近录制</h2>
+            <p class="recent-note" data-i18n="gif.recent.note">临时素材保留 72 小时；关闭窗口不删除素材，编辑进度自动保存。</p>
+        </div>
+        <div class="recent-actions">
+            <button class="btn hidden" data-i18n="gif.recent.back" id="btn-back-edit" type="button">返回编辑</button>
+            <button class="btn btn-icon" data-i18n-title="gif.recent.refresh" id="btn-recent-refresh" title="刷新" type="button">
+                <svg aria-hidden="true" class="icon"><use href="#icon-refresh-cw"/></svg>
+            </button>
+        </div>
+    </header>
+    <div class="recent-list" id="recent-list"></div>
+    <div class="recent-empty hidden" id="recent-empty">
+        <p data-i18n="gif.recent.empty">还没有录制。在截图中框选区域后点击「录制」，停止后会自动进入编辑器。</p>
+    </div>
+    <div class="recent-loading hidden" data-i18n="gif.recent.loading" id="recent-loading">加载中…</div>
+</section>
 
 <!-- 瞬时提示（编辑失败等，2.5s 自动消失） -->
 <div class="editor-hint hidden" id="editor-hint"></div>

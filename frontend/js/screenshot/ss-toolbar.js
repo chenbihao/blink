@@ -563,14 +563,20 @@ export function showTextInput(x, y) {
     // x/y 是标注 bitmap 坐标，/ renderScale 转回 CSS；fontSize / renderScale 同理。
     const meta = window.__blinkScreenMeta || {vx: 0, vy: 0};
     const {scaleX: rsx, scaleY: rsy} = getRenderScale(meta);
+    // 0.28.23：录制叠层下输入框外置出录制区域（原位会入成品），并在编辑
+    // 期间申请 overlay 键盘焦点（窗口默认不可聚焦，不抢被录应用焦点）。
+    const recHooks = ss.gifRecHooks;
+    let cssPos = {x: ss.selCss.x + x / rsx, y: ss.selCss.y + y / rsy};
+    if (recHooks?.adjustTextPlacement) cssPos = recHooks.adjustTextPlacement(cssPos);
+    recHooks?.onTextInputOpen?.();
 
     const input = document.createElement('span');
     input.className = 'text-annot-input';
     input.contentEditable = 'true';
     input.setAttribute('role', 'textbox');
     input.setAttribute('data-placeholder', '输入文本…');
-    input.style.left = (ss.selCss.x + x / rsx) + 'px';
-    input.style.top = (ss.selCss.y + y / rsy) + 'px';
+    input.style.left = cssPos.x + 'px';
+    input.style.top = cssPos.y + 'px';
     const cssFontPx = annot.getTextConfig().fontSize / rsx;
     input.style.fontSize = cssFontPx + 'px';
     input.style.fontFamily = annot.getTextConfig().fontFamily;
@@ -608,6 +614,7 @@ export function showTextInput(x, y) {
             annot.cancelText();
         }
         cleanup();
+        recHooks?.onTextInputClose?.();
     };
 
     input.addEventListener('keydown', (e) => {

@@ -312,6 +312,9 @@ pub trait SurfacePort: Send + Sync {
     fn open_sticky_manager(&self) -> Result<(), SurfaceError>;
     fn open_chat(&self, draft: &crate::ai::attachment::OpenChatDraft) -> Result<(), SurfaceError>;
     fn open_clipboard_mode(&self) -> Result<(), SurfaceError>;
+    /// 打开录制编辑器（有编辑会话原地激活，无会话进最近录制首页；
+    /// 0.28.23 §5.7.4 统一功能目录入口）。
+    fn open_gif_editor(&self) -> Result<(), SurfaceError>;
     /// 启动区域截图选区。async 因截图时序需等待 DWM 合成。
     ///
     /// `hide_blink_main`：是否隐藏 Blink 主窗 + 右键菜单（0.22.17 修订，用户决策）。
@@ -798,6 +801,9 @@ mod tests {
                 Ok(())
             }
             fn open_clipboard_mode(&self) -> Result<(), SurfaceError> {
+                Ok(())
+            }
+            fn open_gif_editor(&self) -> Result<(), SurfaceError> {
                 Ok(())
             }
             async fn start_region_capture(&self, _: bool) -> Result<(), SurfaceError> {

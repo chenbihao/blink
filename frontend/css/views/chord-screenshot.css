@@ -2619,6 +2619,102 @@ html.eyedropper-picking * {
     height: 15px;
 }
 
+/* ── 0.28.23：录制叠层模式（#toolbar 的第三形态 + 桌面透出） ──────────────
+   录制中/已暂停共用 `toolbar-mode-gif-rec`：保留共享标注工具（抓手/颜色/
+   粗细/撤销组），隐藏依赖截图底图的效果（马赛克组、spotlight/放大镜、水印）
+   与输出去向（录制已开始，复制/保存等不再适用）；显示 #gif-rec-bar。
+   body.gif-recording 清空底图遮罩与选区层、body 背景透明——桌面经
+   DWM 透出，涂画层（#annot-canvas）合成进采集帧。 */
+/* 直接子元素白名单：抓手 / 录制面 / 标注工具组（dropdown-wrap，含颜色
+   与粗细）/ 撤销组；其余（选取、输出去向、分隔线）隐藏。依赖底图的
+   效果由下面的专项规则从工具组内剔除。 */
+#toolbar.toolbar-mode-gif-rec > *:not(#toolbar-drag):not(#gif-rec-bar):not(.dropdown-wrap):not(.undo-group) {
+    display: none;
+}
+
+/* 依赖实时底图的效果在录制叠层不可用（无截图底图像素）：整组隐藏 */
+#toolbar.toolbar-mode-gif-rec > #blur-main,
+#toolbar.toolbar-mode-gif-rec [data-tool="spotlight"],
+#toolbar.toolbar-mode-gif-rec [data-tool="spotlight-multi"],
+#toolbar.toolbar-mode-gif-rec [data-tool="magnifier"],
+#toolbar.toolbar-mode-gif-rec [data-tool="watermark"] {
+    display: none !important;
+}
+
+
+
+#gif-rec-bar {
+    display: none;
+}
+
+#toolbar.toolbar-mode-gif-rec > #gif-rec-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 5px 0 3px;
+    margin-left: 2px;
+}
+
+.gif-rec-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #ff4d4f;
+    box-shadow: 0 0 6px rgba(255, 77, 79, 0.8);
+}
+
+body.gif-rec-paused .gif-rec-dot {
+    background: #e6b450;
+    box-shadow: 0 0 6px rgba(230, 180, 80, 0.7);
+}
+
+.gif-rec-state {
+    font-size: 18px;
+    color: #d8d8de;
+}
+
+.gif-rec-time {
+    font-size: 18px;
+    color: var(--text, #e8e8ec);
+    font-variant-numeric: tabular-nums;
+    min-width: 58px;
+}
+
+.gif-rec-frames {
+    font-size: 16px;
+    color: #9a9aa4;
+    font-variant-numeric: tabular-nums;
+}
+
+#gif-rec-mode.warn {
+    outline: 1px solid rgba(230, 180, 80, 0.7);
+}
+
+#gif-rec-cancel.confirming {
+    color: #ff6b6d;
+    outline: 1px solid rgba(255, 107, 109, 0.8);
+}
+
+/* 录制叠层：桌面透出（同长截图 scroll-capturing 的透明化，但保留涂画层） */
+body.gif-recording,
+html.gif-recording,
+html.gif-recording body {
+    background: transparent;
+}
+
+body.gif-recording :is(#interaction-canvas, #preselection-mask, #live-selection, #ocr-hit-canvas, #stroke-cursor, #pixel-magnifier, #precision-hint, #sel-loading) {
+    visibility: hidden !important;
+}
+
+/* 录制范围框：区域外侧 3px 高亮边框（纯视觉指示，不在采集矩形内成边） */
+.gif-region-frame {
+    position: fixed;
+    border: 3px solid #4a9eff;
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+    pointer-events: none;
+    z-index: 1;
+}
+
 /* 录制面按钮：图标与文字留呼吸感（标注面按钮多为纯图标，不在此全局加 gap） */
 #gif-prep-bar .tool-btn {
     gap: 6px;

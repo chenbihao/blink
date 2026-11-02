@@ -1,11 +1,16 @@
-//! GIF 录制服务编排（0.28.7，bin 侧）。
+//! GIF 录制服务编排（0.28.7，bin 侧；0.28.23 统一浮栏）。
 //!
 //! 职责：
-//! - **录制会话**：`start`（素材目录 + 采集流水线 + 控制条窗口 + 倒计时）、
+//! - **录制会话**：`start`（素材目录 + 采集流水线 + overlay 进入录制叠层模式）、
 //!   `pause/resume`、`stop`（排空 → finalize → 构建 Timeline → 打开编辑器）、
 //!   `cancel`（丢弃素材）；同一时刻仅一个活跃录制。
+//! - **统一浮栏（0.28.23 §5.7.1）**：截图 overlay（`chord-screenshot`）在录制
+//!   期间**不隐藏**——前端隐藏静态截图层、保留同一 `#toolbar` 宿主与
+//!   `#annot-canvas` 实时涂画层；本服务负责窗口属性：不可聚焦（不抢被录应用
+//!   焦点）、「操作桌面」模式下鼠标穿透 + 命中矩形轮询（指针在工具栏/弹层
+//!   矩形内时临时取消穿透）。原独立控制条 / 范围框 / 拖动柄三窗已废弃。
 //! - **状态广播**：`blink://gif-recorder-state`（250ms 节流 ticker + 阶段变化
-//!   即时推送），控制条窗口消费。
+//!   即时推送），overlay 录制面消费。
 //! - **编辑会话**：`session_id → Timeline`（domain 编辑模型）内存态；素材/元数据
 //!   真源在磁盘（infra spool），崩溃后重开编辑器可重建。
 //! - **导出**：`spawn_blocking` 流式编码 + 进度事件 + 取消标志；导出用冻结的
@@ -34,14 +39,10 @@ const COUNTDOWN_MS: u64 = 0;
 const STATE_TICK_MS: u64 = 250;
 /// 素材 TTL。
 const SESSION_TTL: Duration = Duration::from_secs(72 * 3600);
-/// 控制条窗口 label。
-const CONTROL_LABEL: &str = "gif-control";
-/// 录制范围指示框窗口 label。
-const REGION_LABEL: &str = "gif-region";
-/// 录制区域拖动柄窗口 label。
-const REGION_HANDLE_LABEL: &str = "gif-region-handle";
-/// 范围框边框宽度（px，物理像素）；窗口比录制区域四周外扩该值。
-const REGION_BORDER: i32 = 3;
+/// 截图 overlay 窗口 label（录制期间作为统一浮栏 + 涂画层宿主）。
+const OVERLAY_LABEL: &str = "chord-screenshot";
+/// 「操作桌面」模式命中矩形轮询周期（ms）——指针移入工具栏到可点击的最大延迟。
+const OVERLAY_HIT_POLL_MS: u64 = 16;
 /// 编辑器窗口 label。
 const EDITOR_LABEL: &str = "gif-editor";
 
@@ -60,13 +61,30 @@ pub(crate) struct ActiveRecording {
     region_h: u32,
 }
 
+/// 录制叠层模式的 overlay 输入态（0.28.23）。
+#[derive(Debug, Default)]
+pub(crate) struct OverlayInputState {
+    /// 「操作桌面」模式：整窗鼠标穿透，指针落在 `hit_rects` 内临时取消穿透。
+    desktop_mode: bool,
+    /// 命中矩形（物理屏幕坐标 `[x0, y0, x1, y1]`，右下开区间）：工具栏与打开的弹层。
+    hit_rects: Vec<[i32; 4]>,
+    /// 当前已应用到窗口的穿透状态（避免重复 set）。
+    pass_through: bool,
+}
+
 /// GIF 服务（managed state）。
 pub struct GifService {
     start_lock: Mutex<()>,
     pub(crate) recording: Mutex<Option<ActiveRecording>>,
+    /// overlay 录制叠层输入态（穿透/命中矩形）。
+    pub(crate) overlay_input: Mutex<OverlayInputState>,
     pub(crate) timelines: Mutex<HashMap<String, Timeline>>,
     /// 编辑器当前会话（复用窗口 + ready/pull）。
     pub(crate) editor_session: Mutex<Option<String>>,
+    /// 编辑进度草稿状态（0.28.23；播放位置 + 防抖代次，见 gif_draft.rs）。
+    pub(crate) drafts: Mutex<HashMap<String, crate::app::gif_draft::DraftState>>,
+    /// 会话素材身份（创建时间, 索引帧数）——草稿保存/恢复共用。
+    pub(crate) session_identity: Mutex<HashMap<String, (u64, u32)>>,
 }
 
 impl Default for GifService {
@@ -80,8 +98,11 @@ impl GifService {
         Self {
             start_lock: Mutex::new(()),
             recording: Mutex::new(None),
+            overlay_input: Mutex::new(OverlayInputState::default()),
             timelines: Mutex::new(HashMap::new()),
             editor_session: Mutex::new(None),
+            drafts: Mutex::new(HashMap::new()),
+            session_identity: Mutex::new(HashMap::new()),
         }
     }
 
@@ -234,7 +255,7 @@ impl From<blink_infra::gif::SpoolError> for GifServiceError {
 
 pub type GifResult<T> = Result<T, GifServiceError>;
 
-/// 开始录制：素材目录 + 流水线 + 控制条 + 倒计时。
+/// 开始录制：素材目录 + 流水线 + overlay 进入录制叠层模式 + 倒计时。
 pub fn start_recording(
     app: &AppHandle,
     x: i32,
@@ -243,8 +264,6 @@ pub fn start_recording(
     h: u32,
     fps: u32,
     show_cursor: bool,
-    control_x: Option<i32>,
-    control_y: Option<i32>,
 ) -> GifResult<String> {
     if !(64..=2560).contains(&w) || !(64..=1600).contains(&h) {
         return Err(GifServiceError::InvalidRegion);
@@ -305,16 +324,12 @@ pub fn start_recording(
     #[cfg(not(target_os = "windows"))]
     let region_for_rec = Arc::new(Mutex::new((x, y)));
 
-    // 控制条窗口（区域下方，避让选区——控制条不入成品）；范围指示框
-    // （边框落在区域外，鼠标穿透）；窗口就绪后再收截图 overlay（时序确定：
-    // overlay 的灰罩不会盖住倒计时，录制画面干净）。
-    // 窗口预热（准备模式进入时创建）后这里全部为复用路径——set/show
-    // 毫秒级，「点开始到边框出现」无冷启动间隔。
-    show_control_window(app, x, y, w, h, control_x, control_y);
-    show_region_frame(app, x, y, w, h);
-    show_region_handle(app, x, y, w);
+    // 0.28.23 统一浮栏：overlay 不隐藏，转为录制叠层模式（前端在 invoke 成功
+    // 后切换 UI：隐藏静态截图层、工具栏切录制面、#annot-canvas 变实时涂画层）。
+    // 后端只管窗口属性与看门狗豁免；静态截图位图此时可释放（底图不再需要）。
+    enter_overlay_record_mode(app);
+    blink_infra::platform::screenshot::end_session();
     emit_region_updated(app, x, y, w, h);
-    crate::infra::platform::window::hide_screenshot_overlay(app);
 
     // 倒计时基准在窗口就绪后才起算（COUNTDOWN_MS>0 时可见倒计时恒为
     // 完整时长；当前 0 = 点击即录，此行仅为恢复倒计时时保序）。
@@ -391,9 +406,7 @@ fn finalize_after_stop(
             *rec = None;
         }
     }
-    close_control_window(app);
-    close_region_frame(app);
-    close_region_handle(app);
+    exit_overlay_record_mode(app);
     let root = GifService::root();
     if cancelled {
         let _ = std::fs::remove_dir_all(root.join("sessions").join(session_id));
@@ -431,102 +444,163 @@ fn finalize_after_stop(
     }
 }
 
-/// 控制条窗口：优先定位到截图工具栏原位（「工具栏原地切换成录制栏」，
-/// overlay 前端传入物理坐标）；无位置信息时区域下方 12px → 上方。
-///
-/// focusable(false)（WS_EX_NOACTIVATE）：show() 不从被录应用抢前台焦点，
-/// 鼠标点击照常可用——控制条不需要键盘输入。
-fn show_control_window(
-    app: &AppHandle,
-    x: i32,
-    y: i32,
-    w: u32,
-    h: u32,
-    control_x: Option<i32>,
-    control_y: Option<i32>,
-) {
-    let win = match show_control_window_builder(app) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::error!(error = %e, "GIF 控制条窗口创建失败（录制仍继续，用托盘不可停）");
-            return;
+// ── 录制叠层模式（0.28.23 §5.7.1/§5.7.2：overlay 作为统一浮栏与涂画层宿主）──
+
+fn overlay_window(app: &AppHandle) -> Option<tauri::WebviewWindow> {
+    app.get_webview_window(OVERLAY_LABEL)
+}
+
+/// 进入录制叠层模式：看门狗豁免 + 不可聚焦（点击浮栏不抢被录应用焦点；
+/// 文字输入期间前端显式申请聚焦）+ 初始非穿透（前端随后按默认「操作桌面」
+/// 模式上报命中矩形并切换）。启动命中轮询任务。
+fn enter_overlay_record_mode(app: &AppHandle) {
+    crate::infra::platform::window::set_overlay_record_active(true);
+    {
+        let service = app.state::<Arc<GifService>>();
+        *service.overlay_input.lock().unwrap_or_else(|e| e.into_inner()) =
+            OverlayInputState::default();
+    }
+    if let Some(win) = overlay_window(app) {
+        let _ = win.set_ignore_cursor_events(false);
+        if let Err(e) = win.set_focusable(false) {
+            tracing::warn!(error = %e, "overlay 设为不可聚焦失败（录制继续，点击浮栏可能抢焦点）");
+        }
+    }
+    spawn_overlay_hit_poller(app.clone());
+}
+
+/// 退出录制叠层模式：复位窗口属性 → 清标志 → 走既有隐藏链（含 cloak 与会话清理）。
+fn exit_overlay_record_mode(app: &AppHandle) {
+    if let Some(win) = overlay_window(app) {
+        let _ = win.set_ignore_cursor_events(false);
+        let _ = win.set_focusable(true);
+    }
+    {
+        let service = app.state::<Arc<GifService>>();
+        *service.overlay_input.lock().unwrap_or_else(|e| e.into_inner()) =
+            OverlayInputState::default();
+    }
+    crate::infra::platform::window::set_overlay_record_active(false);
+    crate::infra::platform::window::hide_screenshot_overlay(app);
+}
+
+/// 前端上报 overlay 输入模式与命中矩形（物理屏幕坐标）。
+/// - `draw`：涂画模式，整窗接收指针；
+/// - `desktop`：操作桌面模式，整窗穿透，指针在 `rects` 内临时取消穿透。
+pub fn set_overlay_input(app: &AppHandle, desktop_mode: bool, rects: Vec<[i32; 4]>) -> GifResult<()> {
+    let service = app.state::<Arc<GifService>>();
+    if service.recording.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
+        return Err(GifServiceError::NoActiveRecording);
+    }
+    let want_pass = {
+        let mut st = service.overlay_input.lock().unwrap_or_else(|e| e.into_inner());
+        st.desktop_mode = desktop_mode;
+        st.hit_rects = rects;
+        // 涂画模式立即取消穿透；桌面模式按当前指针位置先算一次，
+        // 避免切换瞬间的轮询空档
+        if desktop_mode {
+            let (cx, cy) = cursor_pos();
+            !st.hit_rects.iter().any(|r| rect_contains(r, cx, cy))
+        } else {
+            false
         }
     };
-    // 初始位置：工具栏原位优先；否则区域下方。
-    let (mut pos_x, mut pos_y) = match (control_x, control_y) {
-        (Some(cx), Some(cy)) => (cx, cy),
-        _ => (x, y + h as i32 + 12),
+    apply_pass_through(app, &service, want_pass);
+    Ok(())
+}
+
+/// 仅更新命中矩形（工具栏拖动/弹层开合后的周期刷新）。
+pub fn set_overlay_hit_rects(app: &AppHandle, rects: Vec<[i32; 4]>) -> GifResult<()> {
+    let service = app.state::<Arc<GifService>>();
+    if service.recording.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
+        return Err(GifServiceError::NoActiveRecording);
+    }
+    service
+        .overlay_input
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .hit_rects = rects;
+    Ok(())
+}
+
+/// 文字输入期间 overlay 需要键盘焦点（前端在文字编辑开始/结束时申请/归还）。
+pub fn set_overlay_focusable(app: &AppHandle, focusable: bool) -> GifResult<()> {
+    let service = app.state::<Arc<GifService>>();
+    if service.recording.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
+        return Err(GifServiceError::NoActiveRecording);
+    }
+    if let Some(win) = overlay_window(app) {
+        let _ = win.set_focusable(focusable);
+        if focusable {
+            let _ = win.set_focus();
+        }
+    }
+    Ok(())
+}
+
+fn apply_pass_through(app: &AppHandle, service: &GifService, want: bool) {
+    let changed = {
+        let mut st = service.overlay_input.lock().unwrap_or_else(|e| e.into_inner());
+        if st.pass_through == want {
+            false
+        } else {
+            st.pass_through = want;
+            true
+        }
     };
-    let _ = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
-        pos_x, pos_y,
-    )));
-    // 物理尺寸读回（逻辑 400×52 随所在屏 DPI 缩放；移动后按目标屏实际值）。
-    let (cw, ch) = win
-        .outer_size()
-        .map(|s| (s.width as i32, s.height as i32))
-        .unwrap_or((400, 52));
-    // 工具栏原位可能被拖进过选区 → 控制条会入成品，挪到区域下方，放不下放上方。
-    let overlaps = pos_x < x + w as i32
-        && pos_x + cw > x
-        && pos_y < y + h as i32
-        && pos_y + ch > y;
-    if overlaps {
-        pos_y = y + h as i32 + 12;
-        let (_, vy, _, vh) = virtual_screen_rect();
-        if pos_y + ch > vy + vh {
-            pos_y = y - 12 - ch;
+    if changed
+        && let Some(win) = overlay_window(app)
+    {
+        let _ = win.set_ignore_cursor_events(want);
+    }
+}
+
+fn rect_contains(r: &[i32; 4], x: i32, y: i32) -> bool {
+    x >= r[0] && x < r[2] && y >= r[1] && y < r[3]
+}
+
+/// 当前指针物理屏幕坐标。
+fn cursor_pos() -> (i32, i32) {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::Foundation::POINT;
+        use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+        let mut pt = POINT::default();
+        // SAFETY: 纯查询，输出参数为本地栈变量
+        if unsafe { GetCursorPos(&mut pt) }.is_ok() {
+            return (pt.x, pt.y);
         }
+        (i32::MIN, i32::MIN)
     }
-    // 虚拟屏幕边界钳制（多屏负坐标合法，按虚拟屏矩形而非主屏判断）。
-    let (vx, vy, vw, vh) = virtual_screen_rect();
-    pos_x = pos_x.clamp(vx, (vx + vw - cw).max(vx));
-    pos_y = pos_y.clamp(vy, (vy + vh - ch).max(vy));
-    let _ = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
-        pos_x, pos_y,
-    )));
-    let _ = win.show();
+    #[cfg(not(target_os = "windows"))]
+    (i32::MIN, i32::MIN)
 }
 
-/// 结束录制：控制条隐藏保活（不销毁）。复用路径 `show()` 毫秒级——
-/// 若每次 close/rebuild，WebView2 冷启动会让「点开始到控制条出现」
-/// 有数百毫秒到一秒的空窗。
-fn close_control_window(app: &AppHandle) {
-    if let Some(win) = app.get_webview_window(CONTROL_LABEL) {
-        let _ = win.hide();
-    }
-}
-
-/// 录制范围指示框：透明置顶 + 鼠标穿透 + 不抢焦点；窗口比区域外扩
-/// REGION_BORDER，边框画在窗口最外圈（内边缘 = 区域边界，不入画面）。
-fn show_region_frame(app: &AppHandle, x: i32, y: i32, w: u32, h: u32) {
-    match show_region_frame_builder(app) {
-        Ok(win) => {
-            let _ = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
-                x - REGION_BORDER,
-                y - REGION_BORDER,
-            )));
-            let _ = win.set_size(tauri::PhysicalSize::new(
-                w + (REGION_BORDER as u32) * 2,
-                h + (REGION_BORDER as u32) * 2,
-            ));
-            // 鼠标穿透：被录区域内的点击/拖拽完全不受影响
-            let _ = win.set_ignore_cursor_events(true);
-            let _ = win.show();
+/// 命中轮询：录制期间每 16ms 读指针；「操作桌面」模式下指针在命中矩形内
+/// 取消穿透、否则恢复穿透。录制结束自动退出（按活跃录制判活，单实例）。
+fn spawn_overlay_hit_poller(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(OVERLAY_HIT_POLL_MS)).await;
+            let service = app.state::<Arc<GifService>>();
+            if service.recording.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
+                break;
+            }
+            let want = {
+                let st = service.overlay_input.lock().unwrap_or_else(|e| e.into_inner());
+                if !st.desktop_mode {
+                    false
+                } else {
+                    let (cx, cy) = cursor_pos();
+                    !st.hit_rects.iter().any(|r| rect_contains(r, cx, cy))
+                }
+            };
+            apply_pass_through(&app, &service, want);
         }
-        Err(e) => {
-            tracing::warn!(error = %e, "GIF 范围框窗口创建失败（录制继续）");
-        }
-    }
+    });
 }
 
-fn close_region_frame(app: &AppHandle) {
-    // 隐藏保活（复用秒显，同 close_control_window 注释）
-    if let Some(win) = app.get_webview_window(REGION_LABEL) {
-        let _ = win.hide();
-    }
-}
-
-/// 播放期间区域变化的统一广播（拖动柄窗口复用时靠此同步，无 URL 重载）。
+/// 录制区域变化的统一广播（overlay 前端据此同步范围框与涂画层位置）。
 fn emit_region_updated(app: &AppHandle, x: i32, y: i32, w: u32, h: u32) {
     let (vx, vy, vw, vh) = virtual_screen_rect();
     let _ = app.emit(
@@ -535,137 +609,11 @@ fn emit_region_updated(app: &AppHandle, x: i32, y: i32, w: u32, h: u32) {
     );
 }
 
-/// 预热录制辅助窗口（准备模式进入时调用）：三个窗口以隐藏态建好，
-/// 点「开始录制」走复用路径（set/show 毫秒级，无 WebView2 冷启动延迟）。
-/// 已存在则无操作。代价是三个常驻隐藏 WebView（各约十几 MB）——只在
-/// 用户明确表达录制意图后才付出。
-pub fn prewarm_windows(app: &AppHandle) {
-    // 三个 builder 与正式 show 路径一致（含 focusable 等），确保复用时
-    // 窗口行为相同；预热不定位不显示。
-    let _ = show_control_window_builder(app);
-    let _ = show_region_frame_builder(app);
-    let _ = show_region_handle_builder(app);
-}
-
-fn show_control_window_builder(app: &AppHandle) -> Result<tauri::WebviewWindow, String> {
-    use blink_infra::platform::window::get_or_create_window;
-    get_or_create_window(app, CONTROL_LABEL, || {
-        WebviewWindowBuilder::new(
-            app,
-            CONTROL_LABEL,
-            WebviewUrl::App("gif-recorder.html".into()),
-        )
-        .title("Blink GIF")
-        .inner_size(340.0, 52.0)
-        .decorations(false)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .resizable(false)
-        .focusable(false)
-        .focused(false)
-        .visible(false)
-        .build()
-    })
-    .map(|(win, _)| win)
-}
-
-fn show_region_frame_builder(app: &AppHandle) -> Result<tauri::WebviewWindow, String> {
-    use blink_infra::platform::window::get_or_create_window;
-    get_or_create_window(app, REGION_LABEL, || {
-        WebviewWindowBuilder::new(
-            app,
-            REGION_LABEL,
-            WebviewUrl::App("gif-region.html".into()),
-        )
-        .title("")
-        .decorations(false)
-        .transparent(true)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .resizable(false)
-        .shadow(false)
-        .focusable(false)
-        .focused(false)
-        .visible(false)
-        .build()
-    })
-    .map(|(win, _)| win)
-}
-
-fn show_region_handle_builder(app: &AppHandle) -> Result<tauri::WebviewWindow, String> {
-    use blink_infra::platform::window::get_or_create_window;
-    get_or_create_window(app, REGION_HANDLE_LABEL, || {
-        WebviewWindowBuilder::new(
-            app,
-            REGION_HANDLE_LABEL,
-            WebviewUrl::App("gif-region-handle.html".into()),
-        )
-        .title("")
-        .decorations(false)
-        .transparent(true)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .resizable(false)
-        .shadow(false)
-        .focusable(false)
-        .focused(false)
-        .inner_size(34.0, 22.0)
-        .visible(false)
-        .build()
-    })
-    .map(|(win, _)| win)
-}
-
-/// 录制区域拖动柄：范围框上边缘中央的小置顶窗（区域外，不挡被录内容）。
-/// focusable(false)：show() 不抢被录应用焦点（拖拽只需要鼠标）。
-/// 窗口保活复用——初始区域/边界经 GIF_REGION_UPDATED 事件同步（预热线
-/// 无 URL 参数；事件为准）。
-fn show_region_handle(app: &AppHandle, x: i32, y: i32, w: u32) {
-    match show_region_handle_builder(app) {
-        Ok(win) => {
-            // 先粗定位到目标屏（让 DPI 变化生效），再按实际物理尺寸精确定位。
-            let _ = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
-                x,
-                y,
-            )));
-            place_region_handle(app, x, y, w);
-            let _ = win.show();
-        }
-        Err(e) => tracing::warn!(error = %e, "GIF 拖动柄窗口创建失败（录制继续）"),
-    }
-}
-
-/// 按实际物理尺寸把柄居中到范围框上边缘中央，并钳制到虚拟屏顶。
-/// 柄窗口以逻辑 34×22 创建，落在不同 DPI 屏上物理宽度不同——用固定
-/// `-17` 物理偏移会在高缩放屏偏心，因此读回 outer_size 后再算。
-fn place_region_handle(app: &AppHandle, x: i32, y: i32, w: u32) {
-    let Some(win) = app.get_webview_window(REGION_HANDLE_LABEL) else {
-        return;
-    };
-    let (phys_w, phys_h) = win
-        .outer_size()
-        .map(|s| (s.width as i32, s.height as i32))
-        .unwrap_or((34, 22));
-    let hx = x + w as i32 / 2 - phys_w / 2;
-    let hy = (y - REGION_BORDER - phys_h).max(virtual_screen_rect().1);
-    let _ = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
-        hx, hy,
-    )));
-}
-
-fn close_region_handle(app: &AppHandle) {
-    // 隐藏保活（复用秒显，同 close_control_window 注释）；区域/边界由
-    // GIF_REGION_UPDATED 事件在下次开始时重新同步（复用无 URL 重载）
-    if let Some(win) = app.get_webview_window(REGION_HANDLE_LABEL) {
-        let _ = win.hide();
-    }
-}
-
-/// 移动录制区域（拖动柄上报目标坐标）：热更新采集位置 + 同步范围框/柄窗口。
+/// 移动录制区域（浮栏「移动区域」按钮拖动上报目标坐标）：热更新采集位置。
 ///
-/// 坐标钳制到虚拟屏幕矩形——BitBlt 越界部分是黑边，范围框也不该悬出屏。
-/// 尺寸取 `ActiveRecording` 内存值（会话元数据回读每帧拖动都要解析整个
-/// frames.jsonl，且录制中索引仍在增长）。
+/// 坐标钳制到虚拟屏幕矩形——BitBlt 越界部分是黑边。尺寸取 `ActiveRecording`
+/// 内存值（录制中索引仍在增长，不回读元数据）。范围框/涂画层由 overlay
+/// 前端按 `GIF_REGION_UPDATED` 对账同步（拖动端就地钳制为主）。
 pub fn move_recording_region(app: &AppHandle, x: i32, y: i32) -> GifResult<()> {
     let service = app.state::<Arc<GifService>>();
     let rec = service.recording.lock().unwrap_or_else(|e| e.into_inner());
@@ -679,29 +627,20 @@ pub fn move_recording_region(app: &AppHandle, x: i32, y: i32) -> GifResult<()> {
     if let Ok(mut g) = r.region_pos.lock() {
         *g = (x, y);
     }
-    if let Some(win) = app.get_webview_window(REGION_LABEL) {
-        let _ = win.set_position(tauri::Position::Physical(tauri::PhysicalPosition::new(
-            x - REGION_BORDER,
-            y - REGION_BORDER,
-        )));
-        let _ = win.set_size(tauri::PhysicalSize::new(
-            r.region_w + (REGION_BORDER as u32) * 2,
-            r.region_h + (REGION_BORDER as u32) * 2,
-        ));
-    }
-    place_region_handle(app, x, y, r.region_w);
-    // 后端钳制结果回发（拖动端就地钳制为主，此为对账同步）
     emit_region_updated(app, x, y, r.region_w, r.region_h);
     Ok(())
 }
 
 /// 打开编辑器窗口（复用 + 会话事件；初始会话由页面 ready 后拉取）。
+/// 换会话前 flush 上一会话的编辑草稿；在途导出按既有语义取消
+/// （列表入口在前端先确认，见 recent-list）。
 pub fn open_editor(app: &AppHandle, session_id: &str) {
     use blink_infra::platform::window::get_or_create_window;
     {
         let service = app.state::<Arc<GifService>>();
         let mut current = service.editor_session.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(previous) = current.as_deref().filter(|id| *id != session_id) {
+            crate::app::gif_draft::flush_draft(app, previous);
             crate::app::media_service::shared().cancel(Some(previous), None);
         }
         *current = Some(session_id.to_string());
@@ -712,7 +651,9 @@ pub fn open_editor(app: &AppHandle, session_id: &str) {
             EDITOR_LABEL,
             WebviewUrl::App("gif-editor.html".into()),
         )
-        .title("Blink GIF 编辑器")
+        // 0.28.23 改名「录制编辑器」；窗口 label / IPC 保持 gif-* 不迁移，
+        // 前端启动后按语言经 set-title 覆盖为双语标题。
+        .title("Blink 录制编辑器")
         .inner_size(980.0, 720.0)
         .min_inner_size(760.0, 540.0)
         .visible(false)
@@ -722,10 +663,15 @@ pub fn open_editor(app: &AppHandle, session_id: &str) {
         Ok((win, created)) => {
             if created {
                 let service = app.state::<Arc<GifService>>().inner().clone();
+                let app_for_close = app.clone();
                 win.on_window_event(move |event| {
                     if matches!(event, tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed) {
                         let mut current = service.editor_session.lock().unwrap_or_else(|e| e.into_inner());
-                        if let Some(id) = current.take() { crate::app::media_service::shared().cancel(Some(&id), None); }
+                        if let Some(id) = current.take() {
+                            // 关闭前 flush 编辑草稿（素材保留，进度下次可恢复）
+                            crate::app::gif_draft::flush_draft(&app_for_close, &id);
+                            crate::app::media_service::shared().cancel(Some(&id), None);
+                        }
                     }
                 });
             }
@@ -741,19 +687,74 @@ pub fn open_editor(app: &AppHandle, session_id: &str) {
     }
 }
 
-// ── 简单屏幕几何（Win32 直查；避免引入窗口管理依赖） ──────────────────────────
-
-/// 当前录制区域快照（拖动柄窗口加载时拉取；无活跃录制返回 None）。
-pub fn recording_region_snapshot(service: &Arc<GifService>) -> Option<serde_json::Value> {
-    let rec = service.recording.lock().unwrap_or_else(|e| e.into_inner());
-    let r = rec.as_ref()?;
-    let (x, y) = r.region_pos.lock().map(|g| *g).unwrap_or((0, 0));
-    let (vx, vy, vw, vh) = virtual_screen_rect();
-    Some(serde_json::json!({
-        "x": x, "y": y, "w": r.region_w, "h": r.region_h,
-        "vx": vx, "vy": vy, "vw": vw, "vh": vh,
-    }))
+/// 主窗口/功能目录入口（0.28.23 §5.7.4）：有编辑会话则原地激活保留工作，
+/// 无会话打开编辑器首页（前端进入「最近录制」列表）。
+pub fn open_editor_entry(app: &AppHandle) {
+    let current = {
+        let service = app.state::<Arc<GifService>>();
+        service
+            .editor_session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    };
+    match current {
+        Some(session_id) => {
+            if let Some(win) = app.get_webview_window(EDITOR_LABEL) {
+                let _ = win.show();
+                let _ = win.set_focus();
+                let _ = app.emit_to(
+                    EDITOR_LABEL,
+                    EventNames::GIF_EDITOR_SESSION,
+                    serde_json::json!({ "sessionId": session_id }),
+                );
+                return;
+            }
+            // 窗口丢失但会话仍在：走 open_editor 重建窗口
+            open_editor(app, &session_id);
+        }
+        None => open_editor_home(app),
+    }
 }
+
+/// 编辑器首页（无会话）：复用窗口 + 发空会话事件（前端显示最近录制）。
+pub fn open_editor_home(app: &AppHandle) {
+    use blink_infra::platform::window::get_or_create_window;
+    {
+        let service = app.state::<Arc<GifService>>();
+        let mut current = service.editor_session.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(previous) = current.take() {
+            crate::app::gif_draft::flush_draft(app, &previous);
+            crate::app::media_service::shared().cancel(Some(&previous), None);
+        }
+    }
+    let built = get_or_create_window(app, EDITOR_LABEL, || {
+        WebviewWindowBuilder::new(
+            app,
+            EDITOR_LABEL,
+            WebviewUrl::App("gif-editor.html".into()),
+        )
+        .title("Blink 录制编辑器")
+        .inner_size(980.0, 720.0)
+        .min_inner_size(760.0, 540.0)
+        .visible(false)
+        .build()
+    });
+    match built {
+        Ok((win, _created)) => {
+            let _ = win.show();
+            let _ = win.set_focus();
+            let _ = app.emit_to(
+                EDITOR_LABEL,
+                EventNames::GIF_EDITOR_SESSION,
+                serde_json::json!({ "sessionId": null }),
+            );
+        }
+        Err(e) => tracing::error!(error = %e, "GIF 编辑器窗口打开失败"),
+    }
+}
+
+// ── 简单屏幕几何（Win32 直查；避免引入窗口管理依赖） ──────────────────────────
 
 /// 虚拟屏幕矩形（物理像素，多屏时左上角可为负坐标）。
 fn virtual_screen_rect() -> (i32, i32, i32, i32) {

@@ -524,6 +524,12 @@ impl SurfacePort for TauriDomainEnv {
         Ok(())
     }
 
+    fn open_gif_editor(&self) -> Result<(), SurfaceError> {
+        // 0.28.23：录制编辑器统一入口（激活当前会话 / 最近录制首页）
+        crate::app::gif_service::open_editor_entry(&self.app);
+        Ok(())
+    }
+
     fn open_sticky_manager(&self) -> Result<(), SurfaceError> {
         crate::infra::platform::window::show_sticky_manager_window(&self.app)
             .map_err(|e| SurfaceError::CreateFailed { detail: e })

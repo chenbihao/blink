@@ -93,6 +93,23 @@ const ACTIONS: &[BuiltinAction] = &[
         result_action: None,
         default_enabled: true,
     },
+    // 0.28.23：录制编辑器统一入口（激活当前会话/最近录制首页）
+    BuiltinAction {
+        id: "open_gif_editor",
+        capability_id: "open_gif_editor",
+        title: "打开录制编辑器",
+        title_en: "Open Recording Editor",
+        subtitle: "最近录制、继续编辑与导出 GIF / MP4",
+        subtitle_en: "Recent recordings, continue editing and export GIF / MP4",
+        keywords: &[
+            "录制编辑器", "录制历史", "最近录制", "gif编辑器", "lzbjq", "gif", "recording", "editor",
+        ],
+        context: &[],
+        param_source: ParamSource::None,
+        param_field: "",
+        result_action: None,
+        default_enabled: true,
+    },
     // 0.26.20 更新提醒：keyword 命中召回「检查更新」动作；空 query 不注入任何
     // 更新条目（不影响用户路径）。执行经 run_builtin_action 的 command 层分派
     // （检查是网络请求，进不了 domain Capability），结果以标准条目数组回流

@@ -367,6 +367,183 @@ pub fn list_session_ids(root: &Path) -> Vec<String> {
     ids
 }
 
+// ── 轻量摘要与编辑草稿（0.28.23 §5.7.4）──────────────────────────────────
+
+/// 会话轻量摘要（最近录制列表用）。**不解析完整 `frames.jsonl` 索引**：
+/// 已定稿会话的帧数/时长直接来自 `session.json` 的 `ts_ms`；异常中断
+/// （state=recording，崩溃未定稿）才从索引文件头尾取首末时间戳。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSummary {
+    pub id: String,
+    pub created_at: u64,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub frame_count: u32,
+    /// 有效总时长 ms（时长差 + 末帧 `last_dur_ms`）。
+    pub total_ms: u64,
+    /// 素材实际占用（含索引与在途文件由调用方另行统计；此处为压缩素材字节）。
+    pub spool_bytes: u64,
+    /// recording（异常中断可恢复）/ stopped。
+    pub state: String,
+    pub stop_reason: Option<String>,
+    /// 是否存在已保存编辑进度草稿。
+    pub has_draft: bool,
+}
+
+/// 只读 `session.json`（不加使用租约——列表与并发删除竞态由读失败吸收，
+/// 单项失败在列表层跳过，不影响其余会话）。
+pub fn read_session_meta(root: &Path, id: &str) -> Result<SessionMeta, SpoolError> {
+    if !is_valid_session_id(id) {
+        return Err(SpoolError::InvalidSession("会话标识无效".into()));
+    }
+    let meta_path = session_dir(root, id).join("session.json");
+    if !meta_path.is_file() {
+        return Err(SpoolError::InvalidSession(id.to_string()));
+    }
+    let meta: SessionMeta = serde_json::from_slice(&fs::read(&meta_path)?)
+        .map_err(|e| SpoolError::InvalidSession(format!("session.json 解析失败: {e}")))?;
+    if meta.spool_version > SPOOL_VERSION {
+        return Err(SpoolError::UnsupportedVersion(meta.spool_version));
+    }
+    Ok(meta)
+}
+
+/// 从 `frames.jsonl` 头/尾各读一小段，取首/末完整条目的 `(帧号, 时间戳)`。
+/// 崩溃半行（无结尾换行/解析失败）按索引同语义丢弃；空文件返回 `None`。
+fn head_tail_entries(dir: &Path) -> Result<Option<((u32, u64), (u32, u64))>, SpoolError> {
+    let path = dir.join("frames.jsonl");
+    let len = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    if len == 0 {
+        return Ok(None);
+    }
+    const CHUNK: u64 = 4096;
+    let read_at = |start: u64, end: u64| -> Option<Vec<u8>> {
+        let mut f = File::open(&path).ok()?;
+        f.seek(SeekFrom::Start(start)).ok()?;
+        let mut buf = vec![0u8; (end - start) as usize];
+        f.read_exact(&mut buf).ok()?;
+        Some(buf)
+    };
+    // 头部（首行完整——文件从头开始追加，无残行风险）
+    let head = read_at(0, CHUNK.min(len)).unwrap_or_default();
+    let parse_line = |line: &[u8]| -> Option<(u32, u64)> {
+        serde_json::from_slice::<FrameIndexEntry>(line)
+            .ok()
+            .map(|e| (e.i, e.t))
+    };
+    let head_first = head
+        .split(|&b| b == b'\n')
+        .find_map(parse_line);
+    // 尾部（seek 进来的起点不一定在行首，首段可能是半行——非零偏移丢弃第一段）
+    let tail_start = len.saturating_sub(CHUNK);
+    let tail = read_at(tail_start, len).unwrap_or_default();
+    let tail_lines: &[u8] = if tail_start == 0 {
+        &tail[..]
+    } else {
+        match tail.iter().position(|&b| b == b'\n') {
+            Some(pos) => &tail[pos + 1..],
+            None => &[],
+        }
+    };
+    let tail_last = tail_lines.split(|&b| b == b'\n').filter_map(parse_line).last();
+    match (head_first, tail_last) {
+        (Some(first), Some(last)) => Ok(Some((first, last))),
+        _ => Ok(None),
+    }
+}
+
+/// 单会话轻量摘要（不打开完整索引/素材；草稿存在性用文件探测）。
+pub fn read_summary(root: &Path, id: &str) -> Result<SessionSummary, SpoolError> {
+    let meta = read_session_meta(root, id)?;
+    let dir = session_dir(root, id);
+    let (frame_count, total_ms) = if !meta.ts_ms.is_empty() {
+        let n = meta.ts_ms.len() as u32;
+        let span = meta.ts_ms.last().copied().unwrap_or(0)
+            - meta.ts_ms.first().copied().unwrap_or(0);
+        (n, span + meta.last_dur_ms as u64)
+    } else if let Some(((_, t0), (i_last, t_last))) = head_tail_entries(&dir)? {
+        (
+            i_last + 1,
+            t_last.saturating_sub(t0) + meta.last_dur_ms.max(1) as u64,
+        )
+    } else {
+        (0, 0)
+    };
+    Ok(SessionSummary {
+        id: id.to_string(),
+        created_at: meta.created_at,
+        width: meta.region.w,
+        height: meta.region.h,
+        fps: meta.fps,
+        frame_count,
+        total_ms,
+        spool_bytes: meta.spool_bytes,
+        state: meta.state.clone(),
+        stop_reason: meta.stop_reason.clone(),
+        has_draft: draft_path(&dir).is_file(),
+    })
+}
+
+/// 全部会话摘要按创建时间倒序（同刻按 id 倒序保证稳定），再按
+/// `offset/limit` 分页；返回 `(当页, 总数)`。单项读取失败（并发删除等）
+/// 跳过且计入尝试日志，不阻断列表。
+pub fn list_summaries(root: &Path, offset: usize, limit: usize) -> (Vec<SessionSummary>, usize) {
+    let mut metas: Vec<SessionMeta> = Vec::new();
+    let mut failures = 0usize;
+    for id in list_session_ids(root) {
+        match read_session_meta(root, &id) {
+            Ok(m) => metas.push(m),
+            Err(_) => failures += 1,
+        }
+    }
+    if failures > 0 {
+        tracing::debug!(failures, "最近录制摘要：部分会话读取失败（并发清理/损坏），已跳过");
+    }
+    metas.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| b.id.cmp(&a.id)));
+    let total = metas.len();
+    let items = metas
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .filter_map(|meta| {
+            let id = meta.id.clone();
+            read_summary(root, &id).map_err(|e| {
+                tracing::debug!(session_id = %id, error = %e, "会话摘要补充索引失败");
+                e
+            }).ok()
+        })
+        .collect();
+    (items, total)
+}
+
+// ── 编辑进度草稿文件（`draft.json`；随会话目录 TTL/删除一起清理） ─────────
+
+/// 草稿文件路径（会话目录内——目录删除/TTL 清理自然带走草稿）。
+pub fn draft_path(dir: &Path) -> PathBuf {
+    dir.join("draft.json")
+}
+
+/// 原子写入草稿（`atomic_write_bytes` 同目录临时文件 + 原子替换；失败保留旧草稿）。
+pub fn write_draft(dir: &Path, body: &str) -> Result<(), SpoolError> {
+    crate::utils::fs::atomic_write_bytes(&draft_path(dir), body.as_bytes())?;
+    Ok(())
+}
+
+/// 读取草稿原文（不存在/损坏返回 `None`——调用方按"可回退"语义处理，
+/// 不把损坏草稿当成有效编辑进度）。
+pub fn read_draft(root: &Path, id: &str) -> Option<String> {
+    if !is_valid_session_id(id) {
+        return None;
+    }
+    let raw = fs::read_to_string(draft_path(&session_dir(root, id))).ok()?;
+    if raw.trim().is_empty() {
+        return None;
+    }
+    Some(raw)
+}
+
 /// 生成会话 id：`rec-<unix秒>-<pid>-<序号>`（同秒碰撞由目录存在性拒绝；
 /// 无密码学随机需求——id 只需目录名唯一）。
 pub fn generate_session_id() -> String {
@@ -594,6 +771,115 @@ mod tests {
         assert_ne!(a, b);
         assert!(a.starts_with("rec-"));
         assert!(!a.contains(std::path::MAIN_SEPARATOR_STR), "可作目录名");
+    }
+
+    // ── 轻量摘要与草稿文件（0.28.23）────────────────────────────────────────
+
+    #[test]
+    fn summary_of_finalized_session_comes_from_meta_without_index_parse() {
+        let root = tempfile::tempdir().unwrap();
+        let mut m = meta(64, 48);
+        m.created_at = 1_700_000_000_000;
+        let id = m.id.clone();
+        let mut w = SpoolWriter::create(root.path(), m).unwrap();
+        for i in 0..5 {
+            w.append_frame(i as u64 * 100, &frame(i, 64, 48)).unwrap();
+        }
+        w.finalize("user").unwrap();
+        // 删除索引文件：已定稿摘要只依赖 session.json，不触碰 frames.jsonl
+        fs::remove_file(session_dir(root.path(), &id).join("frames.jsonl")).unwrap();
+        let s = read_summary(root.path(), &id).unwrap();
+        assert_eq!(s.frame_count, 5);
+        // 时间戳跨度 400 + 末帧时长 100
+        assert_eq!(s.total_ms, 500);
+        assert_eq!((s.width, s.height, s.fps), (64, 48, 10));
+        assert_eq!(s.state, "stopped");
+        assert_eq!(s.stop_reason.as_deref(), Some("user"));
+        assert!(!s.has_draft);
+        assert!(s.spool_bytes > 0);
+    }
+
+    #[test]
+    fn summary_of_crashed_session_uses_index_head_and_tail_only() {
+        let root = tempfile::tempdir().unwrap();
+        let m = meta(32, 32);
+        let id = m.id.clone();
+        let mut w = SpoolWriter::create(root.path(), m).unwrap();
+        for i in 0..40 {
+            w.append_frame(i as u64 * 50, &frame(i, 32, 32)).unwrap();
+        }
+        drop(w); // 不 finalize
+        // 尾部追加半行（崩溃残行）：摘要应忽略残行取最后完整条目
+        {
+            use std::io::Write as _;
+            let mut f = OpenOptions::new()
+                .append(true)
+                .open(session_dir(root.path(), &id).join("frames.jsonl"))
+                .unwrap();
+            f.write_all(b"{\"i\":40,\"o\":1").unwrap();
+        }
+        let s = read_summary(root.path(), &id).unwrap();
+        assert_eq!(s.state, "recording");
+        assert_eq!(s.frame_count, 40);
+        // 39 × 50 + last_dur 100
+        assert_eq!(s.total_ms, 39 * 50 + 100);
+    }
+
+    #[test]
+    fn list_summaries_sorts_newest_first_and_paginates() {
+        let root = tempfile::tempdir().unwrap();
+        let mut ids = Vec::new();
+        for (n, created) in [(1u64, 10u64), (2, 30), (3, 20)] {
+            let mut m = meta(16, 16);
+            m.created_at = created;
+            m.id = format!("rec-{n:08x}-1-{n}");
+            ids.push((m.id.clone(), created));
+            let mut w = SpoolWriter::create(root.path(), m).unwrap();
+            w.append_frame(0, &frame(0, 16, 16)).unwrap();
+            w.finalize("user").unwrap();
+        }
+        let (page, total) = list_summaries(root.path(), 0, 2);
+        assert_eq!(total, 3);
+        assert_eq!(page.len(), 2);
+        assert_eq!(page[0].created_at, 30);
+        assert_eq!(page[1].created_at, 20);
+        let (page2, _) = list_summaries(root.path(), 2, 2);
+        assert_eq!(page2.len(), 1);
+        assert_eq!(page2[0].created_at, 10);
+        // 损坏会话（无 session.json）被跳过且不计入 total
+        fs::create_dir_all(root.path().join("sessions").join("rec-broken-0-0")).unwrap();
+        let (_, total_after) = list_summaries(root.path(), 0, 10);
+        assert_eq!(total_after, 3);
+    }
+
+    #[test]
+    fn draft_write_read_atomic_and_missing_or_blank_is_none() {
+        let root = tempfile::tempdir().unwrap();
+        let m = meta(16, 16);
+        let id = m.id.clone();
+        let mut w = SpoolWriter::create(root.path(), m).unwrap();
+        w.append_frame(0, &frame(0, 16, 16)).unwrap();
+        w.finalize("user").unwrap();
+        let dir = session_dir(root.path(), &id);
+        assert_eq!(read_draft(root.path(), &id), None);
+        write_draft(&dir, "{\"a\":1}").unwrap();
+        assert_eq!(read_draft(root.path(), &id).as_deref(), Some("{\"a\":1}"));
+        assert!(read_summary(root.path(), &id).unwrap().has_draft);
+        // 覆盖写：旧内容被整体替换，无临时残留
+        write_draft(&dir, "{\"a\":2}").unwrap();
+        assert_eq!(read_draft(root.path(), &id).as_deref(), Some("{\"a\":2}"));
+        let leftovers: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".blink-tmp"))
+            .collect();
+        assert!(leftovers.is_empty());
+        // 空白草稿视为无
+        fs::write(draft_path(&dir), "  
+").unwrap();
+        assert_eq!(read_draft(root.path(), &id), None);
+        // 非法 id 不读
+        assert_eq!(read_draft(root.path(), "../x"), None);
     }
 
     fn now_ms() -> u64 {

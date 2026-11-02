@@ -1,4 +1,4 @@
-//! GIF 编辑器（0.28.7，gif-editor 窗口）。
+//! 录制编辑器（0.28.7 建，gif-editor 窗口；0.28.23 改名并加进度定位）。
 //!
 //! 结构：
 //! - 状态真源在后端（domain Timeline）；本页持视图快照 + 素材帧图缓存。
@@ -9,17 +9,28 @@
 //!   剩余时长（不丢帧节奏）；播放头前方预取窗口（+24 帧）后台解码，
 //!   缓存 miss 时保持上一帧画面不闪；播放头实时同步时间轴高亮、滚动跟随
 //!   与帧时长输入框回显。
+//! - **进度定位**（0.28.23）：`#play-progress` 为可聚焦滑块——单击定位、按住
+//!   拖动连续浏览（拖动起点暂停、松手按拖动前状态恢复）、方向键/Home/End、
+//!   悬浮显示目标帧与时间。定位按编辑后有效时长前缀和（`durPrefix`）二分
+//!   映射（seek-bar.js），只移动**播放头**（`.playhead`），不改编辑多选集。
+//!   拖动中只用已有缓存/缩略图降级绘制，防抖后才对最新目标请求全尺寸解码；
+//!   解码按 srcIdx 入缓存（内容恒正确，仅可能多余），旧会话回流经 epoch 丢弃。
 //! - **预览清晰度**：解码宽度 = 预览显示区物理像素（clamp 到源宽），不在
 //!   显示时拉伸；预览缓存按字节预算淘汰。
 //! - 选中模型：`selectedSet`——单击单选、Ctrl 切换、Shift 范围；Delete/右键
 //!   删除（单帧 `delete_frame`、多帧 `delete_frames` 批量单 undo）。
 //!
-//! 键盘：Space 播放/暂停；←/→ 帧步进；Delete/Backspace 删除选中。
+//! 键盘：Space 播放/暂停；←/→ 帧步进；Delete/Backspace 删除选中；进度条聚焦
+//! 时 ←/→/Home/End/PageUp/PageDown 走定位语义（不循环、不改选中）。
 
 import {createExportController} from './export-controller.js';
 import {ensureSpriteLoaded} from '../shared/icon.js';
-import {invoke, listen, normalizeError} from '../shared/tauri.js';
+import {confirmDialog, getCurrentWindow, invoke, listen, normalizeError} from '../shared/tauri.js';
+import {EVENTS} from '../shared/event-names.js';
+import {applyI18nFromConfig, onLangChange, t} from '../i18n/index.js';
 import {commands, formatFrameDur, formatSeconds, frameState, nextPlayStep, playToSrc, srcToPlayIndex} from './timeline-view.js';
+import {clampPreviewLeft, formatTimecode, keyboardStep, locateTime, pointerRatio, ratioToTime, timeAt} from './seek-bar.js';
+import {createRecentList} from './recent-list.js';
 
 ensureSpriteLoaded();
 
@@ -32,6 +43,8 @@ const VIRTUAL_BUFFER = 10;
 const PLAY_PREFETCH = 24;
 /** 预览缓存字节预算（ImageBitmap 按源像素估算）。 */
 const PREVIEW_BYTES_BUDGET = 96 << 20;
+/** 拖动定位中对最新目标请求全尺寸解码的防抖（ms）。 */
+const SEEK_DECODE_DEBOUNCE_MS = 80;
 
 const $ = id => document.getElementById(id);
 const els = {
@@ -42,6 +55,7 @@ const els = {
     pos: $('preview-pos'),
     dur: $('preview-dur'),
     totalDur: $('total-dur'),
+    seekTime: $('seek-time'),
     strip: $('frame-strip'),
     stripScroll: $('timeline-scroll'),
     frameCountInd: $('frame-count-ind'),
@@ -60,8 +74,18 @@ const els = {
     stopBanner: $('stop-reason-banner'),
     stopBannerText: $('stop-reason-text'),
     stopBannerClose: $('stop-reason-close'),
-    /** 播放进度条填充（按时间轴推进；贴 preview-bar 底边）。 */
+    /** 进度定位条（slider）及其轨道/填充/播放头/悬浮预览。 */
+    seekBar: $('play-progress'),
     playProgress: $('play-progress-fill'),
+    seekThumb: $('play-progress-thumb'),
+    seekPreview: $('seek-preview'),
+    seekPreviewImg: $('seek-preview-img'),
+    seekPreviewLabel: $('seek-preview-label'),
+    /** 视图根与最近录制面（0.28.23；互斥显示）。 */
+    editorRoot: $('gif-editor'),
+    recentPane: $('recent-pane'),
+    btnRecent: $('btn-recent'),
+    btnBackEdit: $('btn-back-edit'),
 };
 
 /** 会话状态。 */
@@ -101,6 +125,16 @@ const state = {
     pendingBatches: [],
     /** 瞬时提示定时器。 */
     hintTimer: 0,
+    /** 进度条拖动中（pointer capture 期间）。 */
+    seekDragging: false,
+    /** 拖动前是否在播放（松手按此恢复）。 */
+    seekWasPlaying: false,
+    /** 拖动/定位中的全尺寸解码防抖句柄。 */
+    seekDecodeTimer: 0,
+    /** 进度条定位后的帧内偏移（暂停态显示/恢复播放用；步进/点选/播放推进归零）。 */
+    seekInFrameMs: 0,
+    /** 播放位置上报节流句柄（草稿播放头；提交定位/暂停/步进时上报）。 */
+    posReportTimer: 0,
 };
 
 // ── 帧解码（批量懒加载 + 缓存淘汰） ─────────────────────────────────────
@@ -189,7 +223,7 @@ function layoutGeometry(view) {
     state.thumbW = Math.max(48, Math.round(THUMB_H * aspect));
     state.slotW = state.thumbW + THUMB_GAP;
     els.strip.style.width = `${view.frameCount * state.slotW}px`;
-    els.frameCountInd.textContent = `${view.frameCount} 帧`;
+    els.frameCountInd.textContent = t('gif.editor.frames', {n: view.frameCount});
 }
 
 function visibleRange() {
@@ -258,6 +292,7 @@ function buildThumb(view, idx) {
     if (fs.deleted) btn.classList.add('frame-deleted');
     else if (!fs.visible) btn.classList.add('out-of-range');
     if (state.selectedSet.has(idx)) btn.classList.add('selected');
+    if (currentPlaySrc() === idx) btn.classList.add('playhead');
     const img = document.createElement('img');
     img.style.height = `${THUMB_H}px`;
     img.style.width = '100%';
@@ -276,10 +311,10 @@ function buildThumb(view, idx) {
         hold.textContent = 'H';
         btn.appendChild(hold);
     }
-    btn.title = fs.deleted ? '已删除（撤销可恢复）'
-        : !fs.inTrim ? '修剪范围外'
-        : fs.held ? `帧 ${idx} · 停留 ${formatFrameDur(view.holds[String(idx)])}`
-        : `帧 ${idx}`;
+    btn.title = fs.deleted ? t('gif.editor.thumb.deleted')
+        : !fs.inTrim ? t('gif.editor.thumb.outOfRange')
+        : fs.held ? t('gif.editor.thumb.held', {frame: idx, dur: formatFrameDur(view.holds[String(idx)])})
+        : t('gif.editor.thumb.frame', {frame: idx});
     btn.addEventListener('click', ev => handleThumbClick(idx, ev));
     btn.addEventListener('contextmenu', ev => handleThumbContextMenu(idx, ev));
     return btn;
@@ -299,6 +334,14 @@ function refreshSelectionClasses() {
     }
 }
 
+/** 更新全部已建槽的播放头标记（与选中态独立）。 */
+function refreshPlayheadClass() {
+    const cur = currentPlaySrc();
+    for (const [idx, el] of state.liveThumbs) {
+        el.classList.toggle('playhead', idx === cur);
+    }
+}
+
 // ── 预览 ─────────────────────────────────────────────────────────────────
 
 function currentPlaySrc() {
@@ -309,6 +352,7 @@ function renderPreview() {
     const view = state.view;
     if (!view || !view.frames.length) {
         els.canvasEmpty.classList.remove('hidden');
+        updatePlayProgress();
         return;
     }
     const cur = Math.min(state.playIdx, view.frames.length - 1);
@@ -321,22 +365,17 @@ function renderPreview() {
         state.previewCache.delete(srcIdx);
         state.previewCache.set(srcIdx, bmp);
         drawPreview(bmp);
+    } else if (state.seekDragging) {
+        // 拖动定位中：只用缩略图降级绘制，不逐帧发解码请求/建等待定时器；
+        // 全尺寸解码由 scheduleSeekDecode 防抖后对最新目标单独请求。
+        drawThumbFallback(srcIdx);
     } else {
         // miss：先上缩略图降级帧（帧内容正确优先于清晰度，图片与播放头
         // /高亮不再错位），再请求全尺寸解码；完成后播放头未变才上屏。
         // 降级绘制不改写 canvas 位图尺寸（按预览档位初始化后只拉伸绘制）
         // ——canvas 显示尺寸跟随位图（max-width:100%），被缩略图尺寸定型
         // 就是"大图变小"的直接表现。
-        const thumbUrl = state.thumbCache.get(srcIdx);
-        if (thumbUrl) {
-            const fallback = new Image();
-            fallback.onload = () => {
-                if (currentPlaySrc() === srcIdx && !state.previewCache.has(srcIdx)) {
-                    drawFallback(fallback);
-                }
-            };
-            fallback.src = thumbUrl;
-        }
+        drawThumbFallback(srcIdx);
         requestDecode(state.sessionId, [srcIdx], state.previewWidth, state.previewCache, true);
         const wait = setInterval(() => {
             const b = state.previewCache.get(srcIdx);
@@ -347,10 +386,24 @@ function renderPreview() {
         }, 30);
     }
     els.pos.textContent = `${cur + 1} / ${view.frames.length}`;
-    els.dur.textContent = formatFrameDur(view.frames[cur].durMs) + (view.frames[cur].held ? '（停留）' : '');
-    els.totalDur.textContent = `总时长 ${formatSeconds(view.totalMs)}`;
+    els.dur.textContent = formatFrameDur(view.frames[cur].durMs) + (view.frames[cur].held ? t('gif.editor.held') : '');
+    els.totalDur.textContent = t('gif.editor.totalDur', {dur: formatSeconds(view.totalMs)});
+    refreshPlayheadClass();
     // 非播放态（步进/点选/编辑后）进度停在该帧起点；播放态由 rAF 循环推进
     updatePlayProgress();
+}
+
+/** 缩略图降级：有缓存则画到预览画布（不改位图尺寸）。 */
+function drawThumbFallback(srcIdx) {
+    const thumbUrl = state.thumbCache.get(srcIdx);
+    if (!thumbUrl) return;
+    const fallback = new Image();
+    fallback.onload = () => {
+        if (currentPlaySrc() === srcIdx && !state.previewCache.has(srcIdx)) {
+            drawFallback(fallback);
+        }
+    };
+    fallback.src = thumbUrl;
 }
 
 function drawPreview(bmp) {
@@ -398,6 +451,7 @@ function playTick() {
     const step = nextPlayStep(view.frames, state.playIdx);
     state.playIdx = step.cursor;
     state.frameShownAt = performance.now();
+    state.seekInFrameMs = 0;
     renderPreview();
     prefetchAhead();
     syncPlayhead(playToSrc(view, step.cursor));
@@ -432,11 +486,16 @@ function setPlaying(on) {
     cancelAnimationFrame(state.progressRaf);
     state.progressRaf = 0;
     if (on) {
-        // 保留当前帧剩余展示时长（不立即跳帧——空格启动也丝滑）
+        // 保留当前帧剩余展示时长（不立即跳帧——空格启动也丝滑）；进度条
+        // 定位后从指针所在帧内偏移续播。
         const view = state.view;
         if (view && view.frames.length) {
             const cur = Math.min(state.playIdx, view.frames.length - 1);
-            const elapsed = performance.now() - state.frameShownAt;
+            const elapsed = state.seekInFrameMs > 0
+                ? state.seekInFrameMs
+                : performance.now() - state.frameShownAt;
+            state.seekInFrameMs = 0;
+            state.frameShownAt = performance.now() - elapsed;
             const remaining = Math.max(5, view.frames[cur].durMs - elapsed);
             state.playDue = performance.now() + remaining;
             scheduleNext(remaining);
@@ -444,22 +503,27 @@ function setPlaying(on) {
         progressLoop();
     } else {
         updatePlayProgress();
+        reportPlayPosition();
     }
 }
 
-/** 播放头轻量同步：只切高亮类 + 滚动跟随（连续时间轴，无翻页）。 */
-function syncPlayhead(srcIdx) {
+/** 播放头轻量同步：切高亮类 + 滚动跟随（连续时间轴，无翻页）。
+ *  `select=true`（播放/步进）同时把选中集置为播放头所在帧；进度条定位
+ *  传 false——只移动播放头标记，不改编辑多选集合。 */
+function syncPlayhead(srcIdx, select = true) {
     if (srcIdx == null) return;
-    state.selectedSet = new Set([srcIdx]);
+    if (select) state.selectedSet = new Set([srcIdx]);
     const thumb = state.liveThumbs.get(srcIdx);
     if (thumb) {
         refreshSelectionClasses();
+        refreshPlayheadClass();
         thumb.scrollIntoView({block: 'nearest', inline: 'nearest', behavior: 'auto'});
     } else {
         // 不在虚拟化窗口：滚到目标位置（scroll 事件触发 relayout 建槽）
         els.stripScroll.scrollLeft = Math.max(0, srcIdx * state.slotW - els.stripScroll.clientWidth / 2);
         requestAnimationFrame(() => {
             refreshSelectionClasses();
+            refreshPlayheadClass();
             state.liveThumbs.get(srcIdx)
                 ?.scrollIntoView({block: 'nearest', inline: 'nearest'});
         });
@@ -499,10 +563,12 @@ function handleThumbClick(idx, ev) {
         const play = srcToPlayIndex(state.view, idx);
         if (play >= 0) state.playIdx = play;
         state.frameShownAt = performance.now();
+        state.seekInFrameMs = 0;
     }
     refreshSelectionClasses();
     renderPreview();
     renderControls();
+    reportPlayPosition();
 }
 
 function handleThumbContextMenu(idx, ev) {
@@ -524,7 +590,7 @@ async function deleteSelected() {
     const deletedSet = new Set(view?.deleted || []);
     const toDelete = sel.filter(i => !deletedSet.has(i));
     if (!toDelete.length) {
-        showHint('所选帧已是删除状态（右键可恢复）');
+        showHint(t('gif.editor.hint.alreadyDeleted'));
         return;
     }
     const skipped = sel.length - toDelete.length;
@@ -534,7 +600,7 @@ async function deleteSelected() {
         ? commands.deleteFrame(toDelete[0])
         : commands.deleteFrames(toDelete);
     await edit(cmd);
-    if (skipped > 0) showHint(`已删除 ${toDelete.length} 帧，${skipped} 帧先前已删（跳过）`);
+    if (skipped > 0) showHint(t('gif.editor.hint.deletedSkipped', {n: toDelete.length, skipped}));
 }
 
 /** 恢复选中集合中已删除的帧（时长从素材基线还原；保留选中便于继续操作）。 */
@@ -561,6 +627,8 @@ async function loadSession(sessionId) {
     clearTimeout(state.playTimer);
     cancelAnimationFrame(state.progressRaf);
     state.progressRaf = 0;
+    endSeekDrag(false);
+    hideSeekPreview();
     state.thumbCache.clear();
     for (const bmp of state.previewCache.values()) bmp.close();
     state.previewCache.clear();
@@ -575,16 +643,36 @@ async function loadSession(sessionId) {
     state.view = view;
     state.durBySrc = effectiveDurMap(state.view);
     buildDurPrefix(state.view);
-    const m = state.view.meta;
-    els.title.textContent = 'GIF 编辑器';
-    els.meta.textContent = `${m.width}×${m.height} · ${m.fps}fps · ${state.view.frameCount} 帧`;
-    renderStopBanner(m.stopReason);
+    renderSessionHeader();
+    renderStopBanner(state.view.meta?.stopReason);
     measurePreviewWidth(state.view);
     layoutGeometry(state.view);
+    // 草稿播放位置：按有效时长前缀和定位（编辑态已由后端恢复到 view）
+    const draftPos = Number(view.draftPlayPosMs) || 0;
+    if (draftPos > 0) {
+        const loc = locateTime(state.durPrefix, draftPos);
+        if (loc) {
+            state.playIdx = loc.playIdx;
+            state.seekInFrameMs = loc.atEnd ? 0 : loc.inFrameMs;
+            state.frameShownAt = performance.now() - state.seekInFrameMs;
+        }
+    }
+    showEditorView();
     relayoutStrip();
     renderPreview();
     renderControls();
+    if (state.playIdx > 0) syncPlayhead(currentPlaySrc(), false);
+    if (view.draftStatus === 'discarded') showHint(t('gif.editor.draftDiscarded'), false);
     startPreload();
+}
+
+/** 标题与会话元信息（语言切换时重算）。 */
+function renderSessionHeader() {
+    els.title.textContent = t('gif.editor.title');
+    const m = state.view?.meta;
+    els.meta.textContent = m
+        ? t('gif.editor.meta', {w: m.width, h: m.height, fps: m.fps, n: state.view.frameCount})
+        : '';
 }
 
 /** 打开即静默预载：缩略全量 + 预览按序（后台批次，播放/交互优先插队）。
@@ -622,21 +710,21 @@ function showHint(text, isError = true) {
 
 /** 非用户主动停止的会话横幅（预算到顶/过载/采集失败——用户需要知道
  *  录制为何提前结束）；用户主动停止不展示。 */
-const STOP_REASON_TEXT = {
-    budget_exhausted: '录制已达到时长/帧数/素材上限，自动停止',
-    overload: '采集过载，录制已自动停止（素材完整保留）',
-    capture_failed: '屏幕采集中断，录制提前结束（已录部分完整保留）',
+const STOP_REASON_KEYS = {
+    budget_exhausted: 'gif.editor.stop.budget_exhausted',
+    overload: 'gif.editor.stop.overload',
+    capture_failed: 'gif.editor.stop.capture_failed',
 };
 
 function renderStopBanner(reason) {
     const banner = els.stopBanner;
     if (!banner) return;
-    const text = STOP_REASON_TEXT[reason];
-    if (!text) {
+    const key = STOP_REASON_KEYS[reason];
+    if (!key) {
         banner.classList.add('hidden');
         return;
     }
-    if (els.stopBannerText) els.stopBannerText.textContent = text;
+    if (els.stopBannerText) els.stopBannerText.textContent = t(key);
     banner.classList.remove('hidden');
 }
 
@@ -653,16 +741,20 @@ async function edit(command) {
         view = await invoke('gif_edit', {sessionId: state.sessionId, command});
     } catch (err) {
         console.error('[gif-editor] 编辑命令失败', err);
-        showHint(`操作失败：${normalizeError(err).message}`);
+        showHint(t('gif.editor.hint.editFailed', {msg: normalizeError(err).message}));
         return;
     }
     if (epoch !== state.epoch || view.revision < (state.view?.revision ?? 0)) return;
     state.view = view;
     state.durBySrc = effectiveDurMap(view);
     buildDurPrefix(view);
+    // 编辑 revision 变化：位置映射已变，关闭悬浮预览；在途解码经 epoch/
+    // revision 双校验丢弃，不回填旧位置
+    hideSeekPreview();
     state.playIdx = anchorPlayIndex(view, srcAnchor, state.playIdx);
     state.frameShownAt = performance.now();
     layoutGeometry(view);
+    renderSessionHeader();
     // 已建帧槽全部重建（relayoutStrip 只补缺——不清空的话旧槽的
     // 时长标签/已删状态类不会随编辑刷新）
     for (const [, el] of state.liveThumbs) el.remove();
@@ -688,29 +780,186 @@ function buildDurPrefix(view) {
 
 /**
  * 播放进度（按时间轴，非帧号——帧时长不均时进度仍连续，缓解"某帧停顿
- * 很久画面不动"的卡顿感）。播放中含帧内已播时间；暂停/步进停在该帧起点。
+ * 很久画面不动"的卡顿感）。播放中含帧内已播时间；暂停/步进停在该帧起点；
+ * 进度条定位后保留指针所在的帧内偏移（`seekInFrameMs`）。
+ * 同步填充宽度、播放头位置、aria 值与时间码。
  */
 function updatePlayProgress() {
     const view = state.view;
     const fill = els.playProgress;
-    if (!fill || !view) return;
+    if (!fill) return;
     const total = state.durPrefix[state.durPrefix.length - 1] || 0;
-    if (total <= 0 || !view.frames.length) {
+    const disabled = !view || total <= 0 || !view.frames.length;
+    els.seekBar?.setAttribute('aria-disabled', disabled ? 'true' : 'false');
+    if (disabled) {
         fill.style.width = '0%';
+        if (els.seekThumb) els.seekThumb.style.left = '0%';
+        setSeekAria(0, 0);
         return;
     }
     const cur = Math.min(state.playIdx, view.frames.length - 1);
     const inFrame = state.playing
         ? Math.min(performance.now() - state.frameShownAt, view.frames[cur].durMs)
-        : 0;
-    const pos = (state.durPrefix[cur] + inFrame) / total;
-    fill.style.width = `${Math.min(100, pos * 100)}%`;
+        : Math.min(state.seekInFrameMs, view.frames[cur].durMs);
+    const timeMs = state.durPrefix[cur] + inFrame;
+    const pct = Math.min(100, (timeMs / total) * 100);
+    fill.style.width = `${pct}%`;
+    if (els.seekThumb) els.seekThumb.style.left = `${pct}%`;
+    setSeekAria(timeMs, total);
+}
+
+function setSeekAria(timeMs, totalMs) {
+    const code = formatTimecode(timeMs);
+    if (els.seekTime) els.seekTime.textContent = code;
+    const bar = els.seekBar;
+    if (!bar) return;
+    bar.setAttribute('aria-valuemax', String(Math.round(totalMs)));
+    bar.setAttribute('aria-valuenow', String(Math.round(timeMs)));
+    bar.setAttribute('aria-valuetext', code);
 }
 
 function progressLoop() {
     if (!state.playing) return;
     updatePlayProgress();
     state.progressRaf = requestAnimationFrame(progressLoop);
+}
+
+// ── 进度定位条（0.28.23：单击/拖动/键盘/悬浮预览） ───────────────────────
+
+/** 可定位判定（空素材/零时长禁用交互）。 */
+function seekEnabled() {
+    const total = state.durPrefix[state.durPrefix.length - 1] || 0;
+    return Boolean(state.view && state.view.frames.length && total > 0);
+}
+
+/**
+ * 定位到时间 t：按有效时长前缀和映射到播放序号 + 帧内偏移；只移动播放头
+ * 与预览，不改编辑多选集合。拖动中 `renderPreview` 走降级绘制路径，
+ * 全尺寸解码由 `scheduleSeekDecode` 防抖后对最新目标单独请求。
+ */
+function seekToTime(t) {
+    const view = state.view;
+    if (!view) return;
+    const loc = locateTime(state.durPrefix, t);
+    if (!loc) return;
+    state.playIdx = loc.playIdx;
+    state.seekInFrameMs = loc.atEnd ? 0 : loc.inFrameMs;
+    // frameShownAt 反推到"已展示 seekInFrameMs"——恢复播放时从指针位置续播
+    state.frameShownAt = performance.now() - state.seekInFrameMs;
+    renderPreview();
+    syncPlayhead(playToSrc(view, loc.playIdx), false);
+    updatePlayProgress();
+    scheduleSeekDecode();
+}
+
+/** 拖动中对最新目标防抖请求全尺寸解码（避免连续 scrub 打爆解码队列；
+ *  解码按 srcIdx 入 previewCache——目标再变也只会留下正确的多余缓存，
+ *  回流无需代次校验，缓存仍受字节预算约束）。 */
+function scheduleSeekDecode() {
+    clearTimeout(state.seekDecodeTimer);
+    state.seekDecodeTimer = setTimeout(() => {
+        if (!state.seekDragging) return;
+        const srcIdx = currentPlaySrc();
+        if (srcIdx == null || state.previewCache.has(srcIdx)) return;
+        requestDecode(state.sessionId, [srcIdx], state.previewWidth, state.previewCache, true);
+    }, SEEK_DECODE_DEBOUNCE_MS);
+}
+
+/** 结束拖动：恢复拖动前播放状态（提交位置后，上报播放头给草稿）。 */
+function endSeekDrag(resume) {
+    if (!state.seekDragging) return;
+    state.seekDragging = false;
+    clearTimeout(state.seekDecodeTimer);
+    document.body.classList.remove('seek-dragging');
+    els.seekBar?.classList.remove('seek-active');
+    if (resume && state.seekWasPlaying) {
+        setPlaying(true);
+    } else {
+        renderPreview(); // 拖动后按最终位置重绘（可能需要全尺寸解码）
+    }
+    reportPlayPosition();
+}
+
+/** 悬浮预览：显示目标帧缩略图与时间码，水平跟随指针、钳制在轨道内。
+ *  缩略 miss 时低优先级补一张（入 thumbCache）；图在下次指针事件回填，
+ *  鼠标完全静止则保持占位（时间码仍准确）。 */
+function showSeekPreview(clientX) {
+    const view = state.view;
+    const total = state.durPrefix[state.durPrefix.length - 1] || 0;
+    if (!view || !view.frames.length || total <= 0) return;
+    const rect = els.seekBar.getBoundingClientRect();
+    const ratio = pointerRatio(clientX, rect);
+    const loc = locateTime(state.durPrefix, ratioToTime(ratio, total));
+    if (!loc) return;
+    const src = view.frames[loc.playIdx].srcIdx;
+    const timeMs = state.durPrefix[loc.playIdx] + loc.inFrameMs;
+    els.seekPreviewLabel.textContent = t('gif.editor.seek.preview', {
+        frame: src,
+        time: formatTimecode(timeMs),
+    });
+    els.seekPreviewImg.removeAttribute('src');
+    const url = state.thumbCache.get(src);
+    if (url) {
+        els.seekPreviewImg.src = url;
+    } else {
+        requestDecode(state.sessionId, [src], 160, state.thumbCache);
+    }
+    const pw = els.seekPreview.offsetWidth || 120;
+    els.seekPreview.style.left = `${clampPreviewLeft(clientX - rect.left, pw, rect.width)}px`;
+    els.seekPreview.classList.remove('hidden');
+}
+
+function hideSeekPreview() {
+    els.seekPreview?.classList.add('hidden');
+    els.seekPreviewImg?.removeAttribute('src');
+}
+
+if (els.seekBar) {
+    els.seekBar.addEventListener('pointerdown', ev => {
+        if (!seekEnabled() || ev.button !== 0) return;
+        ev.preventDefault();
+        state.seekWasPlaying = state.playing;
+        setPlaying(false);
+        state.seekDragging = true;
+        document.body.classList.add('seek-dragging');
+        els.seekBar.classList.add('seek-active');
+        els.seekBar.setPointerCapture(ev.pointerId);
+        els.seekBar.focus({preventScroll: true}); // preventDefault 阻止了默认聚焦
+        hideSeekPreview();
+        seekToTime(ratioToTime(pointerRatio(ev.clientX, els.seekBar.getBoundingClientRect()),
+            state.durPrefix[state.durPrefix.length - 1]));
+    });
+    els.seekBar.addEventListener('pointermove', ev => {
+        if (state.seekDragging) {
+            seekToTime(ratioToTime(pointerRatio(ev.clientX, els.seekBar.getBoundingClientRect()),
+                state.durPrefix[state.durPrefix.length - 1]));
+        } else if (ev.pointerType === 'mouse') {
+            showSeekPreview(ev.clientX);
+        }
+    });
+    els.seekBar.addEventListener('pointerup', ev => {
+        if (!state.seekDragging) return;
+        els.seekBar.releasePointerCapture?.(ev.pointerId);
+        endSeekDrag(true);
+    });
+    els.seekBar.addEventListener('pointercancel', () => endSeekDrag(false));
+    els.seekBar.addEventListener('pointerleave', () => {
+        if (!state.seekDragging) hideSeekPreview();
+    });
+    els.seekBar.addEventListener('keydown', ev => {
+        if (!seekEnabled()) return;
+        const next = keyboardStep(state.playIdx, state.view.frames.length, ev.code);
+        if (next == null) return;
+        ev.preventDefault();
+        setPlaying(false);
+        state.seekInFrameMs = 0;
+        state.playIdx = next;
+        state.frameShownAt = performance.now();
+        renderPreview();
+        syncPlayhead(currentPlaySrc(), false);
+        updatePlayProgress();
+        reportPlayPosition();
+    });
 }
 
 /** 帧时长输入框回显：跟随选中集（播放/步进时选中集即播放头所在帧）。
@@ -727,7 +976,7 @@ function syncDurInput() {
         els.durInput.placeholder = '—';
     } else {
         els.durInput.value = '';
-        els.durInput.placeholder = sel.length > 1 ? `${sel.length} 帧` : '选中帧后设置';
+        els.durInput.placeholder = sel.length > 1 ? t('gif.editor.durPh.multi', {n: sel.length}) : t('gif.editor.durPh.select');
     }
 }
 
@@ -760,6 +1009,7 @@ function stepFrame(dir) {
     if (!len) return;
     state.playIdx = (state.playIdx + dir + len) % len;
     state.frameShownAt = performance.now();
+    state.seekInFrameMs = 0;
     const src = currentPlaySrc();
     if (src != null) {
         state.selectedSet = new Set([src]);
@@ -768,12 +1018,15 @@ function stepFrame(dir) {
     renderPreview();
     if (src != null) syncPlayhead(src);
     syncDurInput();
+    reportPlayPosition();
 }
 
 document.addEventListener('keydown', ev => {
     if (els.dialog.open) return;
     const tag = document.activeElement?.tagName;
     if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+    // 进度条聚焦时方向键/Home/End 由其自身处理（定位语义，不循环、不改选中）
+    if (document.activeElement === els.seekBar && ev.code !== 'Space' && ev.code !== 'Delete' && ev.code !== 'Backspace') return;
     switch (ev.code) {
         case 'Space':
             ev.preventDefault();
@@ -820,7 +1073,7 @@ const DUR_MIN_MS = 10, DUR_MAX_MS = 6000;
 els.durInput?.addEventListener('change', () => {
     const sel = [...state.selectedSet].filter(i => i < (state.view?.frameCount ?? 0));
     if (!sel.length) {
-        showHint('请先选中要设置时长的帧');
+        showHint(t('gif.editor.hint.selectFirst'));
         return;
     }
     const raw = parseInt(els.durInput.value, 10);
@@ -836,13 +1089,107 @@ els.durClear?.addEventListener('click', () => {
 const exportController = createExportController();
 window.addEventListener('beforeunload', () => exportController.dispose());
 
-listen('blink://gif-editor-session', event => {
-    const sid = event.payload?.sessionId;
-    if (sid && sid !== state.sessionId) loadSession(sid).catch(err => console.error('[gif-editor] 会话加载失败', err));
+// ── 视图切换 / 最近录制（0.28.23 §5.7.4）────────────────────────────────
+
+function showEditorView() {
+    els.editorRoot?.classList.remove('hidden');
+    els.recentPane?.classList.add('hidden');
+}
+
+function showRecentView() {
+    setPlaying(false);
+    hideSeekPreview();
+    els.editorRoot?.classList.add('hidden');
+    els.recentPane?.classList.remove('hidden');
+    void recentList.refresh();
+}
+
+const recentList = createRecentList({
+    invoke,
+    t,
+    confirm: message => confirmDialog(message),
+    onOpened: () => {
+        // 会话切换由后端 open_editor 发事件驱动 loadSession；此处只切视图
+        showEditorView();
+    },
+    currentSessionId: () => state.sessionId,
 });
+recentList.bind();
+els.btnRecent?.addEventListener('click', () => {
+    reportPlayPosition(true);
+    showRecentView();
+});
+els.btnBackEdit?.addEventListener('click', () => {
+    if (state.sessionId) showEditorView();
+});
+
+/** 上报播放头位置给草稿（节流 500ms；`immediate` 用于切换/关闭前）。 */
+function reportPlayPosition(immediate = false) {
+    if (!state.sessionId || !state.view) return;
+    const send = () => {
+        if (!state.sessionId) return;
+        const pos = Math.round(timeAt(state.durPrefix, state.playIdx, state.seekInFrameMs));
+        invoke('gif_set_play_position', {sessionId: state.sessionId, posMs: pos}).catch(() => {});
+    };
+    clearTimeout(state.posReportTimer);
+    if (immediate) send();
+    else state.posReportTimer = setTimeout(send, 500);
+}
+
+window.addEventListener('pagehide', () => reportPlayPosition(true));
+
+listen(EVENTS.GIF_EDITOR_SESSION, event => {
+    const sid = event.payload?.sessionId;
+    if (!sid) {
+        // 空会话（主窗口入口无活动会话）：进入最近录制首页
+        state.sessionId = null;
+        state.view = null;
+        showRecentView();
+        return;
+    }
+    if (sid !== state.sessionId) {
+        loadSession(sid).catch(err => console.error('[gif-editor] 会话加载失败', err));
+    } else {
+        showEditorView();
+    }
+});
+
+// ── i18n / 窗口标题（0.28.23）────────────────────────────────────────────
+// 录制编辑器原为硬编码中文；接入 i18n 后静态文案走 data-i18n，动态文案在
+// 语言切换时按当前视图重算。原生窗口标题经 set-title 同步（ACL 已含）。
+
+function applyWindowTitle() {
+    getCurrentWindow()?.setTitle(t('gif.editor.windowTitle'))?.catch(() => {});
+    document.title = t('gif.editor.windowTitle');
+}
+
+/** 语言切换后刷新全部 JS 动态文案（静态 data-i18n 由 applyI18n 处理）。 */
+function refreshLocalizedTexts() {
+    applyWindowTitle();
+    if (state.view) {
+        renderSessionHeader();
+        renderStopBanner(state.view.meta?.stopReason);
+        layoutGeometry(state.view);
+        for (const [, el] of state.liveThumbs) el.remove();
+        state.liveThumbs.clear();
+        relayoutStrip();
+        renderPreview();
+        renderControls();
+    }
+}
+
+onLangChange(refreshLocalizedTexts);
+listen(EVENTS.CONFIG_CHANGED, event => {
+    if (!event.payload?.key || event.payload.key === 'language') {
+        void applyI18nFromConfig();
+    }
+});
+void applyI18nFromConfig();
 
 invoke('gif_editor_current')
     .then(sid => {
         if (sid) return loadSession(sid);
+        showRecentView();
+        return undefined;
     })
     .catch(err => console.error('[gif-editor] 初始会话拉取失败', normalizeError(err)));

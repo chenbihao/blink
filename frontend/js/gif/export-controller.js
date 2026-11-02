@@ -1,4 +1,5 @@
 import {invoke, listen, normalizeError, saveDialog} from '../shared/tauri.js';
+import {EVENTS} from '../shared/event-names.js';
 import {ExportJobState, exportPath, isTerminal, progressView} from './export-state.js';
 
 /** 后端任务是真源；监听器丢失/弹窗关闭后由状态查询恢复，安装后由用户再次导出。 */
@@ -154,7 +155,7 @@ export function createExportController({documentRef = document, windowRef = wind
         ['btn-export-folder','click',folder],['btn-export-close','click',close]];
     bindings.forEach(([id,event,handler]) => els[id].addEventListener(event, handler));
     windowRef.addEventListener('focus', focus);
-    listen('blink://gif-export-progress', event => {
+    listen(EVENTS.GIF_EXPORT_PROGRESS, event => {
         if (!disposed && !starting && state.accept(event.payload)) { render(); schedule(); }
     }).then(off => { if (disposed) off(); else unlisten = off; }).catch(error => console.warn('[media] 事件监听失败，将通过查询恢复', error));
     render();

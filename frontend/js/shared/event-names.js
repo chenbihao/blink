@@ -93,6 +93,16 @@ export const EVENTS = Object.freeze({
      */
     EDITOR_TRANSFORM_FAILED: 'blink://editor-transform-failed',
 
+    // ── 录制（gif-*；窗口 label 与 IPC 历史名保留）──
+    /** 录制状态（phase/sessionId/elapsedMs/frames/paused）；payload 见后端 RecorderStatePayload。 */
+    GIF_RECORDER_STATE: 'blink://gif-recorder-state',
+    /** 导出进度；payload 见 media_service JobSnapshot。 */
+    GIF_EXPORT_PROGRESS: 'blink://gif-export-progress',
+    /** 编辑器会话切换（sessionId；null = 最近录制首页）。 */
+    GIF_EDITOR_SESSION: 'blink://gif-editor-session',
+    /** 录制区域变化（x/y/w/h + 虚拟屏边界；物理像素）。 */
+    GIF_REGION_UPDATED: 'blink://gif-region-updated',
+
     // ── 配置 ──
     CONFIG_CHANGED: 'blink://config-changed',
     PROMPT_LIBRARY_CHANGED: 'blink://prompt-library-changed',

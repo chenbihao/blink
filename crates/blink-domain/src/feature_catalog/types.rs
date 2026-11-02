@@ -60,7 +60,8 @@ impl FeatureGroup {
             | "analyze_image_palette"
             | "start_region_capture"
             | "edit_clipboard_image"
-            | "pin_image" => Self::ImageColor,
+            | "pin_image"
+            | "open_gif_editor" => Self::ImageColor,
 
             // 便签与内容
             "list_sticky"

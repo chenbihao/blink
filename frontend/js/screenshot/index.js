@@ -100,6 +100,7 @@ import {
 } from "./ss-ocr.js";
 import {updateOcrButtonBusy} from "./ss-ocr-busy.js";
 import {bindGifPrepBar, exitGifRecordMode, isGifPrepActive} from './ss-gif-prep.js';
+import {bindGifRecBar, handleOverlayHidden, isGifRecActive} from './ss-gif-rec.js';
 import {
     cleanupCanvasVisuals,
     compositeSelection,
@@ -599,6 +600,8 @@ function resetState() {
     if (gifButton) gifButton.hidden = false;
     // 0.28.7：宿主双面架构——新会话一律从标注面开始（防上一会话的准备面残留）
     toolbar.classList.remove('toolbar-mode-gif-prep');
+    // 0.28.23：录制叠层投影随新会话复位（overlay 隐藏/重开会话的兜底路径）
+    handleOverlayHidden();
     // 0.20.x：恢复 pin 来源编辑时隐藏的「钉图」按钮
     const pinButton = document.getElementById('btn-pin');
     if (pinButton) pinButton.hidden = false;
@@ -1563,7 +1566,7 @@ canvas.addEventListener('pointerdown', (e) => {
         }
     }
 
-    if (ss.isAnnotating && ss.selCss && tool === 'select' && !ss.eyedropperActive) {
+    if (ss.isAnnotating && ss.selCss && tool === 'select' && !ss.eyedropperActive && !isGifRecActive()) {
         const handle = isGifPrepActive() ? null : getSelectionHandle(point.offsetX, point.offsetY, ss.selCss);
         if (handle) {
             capturePointer(canvas, e);
@@ -2116,6 +2119,8 @@ function flushSelectionNudge() {
     nudgePendingDx = 0;
     nudgePendingDy = 0;
     if (dx === 0 && dy === 0) return;
+    // 录制叠层下区域移动走浮栏「移动区域」按钮（拖动语义），方向键不再移选区
+    if (isGifRecActive()) return;
     // 会话已退出/选区已清除/selectionRevision 已变时丢弃过期增量
     if (!ss.isAnnotating || !ss.selCss || annot.getTool() !== 'select') return;
     if (nudgeSelectionRevision !== ss.selectionRevision) return;
@@ -2322,6 +2327,11 @@ document.addEventListener('keydown', (e) => {
             (closeLayoutEditor() || closeActionMenu({focus: true}) || closeQrPanel({focus: true}))) {
             e.preventDefault(); return;
         }
+        // 0.28.23：录制叠层态——Esc 不退出录制（取消走受保护的二次确认按钮）。
+        if (isGifRecActive()) {
+            e.preventDefault();
+            return;
+        }
         // 准备态优先退回截图，不能因控件持有焦点而永久忽略 Esc。
         if (isGifPrepActive()) {
             e.preventDefault();
@@ -2445,10 +2455,14 @@ window.addEventListener('blur', () => {
         });
         return;
     }
-    // 0.28.7：GIF 辅助窗口预热/操作期的焦点瞬移不视为退出意图——WebView2
-    // 建窗时会把窗口级焦点 SetFocus 给新窗口（前台进程未变、后端看门狗
-    // 按 PID 判定不触发），只有本 blur 路径会误杀准备模式会话（曾表现为
-    // 「首次点录制 GIF 按钮退出一次」，第二次窗口已存在不再复现）。
+    // 0.28.23：录制叠层期 blur 是常态（用户操作被录桌面应用）——overlay
+    // 由录制服务管理隐藏，这里不退出；后端看门狗也被 OVERLAY_RECORD_ACTIVE
+    // 豁免。
+    if (isGifRecActive()) {
+        console.debug('[screenshot] window blur ignored during gif recording overlay');
+        return;
+    }
+    // 0.28.7：GIF 辅助窗口预热/操作期的焦点瞬移不视为退出意图。
     // 真正切走（异进程前台）仍由后端看门狗 150ms 兜底隐藏。
     if (ss.gifWindowHold) {
         console.debug('[screenshot] window blur ignored (gif window ops hold)');
@@ -2502,6 +2516,7 @@ ss._reloadScreenshotConfig = () => loadEditorConfig(false);
 bindToolbar();
 // 0.28.7：GIF 录制准备栏（两段式录制第一段）
 bindGifPrepBar();
+bindGifRecBar();
 // 0.23.19：自定义 tooltip——原生 title 提示在多屏混合 DPI 下会漂到别的屏幕
 initSsTooltip();
 

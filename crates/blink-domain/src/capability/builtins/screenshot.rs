@@ -1018,6 +1018,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::capability::SurfacePort for MockSurface {
+        fn open_gif_editor(&self) -> Result<(), crate::capability::SurfaceError> {
+            unreachable!()
+        }
         fn open_settings(&self) -> Result<(), crate::capability::SurfaceError> {
             unreachable!()
         }

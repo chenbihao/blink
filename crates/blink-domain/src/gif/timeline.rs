@@ -155,6 +155,8 @@ pub enum EditError {
     FrameOutOfRange,
     /// 修剪终点早于起点。
     InvalidTrimRange,
+    /// 草稿速度因子非法（非有限值或超出 clamp 范围）。
+    InvalidSpeed,
 }
 
 impl std::fmt::Display for EditError {
@@ -162,6 +164,7 @@ impl std::fmt::Display for EditError {
         match self {
             EditError::FrameOutOfRange => write!(f, "帧号超出素材范围"),
             EditError::InvalidTrimRange => write!(f, "修剪终点早于起点"),
+            EditError::InvalidSpeed => write!(f, "速度因子非法"),
         }
     }
 }
@@ -407,6 +410,110 @@ impl Timeline {
             .iter()
             .map(|f| f.dur_ms as u64)
             .sum()
+    }
+
+    // ── 版本化编辑草稿（0.28.23 §5.7.4）────────────────────────────────────
+    //
+    // 保存/恢复非破坏编辑状态与播放位置。undo/redo 栈**不持久化**——恢复后
+    // 栈为空（不可撤销到恢复前），编辑语义全部保留。素材身份（帧数/创建时间）
+    // 由调用方（app 层草稿文件）附加校验，domain 只校验帧号范围。
+
+    /// 导出当前编辑状态为草稿（`play_pos_ms` 为前端播放头位置）。
+    pub fn to_draft(&self, play_pos_ms: u64) -> TimelineDraft {
+        TimelineDraft {
+            version: TIMELINE_DRAFT_VERSION,
+            trim_start: self.core.trim_start,
+            trim_end: self.core.trim_end,
+            deleted: self.core.deleted.iter().copied().collect(),
+            speed: self.core.speed,
+            holds: self.core.holds.iter().map(|(k, v)| (*k, *v)).collect(),
+            loop_count: self.core.loop_count,
+            revision: self.revision,
+            play_pos_ms,
+        }
+    }
+
+    /// 恢复草稿：帧号越界/修剪区间非法时拒绝且不改状态（素材已变化的调用方
+    /// 应丢弃草稿并如实提示，不能声称恢复全部编辑）。成功后 undo/redo 栈为空，
+    /// revision 沿用草稿保存值（前端按 revision 拒绝旧回包的语义继续成立）。
+    pub fn restore_draft(&mut self, draft: TimelineDraft) -> Result<(), EditError> {
+        let end = self.frame_count.saturating_sub(1);
+        if draft.trim_start > end
+            || draft.trim_end > end
+            || draft.trim_start > draft.trim_end
+            || draft.deleted.iter().any(|&f| f > end)
+            || draft.holds.iter().any(|&(f, _)| f > end)
+        {
+            return Err(EditError::FrameOutOfRange);
+        }
+        if !draft.speed.is_finite() || !(0.25..=4.0).contains(&draft.speed) {
+            return Err(EditError::InvalidSpeed);
+        }
+        // 草稿的 base_dur_ms 必须重建：deleted 帧时长置零是 Core 的不变式
+        let mut base = self.origin_durs.clone();
+        for &f in &draft.deleted {
+            base[f as usize] = 0;
+        }
+        self.core = Core {
+            trim_start: draft.trim_start,
+            trim_end: draft.trim_end,
+            deleted: draft.deleted.iter().copied().collect(),
+            base_dur_ms: base,
+            speed: draft.speed,
+            holds: draft.holds.iter().copied().collect(),
+            loop_count: draft.loop_count,
+        };
+        self.undo.clear();
+        self.redo.clear();
+        self.revision = draft.revision.max(1);
+        Ok(())
+    }
+}
+
+/// 版本化编辑草稿（`sessions/<id>/draft.json` 的编辑态部分；0.28.23 §5.7.4）。
+///
+/// `holds` 用 `Vec<(u32, u32)>` 而非 map——serde 会把非 u32 键的 BTreeMap
+/// 序列化成字符串键，恢复端再解析回数字；显式元组数组避免该歧义。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineDraft {
+    /// 草稿格式版本（不兼容时整体丢弃并提示，不逐字段猜测）。
+    pub version: u32,
+    pub trim_start: u32,
+    pub trim_end: u32,
+    pub deleted: Vec<u32>,
+    pub speed: f32,
+    pub holds: Vec<(u32, u32)>,
+    pub loop_count: Option<u16>,
+    /// 保存时的 timeline revision（恢复后沿用）。
+    pub revision: u64,
+    /// 播放头位置（编辑后有效时间轴，ms）。
+    pub play_pos_ms: u64,
+}
+
+pub const TIMELINE_DRAFT_VERSION: u32 = 1;
+
+/// 草稿文件整体（`sessions/<id>/draft.json`）：编辑态 + 素材身份。
+///
+/// 身份不匹配（素材变化/串目录）时整体作废——不逐字段猜测半恢复；
+/// 由调用方如实提示"已回退到原始素材"，不宣称恢复了编辑进度。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionDraftFile {
+    pub version: u32,
+    /// 素材创建时间（`session.json` 的 `created_at`）。
+    pub session_created_at: u64,
+    /// 素材原始帧数（索引帧数，与构建 Timeline 的输入一致）。
+    pub material_frames: u32,
+    pub draft: TimelineDraft,
+}
+
+impl SessionDraftFile {
+    /// 素材身份匹配判定（恢复前置校验）。
+    pub fn identity_matches(&self, created_at: u64, material_frames: u32) -> bool {
+        self.version == TIMELINE_DRAFT_VERSION
+            && self.session_created_at == created_at
+            && self.material_frames == material_frames
     }
 }
 
@@ -708,5 +815,111 @@ mod tests {
             assert_eq!(back, cmd);
         }
         assert!(serde_json::from_str::<EditCommand>(r#"{"type":"nope"}"#).is_err());
+    }
+
+    // ── 版本化编辑草稿（0.28.23）────────────────────────────────────────────
+
+    #[test]
+    fn draft_roundtrip_preserves_all_edit_semantics() {
+        let mut t = tl();
+        t.apply(&EditCommand::TrimStart { frame: 1 }).unwrap();
+        t.apply(&EditCommand::DeleteFrame { frame: 3 }).unwrap();
+        t.apply(&EditCommand::SetSpeed { factor: 2.0 }).unwrap();
+        t.apply(&EditCommand::SetHold { frame: 2, ms: 1500 }).unwrap();
+        t.apply(&EditCommand::SetLoop { count: Some(3) }).unwrap();
+        let before = t.to_draft(1234);
+
+        // 序列化/反序列化（文件往返）
+        let json = serde_json::to_string(&before).unwrap();
+        let parsed: TimelineDraft = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, before);
+        assert_eq!(parsed.version, TIMELINE_DRAFT_VERSION);
+        // holds 是元组数组（数字键），不是字符串键 map
+        assert!(json.contains("\"holds\":[[2,1500]]"));
+
+        // 恢复到全新时间轴：编辑投影一致
+        let mut restored = tl();
+        restored.restore_draft(parsed).unwrap();
+        assert_eq!(restored.trim_range(), t.trim_range());
+        assert_eq!(restored.deleted_frames(), t.deleted_frames());
+        assert_eq!(restored.speed(), t.speed());
+        assert_eq!(restored.holds(), t.holds());
+        assert_eq!(restored.loop_count(), t.loop_count());
+        assert_eq!(restored.effective_total_ms(), t.effective_total_ms());
+        // revision 沿用草稿值；undo 栈为空（栈不持久化）
+        assert_eq!(restored.revision(), t.revision());
+        assert!(!restored.can_undo());
+        assert!(!restored.can_redo());
+    }
+
+    #[test]
+    fn draft_restore_rejects_frame_indices_out_of_smaller_material() {
+        let mut t = tl();
+        t.apply(&EditCommand::DeleteFrame { frame: 4 }).unwrap();
+        let draft = t.to_draft(0);
+        // 素材只剩 3 帧（如另一段素材）：帧号越界整体拒绝且状态不变
+        let mut smaller = Timeline::from_durations(vec![100, 100, 100]);
+        assert_eq!(
+            smaller.restore_draft(draft),
+            Err(EditError::FrameOutOfRange)
+        );
+        assert_eq!(smaller.revision(), 1);
+        assert!(smaller.deleted_frames().is_empty());
+    }
+
+    #[test]
+    fn draft_restore_rejects_invalid_trim_and_speed_without_mutation() {
+        let mk = |speed: f32, trim_start: u32, trim_end: u32| TimelineDraft {
+            version: TIMELINE_DRAFT_VERSION,
+            trim_start,
+            trim_end,
+            deleted: vec![],
+            speed,
+            holds: vec![],
+            loop_count: None,
+            revision: 3,
+            play_pos_ms: 0,
+        };
+        let mut t = tl();
+        for (draft, err) in [
+            (mk(1.0, 2, 1), EditError::FrameOutOfRange),
+            (mk(f32::NAN, 0, 4), EditError::InvalidSpeed),
+            (mk(9.0, 0, 4), EditError::InvalidSpeed),
+        ] {
+            let before_revision = t.revision();
+            assert_eq!(t.restore_draft(draft), Err(err));
+            assert_eq!(t.revision(), before_revision);
+        }
+    }
+
+    #[test]
+    fn draft_restore_deleted_frames_zero_duration_like_live_edits() {
+        // 恢复后删除帧时长置零的 Core 不变式与实时编辑一致（effective_total 反映）
+        let mut t = tl();
+        t.apply(&EditCommand::DeleteFrame { frame: 1 }).unwrap();
+        let draft = t.to_draft(0);
+        let mut restored = tl();
+        restored.restore_draft(draft).unwrap();
+        assert_eq!(restored.effective_total_ms(), 400);
+        // 修剪不受删除影响（trim 是素材索引语义）
+        assert_eq!(restored.trim_range(), (0, 4));
+    }
+
+    #[test]
+    fn draft_restore_revision_never_below_one() {
+        let draft = TimelineDraft {
+            version: TIMELINE_DRAFT_VERSION,
+            trim_start: 0,
+            trim_end: 4,
+            deleted: vec![],
+            speed: 1.0,
+            holds: vec![],
+            loop_count: None,
+            revision: 0,
+            play_pos_ms: 0,
+        };
+        let mut t = tl();
+        t.restore_draft(draft).unwrap();
+        assert_eq!(t.revision(), 1);
     }
 }
