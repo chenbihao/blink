@@ -2562,7 +2562,7 @@ html.eyedropper-picking * {
    全部作用于宿主——准备面自动继承，不存在第二条需要同步的定位链路。
    切面 = 宿主加 toolbar-mode-gif-prep：隐藏标注工具组（抓手保留）、显示
    本面。双栏并行在结构上不可能发生。 */
-#toolbar.toolbar-mode-gif-prep > *:not(#toolbar-drag):not(#gif-prep-bar) {
+#toolbar.toolbar-mode-gif-prep > *:not(#toolbar-drag):not(#gif-prep-bar):not(#gif-audio-settings) {
     display: none;
 }
 
@@ -2628,7 +2628,7 @@ html.eyedropper-picking * {
 /* 直接子元素白名单：抓手 / 录制面 / 标注工具组（dropdown-wrap，含颜色
    与粗细）/ 撤销组；其余（选取、输出去向、分隔线）隐藏。依赖底图的
    效果由下面的专项规则从工具组内剔除。 */
-#toolbar.toolbar-mode-gif-rec > *:not(#toolbar-drag):not(#gif-rec-bar):not(.dropdown-wrap):not(.undo-group) {
+#toolbar.toolbar-mode-gif-rec > *:not(#toolbar-drag):not(#gif-rec-bar):not(.dropdown-wrap):not(.undo-group):not(#gif-audio-settings) {
     display: none;
 }
 
@@ -2723,3 +2723,20 @@ body.gif-recording :is(#interaction-canvas, #preselection-mask, #live-selection,
 .gif-prep-cursor {
     cursor: pointer;
 }
+
+/* 录制声音：独立竖向电平，工具栏内的设备面板沿用同一宿主。 */
+.gif-audio-meters { display: flex; align-items: center; gap: 8px; }
+.audio-source { display: flex; align-items: center; gap: 5px; font-size: var(--text-xs); }
+.audio-source.hidden, .gif-audio-settings.hidden { display: none; }
+.audio-source-name { max-width: 100px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.audio-level { position: relative; display: inline-block; width: 7px; height: 28px; overflow: hidden; border-radius: var(--radius-sm); background: var(--screenshot-hover-bg); }
+.audio-level-fill { position: absolute; bottom: 0; width: 100%; background: var(--accent); transition: height 120ms ease-out; }
+.audio-level-peak { position: absolute; width: 100%; height: 2px; background: var(--screenshot-text); }
+.audio-overload .audio-level-fill { background: var(--red); }
+.audio-inactive .audio-level { opacity: 0.45; }
+.gif-audio-settings { position: absolute; inset-inline-end: 0; bottom: calc(100% + 8px); width: min(360px, 90vw); padding: 12px; border: 1px solid var(--screenshot-border); border-radius: var(--radius-md); background: var(--screenshot-panel-bg); color: var(--screenshot-text); box-shadow: 0 4px 16px var(--screenshot-shadow); z-index: var(--z-dropdown); }
+.gif-audio-settings label { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; font-size: var(--text-sm); }
+.gif-audio-settings label.hidden { display: none; }
+.gif-audio-settings select { width: 230px; max-width: 70%; color: var(--screenshot-text); background: var(--screenshot-toolbar-bg); }
+.gif-audio-settings p { font-size: var(--text-xs); margin: 8px 0; }
+#gif-audio-error { color: var(--red); }

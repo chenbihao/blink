@@ -31,8 +31,11 @@ import {applyI18nFromConfig, onLangChange, t} from '../i18n/index.js';
 import {commands, formatFrameDur, formatSeconds, frameState, nextPlayStep, playToSrc, srcToPlayIndex} from './timeline-view.js';
 import {clampPreviewLeft, formatTimecode, keyboardStep, locateTime, playbackOffset, pointerRatio, ratioToTime, timeAt} from './seek-bar.js';
 import {createRecentList} from './recent-list.js';
+import {createAudioPlayback} from './audio-playback.js';
 
 ensureSpriteLoaded();
+const audioPlayback = createAudioPlayback({onError: error => showHint(t('gif.audio.previewFailed', {msg: normalizeError(error).message}))});
+window.addEventListener('pagehide', () => audioPlayback.dispose());
 
 /** 缩略图固定高度（CSS px）。 */
 const THUMB_H = 64;
@@ -477,9 +480,12 @@ function playTick() {
     if (!state.playing) return;
     const view = state.view;
     if (!view || !view.frames.length) return;
-    const step = nextPlayStep(view.frames, state.playIdx);
+    const total = state.durPrefix.at(-1) || 1;
+    const elapsed = (performance.now() - state.playClockAt) % total;
+    const loc = locateTime(state.durPrefix, elapsed);
+    const step = {cursor: loc.playIdx, durMs: view.frames[loc.playIdx].durMs - loc.inFrameMs};
     state.playIdx = step.cursor;
-    state.frameShownAt = performance.now();
+    state.frameShownAt = performance.now() - loc.inFrameMs;
     state.seekInFrameMs = 0;
     renderPreview();
     prefetchAhead();
@@ -488,7 +494,7 @@ function playTick() {
     // 漂移补偿：按绝对时刻累计（playDue），setTimeout 只补差值——渲染耗时
     // 与 setTimeout 惰性不再逐帧累积，长会话播放不越播越慢
     const now = performance.now();
-    state.playDue = Math.max(state.playDue + step.durMs, now + 5);
+    state.playDue = now + Math.max(5, step.durMs);
     scheduleNext(state.playDue - now);
 }
 
@@ -510,6 +516,8 @@ function setPlaying(on) {
         state.seekInFrameMs, performance.now());
     state.seekInFrameMs = elapsed;
     state.playing = on;
+    if (!on) audioPlayback.pause();
+    else state.playClockAt = performance.now() - timeAt(state.durPrefix, state.playIdx, elapsed);
     const icons = els.btnPlay.querySelectorAll('.icon');
     if (icons.length === 2) {
         icons[0].classList.toggle('hidden', on);
@@ -645,6 +653,7 @@ async function restoreSelected() {
 // ── 会话加载 ─────────────────────────────────────────────────────────────
 
 async function loadSession(sessionId) {
+    audioPlayback.clear();
     exportController.setSession(sessionId);
     const epoch = ++state.epoch;
     state.sessionId = sessionId;
@@ -678,6 +687,8 @@ async function loadSession(sessionId) {
     const view = await invoke('gif_get_session', {sessionId});
     if (epoch !== state.epoch) return;
     state.view = view;
+    void audioPlayback.load(sessionId, view.audio?.enabled);
+    renderAudioMix(view);
     state.durBySrc = effectiveDurMap(state.view);
     buildDurPrefix(state.view);
     renderSessionHeader();
@@ -700,6 +711,7 @@ async function loadSession(sessionId) {
     renderControls();
     if (state.playIdx > 0) syncPlayhead(currentPlaySrc(), false);
     if (view.draftStatus === 'discarded') showHint(t('gif.editor.draftDiscarded'), false);
+    if (view.audioRecovered) showHint(t('gif.audio.recovered'), false);
     startPreload();
 }
 
@@ -710,6 +722,26 @@ function renderSessionHeader() {
     els.meta.textContent = m
         ? t('gif.editor.meta', {w: m.width, h: m.height, fps: m.fps, n: state.view.frameCount})
         : '';
+}
+
+function renderAudioMix(view) {
+    const panel = $('audio-mix');
+    if (!panel) return;
+    for (let source = 0; source < 2; source++) {
+        const row = $(`audio-mix-${source}`), setting = view.mix?.[source] || {gain: 1, muted: false};
+        row.classList.toggle('hidden', !view.audio?.enabled?.[source]);
+        row.querySelector('input[type="range"]').value = String(setting.gain * 100);
+        row.querySelector('input[type="checkbox"]').checked = setting.muted;
+        row.querySelector('output').textContent = `${Math.round(setting.gain * 100)}%`;
+    }
+    panel.classList.toggle('hidden', !view.audio?.enabled?.some(Boolean));
+}
+for (let source = 0; source < 2; source++) {
+    const row = $(`audio-mix-${source}`);
+    row?.addEventListener('input', () => { row.querySelector('output').textContent = `${row.querySelector('input[type="range"]').value}%`; });
+    row?.addEventListener('change', () => edit({type: 'set_audio', source,
+        gain: Number(row.querySelector('input[type="range"]').value) / 100,
+        muted: row.querySelector('input[type="checkbox"]').checked}));
 }
 
 /** 打开即静默预载：缩略全量 + 预览按序（后台批次，播放/交互优先插队）。
@@ -771,6 +803,7 @@ els.stopBannerClose?.addEventListener('click', () => {
 
 async function edit(command) {
     if (!state.sessionId) return;
+    setPlaying(false);
     const epoch = state.epoch;
     const srcAnchor = currentPlaySrc();
     let view;
@@ -782,7 +815,9 @@ async function edit(command) {
         return;
     }
     if (epoch !== state.epoch || view.revision < (state.view?.revision ?? 0)) return;
+    view = {...state.view, ...view};
     state.view = view;
+    renderAudioMix(view);
     state.durBySrc = effectiveDurMap(view);
     buildDurPrefix(view);
     // 编辑 revision 变化：位置映射已变，关闭悬浮预览；在途解码经 epoch/
@@ -839,7 +874,8 @@ function updatePlayProgress() {
     const inFrame = state.playing
         ? Math.min(performance.now() - state.frameShownAt, view.frames[cur].durMs)
         : Math.min(state.seekInFrameMs, view.frames[cur].durMs);
-    const timeMs = state.durPrefix[cur] + inFrame;
+    const timeMs = state.playing ? (performance.now() - state.playClockAt) % total : state.durPrefix[cur] + inFrame;
+    audioPlayback.sync(timeMs, state.playing && !state.seekDragging, view.audioSpans, view.mix);
     const pct = Math.min(100, (timeMs / total) * 100);
     fill.style.width = `${pct}%`;
     if (els.seekThumb) els.seekThumb.style.left = `${pct}%`;
@@ -884,6 +920,7 @@ function seekToTime(t) {
     state.seekInFrameMs = loc.inFrameMs;
     // frameShownAt 反推到"已展示 seekInFrameMs"——恢复播放时从指针位置续播
     state.frameShownAt = performance.now() - state.seekInFrameMs;
+    if (state.playing) state.playClockAt = performance.now() - t;
     renderPreview();
     syncPlayhead(playToSrc(view, loc.playIdx), false);
     updatePlayProgress();
@@ -1012,7 +1049,7 @@ function syncDurInput() {
     const sel = [...state.selectedSet].filter(i => i < (view.frameCount ?? 0));
     if (sel.length === 1) {
         const f = (view.frames || []).find(x => x.srcIdx === sel[0]);
-        els.durInput.value = f ? String(f.durMs) : '';
+        els.durInput.value = f ? String(view.holds?.[sel[0]] ?? Math.round(f.durMs * (view.speed || 1))) : '';
         els.durInput.placeholder = '—';
     } else {
         els.durInput.value = '';
@@ -1127,6 +1164,7 @@ els.durClear?.addEventListener('click', () => {
 });
 
 const exportController = createExportController();
+document.getElementById('btn-export')?.addEventListener('click', () => setPlaying(false));
 window.addEventListener('beforeunload', () => exportController.dispose());
 
 // ── 视图切换 / 最近录制（0.28.23 §5.7.4）────────────────────────────────

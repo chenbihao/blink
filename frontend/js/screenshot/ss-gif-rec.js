@@ -24,6 +24,7 @@ import {EVENTS} from '../shared/event-names.js';
 import {showTransientHint} from './ss-ocr.js';
 import * as annot from './annotation-engine.js';
 import {formatTimecode} from '../gif/seek-bar.js';
+import {beginAudioRecording, endAudioRecording, applyAudioStatus, closeAudioSettings} from './ss-gif-audio.js';
 
 /** 宿主录制面 class（CSS 面切换规则）。 */
 const REC_MODE_CLASS = 'toolbar-mode-gif-rec';
@@ -109,6 +110,7 @@ export function annotationsMigratable() {
  * @param {{x:number, y:number, w:number, h:number}} regionPhys 录制区域（物理屏幕坐标）
  */
 export async function enterGifRecordOverlay(regionPhys, sessionId) {
+    await beginAudioRecording(sessionId);
     const toolbar = toolbarEl();
     if (!toolbar) throw new Error('录制工具栏未就绪');
     state.active = true;
@@ -180,6 +182,7 @@ export async function enterGifRecordOverlay(regionPhys, sessionId) {
 
 /** 录制会话结束（停止/取消由后端收场并隐藏 overlay）——仅复位 UI 投影。 */
 function endOverlaySession() {
+    endAudioRecording();
     state.active = false;
     state.sessionId = null;
     state.stopping = false;
@@ -246,6 +249,7 @@ function applyRecorderState(p) {
         return;
     }
     state.phase = p.phase;
+    applyAudioStatus(p.audio, state.sessionId);
     state.elapsedBase = p.elapsedMs ?? state.elapsedBase;
     state.elapsedAt = performance.now();
     state.frames = p.frames ?? state.frames;
@@ -267,7 +271,7 @@ function renderRecState() {
     setButtonsDisabled(false);
     const paused = state.phase === 'paused';
     document.body.classList.toggle(PAUSED_CLASS, paused);
-    stateEl.textContent = paused ? '已暂停' : '录制中';
+    stateEl.textContent = paused ? '已暂停（可继续或停止）' : '录制中';
     if (timeEl) timeEl.textContent = formatTimecode(currentElapsedMs());
     if (framesEl) framesEl.textContent = `${state.frames} 帧`;
     if (pauseBtn) {
@@ -327,6 +331,7 @@ function collectHitRects() {
         ]);
     };
     push(toolbarEl());
+    push(el('gif-audio-settings'));
     // 打开的下拉（data-open="true"）与浮层
     for (const dom of document.querySelectorAll('#toolbar .dropdown[data-open="true"]')) push(dom);
     push(el('ss-action-menu'));
@@ -490,8 +495,12 @@ function cancelRecording() {
     });
 }
 
-function togglePause() {
+async function togglePause() {
     if (state.stopping) return;
+    if (state.phase === 'paused') {
+        await closeAudioSettings();
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    }
     const cmd = state.phase === 'paused' ? 'gif_resume_recording' : 'gif_pause_recording';
     invoke(cmd).catch(err => {
         console.error('[screenshot] 暂停/继续失败', err);
@@ -531,5 +540,6 @@ export function bindGifRecBar() {
 
 /** 会话外部收场兜底（overlay 被 hide_screenshot_overlay 隐藏后调用）。 */
 export function handleOverlayHidden() {
+    endAudioRecording();
     if (state.active) endOverlaySession();
 }

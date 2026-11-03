@@ -76,6 +76,7 @@ test('录制就绪等待透明层绘制；旧会话 idle 不清理新会话，�
         window: {__blinkScreenMeta: {vx: 0, vy: 0, w: 1920, h: 1080}},
         document: {body, documentElement: root, getElementById: () => null, querySelectorAll: () => []},
         annot: {getTool: () => 'pencil'}, positionToolbar() {}, selectTool() {},
+        beginAudioRecording: async () => {}, endAudioRecording() {}, applyAudioStatus() {},
         getRenderScale: () => ({scaleX: 1, scaleY: 1}), cssPointToScreen: (x, y) => ({x, y}),
         listen: async () => () => {}, EVENTS: {}, performance: {now: () => 1000},
         setInterval: () => { timers.add(++timerId); return timerId; },

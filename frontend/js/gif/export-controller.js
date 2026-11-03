@@ -20,7 +20,7 @@ export function createExportController({documentRef = document, windowRef = wind
     const hint = text => { els['export-progress-text'].textContent = text; els['export-progress-row'].classList.remove('hidden'); };
     function render() {
         const mp4 = format() === 'mp4';
-        els['export-note'].textContent = mp4 ? '30fps · 无声 · 单次播放；循环设置仅用于 GIF。' : 'GIF 动图 · 使用时间轴的循环设置。';
+        els['export-note'].textContent = mp4 ? '30fps · 按当前音轨混音设置导出 · 单次播放；循环设置仅用于 GIF。' : 'GIF 此次导出不包含声音（保留原音轨）· 使用时间轴的循环设置。';
         els['export-quality-field'].classList.toggle('hidden', mp4);
         els['export-preset-field'].classList.toggle('hidden', !mp4);
         els['export-preset-note'].classList.toggle('hidden', !mp4);
@@ -46,7 +46,7 @@ export function createExportController({documentRef = document, windowRef = wind
         hint(view.text);
         if (snapshot.stage === 'done' && snapshot.stats) {
             const s = snapshot.stats;
-            const duration = snapshot.format === 'mp4' ? ` · ${(s.durationMs / 1000).toFixed(2)}s · 无声` : '';
+            const duration = snapshot.format === 'mp4' ? ` · ${(s.durationMs / 1000).toFixed(2)}s · ${s.hasAudio ? '有声' : '无声'}` : '';
             hint(`完成：${snapshot.format.toUpperCase()} · ${s.width}×${s.height} · ${s.writtenFrames} 帧${duration} · ${(s.bytes / 1024).toFixed(0)} KB`);
         }
         els['btn-export-folder'].classList.toggle('hidden', snapshot.stage !== 'done' || !snapshot.stats?.outputPath);

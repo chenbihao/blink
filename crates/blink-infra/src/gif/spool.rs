@@ -200,7 +200,11 @@ impl SpoolWriter {
     }
 
     /// 停止定稿：flush、写时长表（时间戳 + 末帧时长）、state=stopped。
-    pub fn finalize_at(mut self, stop_reason: &str, elapsed_ms: u64) -> Result<SessionMeta, SpoolError> {
+    pub fn finalize_at(
+        mut self,
+        stop_reason: &str,
+        elapsed_ms: u64,
+    ) -> Result<SessionMeta, SpoolError> {
         if let Some(last_ts) = self.ts.last() {
             self.meta.last_dur_ms = elapsed_ms.saturating_sub(*last_ts).clamp(1, u32::MAX as u64) as u32;
         }
@@ -251,6 +255,7 @@ pub struct SpoolReader {
     _usage: File,
     pub meta: SessionMeta,
     index: Vec<FrameIndexEntry>,
+    pub audio_recovered: bool,
 }
 
 impl SpoolReader {
@@ -294,7 +299,26 @@ impl SpoolReader {
                 index.push(entry);
             }
         }
-        Ok(Self { dir, _usage: usage, meta, index })
+        let mut reader = Self {
+            dir,
+            _usage: usage,
+            meta,
+            index,
+            audio_recovered: false,
+        };
+        let total: u64 = reader.durations().iter().map(|v| *v as u64).sum();
+        let (end, recovered) = super::audio::recovery_end(&reader.dir, total)?;
+        reader.audio_recovered = recovered;
+        if end < total {
+            reader.index.retain(|e| e.t < end);
+            reader.meta.ts_ms = reader.index.iter().map(|e| e.t).collect();
+            reader.meta.last_dur_ms = reader
+                .index
+                .last()
+                .map(|e| end.saturating_sub(e.t) as u32)
+                .unwrap_or(0);
+        }
+        Ok(reader)
     }
 
     pub fn frame_count(&self) -> u32 {
@@ -303,9 +327,6 @@ impl SpoolReader {
 
     /// 帧时间戳（优先元数据定稿值；未定稿回退索引）。
     pub fn timestamps(&self) -> Vec<u64> {
-        if !self.meta.ts_ms.is_empty() {
-            return self.meta.ts_ms.clone();
-        }
         self.index.iter().map(|e| e.t).collect()
     }
 
@@ -375,6 +396,8 @@ pub fn list_session_ids(root: &Path) -> Vec<String> {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionSummary {
+    pub audio_recovered: bool,
+    pub recovered_ms: u64,
     pub id: String,
     pub created_at: u64,
     pub width: u32,
@@ -475,7 +498,18 @@ pub fn read_summary(root: &Path, id: &str) -> Result<SessionSummary, SpoolError>
     } else {
         (0, 0)
     };
+    let (recovered_ms, audio_recovered) =
+        super::audio::recovery_end(&dir, total_ms).unwrap_or((0, true));
+    let audio_bytes = (0..2)
+        .map(|i| {
+            fs::metadata(super::audio::track_path(&dir, i))
+                .map(|m| m.len())
+                .unwrap_or(0)
+        })
+        .sum::<u64>();
     Ok(SessionSummary {
+        audio_recovered,
+        recovered_ms,
         id: id.to_string(),
         created_at: meta.created_at,
         width: meta.region.w,
@@ -483,7 +517,7 @@ pub fn read_summary(root: &Path, id: &str) -> Result<SessionSummary, SpoolError>
         fps: meta.fps,
         frame_count,
         total_ms,
-        spool_bytes: meta.spool_bytes,
+        spool_bytes: meta.spool_bytes.saturating_add(audio_bytes),
         state: meta.state.clone(),
         stop_reason: meta.stop_reason.clone(),
         has_draft: draft_path(&dir).is_file(),
@@ -505,7 +539,11 @@ pub fn list_summaries(root: &Path, offset: usize, limit: usize) -> (Vec<SessionS
     if failures > 0 {
         tracing::debug!(failures, "最近录制摘要：部分会话读取失败（并发清理/损坏），已跳过");
     }
-    metas.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| b.id.cmp(&a.id)));
+    metas.sort_by(|a, b| {
+        b.created_at
+            .cmp(&a.created_at)
+            .then_with(|| b.id.cmp(&a.id))
+    });
     let total = metas.len();
     let items = metas
         .into_iter()
@@ -894,8 +932,7 @@ mod tests {
             .collect();
         assert!(leftovers.is_empty());
         // 空白草稿视为无
-        fs::write(draft_path(&dir), "  
-").unwrap();
+        fs::write(draft_path(&dir), "  \n").unwrap();
         assert_eq!(read_draft(root.path(), &id), None);
         // 非法 id 不读
         assert_eq!(read_draft(root.path(), "../x"), None);

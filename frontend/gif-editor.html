@@ -81,8 +81,8 @@
                     <option value="4">4×</option>
                 </select>
             </label>
-            <label class="param" data-i18n-title="gif.editor.frameDur.title" title="所选帧的显示时长（ms，10–6000；多选批量应用，单次撤销）">
-                <span data-i18n="gif.editor.frameDur">帧时长</span>
+            <label class="param" data-i18n-title="gif.editor.frameDur.title" title="所选帧在全局变速前的停留时长（ms，10–6000；多选批量应用，单次撤销）">
+                <span data-i18n="gif.editor.frameDur">停留（变速前）</span>
                 <input id="inp-dur" max="6000" min="10" placeholder="—" step="10" type="number"/>
                 <button class="btn btn-icon" data-i18n-title="gif.editor.frameDur.clear" id="btn-dur-clear" title="恢复自动时长（清除手动设置）" type="button">
                     <svg aria-hidden="true" class="icon"><use href="#icon-x"/></svg>
@@ -97,6 +97,12 @@
                 </select>
             </label>
         </div>
+    </section>
+
+    <section class="audio-mix hidden" id="audio-mix" aria-label="音轨混音（可撤销）">
+        <span data-i18n="gif.audio.mix">音轨混音（可撤销）</span>
+        <label id="audio-mix-0"><span data-i18n="gif.audio.microphone">麦克风</span> <input aria-label="麦克风音量" type="range" min="0" max="200" step="5" value="100"/><output>100%</output><input type="checkbox"/><span data-i18n="gif.audio.mute">编辑器静音</span></label>
+        <label id="audio-mix-1"><span data-i18n="gif.audio.system">系统声音</span> <input aria-label="系统声音音量" type="range" min="0" max="200" step="5" value="100"/><output>100%</output><input type="checkbox"/><span data-i18n="gif.audio.mute">编辑器静音</span></label>
     </section>
 
     <!-- 时间轴：全量连续缩略图（虚拟化渲染——只建可视区 DOM，滚动懒解码；

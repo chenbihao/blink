@@ -1,5 +1,7 @@
 //! 类型化媒体出口。调用方持有 TaskLease 与托管产物租约，不接受任意 FFmpeg 参数。
+mod audio;
 mod encode;
+pub use audio::{AudioInput, Span as AudioSpan};
 pub(crate) mod process;
 mod sampling;
 #[cfg(test)]
@@ -99,6 +101,7 @@ impl Default for Budget {
 }
 #[derive(Clone, Debug, Default)]
 pub struct VideoOptions {
+    pub audio: Option<AudioInput>,
     pub max_width: Option<u32>,
     pub quality: Quality,
     pub preset: Option<VideoPreset>,
@@ -149,6 +152,7 @@ impl VideoPreset {
 #[derive(Clone, serde::Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct VideoStats {
+    pub has_audio: bool,
     pub format: &'static str,
     pub codec: &'static str,
     pub width: u32,

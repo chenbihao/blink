@@ -79,7 +79,7 @@ pub(super) async fn verify(
         return Err(Error::SelfTestFailed("ffprobe 构建版本不符".into()));
     }
     let sample = scratch.join("self-test.mp4");
-    let mut args: Vec<&OsStr> = [
+    let arguments = [
         "-hide_banner",
         "-loglevel",
         "error",
@@ -102,10 +102,8 @@ pub(super) async fn verify(
         "yuv420p",
         "-f",
         "mp4",
-    ]
-    .iter()
-    .map(OsStr::new)
-    .collect();
+    ];
+    let mut args: Vec<&OsStr> = arguments.iter().map(OsStr::new).collect();
     args.push(sample.as_os_str());
     run(ffmpeg, args, cancel).await?;
     let args = [
@@ -133,6 +131,86 @@ pub(super) async fn verify(
     command.push(sample.as_os_str());
     command.extend(["-f", "null", "-"].iter().map(OsStr::new));
     run(ffmpeg, command, cancel).await?;
+    verify_audio(ffmpeg, ffprobe, scratch, cancel).await?;
+    tokio::fs::remove_file(sample).await?;
+    Ok(())
+}
+
+/// 不以编码器列表存在代替实际能力；安装/显式诊断验证 AAC 与编辑所需滤镜。
+async fn verify_audio(
+    ffmpeg: &Path,
+    ffprobe: &Path,
+    scratch: &Path,
+    cancel: &CancellationToken,
+) -> Result<(), Error> {
+    let sample = scratch.join("audio-self-test.m4a");
+    let graph = "[0:a]asplit=2[a][b];[a]atrim=end_sample=4800,asetpts=N/SR/TB,apad=whole_len=9600,atempo=0.5,atempo=2,atrim=end_sample=9600[a1];[b]atrim=start_sample=4800:end_sample=9600,asetpts=N/SR/TB[b1];[a1][b1]concat=n=2:v=0:a=1[out]";
+    let arguments = [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=1000:sample_rate=48000:duration=0.2",
+        "-filter_complex_threads",
+        "1",
+        "-filter_complex",
+        graph,
+        "-map",
+        "[out]",
+        "-c:a",
+        "aac",
+        "-threads",
+        "1",
+        "-ac",
+        "2",
+        "-ar",
+        "48000",
+        "-f",
+        "mp4",
+    ];
+    let mut args: Vec<&OsStr> = arguments.iter().map(OsStr::new).collect();
+    args.push(sample.as_os_str());
+    run(ffmpeg, args, cancel).await?;
+    let bytes = run(
+        ffprobe,
+        [
+            OsStr::new("-v"),
+            OsStr::new("error"),
+            OsStr::new("-show_streams"),
+            OsStr::new("-of"),
+            OsStr::new("json"),
+            sample.as_os_str(),
+        ],
+        cancel,
+    )
+    .await?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|_| Error::SelfTestFailed("音频自检元数据无效".into()))?;
+    if !value["streams"].as_array().is_some_and(|s| {
+        s.len() == 1
+            && s[0]["codec_name"] == "aac"
+            && s[0]["sample_rate"] == "48000"
+            && s[0]["channels"] == 2
+    }) {
+        return Err(Error::SelfTestFailed("音频编码/混音滤镜自检失败".into()));
+    }
+    let args = [
+        OsStr::new("-v"),
+        OsStr::new("error"),
+        OsStr::new("-xerror"),
+        OsStr::new("-threads"),
+        OsStr::new("1"),
+        OsStr::new("-i"),
+        sample.as_os_str(),
+        OsStr::new("-f"),
+        OsStr::new("null"),
+        OsStr::new("-"),
+    ];
+    run(ffmpeg, args, cancel).await?;
     tokio::fs::remove_file(sample).await?;
     Ok(())
 }

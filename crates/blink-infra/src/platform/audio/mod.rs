@@ -159,3 +159,27 @@ pub mod normalize;
 // 平台特定实现
 #[cfg(target_os = "windows")]
 mod windows;
+
+#[cfg(target_os = "windows")]
+pub mod recording;
+
+static MICROPHONE_BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub struct MicrophoneLease;
+impl MicrophoneLease {
+    pub fn acquire() -> Result<Self, AudioError> {
+        MICROPHONE_BUSY
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .map_err(|_| AudioError::DeviceUnavailable("麦克风正被语音输入或录屏使用".into()))?;
+        Ok(Self)
+    }
+}
+impl Drop for MicrophoneLease {
+    fn drop(&mut self) {
+        MICROPHONE_BUSY.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}

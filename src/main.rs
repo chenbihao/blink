@@ -137,6 +137,13 @@ fn main() {
         // - html 响应带插件页面专属 CSP 头——全局 csp 保持 null，既有窗口零影响；
         // - theme.css?name=X 按主题名（字符集白名单）从应用资产解析；
         // - 响应一律 no-store：插件更新后同 URL 不吃浏览器缓存旧资产。
+        .register_asynchronous_uri_scheme_protocol("blink-recording-audio", |ctx, request, responder| {
+            let app = ctx.app_handle().clone(); let label = ctx.webview_label().to_owned();
+            tauri::async_runtime::spawn_blocking(move || {
+                responder.respond(app::commands::serve_recording_audio(&app, &label, request.uri().path(),
+                    request.headers().get("Range").and_then(|v| v.to_str().ok())));
+            });
+        })
         .register_asynchronous_uri_scheme_protocol("blink-plugin", |ctx, request, responder| {
             let app = ctx.app_handle().clone();
             let uri = request.uri().clone();
@@ -624,10 +631,9 @@ fn serve_plugin_page_asset(
     else {
         return not_found("插件不在当前运行时快照");
     };
-    let Ok(path) = blink_infra::plugin_storage::pages::resolve_page_resource(
-        handle.package_dir(),
-        rest,
-    ) else {
+    let Ok(path) =
+        blink_infra::plugin_storage::pages::resolve_page_resource(handle.package_dir(), rest)
+    else {
         return not_found("资源路径非法");
     };
     // 有界读入：页面静态资源远小于此限；超限（误指二进制/数据包）拒绝
@@ -941,8 +947,9 @@ fn setup_app(app: &mut tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error:
     }
 
     // 0.28.4：数据包（词库）存储与安装器——恢复孤儿版本/自愈提交点残留。
-    let dataset_installer =
-        std::sync::Arc::new(domain::plugin::DatasetInstaller::new(plugin_storage.clone()));
+    let dataset_installer = std::sync::Arc::new(domain::plugin::DatasetInstaller::new(
+        plugin_storage.clone(),
+    ));
     {
         let report = dataset_installer.recover();
         tracing::info!(
@@ -1305,9 +1312,7 @@ fn setup_app(app: &mut tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error:
         capability_registry.clone(),
         router.clone(),
     ));
-    match tauri::async_runtime::block_on(
-        plugin_publisher.publish(plugin_engine.all_plugins()),
-    ) {
+    match tauri::async_runtime::block_on(plugin_publisher.publish(plugin_engine.all_plugins())) {
         Ok(report) => {
             tracing::info!(
                 generation = report.generation,
@@ -1356,11 +1361,15 @@ fn setup_app(app: &mut tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error:
     app.manage(bootstrap_manager.clone());
     tracing::info!("数据集自举管理器初始化完成（宿主运行时）");
     // 0.28.5：官方插件中心目录缓存（内存 TTL + 磁盘降级回放）
-    app.manage(std::sync::Arc::new(app::commands::PluginCatalogState::default()));
+    app.manage(std::sync::Arc::new(
+        app::commands::PluginCatalogState::default(),
+    ));
     // 0.28.7：GIF 录制服务 + 素材 TTL 清理（阻塞 IO，放后台线程）
     app.manage(std::sync::Arc::new(app::gif_service::GifService::new()));
     // 0.28.2：插件独立窗口面（会话表 + 窗口编排入口；必须在任何插件窗口打开前管理）
-    app.manage(std::sync::Arc::new(app::plugin_surface::PluginSurface::new()));
+    app.manage(std::sync::Arc::new(
+        app::plugin_surface::PluginSurface::new(),
+    ));
 
     tracing::info!("startup: migrating credentials");
     // 0.17.11: CM→keyring 密钥迁移（一次性,幂等）
@@ -2215,6 +2224,10 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
         app::commands::get_plugin_catalog,
         app::commands::install_plugin_from_catalog,
         app::commands::gif_start_recording,
+        app::commands::gif_audio_devices,
+        app::commands::gif_audio_monitor,
+        app::commands::gif_audio_monitor_status,
+        app::commands::gif_audio_control,
         app::commands::gif_pause_recording,
         app::commands::gif_resume_recording,
         app::commands::gif_stop_recording,
@@ -2231,6 +2244,7 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
         app::commands::gif_editor_current,
         app::commands::gif_get_frames,
         app::commands::gif_edit,
+        app::commands::gif_timeline_page,
         // 0.28.23：最近录制列表 / 会话缩略图 / 打开切换 / 编辑器入口 / 播放位置草稿
         app::commands::gif_recent_sessions,
         app::commands::gif_session_thumbnail,

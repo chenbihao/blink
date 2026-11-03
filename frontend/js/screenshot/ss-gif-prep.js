@@ -17,6 +17,7 @@ import {positionToolbar} from './ss-display.js';
 import {invoke, normalizeError} from '../shared/tauri.js';
 import {showTransientHint} from './ss-ocr.js';
 import {annotationsMigratable, enterGifRecordOverlay, handleOverlayHidden} from './ss-gif-rec.js';
+import {audioOptions, enterAudioPrep, stopAudioMonitor, bindAudioControls} from './ss-gif-audio.js';
 
 /** 宿主上的录制准备态 class（对应 CSS 的面切换规则）。 */
 const PREP_MODE_CLASS = 'toolbar-mode-gif-prep';
@@ -58,6 +59,7 @@ export function enterGifRecordMode() {
         return;
     }
     toolbar.classList.add(PREP_MODE_CLASS);
+    enterAudioPrep();
     // 面宽不同（准备面比标注面窄）：按新宽度立即右对齐到选区——否则
     // 首次进入停在旧左边界，拖一次选区才归位。用户拖过宿主则保留位置
     // 仅 clamp（positionToolbar 的 userMoved 语义）。
@@ -66,6 +68,7 @@ export function enterGifRecordMode() {
 
 /** 退出准备模式：宿主切回标注面（工具组还原显示）。 */
 export function exitGifRecordMode() {
+    void stopAudioMonitor();
     const toolbar = toolbarEl();
     if (toolbar) toolbar.classList.remove(PREP_MODE_CLASS);
     // 回标注模式：宿主应可见（ESC/取消路径本来可见；清场路径由
@@ -112,6 +115,7 @@ export async function startGifRecordingFromPrep() {
     ss.gifWindowHold = true;
     let sessionId;
     try {
+        await stopAudioMonitor();
         const info = await invoke('gif_start_recording', {
             x: origin.x,
             y: origin.y,
@@ -119,6 +123,7 @@ export async function startGifRecordingFromPrep() {
             h: bmp.h,
             fps,
             showCursor,
+            audio: audioOptions(),
         });
         sessionId = info.sessionId;
         // overlay 不隐藏：同一宿主切到录制面，涂画层就位
@@ -138,6 +143,7 @@ export async function startGifRecordingFromPrep() {
 
 /** 绑定准备栏按钮（index.js 初始化时调用一次）。 */
 export function bindGifPrepBar() {
+    bindAudioControls();
     // 在窗口捕获阶段消费准备态 Esc，避免控件/浮层先吞掉；开始录制后由
     // 录制叠层的捕获层接管（录制中 Esc 不退出）。
     window.addEventListener('keydown', (event) => {

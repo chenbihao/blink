@@ -28,8 +28,8 @@ use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 use blink_domain::gif::Timeline;
 use blink_infra::event_names::EventNames;
 use blink_infra::gif::{
-    self as infra_gif, spawn_pipeline, CaptureCommand, CaptureCtl, CaptureOutcome,
-    EncodeFrame, EncodePlan, SessionMeta, SpoolReader, SpoolWriter,
+    self as infra_gif, CaptureCommand, CaptureCtl, CaptureOutcome, EncodeFrame, EncodePlan,
+    SessionMeta, SpoolReader, SpoolWriter, spawn_pipeline,
 };
 
 /// 录制倒计时（ms）。0 = 无倒计时、点「开始录制」立即采集（2026-10-27
@@ -48,7 +48,7 @@ const EDITOR_LABEL: &str = "gif-editor";
 
 pub(crate) struct ActiveRecording {
     pub(crate) session_id: String,
-    ctl: Arc<CaptureCtl>,
+    pub(crate) ctl: Arc<CaptureCtl>,
     /// 倒计时剩余（phase=countdown 时 Some）。
     countdown_deadline: Option<std::time::Instant>,
     /// 取消标志：true 时停止后丢弃素材。
@@ -59,6 +59,7 @@ pub(crate) struct ActiveRecording {
     /// 不再从磁盘会话元数据回读（录制中索引还在增长，回读既贵又可能失败）。
     region_w: u32,
     region_h: u32,
+    pub(crate) audio: blink_infra::gif::audio::SharedAudio,
 }
 
 /// 录制叠层模式的 overlay 输入态（0.28.23）。
@@ -87,6 +88,7 @@ pub struct GifService {
     pub(crate) drafts: Mutex<HashMap<String, crate::app::gif_draft::DraftState>>,
     /// 会话素材身份（创建时间, 索引帧数）——草稿保存/恢复共用。
     pub(crate) session_identity: Mutex<HashMap<String, (u64, u32)>>,
+    pub(crate) audio_preview: Mutex<Option<blink_infra::platform::audio::recording::Session>>,
 }
 
 impl Default for GifService {
@@ -106,6 +108,7 @@ impl GifService {
             editor_session: Mutex::new(None),
             drafts: Mutex::new(HashMap::new()),
             session_identity: Mutex::new(HashMap::new()),
+            audio_preview: Mutex::new(None),
         }
     }
 
@@ -138,7 +141,6 @@ impl GifService {
             tracing::info!(removed, "录制素材 TTL 清理完成");
         }
     }
-
 }
 
 // ── 状态广播 ────────────────────────────────────────────────────────────────
@@ -146,6 +148,7 @@ impl GifService {
 #[derive(serde::Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct RecorderStatePayload {
+    pub audio: blink_infra::gif::audio::AudioStatus,
     pub phase: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
@@ -171,6 +174,7 @@ fn snapshot_state(service: &GifService) -> RecorderStatePayload {
     let rec = service.recording.lock().unwrap_or_else(|e| e.into_inner());
     match rec.as_ref() {
         None => RecorderStatePayload {
+            audio: Default::default(),
             phase: "idle",
             session_id: None,
             countdown_ms: None,
@@ -190,10 +194,12 @@ fn snapshot_state(service: &GifService) -> RecorderStatePayload {
             } else {
                 r.ctl.phase()
             };
-            let countdown_ms = r
-                .countdown_deadline
-                .map(|d| d.saturating_duration_since(std::time::Instant::now()).as_millis() as u64);
+            let countdown_ms = r.countdown_deadline.map(|d| {
+                d.saturating_duration_since(std::time::Instant::now())
+                    .as_millis() as u64
+            });
             RecorderStatePayload {
+                audio: r.audio.lock().unwrap_or_else(|e| e.into_inner()).snapshot(),
                 phase,
                 session_id: Some(r.session_id.clone()),
                 countdown_ms,
@@ -213,7 +219,10 @@ fn spawn_state_ticker(app: AppHandle) {
             let (phase, keep) = {
                 let rec = service.recording.lock().unwrap_or_else(|e| e.into_inner());
                 match rec.as_ref() {
-                    Some(r) => (Some(r.ctl.phase()), r.ctl.is_running() || r.ctl.phase() != "done"),
+                    Some(r) => (
+                        Some(r.ctl.phase()),
+                        r.ctl.is_running() || r.ctl.phase() != "done",
+                    ),
                     None => (None, false),
                 }
             };
@@ -267,6 +276,7 @@ pub fn start_recording(
     h: u32,
     fps: u32,
     show_cursor: bool,
+    audio_options: blink_infra::gif::audio::AudioOptions,
 ) -> GifResult<String> {
     if !(64..=2560).contains(&w) || !(64..=1600).contains(&h) {
         return Err(GifServiceError::InvalidRegion);
@@ -312,6 +322,23 @@ pub fn start_recording(
     };
     let writer = SpoolWriter::create(&root, meta).map_err(GifServiceError::from)?;
 
+    // 准备态试音先释放，采集资源在 worker 内重新解析/核验，不继承旧默认设备。
+    service
+        .audio_preview
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+    let audio = blink_infra::gif::audio::shared(audio_options.clone());
+    let source = RecordingSource {
+        video: source,
+        audio: blink_infra::platform::audio::recording::Session::new(
+            audio.clone(),
+            (audio_options.mode != blink_infra::gif::audio::AudioMode::Silent)
+                .then(|| root.join("sessions").join(&session_id)),
+        ),
+        enabled: audio_options.mode != blink_infra::gif::audio::AudioMode::Silent,
+    };
+
     #[cfg(target_os = "windows")]
     let (ctl, outcome_rx) = spawn_pipeline(
         source,
@@ -341,6 +368,7 @@ pub fn start_recording(
         region_pos: region_for_rec,
         region_w: w,
         region_h: h,
+        audio,
     });
 
     enter_overlay_record_mode(app);
@@ -367,7 +395,13 @@ pub fn start_recording(
     let ctl_for_wait = Arc::clone(&ctl);
     tauri::async_runtime::spawn_blocking(move || {
         let outcome = outcome_rx.recv().ok();
-        finalize_after_stop(&app3, &session_for_wait, &ctl_for_wait, cancel_flag.load(Ordering::SeqCst), outcome);
+        finalize_after_stop(
+            &app3,
+            &session_for_wait,
+            &ctl_for_wait,
+            cancel_flag.load(Ordering::SeqCst),
+            outcome,
+        );
     });
 
     spawn_state_ticker(app.clone());
@@ -463,9 +497,16 @@ fn finalize_after_stop(
             if !open_editor(app, session_id) {
                 // 录制完成不能静默取消另一段素材的导出；新素材保留在最近录制。
                 open_editor_entry(app);
-                let current = service.editor_session.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                let _ = app.emit_to(EDITOR_LABEL, EventNames::GIF_EDITOR_SESSION,
-                    serde_json::json!({"sessionId": current, "recordingSaved": true}));
+                let current = service
+                    .editor_session
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                let _ = app.emit_to(
+                    EDITOR_LABEL,
+                    EventNames::GIF_EDITOR_SESSION,
+                    serde_json::json!({"sessionId": current, "recordingSaved": true}),
+                );
             }
         }
         Err(e) => {
@@ -517,7 +558,11 @@ fn exit_overlay_record_mode(app: &AppHandle) {
 /// 前端上报 overlay 输入模式与命中矩形（物理屏幕坐标）。
 /// - `draw`：涂画模式，整窗接收指针；
 /// - `desktop`：操作桌面模式，整窗穿透，指针在 `rects` 内临时取消穿透。
-pub fn set_overlay_input(app: &AppHandle, desktop_mode: bool, rects: Vec<[i32; 4]>) -> GifResult<()> {
+pub fn set_overlay_input(
+    app: &AppHandle,
+    desktop_mode: bool,
+    rects: Vec<[i32; 4]>,
+) -> GifResult<()> {
     let service = app.state::<Arc<GifService>>();
     if service.recording.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
         return Err(GifServiceError::NoActiveRecording);
@@ -686,18 +731,14 @@ pub fn open_editor(app: &AppHandle, session_id: &str) -> bool {
         *current = Some(session_id.to_string());
     }
     let built = get_or_create_window(app, EDITOR_LABEL, || {
-        WebviewWindowBuilder::new(
-            app,
-            EDITOR_LABEL,
-            WebviewUrl::App("gif-editor.html".into()),
-        )
-        // 0.28.23 改名「录制编辑器」；窗口 label / IPC 保持 gif-* 不迁移，
-        // 前端启动后按语言经 set-title 覆盖为双语标题。
-        .title("Blink 录制编辑器")
-        .inner_size(980.0, 720.0)
-        .min_inner_size(760.0, 540.0)
-        .visible(false)
-        .build()
+        WebviewWindowBuilder::new(app, EDITOR_LABEL, WebviewUrl::App("gif-editor.html".into()))
+            // 0.28.23 改名「录制编辑器」；窗口 label / IPC 保持 gif-* 不迁移，
+            // 前端启动后按语言经 set-title 覆盖为双语标题。
+            .title("Blink 录制编辑器")
+            .inner_size(980.0, 720.0)
+            .min_inner_size(760.0, 540.0)
+            .visible(false)
+            .build()
     });
     match built {
         Ok((win, created)) => {
@@ -759,16 +800,12 @@ pub fn open_editor_home(app: &AppHandle) {
         }
     }
     let built = get_or_create_window(app, EDITOR_LABEL, || {
-        WebviewWindowBuilder::new(
-            app,
-            EDITOR_LABEL,
-            WebviewUrl::App("gif-editor.html".into()),
-        )
-        .title("Blink 录制编辑器")
-        .inner_size(980.0, 720.0)
-        .min_inner_size(760.0, 540.0)
-        .visible(false)
-        .build()
+        WebviewWindowBuilder::new(app, EDITOR_LABEL, WebviewUrl::App("gif-editor.html".into()))
+            .title("Blink 录制编辑器")
+            .inner_size(980.0, 720.0)
+            .min_inner_size(760.0, 540.0)
+            .visible(false)
+            .build()
     });
     match built {
         Ok((win, created)) => {
@@ -857,7 +894,48 @@ pub fn timeline_view(tl: &Timeline) -> serde_json::Value {
         "totalMs": tl.effective_total_ms(),
         "canUndo": tl.can_undo(),
         "canRedo": tl.can_redo(),
+        "audioSpans": tl.audio_spans(),
+        "mix": tl.mix(),
     })
+}
+
+/// 音画生命周期由采集线程串行驱动；打开两路成功后才启动共同单调时钟。
+struct RecordingSource {
+    video: blink_infra::gif::GdiFrameSource,
+    audio: blink_infra::platform::audio::recording::Session,
+    enabled: bool,
+}
+impl blink_infra::gif::capture::FrameSource for RecordingSource {
+    fn capture(&mut self) -> Result<Vec<u8>, String> {
+        if let Some(error) = self.audio.fault() {
+            return Err(error);
+        }
+        self.video.capture().inspect_err(|_| {
+            self.audio
+                .shared
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .fail("画面采集失效，全部来源已暂停，请手动继续或停止保留素材");
+        })
+    }
+    fn frame_bytes(&self) -> usize {
+        self.video.frame_bytes()
+    }
+    fn resume(&mut self, offset: u64) -> Result<std::time::Instant, String> {
+        if self.enabled {
+            self.audio.resume(offset)
+        } else {
+            Ok(std::time::Instant::now())
+        }
+    }
+    fn pause(&mut self, end: u64) {
+        if self.enabled {
+            self.audio.pause(end);
+        }
+    }
+    fn recoverable(&self) -> bool {
+        self.enabled
+    }
 }
 
 /// 把 domain 导出计划转换为 infra 编码计划（分层边界桥接）。

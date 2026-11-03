@@ -45,6 +45,12 @@ pub enum EditCommand {
     SetHoldMany { frames: Vec<u32>, ms: u32 },
     /// 循环次数：None = 无限循环；Some(0) = 播放一次（GIF Finite(0)）。
     SetLoop { count: Option<u16> },
+    /// 两路源音轨的非破坏混音设置；索引 0=麦克风，1=系统声音。
+    SetAudio {
+        source: usize,
+        gain: f32,
+        muted: bool,
+    },
     /// 重置全部编辑（不可撤销其他命令之后——reset 本身可撤销）。
     Reset,
 }
@@ -80,6 +86,34 @@ pub struct ExportSnapshot {
     pub src_h: u32,
     pub frames: Vec<FrameView>,
     pub loop_count: Option<u16>,
+    pub audio: Vec<AudioSpan>,
+    pub mix: [AudioMix; 2],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct AudioMix {
+    pub gain: f32,
+    pub muted: bool,
+}
+impl Default for AudioMix {
+    fn default() -> Self {
+        Self {
+            gain: 1.0,
+            muted: false,
+        }
+    }
+}
+
+/// 连续原始区间映射到有效时间轴；新增停留是静音，随后统一保音调变速。
+/// 相邻区间合并，不为每一帧复制音轨或滤镜。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioSpan {
+    pub source_ms: u64,
+    pub sound_ms: u64,
+    pub silence_ms: u64,
+    pub output_ms: u64,
+    pub speed: f32,
 }
 impl ExportSnapshot {
     pub fn gif_plan(&self) -> ExportPlan {
@@ -118,6 +152,7 @@ struct Core {
     speed: f32,
     holds: BTreeMap<u32, u32>,
     loop_count: Option<u16>,
+    mix: [AudioMix; 2],
 }
 
 impl Core {
@@ -131,6 +166,7 @@ impl Core {
             speed: 1.0,
             holds: BTreeMap::new(),
             loop_count: None,
+            mix: [AudioMix::default(); 2],
         }
     }
 }
@@ -159,6 +195,7 @@ pub enum EditError {
     InvalidSpeed,
     /// 草稿格式版本未知。
     InvalidDraftVersion,
+    InvalidAudio,
 }
 
 impl std::fmt::Display for EditError {
@@ -168,6 +205,7 @@ impl std::fmt::Display for EditError {
             EditError::InvalidTrimRange => write!(f, "修剪终点早于起点"),
             EditError::InvalidSpeed => write!(f, "速度因子非法"),
             EditError::InvalidDraftVersion => write!(f, "草稿格式版本不受支持"),
+            EditError::InvalidAudio => write!(f, "音轨或音量无效"),
         }
     }
 }
@@ -339,9 +377,15 @@ impl Timeline {
                 // 该帧的显示时间消失，不是跳帧等待。
                 c.base_dur_ms[frame as usize] = 0;
             }
-            EditCommand::DeleteFrames { .. } => unreachable!("DeleteFrames 由 apply_core 前置特判处理"),
-            EditCommand::RestoreFrames { .. } => unreachable!("RestoreFrames 由 apply_core 前置特判处理"),
-            EditCommand::SetHoldMany { .. } => unreachable!("SetHoldMany 由 apply_core 前置特判处理"),
+            EditCommand::DeleteFrames { .. } => {
+                unreachable!("DeleteFrames 由 apply_core 前置特判处理")
+            }
+            EditCommand::RestoreFrames { .. } => {
+                unreachable!("RestoreFrames 由 apply_core 前置特判处理")
+            }
+            EditCommand::SetHoldMany { .. } => {
+                unreachable!("SetHoldMany 由 apply_core 前置特判处理")
+            }
             EditCommand::SetSpeed { factor } => {
                 c.speed = factor.clamp(0.25, 4.0);
             }
@@ -358,6 +402,16 @@ impl Timeline {
             EditCommand::SetLoop { count } => {
                 c.loop_count = count;
             }
+            EditCommand::SetAudio {
+                source,
+                gain,
+                muted,
+            } => {
+                if source > 1 || !gain.is_finite() || !(0.0..=2.0).contains(&gain) {
+                    return Err(EditError::InvalidAudio);
+                }
+                c.mix[source] = AudioMix { gain, muted };
+            }
             EditCommand::Reset => {
                 // Reset 回到素材原始状态（含原始时长——删除帧置 0 的时长恢复）；
                 // 本身可撤销（undo 栈回滚 Core 快照）。
@@ -369,27 +423,27 @@ impl Timeline {
 
     /// 逐帧导出视图（应用全部编辑；dur 未量化，供前端预览播放）。
     pub fn effective_frames(&self) -> Vec<FrameView> {
-        let mut out = Vec::new();
-        if self.frame_count == 0 {
-            return out;
-        }
-        for i in self.core.trim_start..=self.core.trim_end {
-            if self.core.deleted.contains(&i) {
-                continue;
-            }
-            let base = self.core.base_dur_ms[i as usize].max(1);
-            let held = self.core.holds.get(&i).copied();
-            let dur = match held {
-                Some(h) => h,
-                None => ((base as f32) / self.core.speed).round().max(1.0) as u32,
-            };
-            out.push(FrameView {
-                src_idx: i,
-                dur_ms: dur,
-                held: held.is_some(),
-            });
-        }
-        out
+        self.frame_views().collect()
+    }
+    fn frame_views(&self) -> impl Iterator<Item = FrameView> + '_ {
+        (0..self.frame_count)
+            .filter(|i| {
+                *i >= self.core.trim_start
+                    && *i <= self.core.trim_end
+                    && !self.core.deleted.contains(i)
+            })
+            .map(|i| {
+                let base = self.core.base_dur_ms[i as usize].max(1);
+                let held = self.core.holds.get(&i).copied();
+                let dur = ((held.unwrap_or(base) as f64) / self.core.speed as f64)
+                    .round()
+                    .max(1.0) as u32;
+                FrameView {
+                    src_idx: i,
+                    dur_ms: dur,
+                    held: held.is_some(),
+                }
+            })
     }
 
     /// 冻结导出计划（revision 快照 + delay 量化到 1/100s）。
@@ -404,7 +458,60 @@ impl Timeline {
             src_h,
             frames: self.effective_frames(),
             loop_count: self.core.loop_count,
+            audio: self.audio_spans(),
+            mix: self.core.mix,
         }
+    }
+
+    pub fn mix(&self) -> [AudioMix; 2] {
+        self.core.mix
+    }
+
+    /// 有界分页帧源契约：调用方只取可见页；0.28.25 可替换内部存储而不改 IPC。
+    pub fn frame_page(&self, offset: usize, limit: usize) -> Vec<FrameView> {
+        self.frame_views()
+            .skip(offset)
+            .take(limit.min(256))
+            .collect()
+    }
+
+    pub fn audio_spans(&self) -> Vec<AudioSpan> {
+        let frames = self.effective_frames();
+        let mut offsets = Vec::with_capacity(self.origin_durs.len());
+        let mut at = 0u64;
+        for d in &self.origin_durs {
+            offsets.push(at);
+            at += *d as u64;
+        }
+        let mut out: Vec<AudioSpan> = Vec::new();
+        for f in frames {
+            let original = self.origin_durs[f.src_idx as usize] as u64;
+            let held = self
+                .core
+                .holds
+                .get(&f.src_idx)
+                .copied()
+                .map(u64::from)
+                .unwrap_or(original);
+            let span = AudioSpan {
+                source_ms: offsets[f.src_idx as usize],
+                sound_ms: original.min(held),
+                silence_ms: held.saturating_sub(original),
+                output_ms: f.dur_ms as u64,
+                speed: self.core.speed,
+            };
+            if let Some(last) = out.last_mut().filter(|last| {
+                last.silence_ms == 0
+                    && span.silence_ms == 0
+                    && last.source_ms + last.sound_ms == span.source_ms
+            }) {
+                last.sound_ms += span.sound_ms;
+                last.output_ms += span.output_ms;
+            } else {
+                out.push(span);
+            }
+        }
+        out
     }
 
     /// 有效总时长（ms，未量化）。
@@ -433,6 +540,7 @@ impl Timeline {
             loop_count: self.core.loop_count,
             revision: self.revision,
             play_pos_ms,
+            mix: self.core.mix,
         }
     }
 
@@ -456,6 +564,13 @@ impl Timeline {
         if !draft.speed.is_finite() || !(0.25..=4.0).contains(&draft.speed) {
             return Err(EditError::InvalidSpeed);
         }
+        if draft
+            .mix
+            .iter()
+            .any(|m| !m.gain.is_finite() || !(0.0..=2.0).contains(&m.gain))
+        {
+            return Err(EditError::InvalidAudio);
+        }
         // 草稿的 base_dur_ms 必须重建：deleted 帧时长置零是 Core 的不变式
         let mut base = self.origin_durs.clone();
         for &f in &draft.deleted {
@@ -469,6 +584,7 @@ impl Timeline {
             speed: draft.speed,
             holds: draft.holds.iter().copied().collect(),
             loop_count: draft.loop_count,
+            mix: draft.mix,
         };
         self.undo.clear();
         self.redo.clear();
@@ -496,6 +612,8 @@ pub struct TimelineDraft {
     pub revision: u64,
     /// 播放头位置（编辑后有效时间轴，ms）。
     pub play_pos_ms: u64,
+    #[serde(default)]
+    pub mix: [AudioMix; 2],
 }
 
 pub const TIMELINE_DRAFT_VERSION: u32 = 1;
@@ -679,7 +797,11 @@ mod tests {
     fn set_hold_many_batch_single_undo_and_clear() {
         let mut t = tl();
         let rev = t.revision();
-        t.apply(&EditCommand::SetHoldMany { frames: vec![0, 2, 4], ms: 300 }).unwrap();
+        t.apply(&EditCommand::SetHoldMany {
+            frames: vec![0, 2, 4],
+            ms: 300,
+        })
+        .unwrap();
         assert_eq!(t.revision(), rev + 1, "批量同值单命令推进一次 revision");
         let v = t.effective_frames();
         for i in [0, 2, 4] {
@@ -690,7 +812,11 @@ mod tests {
         // 同值幂等
         assert_eq!(t.apply(&EditCommand::SetHoldMany { frames: vec![0, 2], ms: 300 }), Ok(false));
         // ms=0 批量清除 → 回速度计算
-        t.apply(&EditCommand::SetHoldMany { frames: vec![0, 2, 4], ms: 0 }).unwrap();
+        t.apply(&EditCommand::SetHoldMany {
+            frames: vec![0, 2, 4],
+            ms: 0,
+        })
+        .unwrap();
         assert!(t.effective_frames().iter().all(|f| !f.held));
         // 一次 undo 回到「0/2/4 hold 300」（帧 1/3 从未被 hold）
         t.undo();
@@ -706,7 +832,11 @@ mod tests {
             Err(EditError::FrameOutOfRange)
         );
         // 超 clamp 收敛到上限（MAX_DELAY_CS*10 = 6000ms）
-        t.apply(&EditCommand::SetHoldMany { frames: vec![1], ms: 99_999 }).unwrap();
+        t.apply(&EditCommand::SetHoldMany {
+            frames: vec![1],
+            ms: 99_999,
+        })
+        .unwrap();
         assert_eq!(t.effective_frames()[1].dur_ms, 6000);
     }
 
@@ -723,7 +853,7 @@ mod tests {
         // hold 覆盖该帧
         t.apply(&EditCommand::SetHold { frame: 1, ms: 800 }).unwrap();
         let v = t.effective_frames();
-        assert_eq!(v[1].dur_ms, 800);
+        assert_eq!(v[1].dur_ms, 3200);
         assert!(v[1].held);
         // 清除 hold 恢复速度计算
         t.apply(&EditCommand::SetHold { frame: 1, ms: 0 }).unwrap();
@@ -802,12 +932,12 @@ mod tests {
                 .iter()
                 .map(|f| (f.src_idx, f.dur_ms))
                 .collect::<Vec<_>>(),
-            vec![(0, 22), (2, 777), (3, 22)]
+            vec![(0, 22), (2, 518), (3, 22)]
         );
         assert_eq!(snapshot.gif_plan(), t.export_plan(65, 67));
-        assert_eq!(snapshot.gif_plan().frames[1].delay_cs, 77);
+        assert_eq!(snapshot.gif_plan().frames[1].delay_cs, 51);
         t.apply(&EditCommand::Reset).unwrap();
-        assert_eq!(snapshot.frames[1].dur_ms, 777);
+        assert_eq!(snapshot.frames[1].dur_ms, 518);
         assert_ne!(snapshot.revision, t.revision());
     }
 
@@ -901,6 +1031,7 @@ mod tests {
             loop_count: None,
             revision: 3,
             play_pos_ms: 0,
+            mix: [AudioMix::default(); 2],
         };
         let mut t = tl();
         for (draft, err) in [
@@ -939,9 +1070,84 @@ mod tests {
             loop_count: None,
             revision: 0,
             play_pos_ms: 0,
+            mix: [AudioMix::default(); 2],
         };
         let mut t = tl();
         t.restore_draft(draft).unwrap();
         assert_eq!(t.revision(), 1);
+    }
+
+    #[test]
+    fn audio_mapping_cuts_deleted_time_pads_holds_then_applies_speed() {
+        let mut t = Timeline::from_durations(vec![100; 4]);
+        t.apply(&EditCommand::DeleteFrame { frame: 1 }).unwrap();
+        t.apply(&EditCommand::SetHold { frame: 0, ms: 300 })
+            .unwrap();
+        t.apply(&EditCommand::SetHold { frame: 2, ms: 50 }).unwrap();
+        t.apply(&EditCommand::SetSpeed { factor: 2.0 }).unwrap();
+        let s = t.audio_spans();
+        assert_eq!(
+            s.iter()
+                .map(|s| (s.source_ms, s.sound_ms, s.silence_ms, s.output_ms))
+                .collect::<Vec<_>>(),
+            vec![(0, 100, 200, 150), (200, 50, 0, 25), (300, 100, 0, 50)]
+        );
+        assert_eq!(
+            s.iter().map(|s| s.output_ms).sum::<u64>(),
+            t.effective_total_ms()
+        );
+        t.undo();
+        assert_eq!(t.audio_spans()[0].output_ms, 300);
+    }
+    #[test]
+    fn continuous_audio_is_one_interval_and_mix_is_undoable_and_persisted() {
+        let mut t = Timeline::from_durations(vec![33; 1000]);
+        assert_eq!(t.audio_spans().len(), 1);
+        t.apply(&EditCommand::SetAudio {
+            source: 1,
+            gain: 0.5,
+            muted: true,
+        })
+        .unwrap();
+        let snapshot = t.export_snapshot(640, 480);
+        let draft = t.to_draft(100);
+        t.undo();
+        assert_eq!(t.mix()[1], AudioMix::default());
+        assert_eq!(
+            snapshot.mix[1],
+            AudioMix {
+                gain: 0.5,
+                muted: true
+            }
+        );
+        t.restore_draft(draft).unwrap();
+        assert_eq!(t.mix(), snapshot.mix);
+        let rev = t.revision();
+        assert_eq!(
+            t.apply(&EditCommand::SetAudio {
+                source: 2,
+                gain: 1.0,
+                muted: false
+            }),
+            Err(EditError::InvalidAudio)
+        );
+        assert_eq!(t.revision(), rev);
+    }
+    #[test]
+    fn old_draft_defaults_to_unmuted_tracks_and_pages_are_bounded() {
+        let mut t = tl();
+        let mut json = serde_json::to_value(t.to_draft(0)).unwrap();
+        json.as_object_mut().unwrap().remove("mix");
+        t.restore_draft(serde_json::from_value(json).unwrap())
+            .unwrap();
+        assert_eq!(t.mix(), [AudioMix::default(); 2]);
+        assert_eq!(
+            t.frame_page(2, 2)
+                .iter()
+                .map(|f| f.src_idx)
+                .collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+        assert!(t.frame_page(99, 256).is_empty());
     }
 }

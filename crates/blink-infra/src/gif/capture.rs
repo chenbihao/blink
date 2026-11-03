@@ -20,7 +20,7 @@ use std::sync::mpsc::{Receiver, TrySendError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use super::overload::{decide_overload, OverloadAction, RecordingBudget, StopReason};
+use super::overload::{OverloadAction, RecordingBudget, StopReason, decide_overload};
 
 use super::spool::SpoolWriter;
 
@@ -174,6 +174,13 @@ pub trait FrameSource: Send {
     /// 抓一帧（BGRA，长 = frame_bytes）。Err = 采集失败（锁屏/屏幕变化等）。
     fn capture(&mut self) -> Result<Vec<u8>, String>;
     fn frame_bytes(&self) -> usize;
+    fn resume(&mut self, _offset_ms: u64) -> Result<Instant, String> {
+        Ok(Instant::now())
+    }
+    fn pause(&mut self, _end_ms: u64) {}
+    fn recoverable(&self) -> bool {
+        false
+    }
 }
 
 /// 采集线程结束时留下的停止上下文（压缩线程聚合 outcome 用）。
@@ -299,8 +306,18 @@ pub fn spawn_pipeline(
                 loop {
                     match ctl.wait_command() {
                         Some(CaptureCommand::Start) => {
-                            start = Some(Instant::now());
-                            ctl.set_phase("recording");
+                            match source.resume(0) {
+                                Ok(now) => {
+                                    start = Some(now);
+                                    ctl.set_phase("recording");
+                                }
+                                Err(_) => {
+                                    source.pause(0);
+                                    start = Some(Instant::now());
+                                    pause_started = start;
+                                    ctl.set_phase("paused");
+                                }
+                            }
                             break;
                         }
                         Some(CaptureCommand::Stop) | None => {
@@ -322,18 +339,63 @@ pub fn spawn_pipeline(
 
                 let mut next_tick = Instant::now();
                 'recording: loop {
+                    // 设备启动失败保持异常暂停，只有用户明确继续才重建所有来源。
+                    if pause_started.is_some() && ctl.phase() == "paused" {
+                        match ctl.wait_command() {
+                            Some(CaptureCommand::Resume) => {
+                                let offset = effective_ms(
+                                    Instant::now(),
+                                    start,
+                                    paused_total,
+                                    pause_started,
+                                );
+                                if let Ok(now) = source.resume(offset) {
+                                    paused_total = now
+                                        .duration_since(start.unwrap())
+                                        .saturating_sub(Duration::from_millis(offset));
+                                    pause_started = None;
+                                    ctl.set_phase("recording");
+                                    next_tick = now;
+                                } else {
+                                    source.pause(offset);
+                                }
+                            }
+                            Some(CaptureCommand::Stop) | None => break 'recording,
+                            _ => {}
+                        }
+                        continue;
+                    }
                     // 非阻塞处理指令
                     while let Some(cmd) = ctl.try_take_command() {
                         match cmd {
                             CaptureCommand::Pause => {
                                 pause_started = Some(Instant::now());
+                                let end = effective_ms(
+                                    Instant::now(),
+                                    start,
+                                    paused_total,
+                                    pause_started,
+                                );
+                                source.pause(end);
+                                ctl.elapsed_ms.store(end, Ordering::SeqCst);
                                 ctl.set_phase("paused");
                                 loop {
                                     match ctl.wait_command() {
                                         Some(CaptureCommand::Resume) => {
-                                            if let Some(p) = pause_started.take() {
-                                                paused_total += p.elapsed();
-                                            }
+                                            let end = effective_ms(
+                                                Instant::now(),
+                                                start,
+                                                paused_total,
+                                                pause_started,
+                                            );
+                                            let Ok(now) = source.resume(end) else {
+                                                source.pause(end);
+                                                continue;
+                                            };
+                                            paused_total = now
+                                                .duration_since(start.unwrap())
+                                                .saturating_sub(Duration::from_millis(end));
+                                            pause_started = None;
                                             ctl.set_phase("recording");
                                             // 重新对齐 tick，立即采一帧
                                             next_tick = Instant::now();
@@ -370,6 +432,17 @@ pub fn spawn_pipeline(
                     let frame = match source.capture() {
                         Ok(f) => f,
                         Err(e) => {
+                            if source.recoverable() {
+                                pause_started = Some(t0);
+                                let end = effective_ms(t0, start, paused_total, pause_started);
+                                source.pause(end);
+                                ctl.elapsed_ms.store(end, Ordering::SeqCst);
+                                ctl.set_phase("paused");
+                                tracing::warn!(
+                                    "录制来源失效，全部来源暂停（保留素材，等待手动恢复）"
+                                );
+                                continue 'recording;
+                            }
                             tracing::warn!(error = %e, "GIF 采集失败，停止录制（保留素材）");
                             stop_reason = StopReason::CaptureFailed;
                             break 'recording;
@@ -440,6 +513,9 @@ pub fn spawn_pipeline(
                 }
 
                 // 结束：留停止上下文，drop 发送端让压缩线程排空。
+                let end_ms = effective_ms(Instant::now(), start, paused_total, pause_started);
+                source.pause(end_ms);
+                ctl.elapsed_ms.store(end_ms, Ordering::SeqCst);
                 ctl.set_phase("stopping");
                 ctl.running.store(false, Ordering::SeqCst);
                 *stop_ctx.lock().unwrap() = Some(StopContext {
@@ -448,7 +524,7 @@ pub fn spawn_pipeline(
                     duplicates_merged: ctl.duplicates_merged.load(Ordering::SeqCst) as u32,
                     peak_queued: ctl.peak_queued.load(Ordering::SeqCst) as u32,
                     capture_cost_ms,
-                    elapsed_ms: effective_ms(Instant::now(), start, paused_total, pause_started),
+                    elapsed_ms: end_ms,
                 });
                 drop(tx);
             })
@@ -473,7 +549,9 @@ fn reason_label(r: StopReason) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gif::spool::{generate_session_id, CaptureRegion, SessionMeta, SpoolReader, SPOOL_VERSION};
+    use crate::gif::spool::{
+        CaptureRegion, SPOOL_VERSION, SessionMeta, SpoolReader, generate_session_id,
+    };
     use std::sync::atomic::AtomicUsize;
 
     /// 合成帧源：可注入延迟（模拟 BitBlt 耗时）与帧内容序列。
@@ -749,5 +827,71 @@ mod tests {
         ctl.command(CaptureCommand::Stop);
         ctl.command(CaptureCommand::Start);
         assert_eq!(ctl.try_take_command(), Some(CaptureCommand::Stop));
+    }
+
+    #[test]
+    fn recoverable_source_failure_pauses_all_sources_and_requires_explicit_retry() {
+        struct Source {
+            resumes: Arc<AtomicUsize>,
+            pauses: Arc<AtomicUsize>,
+            frames: u32,
+        }
+        impl FrameSource for Source {
+            fn capture(&mut self) -> Result<Vec<u8>, String> {
+                self.frames += 1;
+                if self.frames == 3 {
+                    return Err("device removed".into());
+                }
+                Ok(vec![self.frames as u8; 32 * 32 * 4])
+            }
+            fn frame_bytes(&self) -> usize {
+                32 * 32 * 4
+            }
+            fn resume(&mut self, _: u64) -> Result<Instant, String> {
+                self.resumes.fetch_add(1, Ordering::SeqCst);
+                Ok(Instant::now())
+            }
+            fn pause(&mut self, _: u64) {
+                self.pauses.fetch_add(1, Ordering::SeqCst);
+            }
+            fn recoverable(&self) -> bool {
+                true
+            }
+        }
+        let resumes = Arc::new(AtomicUsize::new(0));
+        let pauses = Arc::new(AtomicUsize::new(0));
+        let (writer, root) = writer(32, 32);
+        let (ctl, rx) = spawn_pipeline(
+            Source {
+                resumes: resumes.clone(),
+                pauses: pauses.clone(),
+                frames: 0,
+            },
+            writer,
+            50,
+            RecordingBudget::default(),
+        );
+        ctl.command(CaptureCommand::Start);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while ctl.phase() != "paused" && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(ctl.phase(), "paused");
+        assert_eq!(resumes.load(Ordering::SeqCst), 1);
+        assert_eq!(pauses.load(Ordering::SeqCst), 1);
+        let elapsed = ctl.elapsed_ms();
+        std::thread::sleep(Duration::from_millis(80));
+        assert_eq!(ctl.elapsed_ms(), elapsed);
+        ctl.command(CaptureCommand::Resume);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while ctl.captured_frames() < 4 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        ctl.command(CaptureCommand::Stop);
+        let outcome = wait_outcome(&rx, 3000);
+        assert!(outcome.frames >= 4);
+        assert_eq!(resumes.load(Ordering::SeqCst), 2);
+        assert_eq!(pauses.load(Ordering::SeqCst), 2);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

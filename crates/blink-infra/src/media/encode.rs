@@ -25,6 +25,15 @@ pub async fn export_mp4<S: FrameSource>(
     let preset = options.preset.unwrap_or_default();
     let deadline = Instant::now() + options.budget.timeout;
     let sampling = SamplingPlan::new(&plan.frames, source.frame_count(), &options.budget)?;
+    let audio = if let Some(input) = options.audio.clone() {
+        let cancel = cancel.clone();
+        let duration = sampling.duration_ms();
+        tokio::task::spawn_blocking(move || super::audio::prepare(input, duration, &cancel))
+            .await
+            .map_err(|_| MediaError::Process("声音素材准备失败"))??
+    } else {
+        None
+    };
     let (width, height) = (plan.width, plan.height);
     if source.dimensions() != (width, height) || width == 0 || height == 0 {
         return Err(MediaError::InvalidPlan("素材尺寸不一致"));
@@ -105,7 +114,6 @@ pub async fn export_mp4<S: FrameSource>(
         "30",
         "-i",
         "pipe:0",
-        "-an",
         "-c:v",
         preset.encoder(),
         "-preset",
@@ -144,6 +152,33 @@ pub async fn export_mp4<S: FrameSource>(
         "-f",
         "mp4",
     ]);
+    if let Some(audio) = &audio {
+        // 第二个输入必须位于所有输出选项前；路径由宿主生成，不接受任意滤镜参数。
+        let at = args.iter().position(|a| a == "-c:v").unwrap();
+        let mut input = process::args(&["-i"]);
+        input.push(audio.wave.0.as_os_str().to_owned());
+        args.splice(at..at, input);
+        args.extend(process::args(&[
+            "-filter_complex_threads",
+            "1",
+            "-filter_complex_script",
+        ]));
+        args.push(audio.graph.0.as_os_str().to_owned());
+        args.extend(process::args(&[
+            "-map",
+            "0:v:0",
+            "-map",
+            "[recorded_audio]",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-ar",
+            "48000",
+        ]));
+    } else {
+        args.extend(process::args(&["-an"]));
+    }
     if preset == VideoPreset::Compact {
         // x265 的线程池不受通用 -threads 完整约束，显式限制，避免占满 CPU。
         args.extend(process::args(&[
@@ -205,7 +240,7 @@ pub async fn export_mp4<S: FrameSource>(
         },
     )
     .await?;
-    verify_metadata(&metadata, out_w, out_h, total, preset)?;
+    verify_metadata_audio(&metadata, out_w, out_h, total, preset, audio.is_some())?;
     let decoded = Arc::new(AtomicU32::new(0));
     let decoded2 = decoded.clone();
     let callback = progress.clone();
@@ -225,7 +260,6 @@ pub async fn export_mp4<S: FrameSource>(
     ]);
     args.push(temp.0.as_os_str().to_owned());
     args.extend(process::args(&[
-        "-an",
         "-progress",
         "pipe:1",
         "-stats_period",
@@ -289,6 +323,7 @@ pub async fn export_mp4<S: FrameSource>(
         "MP4 导出已验证并提交"
     );
     Ok(VideoStats {
+        has_audio: audio.is_some(),
         format: "mp4",
         codec: preset.codec(),
         width: out_w,
@@ -303,6 +338,7 @@ pub async fn export_mp4<S: FrameSource>(
     })
 }
 
+#[cfg(test)]
 pub(super) fn verify_metadata(
     bytes: &[u8],
     width: u32,
@@ -310,12 +346,42 @@ pub(super) fn verify_metadata(
     frames: u32,
     preset: VideoPreset,
 ) -> Result<(), MediaError> {
+    verify_metadata_audio(bytes, width, height, frames, preset, false)
+}
+fn verify_metadata_audio(
+    bytes: &[u8],
+    width: u32,
+    height: u32,
+    frames: u32,
+    preset: VideoPreset,
+    audio: bool,
+) -> Result<(), MediaError> {
     let value: serde_json::Value =
         serde_json::from_slice(bytes).map_err(|_| MediaError::Verify("元数据格式"))?;
     let stream = value["streams"]
         .as_array()
-        .filter(|s| s.len() == 1)
-        .and_then(|s| s.first());
+        .filter(|s| s.len() == if audio { 2 } else { 1 })
+        .and_then(|s| s.iter().find(|s| s["codec_type"] == "video"));
+    if audio
+        && !value["streams"].as_array().is_some_and(|streams| {
+            streams.iter().any(|s| {
+                s["codec_type"] == "audio"
+                    && s["codec_name"] == "aac"
+                    && s["sample_rate"] == "48000"
+                    && s["channels"] == 2
+                    && s["start_time"]
+                        .as_str()
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .is_some_and(|d| d.abs() <= 0.05)
+                    && s["duration"]
+                        .as_str()
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .is_some_and(|d| (d - frames as f64 / 30.0).abs() <= 0.1)
+            })
+        })
+    {
+        return Err(MediaError::Verify("声音编码、声道或音画时长不符"));
+    }
     if !stream.is_some_and(|s| {
         s["codec_name"] == preset.codec()
             && s["codec_type"] == "video"
@@ -334,4 +400,39 @@ pub(super) fn verify_metadata(
         return Err(MediaError::Verify("视频编码、尺寸、色彩、帧数或时长不符"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod audio_validation_tests {
+    use super::*;
+    #[test]
+    fn expected_audio_must_have_valid_codec_clock_and_duration() {
+        let mut data = serde_json::json!({"streams":[
+            {"codec_type":"video","codec_name":"h264","width":64,"height":64,"pix_fmt":"yuv420p","nb_frames":"30","avg_frame_rate":"30/1","duration":"1.0","color_range":"tv","color_space":"bt709"},
+            {"codec_type":"audio","codec_name":"aac","sample_rate":"48000","channels":2,"duration":"1.0","start_time":"0.0"}]});
+        let verify = |data: &serde_json::Value| {
+            verify_metadata_audio(
+                &serde_json::to_vec(data).unwrap(),
+                64,
+                64,
+                30,
+                VideoPreset::General,
+                true,
+            )
+        };
+        assert!(verify(&data).is_ok());
+        for (key, value) in [
+            ("codec_name", serde_json::json!("mp3")),
+            ("sample_rate", serde_json::json!("16000")),
+            ("channels", serde_json::json!(1)),
+            ("duration", serde_json::json!("1.3")),
+            ("start_time", serde_json::json!("1.0")),
+        ] {
+            let mut wrong = data.clone();
+            wrong["streams"][1][key] = value;
+            assert!(verify(&wrong).is_err());
+        }
+        data["streams"].as_array_mut().unwrap().pop();
+        assert!(verify(&data).is_err());
+    }
 }

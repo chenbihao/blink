@@ -11,6 +11,7 @@ function fixture(invoke, createImageBitmap) {
     const context = vm.createContext({
         document: {getElementById() { return {}; }},
         ensureSpriteLoaded() {}, refreshLiveThumbs() {},
+        createAudioPlayback: () => ({}), window: {addEventListener() {}},
         invoke, createImageBitmap,
         fetch: async () => ({blob: async () => ({})}), console,
     });

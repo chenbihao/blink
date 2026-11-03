@@ -170,6 +170,11 @@
             </svg>
             <span>开始录制</span>
         </button>
+        <button class="tool-btn" id="gif-audio-open" title="声音模式与设备">声音</button>
+        <div class="gif-audio-meters" id="gif-prep-audio">
+            <span class="audio-source hidden" data-source="0"><span class="audio-level"><span class="audio-level-fill"></span><span class="audio-level-peak"></span></span><span class="audio-source-name"></span></span>
+            <span class="audio-source hidden" data-source="1"><span class="audio-level"><span class="audio-level-fill"></span><span class="audio-level-peak"></span></span><span class="audio-source-name"></span></span>
+        </div>
         <button class="tool-btn" id="gif-prep-cancel" title="返回截图 (ESC)">
             <svg aria-hidden="true" class="icon">
                 <use href="#icon-x"/>
@@ -186,6 +191,11 @@
         <span class="gif-rec-state" id="gif-rec-state">录制中</span>
         <span class="gif-rec-time" id="gif-rec-time">0:00.0</span>
         <span class="gif-rec-frames" id="gif-rec-frames">0 帧</span>
+        <div class="gif-audio-meters" id="gif-rec-audio">
+            <button class="tool-btn audio-source hidden" data-source="0" title="麦克风采集静音（静音期间的原声不会保存）"><span class="audio-level"><span class="audio-level-fill"></span><span class="audio-level-peak"></span></span><span class="audio-source-name"></span></button>
+            <button class="tool-btn audio-source hidden" data-source="1" title="系统声音采集静音（静音期间的原声不会保存）"><span class="audio-level"><span class="audio-level-fill"></span><span class="audio-level-peak"></span></span><span class="audio-source-name"></span></button>
+        </div>
+        <button class="tool-btn hidden" id="gif-audio-recover" title="设备异常：选择替代设备后手动继续">声音异常 · 设备</button>
         <div class="toolbar-divider"></div>
         <button class="tool-btn" id="gif-rec-mode" title="切换涂画 / 操作桌面模式">
             <svg aria-hidden="true" class="icon"><use href="#icon-pencil"/></svg>
@@ -209,6 +219,15 @@
             <svg aria-hidden="true" class="icon"><use href="#icon-x"/></svg>
         </button>
     </div>
+
+    <section class="gif-audio-settings hidden" id="gif-audio-settings" aria-label="录制声音设置">
+        <label>声音模式<select id="gif-audio-mode"><option value="silent">不录声音（默认）</option><option value="microphone">麦克风</option><option value="system">系统声音</option><option value="both">麦克风 + 系统声音</option></select></label>
+        <label class="hidden" id="gif-audio-field-0">麦克风<select id="gif-audio-device-0"><option value="">系统默认输入设备</option></select></label>
+        <label class="hidden" id="gif-audio-field-1">系统声音<select id="gif-audio-device-1"><option value="">系统默认播放设备</option></select></label>
+        <p>采集静音期间不保存原声；编辑器静音可撤销。</p>
+        <p id="gif-audio-error" role="status"></p>
+        <button class="tool-btn" id="gif-audio-close">收起</button>
+    </section>
 
     <!-- 选取工具（0.11.10-a/k）：默认工具，负责选区重选、移动和缩放。
          有识别结果时，选区内文字由 #ocr-hit-canvas 优先承接拖选；边缘仍保留缩放热区。

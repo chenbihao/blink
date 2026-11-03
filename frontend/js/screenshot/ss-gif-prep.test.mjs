@@ -13,7 +13,7 @@ function harness() {
     const ss = {toolbar, selCss: {x: 0, y: 0, w: 100, h: 100}, sent: false};
     const context = vm.createContext({ss, window: {addEventListener: (k, fn) => handlers.set(k, fn)},
         document: {body: {classList: {contains: () => false}}, getElementById: id => nodes.get(id),
-            querySelectorAll: () => []}, positionToolbar() {}});
+            querySelectorAll: () => []}, positionToolbar() {}, bindAudioControls() {}, stopAudioMonitor: async () => {}});
     const source = readFileSync(new URL('./ss-gif-prep.js', import.meta.url), 'utf8')
         .replace(/^import .*;\r?$/gm, '').replace(/export /g, '');
     vm.runInContext(source, context);

@@ -22,7 +22,8 @@ export function itemMetaText(s) {
     const kb = s.spoolBytes < 1024 * 1024
         ? `${Math.max(1, Math.round(s.spoolBytes / 1024))} KB`
         : `${(s.spoolBytes / (1024 * 1024)).toFixed(1)} MB`;
-    return `${formatSeconds(s.totalMs || 0)} · ${s.width}×${s.height} · ${s.fps}fps · ${s.frameCount} 帧 · ${kb}`;
+    const recovery = s.audioRecovered ? ` · 可恢复共同前缀 ${formatSeconds(s.recoveredMs || 0)}` : '';
+    return `${formatSeconds(s.totalMs || 0)} · ${s.width}×${s.height} · ${s.fps}fps · ${s.frameCount} 帧 · ${kb}${recovery}`;
 }
 
 /** 纯函数：摘要项的本地日期时间。 */
@@ -38,6 +39,7 @@ export function itemBadges(s) {
     const badges = [];
     if (s.hasDraft) badges.push('draft');
     if (s.state === 'recording') badges.push('abnormal');
+    else if (s.audioRecovered) badges.push('abnormal');
     return badges;
 }
 

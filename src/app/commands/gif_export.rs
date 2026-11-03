@@ -230,6 +230,20 @@ async fn start_export(
                     _ => media::Quality::Medium,
                 };
                 let options = media::VideoOptions {
+                    audio: Some(media::AudioInput {
+                        dir: reader.dir().to_path_buf(),
+                        spans: snapshot
+                            .audio
+                            .iter()
+                            .map(|s| media::AudioSpan {
+                                source_ms: s.source_ms,
+                                sound_ms: s.sound_ms,
+                                silence_ms: s.silence_ms,
+                                output_ms: s.output_ms,
+                            })
+                            .collect(),
+                        gain: snapshot.mix.map(|m| if m.muted { 0.0 } else { m.gain }),
+                    }),
                     max_width: request.max_width,
                     quality,
                     preset: request.preset,

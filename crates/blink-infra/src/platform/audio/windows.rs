@@ -79,6 +79,7 @@ impl AudioCapture for CpalCapture {
             return Err(AudioError::Io("already capturing".into()));
         }
 
+        let microphone_lease = super::MicrophoneLease::acquire()?;
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AudioChunk>();
         self.capturing.store(true, Ordering::SeqCst);
 
@@ -89,6 +90,7 @@ impl AudioCapture for CpalCapture {
         std::thread::Builder::new()
             .name("blink-audio-capture".into())
             .spawn(move || {
+                let _lease = microphone_lease;
                 capture_thread(capturing, tx, device_name, target_format);
             })
             .map_err(|e| AudioError::Io(format!("failed to spawn capture thread: {e}")))?;
