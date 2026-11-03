@@ -24,11 +24,17 @@ pub async fn export_mp4<S: FrameSource>(
     let started = std::time::Instant::now();
     let preset = options.preset.unwrap_or_default();
     let deadline = Instant::now() + options.budget.timeout;
-    let sampling = SamplingPlan::new(&plan.frames, source.frame_count(), &options.budget)?;
+    let sampling = SamplingPlan::from_frames(
+        plan.frames.clone(),
+        source.frame_count(),
+        &options.budget,
+        options.fps,
+    )?;
     let audio = if let Some(input) = options.audio.clone() {
         let cancel = cancel.clone();
         let duration = sampling.duration_ms();
-        tokio::task::spawn_blocking(move || super::audio::prepare(input, duration, &cancel))
+        let fps = options.fps;
+        tokio::task::spawn_blocking(move || super::audio::prepare(input, duration, fps, &cancel))
             .await
             .map_err(|_| MediaError::Process("声音素材准备失败"))??
     } else {
@@ -38,11 +44,8 @@ pub async fn export_mp4<S: FrameSource>(
     if source.dimensions() != (width, height) || width == 0 || height == 0 {
         return Err(MediaError::InvalidPlan("素材尺寸不一致"));
     }
-    if width > 2560 || height > 1600 {
-        return Err(MediaError::Budget("素材最大 2560 × 1600，请缩小录制范围"));
-    }
     let frame_bytes = width as usize * height as usize * 4;
-    if frame_bytes > options.budget.max_frame_bytes.min(16 << 20) {
+    if frame_bytes > options.budget.max_frame_bytes.min(64 << 20) {
         return Err(MediaError::Budget("单帧解压体积"));
     }
     if !(1..=2).contains(&options.budget.threads) || options.budget.max_output_bytes == 0 {
@@ -62,6 +65,7 @@ pub async fn export_mp4<S: FrameSource>(
     .await
     .map_err(|_| MediaError::Process("准备文件任务失败"))??;
     progress(Progress {
+        written_bytes: 0,
         stage: "preparing",
         frames_done: 0,
         frames_total: sampling.output_frames,
@@ -111,7 +115,7 @@ pub async fn export_mp4<S: FrameSource>(
         "-video_size",
         &format!("{width}x{height}"),
         "-framerate",
-        "30",
+        &options.fps.to_string(),
         "-i",
         "pipe:0",
         "-c:v",
@@ -147,11 +151,17 @@ pub async fn export_mp4<S: FrameSource>(
         "pipe:1",
         "-stats_period",
         "0.2",
-        "-fs",
-        &options.budget.max_output_bytes.to_string(),
         "-f",
         "mp4",
     ]);
+    // FFmpeg parses numeric -fs through a double and rejects i64::MAX.
+    // Unlimited product size omits this CLI option; live disk/budget checks remain.
+    if options.budget.max_output_bytes < i64::MAX as u64 {
+        args.extend(process::args(&[
+            "-fs",
+            &options.budget.max_output_bytes.to_string(),
+        ]));
+    }
     if let Some(audio) = &audio {
         // 第二个输入必须位于所有输出选项前；路径由宿主生成，不接受任意滤镜参数。
         let at = args.iter().position(|a| a == "-c:v").unwrap();
@@ -161,7 +171,7 @@ pub async fn export_mp4<S: FrameSource>(
         args.extend(process::args(&[
             "-filter_complex_threads",
             "1",
-            "-filter_complex_script",
+            "-/filter_complex",
         ]));
         args.push(audio.graph.0.as_os_str().to_owned());
         args.extend(process::args(&[
@@ -221,6 +231,7 @@ pub async fn export_mp4<S: FrameSource>(
         return Err(MediaError::Budget("输出文件大小"));
     }
     progress(Progress {
+        written_bytes: 0,
         stage: "verifying",
         frames_done: 0,
         frames_total: total,
@@ -240,7 +251,15 @@ pub async fn export_mp4<S: FrameSource>(
         },
     )
     .await?;
-    verify_metadata_audio(&metadata, out_w, out_h, total, preset, audio.is_some())?;
+    verify_metadata_audio_at(
+        &metadata,
+        out_w,
+        out_h,
+        total,
+        preset,
+        audio.is_some(),
+        options.fps,
+    )?;
     let decoded = Arc::new(AtomicU32::new(0));
     let decoded2 = decoded.clone();
     let callback = progress.clone();
@@ -291,6 +310,7 @@ pub async fn export_mp4<S: FrameSource>(
         return Err(MediaError::Timeout);
     }
     progress(Progress {
+        written_bytes: 0,
         stage: "committing",
         frames_done: total,
         frames_total: total,
@@ -331,7 +351,7 @@ pub async fn export_mp4<S: FrameSource>(
         source_frames: plan.frames.len() as u32,
         written_frames: total,
         duration_ms: sampling.duration_ms(),
-        fps: SamplingPlan::FPS,
+        fps: options.fps,
         bytes,
         encode_ms: started.elapsed().as_millis() as u64,
         peak_child_bytes: peak.load(Ordering::Relaxed),
@@ -348,6 +368,7 @@ pub(super) fn verify_metadata(
 ) -> Result<(), MediaError> {
     verify_metadata_audio(bytes, width, height, frames, preset, false)
 }
+#[cfg(test)]
 fn verify_metadata_audio(
     bytes: &[u8],
     width: u32,
@@ -355,6 +376,17 @@ fn verify_metadata_audio(
     frames: u32,
     preset: VideoPreset,
     audio: bool,
+) -> Result<(), MediaError> {
+    verify_metadata_audio_at(bytes, width, height, frames, preset, audio, 30)
+}
+fn verify_metadata_audio_at(
+    bytes: &[u8],
+    width: u32,
+    height: u32,
+    frames: u32,
+    preset: VideoPreset,
+    audio: bool,
+    fps: u32,
 ) -> Result<(), MediaError> {
     let value: serde_json::Value =
         serde_json::from_slice(bytes).map_err(|_| MediaError::Verify("元数据格式"))?;
@@ -376,7 +408,7 @@ fn verify_metadata_audio(
                     && s["duration"]
                         .as_str()
                         .and_then(|v| v.parse::<f64>().ok())
-                        .is_some_and(|d| (d - frames as f64 / 30.0).abs() <= 0.1)
+                        .is_some_and(|d| (d - frames as f64 / fps as f64).abs() <= 0.1)
             })
         })
     {
@@ -389,13 +421,13 @@ fn verify_metadata_audio(
             && s["width"] == width
             && s["height"] == height
             && s["nb_frames"] == frames.to_string()
-            && s["avg_frame_rate"] == "30/1"
+            && s["avg_frame_rate"] == format!("{fps}/1")
             && s["color_range"] == "tv"
             && s["color_space"] == "bt709"
             && s["duration"]
                 .as_str()
                 .and_then(|v| v.parse::<f64>().ok())
-                .is_some_and(|d| (d - frames as f64 / 30.0).abs() < 0.002)
+                .is_some_and(|d| (d - frames as f64 / fps as f64).abs() < 0.002)
     }) {
         return Err(MediaError::Verify("视频编码、尺寸、色彩、帧数或时长不符"));
     }

@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct RecordingBudget {
     /// 最大有效录制时长（ms）。
-    pub max_duration_ms: u32,
+    pub max_duration_ms: u64,
     /// 最大帧数（含被合并的重复帧）。
     pub max_frames: u32,
     /// 压缩素材累计写入上限（字节）。
@@ -34,13 +34,12 @@ pub struct RecordingBudget {
 }
 
 impl RecordingBudget {
-    /// 按帧率折算的短演示预算：帧上限 = fps × 120s——固定 1800 帧会让
-    /// 30fps 只有 60s 有效时长，与 120s 时长上限矛盾。
-    pub fn for_fps(fps: u32) -> Self {
+    /// Product length is governed by live space and bounded queues, not short-demo quotas.
+    pub fn for_fps(_fps: u32) -> Self {
         Self {
-            max_duration_ms: 120_000,
-            max_frames: fps.clamp(1, 30).saturating_mul(120),
-            max_spool_bytes: 512 * 1024 * 1024,
+            max_duration_ms: u64::MAX,
+            max_frames: u32::MAX,
+            max_spool_bytes: u64::MAX,
             queue_frame_cap: 32,
         }
     }
@@ -48,8 +47,6 @@ impl RecordingBudget {
 
 impl Default for RecordingBudget {
     fn default() -> Self {
-        // 短演示预算：120s / 15fps=1800 帧 / 512MB 压缩素材 / 队列 ≤ 2s 缓冲
-        // （1280×720 帧 3.5MB 时 2s ≈ 30 帧，帧更小则按字节换算后放大）。
         Self::for_fps(15)
     }
 }
@@ -141,7 +138,7 @@ pub fn finalize_durations(ts_ms: &[u64], fps: u32) -> Vec<u32> {
     let mut out = Vec::with_capacity(ts_ms.len());
     for i in 0..ts_ms.len() {
         let dur = if i + 1 < ts_ms.len() {
-            ts_ms[i + 1].saturating_sub(ts_ms[i]) as u32
+            ts_ms[i + 1].saturating_sub(ts_ms[i]).min(u32::MAX as u64) as u32
         } else {
             fallback_last
         };
@@ -157,11 +154,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn budget_for_fps_scales_frame_cap_with_fps() {
-        assert_eq!(RecordingBudget::for_fps(15).max_frames, 1800);
-        assert_eq!(RecordingBudget::for_fps(30).max_frames, 3600, "30fps 也应录满 120s");
-        assert_eq!(RecordingBudget::for_fps(5).max_frames, 600);
-        assert_eq!(RecordingBudget::default().max_frames, 1800);
+    fn recording_has_no_short_demo_quota_at_any_supported_fps() {
+        for fps in [10, 15, 24, 30, 60] {
+            let budget = RecordingBudget::for_fps(fps);
+            assert_eq!(budget.max_duration_ms, u64::MAX);
+            assert_eq!(budget.max_frames, u32::MAX);
+            assert_eq!(budget.max_spool_bytes, u64::MAX);
+            assert!(budget.queue_frame_cap <= 32);
+        }
     }
 
     #[test]
@@ -183,7 +183,9 @@ mod tests {
         // 24/32 = 0.75 → 高水位
         assert_eq!(
             decide_overload(24, 32, true, 1.0),
-            OverloadAction::DropDuplicate { interval_factor: 1.0 }
+            OverloadAction::DropDuplicate {
+                interval_factor: 1.0
+            }
         );
     }
 
@@ -191,16 +193,22 @@ mod tests {
     fn decide_overload_unique_at_high_water_backs_off_interval() {
         assert_eq!(
             decide_overload(24, 32, false, 1.0),
-            OverloadAction::Backoff { interval_factor: 1.25 }
+            OverloadAction::Backoff {
+                interval_factor: 1.25
+            }
         );
         // 阶梯累计，上限 2.0
         assert_eq!(
             decide_overload(24, 32, false, 1.5),
-            OverloadAction::Backoff { interval_factor: 1.875 }
+            OverloadAction::Backoff {
+                interval_factor: 1.875
+            }
         );
         assert_eq!(
             decide_overload(24, 32, false, 1.9),
-            OverloadAction::Backoff { interval_factor: 2.0 }
+            OverloadAction::Backoff {
+                interval_factor: 2.0
+            }
         );
     }
 
@@ -214,7 +222,9 @@ mod tests {
     fn decide_overload_duplicate_at_full_queue_dropped_not_stopped() {
         assert_eq!(
             decide_overload(32, 32, true, 1.4),
-            OverloadAction::DropDuplicate { interval_factor: 1.4 }
+            OverloadAction::DropDuplicate {
+                interval_factor: 1.4
+            }
         );
     }
 
@@ -231,7 +241,11 @@ mod tests {
         let ts = [0, 66, 266];
         let d = finalize_durations(&ts, 15);
         assert_eq!(d, vec![66, 200, 66]);
-        assert_eq!(d.iter().map(|x| *x as u64).sum::<u64>(), 332, "总时长=最后时间戳+末帧");
+        assert_eq!(
+            d.iter().map(|x| *x as u64).sum::<u64>(),
+            332,
+            "总时长=最后时间戳+末帧"
+        );
     }
 
     #[test]

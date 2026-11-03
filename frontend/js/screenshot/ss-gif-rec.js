@@ -62,6 +62,8 @@ const state = {
     cancelArmed: false,
     cancelTimer: 0,
     stopping: false,
+    textInputs: new Set(),
+    resumeAfterText: false,
 };
 
 function toolbarEl() {
@@ -116,6 +118,8 @@ export async function enterGifRecordOverlay(regionPhys, sessionId) {
     state.active = true;
     state.sessionId = sessionId;
     state.stopping = false;
+    state.textInputs.clear();
+    state.resumeAfterText = false;
     state.desktopMode = false;
     state.regionPhys = {...regionPhys};
     state.phase = 'recording';
@@ -164,8 +168,7 @@ export async function enterGifRecordOverlay(regionPhys, sessionId) {
     ss.gifRecHooks = {
         allowsTool: tool => REC_TOOLS.has(tool),
         adjustTextPlacement,
-        onTextInputOpen: () => invoke('gif_overlay_focusable', {focusable: true}).catch(() => {}),
-        onTextInputClose: () => invoke('gif_overlay_focusable', {focusable: false}).catch(() => {}),
+        onTextInputOpen: openRecordingTextInput,
     };
 
     // 默认「操作桌面」模式（§5.7.2：默认鼠标穿透，已有涂画继续显示）
@@ -253,6 +256,7 @@ function applyRecorderState(p) {
     state.elapsedBase = p.elapsedMs ?? state.elapsedBase;
     state.elapsedAt = performance.now();
     state.frames = p.frames ?? state.frames;
+    state.storage = p.storage;state.targetFps = p.targetFps;state.actualFps = p.actualFps;
     renderRecState();
 }
 
@@ -271,9 +275,18 @@ function renderRecState() {
     setButtonsDisabled(false);
     const paused = state.phase === 'paused';
     document.body.classList.toggle(PAUSED_CLASS, paused);
-    stateEl.textContent = paused ? '已暂停（可继续或停止）' : '录制中';
+    stateEl.textContent = paused ? (state.storage?.pauseReason === 'low_space' ? '空间不足 · 已暂停' : state.storage?.pauseReason === 'space_unavailable' ? '空间查询失败 · 已暂停' : '已暂停（可继续或停止）') : '录制中';
     if (timeEl) timeEl.textContent = formatTimecode(currentElapsedMs());
-    if (framesEl) framesEl.textContent = `${state.frames} 帧`;
+    if (framesEl) {
+        framesEl.textContent = state.targetFps ? `${Number(state.actualFps || 0).toFixed(1)}/${state.targetFps} fps` : `${state.frames} 帧`;
+        framesEl.title = `实际 / 目标帧率 · 已采集 ${state.frames} 帧（包含合并的重复画面）`;
+    }
+    const storageEl=el('gif-rec-storage'), storage=state.storage;
+    if(storageEl && storage) {
+        const mib=n=>(n/1024/1024).toFixed(1);
+        storageEl.textContent=`${mib(storage.materialBytes)} MiB · ${storage.disk ? '余 '+(storage.disk.availableBytes/1024**3).toFixed(1)+' GiB':'空间未知'}${storage.warning && !storage.pauseReason ? ' · 空间偏低' : ''}`;
+        storageEl.title=`素材盘 ${storage.disk?.volume || '未知'}\n声音 ${mib(storage.audioBytes)} MiB\n${storage.bytesPerSecond ? mib(storage.bytesPerSecond)+' MiB/s':'增长速度尚未稳定'}\n预留 ${mib(storage.reserveBytes)} MiB`;
+    }
     if (pauseBtn) {
         const icons = pauseBtn.querySelectorAll('.icon');
         if (icons.length === 2) {
@@ -510,18 +523,82 @@ async function togglePause() {
 
 // ── 文字输入适配（输入框外置出录制区域 + 焦点申请） ─────────────────────
 
-/** 纯函数：录制叠层下文字输入框外置——原位在录制区域内会入成品，
- *  挪到区域正下方；区域外原位保持。 */
-export function placeTextOutsideRegion(cssPos, sel) {
+/** 优先放在选区外，四侧均无空间时保留可见输入位置，由输入生命周期暂停采集。 */
+export function placeTextOutsideRegion(cssPos, sel, viewport = {w: Infinity, h: Infinity}, size = {w: 0, h: 0}) {
     if (!sel) return cssPos;
-    const inside = cssPos.x >= sel.x && cssPos.x <= sel.x + sel.w
-        && cssPos.y >= sel.y && cssPos.y <= sel.y + sel.h;
-    if (!inside) return cssPos;
-    return {x: cssPos.x, y: sel.y + sel.h + 8};
+    const clamp = pos => ({
+        x: Math.max(8, Math.min(pos.x, viewport.w - size.w - 8)),
+        y: Math.max(8, Math.min(pos.y, viewport.h - size.h - 8)),
+    });
+    const candidates = [
+        {x: cssPos.x, y: sel.y + sel.h + 8},
+        {x: cssPos.x, y: sel.y - size.h - 8},
+        {x: sel.x + sel.w + 8, y: cssPos.y},
+        {x: sel.x - size.w - 8, y: cssPos.y},
+    ];
+    const original = clamp(cssPos);
+    if (!textOverlapsRegion(original, sel, size)) return original;
+    return candidates.map(clamp).find(pos => !textOverlapsRegion(pos, sel, size)) || original;
 }
 
-function adjustTextPlacement(cssPos) {
-    return placeTextOutsideRegion(cssPos, ss.selCss);
+function textOverlapsRegion(pos, sel, size) {
+    return pos.x <= sel.x + sel.w && pos.x + size.w >= sel.x
+        && pos.y <= sel.y + sel.h && pos.y + size.h >= sel.y;
+}
+
+function adjustTextPlacement(cssPos, size) {
+    return placeTextOutsideRegion(cssPos, ss.selCss, {w: window.innerWidth, h: window.innerHeight}, size);
+}
+
+/** 返回所属输入框的收尾函数：只恢复由本次文字编辑主动暂停的同一会话。 */
+async function openRecordingTextInput(pos, size) {
+    const sessionId = state.sessionId;
+    const token = {};
+    state.textInputs.add(token);
+    const current = () => state.active && state.sessionId === sessionId && !state.stopping;
+    const release = async () => {
+        if (!current() || !state.textInputs.delete(token) || state.textInputs.size) return;
+        await invoke('gif_overlay_focusable', {focusable: false});
+        if (!state.resumeAfterText) return;
+        // 输入框已移除、文字已重绘后才续录，防止捕获编辑控件或提交前的一帧。
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        if (!current() || state.textInputs.size) return;
+        const snapshot = await invoke('gif_recorder_state');
+        if (!current() || state.textInputs.size) return;
+        state.resumeAfterText = false;
+        if (snapshot?.sessionId === sessionId && snapshot.phase === 'paused'
+            && !snapshot.audio?.error && !snapshot.storage?.pauseReason) {
+            await invoke('gif_resume_recording');
+        }
+    };
+    try {
+        if (!current()) throw new Error('录制会话已结束');
+        if (textOverlapsRegion(pos, ss.selCss, size)) {
+            let snapshot = await invoke('gif_recorder_state');
+            if (snapshot?.sessionId !== sessionId || !current()) throw new Error('录制会话已切换');
+            if (snapshot.phase === 'recording') {
+                await invoke('gif_pause_recording');
+                const deadline = performance.now() + 3000;
+                do {
+                    snapshot = await invoke('gif_recorder_state');
+                    if (snapshot?.sessionId !== sessionId || !current()) throw new Error('录制会话已结束');
+                    if (snapshot.phase === 'paused') { state.resumeAfterText = true; break; }
+                    if (snapshot.phase !== 'recording' || performance.now() >= deadline) throw new Error('录制尚未暂停，请重试文字输入');
+                    await new Promise(resolve => setTimeout(resolve, 16));
+                } while (true);
+            } else if (snapshot.phase !== 'paused') {
+                throw new Error('请等待录制就绪后再输入文字');
+            }
+            applyRecorderState(snapshot);
+        }
+        await invoke('gif_overlay_focusable', {focusable: true});
+        if (!current()) throw new Error('录制会话已结束');
+        return release;
+    } catch (error) {
+        await release().catch(() => {});
+        showTransientHint(`文字输入失败：${normalizeError(error).message}`, {isError: true, duration: 3000});
+        throw error;
+    }
 }
 
 /** 绑定录制面按钮（index.js 初始化调用一次）。 */

@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use tauri::{AppHandle, Manager};
 
-use blink_domain::gif::{SessionDraftFile, Timeline, TimelineDraft, TIMELINE_DRAFT_VERSION};
+use blink_domain::gif::{SessionDraftFile, TIMELINE_DRAFT_VERSION, Timeline, TimelineDraft};
 use blink_infra::gif::{self as infra_gif, SpoolReader};
 
 use crate::app::gif_service::GifService;
@@ -33,6 +33,7 @@ pub(crate) struct DraftState {
     generation: u64,
     /// 是否有待写盘的变更。
     dirty: bool,
+    saved_revision: Option<u64>,
 }
 
 /// 播放位置更新（前端定位提交；与编辑保存共用防抖链）。
@@ -111,8 +112,14 @@ pub(crate) fn flush_draft(app: &AppHandle, session_id: &str) {
 
 /// 退出时也保存已切走会话中尚在防抖的编辑。
 pub(crate) fn flush_all_drafts(app: &AppHandle) {
-    let ids: Vec<_> = app.state::<Arc<GifService>>().drafts
-        .lock().unwrap_or_else(|e| e.into_inner()).keys().cloned().collect();
+    let ids: Vec<_> = app
+        .state::<Arc<GifService>>()
+        .drafts
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .keys()
+        .cloned()
+        .collect();
     for id in ids {
         flush_draft(app, &id);
     }
@@ -136,8 +143,11 @@ fn save_to(service: &Arc<GifService>, root: &Path, session_id: &str) -> Result<(
     let Some(state) = drafts.get_mut(session_id).filter(|s| s.dirty) else {
         return Ok(());
     };
-    let (draft, identity) = {
-        let identities = service.session_identity.lock().unwrap_or_else(|e| e.into_inner());
+    let (draft, identity, revision) = {
+        let identities = service
+            .session_identity
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let play = state.play_pos_ms;
         let Some(&(created_at, material_frames)) = identities.get(session_id) else {
             return Err("缺少素材身份记录，跳过草稿写入".into());
@@ -146,16 +156,25 @@ fn save_to(service: &Arc<GifService>, root: &Path, session_id: &str) -> Result<(
         let Some(tl) = timelines.get(session_id) else {
             return Err("时间轴不在内存，跳过草稿写入".into());
         };
-        (tl.to_draft(play), (created_at, material_frames))
+        (
+            (state.saved_revision != Some(tl.revision())).then(|| tl.to_draft(play)),
+            (created_at, material_frames),
+            tl.revision(),
+        )
     };
-    let file = SessionDraftFile {
-        version: TIMELINE_DRAFT_VERSION,
-        session_created_at: identity.0,
-        material_frames: identity.1,
-        draft,
-    };
-    let body = serde_json::to_string(&file).map_err(|e| e.to_string())?;
-    infra_gif::spool::write_draft(&dir, &body).map_err(|e| e.to_string())?;
+    if let Some(draft) = draft {
+        let file = SessionDraftFile {
+            version: TIMELINE_DRAFT_VERSION,
+            session_created_at: identity.0,
+            material_frames: identity.1,
+            draft,
+        };
+        let body = serde_json::to_string(&file).map_err(|e| e.to_string())?;
+        infra_gif::spool::write_draft(&dir, &body).map_err(|e| e.to_string())?;
+    }
+    let position = serde_json::json!({"revision":revision,"createdAt":identity.0,"frames":identity.1,"posMs":state.play_pos_ms});
+    infra_gif::spool::write_position(&dir, &position.to_string()).map_err(|e| e.to_string())?;
+    state.saved_revision = Some(revision);
     // 落地完成：清脏标记（代次保留——后续 schedule 会再递增）
     state.dirty = false;
     Ok(())
@@ -174,29 +193,37 @@ pub enum DraftRestore {
 
 /// 初始化及草稿恢复整体完成后才允许其他命令使用时间轴。
 pub(crate) fn ensure_timeline(
-    service: &Arc<GifService>, reader: &SpoolReader, session_id: &str,
-) -> DraftRestore {
+    service: &Arc<GifService>,
+    reader: &SpoolReader,
+    session_id: &str,
+) -> Result<DraftRestore, String> {
     ensure_timeline_at(service, reader, session_id, &GifService::root())
 }
 
 fn ensure_timeline_at(
-    service: &Arc<GifService>, reader: &SpoolReader, session_id: &str, root: &Path,
-) -> DraftRestore {
-    let _initializing = service.timeline_init.lock().unwrap_or_else(|e| e.into_inner());
+    service: &Arc<GifService>,
+    reader: &SpoolReader,
+    session_id: &str,
+    root: &Path,
+) -> Result<DraftRestore, String> {
+    let _initializing = service
+        .timeline_init
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let fresh = {
         let mut timelines = service.timelines.lock().unwrap_or_else(|e| e.into_inner());
         if timelines.contains_key(session_id) {
             false
         } else {
-            let durs = reader.durations();
-            timelines.insert(session_id.to_string(), Timeline::from_durations(durs));
+            let timings = reader.timings().map_err(|e| e.to_string())?;
+            timelines.insert(session_id.to_string(), Timeline::from_timings(timings));
             true
         }
     };
     if fresh {
-        try_restore_draft(service, session_id, reader, root)
+        Ok(try_restore_draft(service, session_id, reader, root))
     } else {
-        DraftRestore::Missing
+        Ok(DraftRestore::Missing)
     }
 }
 
@@ -222,7 +249,15 @@ fn try_restore_draft(
         if !file.identity_matches(identity.0, identity.1) {
             return None;
         }
-        let play = file.draft.play_pos_ms;
+        let play = infra_gif::spool::read_position(&root.join("sessions").join(session_id))
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .filter(|v| {
+                v["revision"].as_u64() == Some(file.draft.revision)
+                    && v["createdAt"].as_u64() == Some(identity.0)
+                    && v["frames"].as_u64() == Some(identity.1 as u64)
+            })
+            .and_then(|v| v["posMs"].as_u64())
+            .unwrap_or(file.draft.play_pos_ms);
         Some((file.draft, play))
     })();
     let Some((draft, play_pos)) = restore else {
@@ -231,6 +266,7 @@ fn try_restore_draft(
     };
     // 锁序约定：timelines 单独持有并在写 drafts 前释放（save_now 为
     // drafts → identity → timelines，保持无环）。
+    let saved_revision = draft.revision;
     let restored = {
         let mut timelines = service.timelines.lock().unwrap_or_else(|e| e.into_inner());
         match timelines.get_mut(session_id) {
@@ -252,9 +288,35 @@ fn try_restore_draft(
                 play_pos_ms: play_pos,
                 generation: 0,
                 dirty: false,
+                saved_revision: Some(saved_revision),
             },
         );
     DraftRestore::Restored(play_pos)
+}
+
+/// Release inactive index mappings only after their edits reached disk. Failed
+/// saves retain in-memory edits and their lease for a later retry.
+pub(crate) fn release_if_saved(service: &GifService, session_id: &str) {
+    let mut drafts = service.drafts.lock().unwrap_or_else(|e| e.into_inner());
+    if drafts.get(session_id).is_some_and(|s| s.dirty) {
+        return;
+    }
+    service
+        .timelines
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(session_id);
+    service
+        .session_identity
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(session_id);
+    drafts.remove(session_id);
+    service
+        .readers
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(session_id);
 }
 
 /// 删除会话时清理内存草稿/身份数据（目录删除已带走草稿文件）。
@@ -287,10 +349,20 @@ mod tests {
         let meta = infra_gif::SessionMeta {
             spool_version: infra_gif::SPOOL_VERSION,
             id: id.clone(),
-            region: infra_gif::CaptureRegion { x: 0, y: 0, w: 8, h: 8 },
-            fps: 10, show_cursor: false, created_at: 42,
-            state: "recording".into(), ts_ms: vec![], last_dur_ms: 100,
-            spool_bytes: 0, stop_reason: None,
+            region: infra_gif::CaptureRegion {
+                x: 0,
+                y: 0,
+                w: 8,
+                h: 8,
+            },
+            fps: 10,
+            show_cursor: false,
+            created_at: 42,
+            state: "recording".into(),
+            ts_ms: vec![],
+            last_dur_ms: 100,
+            spool_bytes: 0,
+            stop_reason: None,
         };
         let mut writer = infra_gif::SpoolWriter::create(root, meta).unwrap();
         writer.append_frame(0, &[0; 256]).unwrap();
@@ -305,12 +377,27 @@ mod tests {
         let reader = material(root.path());
         let id = &reader.meta.id;
         let service = Arc::new(GifService::new());
-        assert_eq!(ensure_timeline_at(&service, &reader, id, root.path()), DraftRestore::Missing);
-        service.timelines.lock().unwrap().get_mut(id).unwrap()
-            .apply(&EditCommand::SetSpeed { factor: 2.0 }).unwrap();
-        service.drafts.lock().unwrap().insert(id.clone(), DraftState {
-            play_pos_ms: 75, dirty: true, generation: 1,
-        });
+        assert_eq!(
+            ensure_timeline_at(&service, &reader, id, root.path()).unwrap(),
+            DraftRestore::Missing
+        );
+        service
+            .timelines
+            .lock()
+            .unwrap()
+            .get_mut(id)
+            .unwrap()
+            .apply(&EditCommand::SetSpeed { factor: 2.0 })
+            .unwrap();
+        service.drafts.lock().unwrap().insert(
+            id.clone(),
+            DraftState {
+                play_pos_ms: 75,
+                dirty: true,
+                generation: 1,
+                saved_revision: None,
+            },
+        );
         save_to(&service, root.path(), id).unwrap();
         assert!(!service.drafts.lock().unwrap()[id].dirty);
         let raw = infra_gif::read_draft(root.path(), id).unwrap();
@@ -320,9 +407,15 @@ mod tests {
         assert_eq!(file.draft.play_pos_ms, 75);
 
         let reopened = Arc::new(GifService::new());
-        assert_eq!(ensure_timeline_at(&reopened, &reader, id, root.path()), DraftRestore::Restored(75));
+        assert_eq!(
+            ensure_timeline_at(&reopened, &reader, id, root.path()).unwrap(),
+            DraftRestore::Restored(75)
+        );
         assert_eq!(reopened.timelines.lock().unwrap()[id].speed(), 2.0);
-        assert_eq!(ensure_timeline_at(&reopened, &reader, id, root.path()), DraftRestore::Missing);
+        assert_eq!(
+            ensure_timeline_at(&reopened, &reader, id, root.path()).unwrap(),
+            DraftRestore::Missing
+        );
         assert_eq!(reopened.drafts.lock().unwrap()[id].play_pos_ms, 75);
     }
 
@@ -332,13 +425,24 @@ mod tests {
         let reader = material(root.path());
         let id = reader.meta.id.clone();
         let service = Arc::new(GifService::new());
-        ensure_timeline_at(&service, &reader, &id, root.path());
-        service.drafts.lock().unwrap().insert(id.clone(), DraftState { dirty: true, ..Default::default() });
+        ensure_timeline_at(&service, &reader, &id, root.path()).unwrap();
+        service.drafts.lock().unwrap().insert(
+            id.clone(),
+            DraftState {
+                dirty: true,
+                ..Default::default()
+            },
+        );
         let dir = root.path().join("sessions").join(&id);
         std::fs::create_dir(dir.join("draft.json")).unwrap();
         assert!(save_to(&service, root.path(), &id).is_err());
         assert!(service.drafts.lock().unwrap()[&id].dirty);
         drop(reader);
+        assert!(
+            infra_gif::spool::discard_session(root.path(), &id).is_err(),
+            "时间轴仍持有独立素材租约"
+        );
+        service.timelines.lock().unwrap().remove(&id);
         infra_gif::spool::discard_session(root.path(), &id).unwrap();
         assert!(save_to(&service, root.path(), &id).is_err());
         assert!(!dir.exists());

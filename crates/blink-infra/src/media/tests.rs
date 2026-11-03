@@ -10,6 +10,24 @@ fn frames(durations: &[u32]) -> Vec<PlanFrame> {
         .collect()
 }
 #[test]
+fn sixty_fps_long_sampling_crosses_old_limits_with_only_a_sparse_directory() {
+    let frames = FrameList::generated(108_000, |i| PlanFrame {
+        src_idx: i as u32,
+        duration_ms: (((i + 1) as u64 * 1000 / 60) - (i as u64 * 1000 / 60)) as u32,
+    });
+    let plan = SamplingPlan::from_frames(frames, 108_000, &Budget::default(), 60).unwrap();
+    assert_eq!(plan.output_frames, 108_000);
+    assert_eq!(plan.duration_ms(), 1_800_000);
+    assert_eq!(plan.source_index(0), Some(0));
+    assert_eq!(plan.source_index(107_999), Some(107_999));
+    assert_eq!(plan.source_index(108_000), None);
+    assert!(Budget::default().max_output_bytes > 256 << 20);
+    assert!(
+        Budget::for_work(1_800_000, 108_000, 1920, 1080).timeout
+            > std::time::Duration::from_secs(1800)
+    );
+}
+#[test]
 fn cumulative_sampling_has_no_per_frame_rounding_drift() {
     let plan = SamplingPlan::new(&frames(&vec![33; 1000]), 1000, &Budget::default()).unwrap();
     assert_eq!(plan.output_frames, 990);
@@ -51,9 +69,13 @@ fn mixed_deleted_speed_hold_and_tiny_tail_use_cumulative_clock() {
     );
 }
 #[test]
-fn long_hold_rejected_before_allocating_samples() {
+fn long_hold_respects_explicit_budget_without_allocating_samples() {
+    let budget = Budget {
+        max_duration_ms: 600_000,
+        ..Default::default()
+    };
     assert!(matches!(
-        SamplingPlan::new(&frames(&[600_001]), 1, &Budget::default()),
+        SamplingPlan::new(&frames(&[600_001]), 1, &budget),
         Err(MediaError::Budget(_))
     ));
     assert!(SamplingPlan::new(&frames(&[0]), 1, &Budget::default()).is_err());
@@ -289,6 +311,76 @@ impl FrameSource for Synthetic {
     }
 }
 
+#[tokio::test]
+#[ignore = "需要 BLINK_FFMPEG_TEST_ARCHIVE 指向锁定发行包；验证各帧率的有声 MP4 尾部补齐"]
+async fn real_mp4_audio_tail_at_each_frame_rate() {
+    let temp = tempfile::tempdir().unwrap();
+    let _runtime = crate::managed_runtime::ffmpeg::test_archive_lease(temp.path()).await;
+    let task = acquire_task_lease_at(&temp.path().join("task.lock")).unwrap();
+    let audio_dir = temp.path().join("audio");
+    std::fs::create_dir(&audio_dir).unwrap();
+    crate::gif::audio::write_manifest(
+        &audio_dir,
+        &crate::gif::audio::AudioManifest {
+            version: 1,
+            enabled: [true, false],
+            committed_ms: 1001,
+            complete: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let samples: Vec<u8> = (0..48_048)
+        .flat_map(|i| {
+            let v = ((i as f64 * 440.0 * std::f64::consts::TAU / 48_000.0).sin() * 8000.0) as i16;
+            [v.to_le_bytes(), v.to_le_bytes()].concat()
+        })
+        .collect();
+    std::fs::write(crate::gif::audio::track_path(&audio_dir, 0), samples).unwrap();
+    for fps in [10, 15, 24, 30, 60] {
+        let stats = export_mp4(
+            &task,
+            crate::managed_runtime::ffmpeg::test_lease_at(temp.path()),
+            Synthetic {
+                width: 64,
+                height: 64,
+                frames: 1,
+            },
+            VideoPlan {
+                width: 64,
+                height: 64,
+                frames: frames(&[1001]).into(),
+            },
+            VideoOptions {
+                fps,
+                audio: Some(AudioInput {
+                    dir: audio_dir.clone(),
+                    spans: vec![AudioSpan {
+                        source_ms: 0,
+                        sound_ms: 1001,
+                        silence_ms: 0,
+                        output_ms: 1001,
+                    }],
+                    gain: [1.0, 0.0],
+                }),
+                ..Default::default()
+            },
+            temp.path().join(format!("audio-{fps}.mp4")),
+            tokio_util::sync::CancellationToken::new(),
+            Arc::new(|_| {}),
+        )
+        .await
+        .unwrap();
+        assert!(stats.has_audio);
+        assert_eq!(stats.fps, fps);
+        assert_eq!(stats.written_frames, fps + 1);
+        assert_eq!(
+            stats.duration_ms,
+            ((fps as u64 + 1) * 1000).div_ceil(fps as u64)
+        );
+    }
+}
+
 /// 发行包显式注入，真实进程全链路在隔离目录；.20 复用此入口扩展资源样例。
 #[tokio::test]
 #[ignore = "需要 BLINK_FFMPEG_TEST_ARCHIVE 指向锁定发行包，显式运行"]
@@ -299,7 +391,7 @@ async fn real_mp4_pipeline_smoke() {
     let plan = VideoPlan {
         width: 65,
         height: 67,
-        frames: frames(&[33, 66, 700]),
+        frames: frames(&[33, 66, 700]).into(),
     };
     use crate::gif::{
         CaptureRegion, EncodeFrame, EncodePlan, ExportOptions, SessionMeta, SpoolReader,
@@ -408,6 +500,37 @@ async fn real_mp4_pipeline_smoke() {
         0
     );
     eprintln!("real MP4 stats: {stats:?}");
+    let sixty = export_mp4(
+        &task,
+        crate::managed_runtime::ffmpeg::test_lease_at(temp.path()),
+        Synthetic {
+            width: 1920,
+            height: 1080,
+            frames: 60,
+        },
+        VideoPlan {
+            width: 1920,
+            height: 1080,
+            frames: FrameList::generated(60, |i| PlanFrame {
+                src_idx: i as u32,
+                duration_ms: (((i + 1) * 1000 / 60) - (i * 1000 / 60)) as u32,
+            }),
+        },
+        VideoOptions {
+            fps: 60,
+            ..Default::default()
+        },
+        temp.path().join("1080p60.mp4"),
+        tokio_util::sync::CancellationToken::new(),
+        Arc::new(|_| {}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        (sixty.fps, sixty.written_frames, sixty.duration_ms),
+        (60, 60, 1000)
+    );
+    eprintln!("real 1080p60 MP4 stats: {sixty:?}");
     for preset in [
         VideoPreset::General,
         VideoPreset::HighQuality,
@@ -426,7 +549,7 @@ async fn real_mp4_pipeline_smoke() {
             VideoPlan {
                 width: 65,
                 height: 67,
-                frames: frames(&[100]),
+                frames: frames(&[100]).into(),
             },
             VideoOptions {
                 preset: Some(preset),
@@ -451,7 +574,11 @@ async fn real_mp4_pipeline_smoke() {
             }
         );
     }
-    for (w, h, durations) in [(2560, 1600, vec![250; 4]), (64, 64, vec![6000])] {
+    for (w, h, durations) in [
+        (2560, 1600, vec![250; 4]),
+        (64, 64, vec![6000]),
+        (64, 64, vec![1_800_000]),
+    ] {
         let runtime = crate::managed_runtime::ffmpeg::test_lease_at(temp.path());
         let count = durations.len() as u32;
         let stats = export_mp4(
@@ -465,10 +592,11 @@ async fn real_mp4_pipeline_smoke() {
             VideoPlan {
                 width: w,
                 height: h,
-                frames: frames(&durations),
+                frames: frames(&durations).into(),
             },
             VideoOptions::default(),
-            temp.path().join(format!("{w}-{h}.mp4")),
+            temp.path()
+                .join(format!("{w}-{h}-{}.mp4", durations.iter().sum::<u32>())),
             tokio_util::sync::CancellationToken::new(),
             Arc::new(|_| {}),
         )
@@ -495,7 +623,7 @@ async fn real_mp4_pipeline_smoke() {
         VideoPlan {
             width: 65,
             height: 67,
-            frames: frames(&[1000]),
+            frames: frames(&[1000]).into(),
         },
         opts,
         rejected.clone(),
@@ -526,7 +654,7 @@ async fn real_mp4_pipeline_smoke() {
             VideoPlan {
                 width: 65,
                 height: 67,
-                frames: frames(&[500]),
+                frames: frames(&[500]).into(),
             },
             options,
             target.clone(),
@@ -564,4 +692,143 @@ async fn real_mp4_pipeline_smoke() {
             .count(),
         0
     );
+}
+
+#[tokio::test]
+#[ignore = "需要锁定 FFmpeg 发行包；真实静态/滚动/高动态与有声/无声估算校准"]
+async fn real_mp4_estimate_fixtures() {
+    use crate::gif::audio::{self, AudioManifest};
+    use std::io::Write;
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .try_init();
+    let temp = tempfile::tempdir().unwrap();
+    let initial = crate::managed_runtime::ffmpeg::test_archive_lease(temp.path()).await;
+    drop(initial);
+    let task = acquire_task_lease_at(&temp.path().join("task.lock")).unwrap();
+    let audio_dir = temp.path().join("audio");
+    std::fs::create_dir(&audio_dir).unwrap();
+    audio::write_manifest(
+        &audio_dir,
+        &AudioManifest {
+            version: 1,
+            enabled: [true, false],
+            committed_ms: 30_000,
+            complete: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut pcm =
+        std::io::BufWriter::new(std::fs::File::create(audio::track_path(&audio_dir, 0)).unwrap());
+    for i in 0..30 * 48_000 {
+        let v = if i % 109 < 55 { 1000i16 } else { -1000i16 };
+        pcm.write_all(&v.to_le_bytes()).unwrap();
+        pcm.write_all(&v.to_le_bytes()).unwrap();
+    }
+    pcm.flush().unwrap();
+    drop(pcm);
+    struct Content {
+        mode: u32,
+    }
+    impl FrameSource for Content {
+        fn dimensions(&self) -> (u32, u32) {
+            (80, 48)
+        }
+        fn frame_count(&self) -> u32 {
+            300
+        }
+        fn read_bgra(&mut self, index: u32) -> Result<Vec<u8>, MediaError> {
+            let mut pixels = vec![0u8; 80 * 48 * 4];
+            let mut random = index.wrapping_add(7);
+            for (i, p) in pixels.chunks_exact_mut(4).enumerate() {
+                let v = match self.mode {
+                    0 => ((i / 80 / 8 + i % 80 / 8) % 2 * 180) as u8,
+                    1 => (((i / 80 + index as usize) / 6) % 2 * 180) as u8,
+                    _ => {
+                        random = random.wrapping_mul(1664525).wrapping_add(1013904223);
+                        (random >> 24) as u8
+                    }
+                };
+                p.copy_from_slice(&[v, v.wrapping_mul(3), v.wrapping_add(30), 255]);
+            }
+            Ok(pixels)
+        }
+    }
+    for (mode, label) in [(0, "static"), (1, "scroll"), (2, "dynamic")] {
+        let plan = VideoPlan {
+            width: 80,
+            height: 48,
+            frames: FrameList::generated(300, |i| PlanFrame {
+                src_idx: i as u32,
+                duration_ms: 100,
+            }),
+        };
+        let sample = VideoPlan {
+            frames: FrameList::generated(96, |i| PlanFrame {
+                src_idx: ((i / 32) * (300 - 32) / 2 + i % 32) as u32,
+                duration_ms: 62,
+            }),
+            ..plan.clone()
+        };
+        let sampled = export_mp4(
+            &task,
+            crate::managed_runtime::ffmpeg::test_lease_at(temp.path()),
+            Content { mode },
+            sample,
+            VideoOptions {
+                fps: 10,
+                ..Default::default()
+            },
+            temp.path().join(format!("sample-{label}.mp4")),
+            tokio_util::sync::CancellationToken::new(),
+            Arc::new(|_| {}),
+        )
+        .await
+        .unwrap();
+        for has_audio in [false, true] {
+            let audio = has_audio.then(|| AudioInput {
+                dir: audio_dir.clone(),
+                spans: vec![super::audio::Span {
+                    source_ms: 0,
+                    sound_ms: 30_000,
+                    silence_ms: 0,
+                    output_ms: 30_000,
+                }],
+                gain: [1.0, 0.0],
+            });
+            let actual = export_mp4(
+                &task,
+                crate::managed_runtime::ffmpeg::test_lease_at(temp.path()),
+                Content { mode },
+                plan.clone(),
+                VideoOptions {
+                    fps: 10,
+                    audio,
+                    ..Default::default()
+                },
+                temp.path().join(format!("actual-{label}-{has_audio}.mp4")),
+                tokio_util::sync::CancellationToken::new(),
+                Arc::new(|_| {}),
+            )
+            .await
+            .unwrap();
+            assert_eq!(actual.has_audio, has_audio);
+            let range = estimate::mp4_size_range(sampled.bytes, 96 * 62, 30_000, has_audio);
+            tracing::info!(
+                label,
+                has_audio,
+                lower = range.lower,
+                upper = range.upper,
+                actual = actual.bytes,
+                peak = actual.peak_child_bytes,
+                "MP4 estimate fixture"
+            );
+            assert!(
+                actual.bytes >= range.lower && actual.bytes <= range.upper,
+                "{label} audio={has_audio}: actual={} range={range:?}",
+                actual.bytes
+            );
+        }
+    }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "blink"
-version = "0.28.24"
+version = "0.28.25"
 edition = "2024"
 description = "Blink — Windows Universal Action Layer"
 license = "MIT"
@@ -32,6 +32,12 @@ opt-level = 3
 [profile.dev.package.adler2]
 opt-level = 3
 [profile.dev.package.flate2]
+opt-level = 3
+[profile.dev.package.zstd-sys]
+opt-level = 3
+[profile.dev.package.zstd-safe]
+opt-level = 3
+[profile.dev.package.zstd]
 opt-level = 3
 
 [workspace.lints.clippy]

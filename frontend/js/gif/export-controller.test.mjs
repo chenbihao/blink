@@ -129,3 +129,41 @@ test('editable paths normalize on export, Enter respects IME, and stale file pic
     assert.deepEqual(path.selection,[path.value.length,path.value.length]);
     controller.dispose();
 });
+
+
+test('bounded estimates discard old settings and yield immediately to an explicit export',async()=>{
+    calls.length=0;status=null;runtime={state:'ready'};
+    node('export-dialog').close();node('export-format').value='mp4';node('export-fps').value='60';
+    const timers=[],estimates=[];
+    const oldTimer=window.setTimeout,oldInvoke=window.__TAURI__.core.invoke;
+    window.setTimeout=callback=>{timers.push(callback);return timers.length;};
+    window.__TAURI__.core.invoke=async(command,args)=>{
+        if(command==='gif_estimate'){calls.push({command,args});return new Promise(resolve=>estimates.push(resolve));}
+        return oldInvoke(command,args);
+    };
+    let controller;
+    try {
+        controller=createExportController();controller.setSession('one');controller.setSource({fps:60});
+        click('btn-export');await flush();
+        const old=timers.at(-1)();await flush();
+        node('export-size').value='800';node('export-size').handlers.change();
+        estimates[0]({lowerBytes:1,upperBytes:2});await old;
+        assert.equal(node('export-estimate').textContent,'估算中…');
+        const current=timers.at(-1)();await flush();
+        estimates[1]({lowerBytes:1<<20,upperBytes:2<<20,sourceDisk:{volume:'C:',availableBytes:100<<20},targetDisk:null,extraBytes:3<<20,audioEstimated:true});
+        await current;assert.match(node('export-estimate').textContent,/1.0.*2.0/);
+        assert.match(node('export-estimate').textContent,/声音按保守范围预留/);
+        node('export-quality').handlers.change();
+        const preempted=timers.at(-1)();await flush();
+        node('export-path').value='C:\\result.mp4';
+        const started=click('btn-export-confirm');await flush();
+        const begin=calls.findLastIndex(c=>c.command==='gif_begin_export');
+        assert.equal(calls[begin-1].command,'gif_cancel_estimate');
+        assert.equal(calls[begin].args.request.fps,60);
+        estimates[2]({lowerBytes:0,upperBytes:0});await preempted;
+        status=job('estimate-preempt',2,'done');beginResolve('estimate-preempt');await started;await flush();
+        assert.match(node('export-progress-text').textContent,/完成/);
+    } finally {
+        controller?.dispose();window.setTimeout=oldTimer;window.__TAURI__.core.invoke=oldInvoke;
+    }
+});

@@ -20,6 +20,7 @@ pub struct JobSnapshot {
     pub sequence: u64,
     pub stage: String,
     pub frames_done: u32,
+    pub written_bytes: u64,
     pub frames_total: u32,
     pub stats: Option<serde_json::Value>,
     pub error: Option<String>,
@@ -39,10 +40,12 @@ struct Active {
 struct State {
     active: Option<Active>,
     history: VecDeque<JobSnapshot>,
+    pending_export: bool,
 }
 #[derive(Default)]
 pub struct MediaService {
     state: Mutex<State>,
+    reservation: Mutex<()>,
 }
 static SERVICE: OnceLock<Arc<MediaService>> = OnceLock::new();
 pub fn shared() -> Arc<MediaService> {
@@ -77,6 +80,17 @@ pub async fn shutdown() {
 }
 type Notify = Arc<dyn Fn(JobSnapshot) + Send + Sync>;
 
+struct PendingExport(Arc<MediaService>);
+impl Drop for PendingExport {
+    fn drop(&mut self) {
+        self.0
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pending_export = false;
+    }
+}
+
 impl MediaService {
     /// 文件锁只在阻塞线程申请；调用方随 Job 持有至输入/进程/验证全部结束。
     pub fn reserve(
@@ -87,6 +101,60 @@ impl MediaService {
         runtime_build: Option<String>,
         notify: Notify,
     ) -> Result<Job, MediaError> {
+        let estimating = format.starts_with("estimate_");
+        let _pending = if !estimating {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if state.pending_export
+                || state
+                    .active
+                    .as_ref()
+                    .is_some_and(|a| !a.snapshot.format.starts_with("estimate_"))
+            {
+                return Err(MediaError::Busy);
+            }
+            state.pending_export = true;
+            Some(PendingExport(self.clone()))
+        } else {
+            None
+        };
+        // A real export preempts a low-priority sample; wait for its Job/lease
+        // destruction, not merely for its cancellation token to be signalled.
+        if !format.starts_with("estimate_") {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                let estimating = {
+                    let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(active) = state
+                        .active
+                        .as_ref()
+                        .filter(|a| a.snapshot.format.starts_with("estimate_"))
+                    {
+                        active.cancel.cancel();
+                        active.gif_cancel.store(true, Ordering::Relaxed);
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if !estimating {
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(MediaError::Timeout);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+        let _reservation = self.reservation.lock().unwrap_or_else(|e| e.into_inner());
+        if estimating
+            && self
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .pending_export
+        {
+            return Err(MediaError::Busy);
+        }
         let lease = acquire_task_lease()?;
         self.reserve_with_lease(session_id, revision, format, runtime_build, notify, lease)
     }
@@ -100,7 +168,7 @@ impl MediaService {
         lease: TaskLease,
     ) -> Result<Job, MediaError> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.active.is_some() {
+        if state.active.is_some() || (format.starts_with("estimate_") && state.pending_export) {
             return Err(MediaError::Busy);
         }
         let job_id = format!(
@@ -120,6 +188,7 @@ impl MediaService {
             sequence: 1,
             stage: "preparing".into(),
             frames_done: 0,
+            written_bytes: 0,
             frames_total: 0,
             stats: None,
             error: None,
@@ -153,14 +222,20 @@ impl MediaService {
             .unwrap_or_else(|e| e.into_inner())
             .active
             .as_ref()
-            .map(|a| a.snapshot.session_id == session && !a.snapshot.terminal())
+            .map(|a| {
+                a.snapshot.session_id == session
+                    && !a.snapshot.terminal()
+                    && !a.snapshot.format.starts_with("estimate_")
+            })
             .unwrap_or(false)
     }
 
     pub fn snapshot(&self, session: Option<&str>, job_id: Option<&str>) -> Option<JobSnapshot> {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let matches = |s: &&JobSnapshot| {
-            session.is_none_or(|id| s.session_id == id) && job_id.is_none_or(|id| s.job_id == id)
+            !s.format.starts_with("estimate_")
+                && session.is_none_or(|id| s.session_id == id)
+                && job_id.is_none_or(|id| s.job_id == id)
         };
         state
             .active
@@ -170,6 +245,16 @@ impl MediaService {
             .or_else(|| state.history.iter().rev().find(matches))
             .cloned()
     }
+    pub fn cancel_estimate(&self, session: &str) {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(a) = state.active.as_ref().filter(|a| {
+            a.snapshot.session_id == session && a.snapshot.format.starts_with("estimate_")
+        }) {
+            a.cancel.cancel();
+            a.gif_cancel.store(true, Ordering::Relaxed);
+        }
+    }
+
     pub fn cancel(&self, session: Option<&str>, job_id: Option<&str>) {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(active) = &state.active {
@@ -215,8 +300,13 @@ impl Job {
         let notify = self.notify.clone();
         Arc::new(move |p| {
             if let Some(snapshot) = service.update(&id, |s| {
+                s.frames_done = if s.stage == p.stage {
+                    s.frames_done.max(p.frames_done)
+                } else {
+                    p.frames_done
+                };
                 s.stage = p.stage.into();
-                s.frames_done = p.frames_done;
+                s.written_bytes = s.written_bytes.max(p.written_bytes);
                 s.frames_total = p.frames_total;
             }) {
                 notify(snapshot);
@@ -304,6 +394,7 @@ mod tests {
             Err(MediaError::Busy)
         ));
         callback(blink_infra::media::Progress {
+            written_bytes: 0,
             stage: "encoding",
             frames_done: 2,
             frames_total: 3,
@@ -324,6 +415,7 @@ mod tests {
         service.cancel(None, Some(&first));
         assert!(!next.cancel.is_cancelled());
         callback(blink_infra::media::Progress {
+            written_bytes: 0,
             stage: "encoding",
             frames_done: 3,
             frames_total: 3,
@@ -348,5 +440,48 @@ mod tests {
         }
         assert_eq!(service.state.lock().unwrap().history.len(), 16);
         assert!(service.snapshot(None, Some(&first)).is_none());
+
+        let low = service
+            .reserve("sample".into(), 1, "estimate_gif", None, Arc::new(|_| {}))
+            .unwrap();
+        assert!(!service.has_active_job("sample"));
+        assert!(service.snapshot(Some("sample"), None).is_none());
+        let token = low.cancel.clone();
+        let probe = token.clone();
+        let cleaned = Arc::new(AtomicBool::new(false));
+        let observed = cleaned.clone();
+        let (permit, wait) = std::sync::mpsc::channel();
+        let cleaner = std::thread::spawn(move || {
+            while !token.is_cancelled() {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            wait.recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            observed.store(true, Ordering::Relaxed);
+            low.finish(Err(("media_cancelled".into(), "cancelled".into())));
+        });
+        let exporting = service.clone();
+        let starter = std::thread::spawn(move || {
+            exporting.reserve("real".into(), 2, "gif", None, Arc::new(|_| {}))
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !probe.is_cancelled() {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(matches!(
+            service.reserve("skipped".into(), 1, "estimate_gif", None, Arc::new(|_| {})),
+            Err(MediaError::Busy)
+        ));
+        assert!(matches!(
+            service.reserve("parallel".into(), 1, "gif", None, Arc::new(|_| {})),
+            Err(MediaError::Busy)
+        ));
+        permit.send(()).unwrap();
+        let real = starter.join().unwrap().unwrap();
+        assert!(cleaned.load(Ordering::Relaxed));
+        cleaner.join().unwrap();
+        assert!(!real.cancel.is_cancelled());
+        real.finish(Ok(serde_json::json!({})));
     }
 }

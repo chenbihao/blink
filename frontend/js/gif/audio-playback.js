@@ -4,9 +4,9 @@ export function locateAudio(spans, outputMs) {
     for (let i = 0; i < (spans || []).length; i++) {
         const s = spans[i], end = at + s.outputMs;
         if (outputMs < end) {
-            const rate = (s.soundMs + s.silenceMs) / s.outputMs;
+            const rate = s.speed ?? (s.soundMs + s.silenceMs) / s.outputMs;
             const offset = Math.max(0, outputMs - at) * rate;
-            return {span: i, sourceMs: s.sourceMs + Math.min(offset, s.soundMs), rate, silent: offset >= s.soundMs};
+            return {span: s.key ?? i, sourceMs: s.sourceMs + Math.min(offset, s.soundMs), rate, silent: offset >= s.soundMs};
         }
         at = end;
     }

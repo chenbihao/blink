@@ -2245,6 +2245,10 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
         app::commands::gif_get_frames,
         app::commands::gif_edit,
         app::commands::gif_timeline_page,
+        app::commands::gif_timeline_window,
+        app::commands::gif_estimate,
+        app::commands::gif_cancel_estimate,
+        app::commands::gif_storage_status,
         // 0.28.23：最近录制列表 / 会话缩略图 / 打开切换 / 编辑器入口 / 播放位置草稿
         app::commands::gif_recent_sessions,
         app::commands::gif_session_thumbnail,

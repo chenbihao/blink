@@ -13,25 +13,28 @@
 
 pub mod audio;
 pub mod capture;
-pub mod encode;
-pub mod overload;
-pub mod spool;
+mod capture_ahead;
 #[cfg(target_os = "windows")]
 pub mod capture_windows;
+pub mod encode;
+pub mod overload;
+pub mod space;
+pub mod spool;
+pub mod timing;
 #[cfg(target_os = "windows")]
 pub use capture_windows::{GdiFrameSource, SharedRegionPos};
 
-pub use capture::{spawn_pipeline, CaptureCommand, CaptureCtl, CaptureOutcome, FrameSource};
-pub use overload::{
-    decide_overload, finalize_durations, OverloadAction, RecordingBudget, StopReason,
-    MAX_INTERVAL_FACTOR, QUEUE_HIGH_WATER,
-};
+pub use capture::{CaptureCommand, CaptureCtl, CaptureOutcome, FrameSource, spawn_pipeline};
 pub use encode::{
-    export_gif, EncodeFrame, EncodePlan, ExportError, ExportOptions, ExportQuality,
-    ExportStage, ExportStats,
+    EncodeFrame, EncodePlan, ExportError, ExportOptions, ExportQuality, ExportStage, ExportStats,
+    export_gif,
+};
+pub use overload::{
+    MAX_INTERVAL_FACTOR, OverloadAction, QUEUE_HIGH_WATER, RecordingBudget, StopReason,
+    decide_overload, finalize_durations,
 };
 pub use spool::{
-    cleanup_expired, generate_session_id, list_session_ids, list_summaries, read_draft,
-    read_session_meta, read_summary, write_draft, CaptureRegion, SessionMeta, SessionSummary,
-    SpoolError, SpoolReader, SpoolWriter, SPOOL_VERSION,
+    CaptureRegion, SPOOL_VERSION, SessionMeta, SessionSummary, SpoolError, SpoolReader,
+    SpoolWriter, cleanup_expired, generate_session_id, list_session_ids, list_summaries,
+    read_draft, read_session_meta, read_summary, write_draft,
 };

@@ -9,9 +9,10 @@ export function createExportController({documentRef = document, windowRef = wind
         'export-quality-field','export-preset','export-preset-field','export-preset-note',
         'export-note','export-engine','export-engine-text','btn-export-install','btn-export','btn-pick-path',
         'btn-export-confirm','btn-export-cancel-req','btn-export-close','btn-export-folder','export-progress-row',
-        'export-progress','export-progress-text'].map(id => [id, $(id)]));
+        'export-progress','export-progress-text','export-fps','export-fps-field','export-estimate'].map(id => [id, $(id)]));
     const state = new ExportJobState();
     let pathRevision = 0;
+    let estimateTimer = null, estimateVersion = 0, sourceFps = null;
     let epoch = 0, queryVersion = 0, timer = null, starting = false, disposed = false;
     let availability = null, availabilityError = '', availabilityVersion = 0;
     let statusBusy = false, statusAgain = null, unlisten = null;
@@ -20,8 +21,9 @@ export function createExportController({documentRef = document, windowRef = wind
     const hint = text => { els['export-progress-text'].textContent = text; els['export-progress-row'].classList.remove('hidden'); };
     function render() {
         const mp4 = format() === 'mp4';
-        els['export-note'].textContent = mp4 ? '30fps · 按当前音轨混音设置导出 · 单次播放；循环设置仅用于 GIF。' : 'GIF 此次导出不包含声音（保留原音轨）· 使用时间轴的循环设置。';
+        els['export-note'].textContent = mp4 ? `${els['export-fps'].value || sourceFps || '匹配素材'} fps · 按当前音轨混音设置导出 · 单次播放；循环设置仅用于 GIF。` : 'GIF 此次导出不包含声音（保留原音轨）· 使用时间轴的循环设置。';
         els['export-quality-field'].classList.toggle('hidden', mp4);
+        els['export-fps-field']?.classList.toggle('hidden', !mp4);
         els['export-preset-field'].classList.toggle('hidden', !mp4);
         els['export-preset-note'].classList.toggle('hidden', !mp4);
         els['export-preset-note'].textContent = {
@@ -34,7 +36,7 @@ export function createExportController({documentRef = document, windowRef = wind
         els['export-engine-text'].textContent = availabilityError || (!availability ? '正在检查媒体引擎…' : 'MP4 需要媒体引擎，请在设置中安装或修复 FFmpeg，然后返回此处导出。');
         els['btn-export-confirm'].disabled = !state.sessionId || busy() || (mp4 && availability?.state !== 'ready');
         els['btn-export-cancel-req'].disabled = !state.running;
-        for (const id of ['export-format','export-path','export-size','export-quality','export-preset','btn-pick-path']) els[id].disabled = busy();
+        for (const id of ['export-format','export-path','export-size','export-quality','export-preset','export-fps','btn-pick-path']) els[id].disabled = busy();
         els['btn-export-close'].textContent = busy() ? '后台继续' : '关闭';
         const labels = ['高','中','低（最快）'];
         Array.from(els['export-quality'].options).forEach((option, index) => { option.textContent = labels[index]; });
@@ -43,7 +45,7 @@ export function createExportController({documentRef = document, windowRef = wind
         const view = progressView(snapshot);
         els['export-progress-row'].classList.remove('hidden');
         els['export-progress'].value = view.value;
-        hint(view.text);
+        hint(view.text + (snapshot.writtenBytes ? ` · 已写入 ${(snapshot.writtenBytes/1024/1024).toFixed(1)} MiB` : ''));
         if (snapshot.stage === 'done' && snapshot.stats) {
             const s = snapshot.stats;
             const duration = snapshot.format === 'mp4' ? ` · ${(s.durationMs / 1000).toFixed(2)}s · ${s.hasAudio ? '有声' : '无声'}` : '';
@@ -91,6 +93,43 @@ export function createExportController({documentRef = document, windowRef = wind
         input.setSelectionRange(value.length, value.length);
         input.scrollLeft = input.scrollWidth;
     }
+    function requestData(path = els['export-path'].value.trim()) {
+        return {sessionId: state.sessionId, path, format: format(),
+            maxWidth: els['export-size'].value ? Number(els['export-size'].value) : null,
+            quality: els['export-quality'].value, preset: format() === 'mp4' ? els['export-preset'].value : null,
+            fps: format() === 'mp4' && els['export-fps'].value ? Number(els['export-fps'].value) : null};
+    }
+    function cancelEstimate() {
+        estimateVersion++; clearTimeout(estimateTimer);
+        if (state.sessionId) void invoke('gif_cancel_estimate', {sessionId: state.sessionId}).catch(() => {});
+    }
+    function estimate() {
+        cancelEstimate();
+        if (!state.sessionId || busy() || !els['export-dialog'].open || disposed) return;
+        const version = estimateVersion, captured = epoch;
+        els['export-estimate'].textContent = '估算中…';
+        estimateTimer = windowRef.setTimeout(async () => {
+            if (busy() || version !== estimateVersion || captured !== epoch || disposed) return;
+            const size = n => `${(n / 1024 / 1024).toFixed(1)} MiB`;
+            try {
+                const value = await invoke('gif_estimate', {request: requestData()});
+                if (!value || busy() || version !== estimateVersion || captured !== epoch || disposed) return;
+                const target = value.targetDisk;
+                const sameVolume = target && target.volume.toLowerCase() === value.sourceDisk.volume.toLowerCase();
+                const space = sameVolume ? ` · 同盘额外空间约 ${size(value.extraBytes)}` :
+                    ` · 成品预留约 ${size(value.upperBytes)}` +
+                    (value.audioTempBytes ? ` · 素材盘声音处理约 ${size(value.audioTempBytes)}` : '');
+                els['export-estimate'].textContent = `预计 ${size(value.lowerBytes)}–${size(value.upperBytes)}（抽样范围${value.audioEstimated ? '，声音按保守范围预留' : ''}）` +
+                    (target ? ` · ${target.volume} 可用 ${size(target.availableBytes)}` : ' · 选择目标路径后检查空间') +
+                    ` · 素材盘 ${value.sourceDisk.volume} 可用 ${size(value.sourceDisk.availableBytes)}` + space;
+            } catch (error) {
+                if (version === estimateVersion && captured === epoch && !disposed) {
+                    const e = normalizeError(error);
+                    els['export-estimate'].textContent = e.code === 'media_busy' ? '媒体任务进行中，暂不估算' : `暂无法估算：${e.message}`;
+                }
+            }
+        }, 450);
+    }
     async function start() {
         if (busy() || !state.sessionId) return;
         if (format() === 'mp4' && availability?.state !== 'ready') { hint('请先在设置中安装或修复媒体引擎'); refreshAvailability(); return; }
@@ -99,7 +138,8 @@ export function createExportController({documentRef = document, windowRef = wind
         const path = exportPath(entered, format());
         writePath(path);
         const captured = epoch;
-        const request = {sessionId: state.sessionId, path, format: format(), maxWidth: els['export-size'].value ? Number(els['export-size'].value) : null, quality: els['export-quality'].value, preset: format() === 'mp4' ? els['export-preset'].value : null};
+        const request = requestData(path);
+        cancelEstimate();
         starting = true; queryVersion++; state.attach(null);
         els['btn-export-folder'].classList.add('hidden');
         els['export-progress'].value = 0; hint('创建导出任务…'); render();
@@ -120,18 +160,18 @@ export function createExportController({documentRef = document, windowRef = wind
     }
     const open = () => {
         if (!els['export-dialog'].open) els['export-dialog'].showModal();
-        refreshAvailability(); refreshJob(!state.running && !starting); render();
+        refreshAvailability(); refreshJob(!state.running && !starting); render(); estimate();
     };
     const pick = async () => {
         const captured = epoch, selected = format(), revision = ++pathRevision;
         const stamp = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15).replace('T','-');
         try {
             const path = await saveDialog({title: `导出 ${selected.toUpperCase()}`, defaultPath: els['export-path'].value.trim() || `blink-${stamp}.${selected}`, filters: [{name: selected.toUpperCase(), extensions: [selected]}]});
-            if (captured === epoch && revision === pathRevision && format() === selected && !busy() && !disposed && path) writePath(exportPath(path, selected));
+            if (captured === epoch && revision === pathRevision && format() === selected && !busy() && !disposed && path) {writePath(exportPath(path, selected));estimate();}
         } catch (error) { if (captured === epoch && revision === pathRevision && !disposed) hint(normalizeError(error).message); }
     };
-    const change = () => { writePath(exportPath(els['export-path'].value.trim(), format())); render(); refreshAvailability(); };
-    const pathInput = () => { pathRevision++; };
+    const change = () => { writePath(exportPath(els['export-path'].value.trim(), format())); render(); refreshAvailability(); estimate(); };
+    const pathInput = () => { pathRevision++; estimate(); };
     const pathKey = event => {
         if (event.key !== 'Enter' || event.isComposing) return;
         // 文本输入中的 Enter 应提交导出，不能触发 method=dialog 而直接关闭弹窗。
@@ -148,10 +188,10 @@ export function createExportController({documentRef = document, windowRef = wind
         const path = state.snapshot?.stats?.outputPath;
         if (path) invoke('gif_open_containing_folder', {path}).catch(error => hint(normalizeError(error).message));
     };
-    const close = () => els['export-dialog'].close();
+    const close = () => { cancelEstimate(); els['export-dialog'].close(); };
     const focus = () => { if (els['export-dialog'].open) { refreshAvailability(); refreshJob(!state.running && !starting); } };
     const bindings = [['export-path','input',pathInput],['export-path','keydown',pathKey],['btn-export','click',open],['btn-pick-path','click',pick],['btn-export-confirm','click',start],
-        ['export-preset','change',render],['export-format','change',change],['btn-export-cancel-req','click',cancel],['btn-export-install','click',install],
+        ['export-preset','change',() => {render();estimate();}],['export-size','change',estimate],['export-quality','change',estimate],['export-fps','change',() => {render();estimate();}],['export-format','change',change],['btn-export-cancel-req','click',cancel],['btn-export-install','click',install],
         ['btn-export-folder','click',folder],['btn-export-close','click',close]];
     bindings.forEach(([id,event,handler]) => els[id].addEventListener(event, handler));
     windowRef.addEventListener('focus', focus);
@@ -161,12 +201,16 @@ export function createExportController({documentRef = document, windowRef = wind
     render();
     return {
         setSession(sessionId) {
+            cancelEstimate(); sourceFps = null;
             epoch++; queryVersion++; starting = false; clearTimeout(timer); state.reset(sessionId);
             writePath(''); els['export-progress-row'].classList.add('hidden'); els['btn-export-folder'].classList.add('hidden');
             if (els['export-dialog'].open) els['export-dialog'].close();
             render(); refreshJob(true);
         },
+        invalidate: estimate,
+        setSource({fps}) { sourceFps = fps; render(); estimate(); },
         dispose() {
+            cancelEstimate();
             disposed = true; epoch++; clearTimeout(timer); unlisten?.();
             bindings.forEach(([id,event,handler]) => els[id].removeEventListener(event, handler));
             windowRef.removeEventListener('focus', focus);

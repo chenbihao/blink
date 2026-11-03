@@ -18,11 +18,11 @@ use std::collections::HashMap;
 
 use windows::Win32::Foundation::POINT;
 use windows::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, DeleteDC, DeleteObject, DIB_RGB_COLORS,
-    GetDC, GetDIBits, ReleaseDC, SelectObject, HGDIOBJ, HBITMAP,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC,
+    DeleteObject, GetDC, GetDIBits, HBITMAP, HGDIOBJ, ReleaseDC, SelectObject,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorInfo, GetIconInfo, CURSORINFO, CURSOR_SHOWING, HCURSOR, ICONINFO,
+    CURSOR_SHOWING, CURSORINFO, GetCursorInfo, GetIconInfo, HCURSOR, ICONINFO,
 };
 
 use super::capture::FrameSource;
@@ -52,11 +52,25 @@ pub struct GdiFrameSource {
     show_cursor: bool,
     /// HCURSOR → 渲染缓存（自定义光标句柄变化自动 miss 重渲染）。
     cursor_cache: HashMap<isize, Option<RenderedCursor>>,
+    ahead: Option<super::capture_ahead::ReadAhead>,
+    fps: u32,
+    clock: Option<(std::time::Instant, u64)>,
+    frame_stamp: Option<u64>,
 }
 
 impl GdiFrameSource {
     pub fn new(x: i32, y: i32, w: u32, h: u32, show_cursor: bool) -> Self {
         Self::with_shared_pos(x, y, w, h, show_cursor, None)
+    }
+
+    pub fn with_fps(mut self, fps: u32) -> Self {
+        self.fps = fps;
+        self
+    }
+    pub fn resume_at(&mut self, anchor: std::time::Instant, offset: u64) {
+        self.ahead.take();
+        self.clock = Some((anchor, offset));
+        self.frame_stamp = None;
     }
 
     /// 热更新位置版本：`pos` 与移动命令共享（初始值 x/y 在此写入）。
@@ -81,12 +95,40 @@ impl GdiFrameSource {
             h,
             show_cursor,
             cursor_cache: HashMap::new(),
+            ahead: None,
+            fps: 0,
+            clock: None,
+            frame_stamp: None,
         }
     }
 }
 
 impl FrameSource for GdiFrameSource {
     fn capture(&mut self) -> Result<Vec<u8>, String> {
+        if self.fps > 30 {
+            if self.ahead.is_none() {
+                let (x, y, w, h, cursor, pos) = (
+                    self.fixed_x,
+                    self.fixed_y,
+                    self.w,
+                    self.h,
+                    self.show_cursor,
+                    self.pos.clone(),
+                );
+                let factory = std::sync::Arc::new(move || {
+                    let mut source = GdiFrameSource::new(x, y, w, h, cursor);
+                    source.pos = pos.clone();
+                    Box::new(source) as Box<dyn FrameSource>
+                });
+                let (anchor, offset) = self.clock.unwrap_or((std::time::Instant::now(), 0));
+                self.ahead = Some(super::capture_ahead::ReadAhead::new(
+                    factory, self.fps, anchor, offset,
+                )?);
+            }
+            let frame = self.ahead.as_mut().unwrap().capture()?;
+            self.frame_stamp = Some(frame.at_ms);
+            return Ok(frame.pixels);
+        }
         // 有共享位置时每帧读取（拖动中热更新）；否则用构造时的固定值。
         let (x, y) = match &self.pos {
             Some(p) => p.lock().map(|g| *g).unwrap_or((0, 0)),
@@ -94,10 +136,24 @@ impl FrameSource for GdiFrameSource {
         };
         let mut frame =
             crate::platform::screenshot::capture_region_continuous(x, y, self.w, self.h)?;
-        if self.show_cursor && blend_current_cursor(&mut frame, self.w, self.h, x, y, &mut self.cursor_cache) {
+        if self.show_cursor
+            && blend_current_cursor(&mut frame, self.w, self.h, x, y, &mut self.cursor_cache)
+        {
             // 已原地叠加
         }
         Ok(frame)
+    }
+
+    fn timestamp_ms(&self, fallback: u64) -> u64 {
+        self.frame_stamp.unwrap_or(fallback).min(fallback)
+    }
+    fn resume(&mut self, offset: u64) -> Result<std::time::Instant, String> {
+        let now = std::time::Instant::now();
+        self.resume_at(now, offset);
+        Ok(now)
+    }
+    fn pause(&mut self, _: u64) {
+        self.ahead.take();
     }
 
     fn frame_bytes(&self) -> usize {
@@ -325,7 +381,14 @@ fn compose_icon(info: &ICONINFO) -> Option<RenderedCursor> {
 }
 
 /// 光标混合：source-over；alpha=1 哨兵 → 反转 dst。越界自动裁剪。
-fn blend(frame: &mut [u8], frame_w: u32, frame_h: u32, c: &RenderedCursor, origin_x: i32, origin_y: i32) {
+fn blend(
+    frame: &mut [u8],
+    frame_w: u32,
+    frame_h: u32,
+    c: &RenderedCursor,
+    origin_x: i32,
+    origin_y: i32,
+) {
     for cy in 0..c.h as i32 {
         for cx in 0..c.w as i32 {
             let fx = origin_x + cx;
@@ -348,11 +411,12 @@ fn blend(frame: &mut [u8], frame_w: u32, frame_h: u32, c: &RenderedCursor, origi
             }
             // source-over（帧 alpha 恒 255）
             let inv = 255 - a;
-            frame[di] = ((c.bgra[si] as u16 * a as u16 + frame[di] as u16 * inv as u16) / 255) as u8;
-            frame[di + 1] =
-                ((c.bgra[si + 1] as u16 * a as u16 + frame[di + 1] as u16 * inv as u16) / 255) as u8;
-            frame[di + 2] =
-                ((c.bgra[si + 2] as u16 * a as u16 + frame[di + 2] as u16 * inv as u16) / 255) as u8;
+            frame[di] =
+                ((c.bgra[si] as u16 * a as u16 + frame[di] as u16 * inv as u16) / 255) as u8;
+            frame[di + 1] = ((c.bgra[si + 1] as u16 * a as u16 + frame[di + 1] as u16 * inv as u16)
+                / 255) as u8;
+            frame[di + 2] = ((c.bgra[si + 2] as u16 * a as u16 + frame[di + 2] as u16 * inv as u16)
+                / 255) as u8;
         }
     }
 }
@@ -362,6 +426,68 @@ fn blend(frame: &mut [u8], frame_w: u32, frame_h: u32, c: &RenderedCursor, origi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "读取真实桌面，仅显式运行；素材在独立临时目录并自动清理"]
+    fn native_recording_matrix() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .try_init();
+        use super::super::{capture::*, overload::*, spool::*};
+        let displays = crate::platform::screenshot::list_displays();
+        let display = displays.first().expect("需要可用桌面");
+        let root = tempfile::tempdir().unwrap();
+        // Require at least 90% of the target for 1080p30/60 and 720p60.
+        // Larger regions remain measured best-effort, with actual FPS exposed.
+        for (wanted_w, wanted_h, fps, min_fps) in [
+            (1920, 1080, 30, 27.0),
+            (1920, 1080, 60, 54.0),
+            (1280, 720, 60, 54.0),
+            (2560, 1440, 30, 0.0),
+        ] {
+            let w = wanted_w.min(display.w);
+            let h = wanted_h.min(display.h);
+            let meta = SessionMeta {
+                spool_version: SPOOL_VERSION,
+                id: format!("native-{w}-{h}-{fps}"),
+                region: CaptureRegion {
+                    x: display.x,
+                    y: display.y,
+                    w,
+                    h,
+                },
+                fps,
+                show_cursor: true,
+                created_at: 0,
+                state: "recording".into(),
+                ts_ms: vec![],
+                last_dur_ms: 1000 / fps,
+                spool_bytes: 0,
+                stop_reason: None,
+            };
+            let writer = SpoolWriter::create(root.path(), meta).unwrap();
+            let budget = RecordingBudget {
+                max_duration_ms: 5000,
+                max_frames: u32::MAX,
+                max_spool_bytes: 512 << 20,
+                queue_frame_cap: 8,
+            };
+            let mut source = GdiFrameSource::new(display.x, display.y, w, h, true).with_fps(fps);
+            if fps <= 30 {
+                source.capture().expect("原生桌面捕获前置核验");
+            }
+            let (ctl, rx) = spawn_pipeline(source, writer, fps, budget);
+            let started = std::time::Instant::now();
+            ctl.command(CaptureCommand::Start);
+            let outcome = rx.recv_timeout(std::time::Duration::from_secs(15)).unwrap();
+            let actual = ctl.captured_frames() as f64 / started.elapsed().as_secs_f64();
+            tracing::info!(w,h,target=fps,actual,captured=ctl.captured_frames(),retained=outcome.frames,
+                bytes=outcome.spool_bytes,capture_ms=outcome.capture_cost_ms,queue_peak=outcome.peak_queued,
+                reason=?outcome.stop_reason,peak_process_bytes=?crate::platform::process::peak_working_set_bytes(std::process::id()),"native recording matrix");
+            assert_eq!(outcome.stop_reason, StopReason::BudgetExhausted);
+            assert!(actual >= min_fps, "采集吞吐未达支持矩阵：{actual}");
+        }
+    }
 
     #[test]
     fn blend_overwrites_opaque_and_inverts_sentinel() {
@@ -380,7 +506,10 @@ mod tests {
         };
         blend(&mut frame, 4, 4, &c, 1, 1);
         let white = &frame[((1 * 4 + 1) * 4)..][..4];
-        assert_eq!((&white[0], &white[1], &white[2], &white[3]), (&255, &255, &255, &255));
+        assert_eq!(
+            (&white[0], &white[1], &white[2], &white[3]),
+            (&255, &255, &255, &255)
+        );
         let inv = &frame[((1 * 4 + 2) * 4)..][..4];
         assert_eq!(
             (inv[0], inv[1], inv[2]),

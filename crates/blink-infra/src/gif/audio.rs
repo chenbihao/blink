@@ -11,7 +11,8 @@ use std::{
 
 pub const RATE: u32 = 48_000;
 pub const BYTES_PER_MS: u64 = 192;
-pub const MAX_AUDIO_MS: u64 = 120_000;
+/// Arithmetic bound, independent of product duration.
+pub const MAX_AUDIO_MS: u64 = u64::MAX / BYTES_PER_MS;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -169,8 +170,14 @@ pub fn canonical_samples(
         for c in 0..2 {
             let channel = c.min(channels as usize - 1);
             let at = |frame: usize| {
-                if channels <= 2 { input[frame * channels as usize + channel] }
-                else { input[frame * channels as usize..(frame + 1) * channels as usize].iter().sum::<f32>() / channels as f32 }
+                if channels <= 2 {
+                    input[frame * channels as usize + channel]
+                } else {
+                    input[frame * channels as usize..(frame + 1) * channels as usize]
+                        .iter()
+                        .sum::<f32>()
+                        / channels as f32
+                }
             };
             let v = if muted(frame as u64 / 48) {
                 0.0
@@ -240,7 +247,11 @@ pub fn read_wav(dir: &Path, source: usize, end_ms: u64) -> std::io::Result<Vec<u
     if source > 1 || end_ms > MAX_AUDIO_MS {
         return Err(std::io::Error::other("音轨读取超限"));
     }
-    let size = (end_ms * BYTES_PER_MS) as u32;
+    let size = u32::try_from(end_ms * BYTES_PER_MS)
+        .map_err(|_| std::io::Error::other("整轨读取超出内存预算，请使用 Range"))?;
+    if size > 16 << 20 {
+        return Err(std::io::Error::other("整轨读取超出内存预算，请使用 Range"));
+    }
     let mut file = File::open(track_path(dir, source))?;
     let mut out = wav_header(size);
     Read::by_ref(&mut file)
@@ -262,22 +273,25 @@ pub fn read_wav_range(
         return Err(std::io::Error::other("音轨读取超限"));
     }
     let pcm_size = end_ms * BYTES_PER_MS;
-    let total = pcm_size + 44;
+    let header = wav_header_long(pcm_size);
+    let header_len = header.len() as u64;
+    let total = pcm_size
+        .checked_add(header_len)
+        .ok_or_else(|| std::io::Error::other("音轨长度溢出"))?;
     let (start, end) = wav_range(range, total)?;
     let mut bytes = Vec::with_capacity((end - start + 1) as usize);
-    if start < 44 {
-        let header = wav_header(pcm_size as u32);
-        bytes.extend(&header[start as usize..(end + 1).min(44) as usize]);
+    if start < header_len {
+        bytes.extend(&header[start as usize..(end + 1).min(header_len) as usize]);
     }
-    if end >= 44 {
+    if end >= header_len {
         let mut file = File::open(track_path(dir, source))?;
         if file.metadata()?.len() < pcm_size {
             return Err(std::io::Error::other("音轨尾部缺失"));
         }
-        let pcm_start = start.max(44) - 44;
+        let pcm_start = start.max(header_len) - header_len;
         file.seek(SeekFrom::Start(pcm_start))?;
         Read::by_ref(&mut file)
-            .take(end - start.max(44) + 1)
+            .take(end - start.max(header_len) + 1)
             .read_to_end(&mut bytes)?;
     }
     if bytes.len() as u64 != end - start + 1 {
@@ -288,6 +302,12 @@ pub fn read_wav_range(
 fn wav_range(range: Option<&str>, total: u64) -> std::io::Result<(u64, u64)> {
     let invalid = || std::io::Error::other("音轨 Range 无效");
     let Some(range) = range else {
+        if total > 1 << 20 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "长音轨请求必须使用 Range",
+            ));
+        }
         return Ok((0, total - 1));
     };
     let (from, to) = range
@@ -313,7 +333,7 @@ fn wav_range(range: Option<&str>, total: u64) -> std::io::Result<(u64, u64)> {
 pub fn wav_header(size: u32) -> Vec<u8> {
     let mut b = Vec::with_capacity(44);
     b.extend(b"RIFF");
-    b.extend((size + 36).to_le_bytes());
+    b.extend(size.saturating_add(36).to_le_bytes());
     b.extend(b"WAVEfmt ");
     b.extend(16u32.to_le_bytes());
     b.extend(1u16.to_le_bytes());
@@ -326,8 +346,32 @@ pub fn wav_header(size: u32) -> Vec<u8> {
     b.extend(size.to_le_bytes());
     b
 }
+/// RF64 removes RIFF's 4GiB length ceiling while retaining canonical PCM.
+pub fn wav_header_long(size: u64) -> Vec<u8> {
+    if size <= (u32::MAX - 36) as u64 {
+        return wav_header(size as u32);
+    }
+    let mut b = Vec::with_capacity(80);
+    b.extend(b"RF64");
+    b.extend(u32::MAX.to_le_bytes());
+    b.extend(b"WAVEds64");
+    b.extend(28u32.to_le_bytes());
+    b.extend(size.saturating_add(72).to_le_bytes());
+    b.extend(size.to_le_bytes());
+    b.extend((size / 4).to_le_bytes());
+    b.extend(0u32.to_le_bytes());
+    let classic = wav_header(0);
+    b.extend_from_slice(&classic[12..36]);
+    b.extend(b"data");
+    b.extend(u32::MAX.to_le_bytes());
+    b
+}
 pub fn write_packet(file: &mut File, start_frame: u64, samples: &[i16]) -> std::io::Result<()> {
-    if start_frame + (samples.len() / 2) as u64 > MAX_AUDIO_MS * RATE as u64 / 1000 {
+    if samples.len() > RATE as usize * 2
+        || start_frame
+            .checked_add((samples.len() / 2) as u64)
+            .is_none_or(|end| end > u64::MAX / 4)
+    {
         return Err(std::io::Error::other("录制音轨达到时长上限"));
     }
     file.seek(SeekFrom::Start(start_frame * 4))?;
@@ -338,6 +382,28 @@ pub fn write_packet(file: &mut File, start_frame: u64, samples: &[i16]) -> std::
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rf64_keeps_u64_sizes_and_large_reads_require_bounded_ranges() {
+        let size = u32::MAX as u64 + 1;
+        let header = wav_header_long(size);
+        assert_eq!(header.len(), 80);
+        assert_eq!(&header[..4], b"RF64");
+        assert_eq!(u64::from_le_bytes(header[28..36].try_into().unwrap()), size);
+        assert_eq!(
+            u64::from_le_bytes(header[36..44].try_into().unwrap()),
+            size / 4
+        );
+        assert!(wav_range(None, 2 << 20).is_err());
+        assert_eq!(
+            wav_range(Some("bytes=0-"), 10 << 20).unwrap(),
+            (0, (1 << 20) - 1)
+        );
+        assert_eq!(
+            wav_range(Some("bytes=1048576-"), 10 << 20).unwrap(),
+            (1 << 20, (2 << 20) - 1)
+        );
+    }
+
     #[test]
     fn levels_are_numeric_and_silence_is_zero() {
         assert_eq!(levels(&[0.0; 64]), (0.0, 0.0));

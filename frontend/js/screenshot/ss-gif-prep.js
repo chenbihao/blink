@@ -23,8 +23,8 @@ import {audioOptions, enterAudioPrep, stopAudioMonitor, bindAudioControls} from 
 const PREP_MODE_CLASS = 'toolbar-mode-gif-prep';
 
 /** 区域尺寸上限（与后端 gif_service 校验一致；物理像素）。 */
-const REGION_MIN_W = 64, REGION_MAX_W = 2560;
-const REGION_MIN_H = 64, REGION_MAX_H = 1600;
+const REGION_MIN_W = 64;
+const REGION_MIN_H = 64;
 
 /** 工具栏宿主（#toolbar）。 */
 function toolbarEl() {
@@ -42,8 +42,7 @@ function regionSizeValid() {
     if (!ss.selCss) return false;
     const meta = window.__blinkScreenMeta || {vx: 0, vy: 0};
     const bmp = cssRectToBitmap(ss.selCss, meta);
-    return bmp.w >= REGION_MIN_W && bmp.w <= REGION_MAX_W
-        && bmp.h >= REGION_MIN_H && bmp.h <= REGION_MAX_H;
+    return bmp.w >= REGION_MIN_W && bmp.h >= REGION_MIN_H && bmp.w * bmp.h * 4 <= 64 * 1024 * 1024;
 }
 
 /** 进入准备模式：宿主原地切面（位置/跟随/拖动全部继承宿主机制）。
@@ -53,13 +52,17 @@ export function enterGifRecordMode() {
     if (!toolbar || isGifPrepActive()) return;
     if (!regionSizeValid()) {
         showTransientHint(
-            `录制区域超限：宽 ${REGION_MIN_W}–${REGION_MAX_W} / 高 ${REGION_MIN_H}–${REGION_MAX_H}（物理像素），请调整选区`,
+            '录制区域至少 64×64，单帧不超过 64MiB，请调整选区',
             {isError: true, duration: 3000},
         );
         return;
     }
     toolbar.classList.add(PREP_MODE_CLASS);
     enterAudioPrep();
+    const target = document.getElementById('gif-prep-storage');
+    invoke('gif_storage_status').then(disk => {
+        if (isGifPrepActive() && target) {target.textContent = `${(disk.availableBytes / 1024 ** 3).toFixed(1)} GiB 可用`;target.title = `临时素材盘 ${disk.volume}`;}
+    }).catch(() => {if (isGifPrepActive() && target) target.textContent = '空间暂不可用';});
     // 面宽不同（准备面比标注面窄）：按新宽度立即右对齐到选区——否则
     // 首次进入停在旧左边界，拖一次选区才归位。用户拖过宿主则保留位置
     // 仅 clamp（positionToolbar 的 userMoved 语义）。
@@ -96,7 +99,7 @@ export async function startGifRecordingFromPrep() {
     }
     if (!regionSizeValid()) {
         showTransientHint(
-            `录制区域超限：宽 ${REGION_MIN_W}–${REGION_MAX_W} / 高 ${REGION_MIN_H}–${REGION_MAX_H}（物理像素）`,
+            '录制区域至少 64×64，单帧不超过 64MiB',
             {isError: true, duration: 3000},
         );
         return;

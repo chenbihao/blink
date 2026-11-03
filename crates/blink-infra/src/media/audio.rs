@@ -28,6 +28,7 @@ pub(crate) struct PreparedAudio {
 pub(crate) fn prepare(
     input: AudioInput,
     output_ms: u64,
+    fps: u32,
     cancel: &CancellationToken,
 ) -> Result<Option<PreparedAudio>, MediaError> {
     if input.gain.iter().all(|v| *v == 0.0) {
@@ -40,7 +41,7 @@ pub(crate) fn prepare(
         .gain
         .iter()
         .any(|v| !v.is_finite() || !(0.0..=2.0).contains(v))
-        || input.spans.len() > 3600
+        || input.spans.len() > 16384
         || input.spans.is_empty()
     {
         return Err(MediaError::InvalidPlan("音画区间或混音设置无效"));
@@ -48,6 +49,14 @@ pub(crate) fn prepare(
     let end = manifest.committed_ms;
     if end > audio::MAX_AUDIO_MS {
         return Err(MediaError::Budget("声音素材时长"));
+    }
+    let available = crate::platform::disk_space::query(&input.dir)?;
+    if available.available_bytes
+        < end
+            .saturating_mul(BYTES_PER_MS)
+            .saturating_add(crate::gif::space::MIN_RESERVE)
+    {
+        return Err(MediaError::Budget("声音处理中间文件所需空间不足"));
     }
     let wave = TempOutput::create(&input.dir.join("audio-mix.wav"))?;
     let graph = TempOutput::create(&input.dir.join("audio-filter.txt"))?;
@@ -61,7 +70,7 @@ pub(crate) fn prepare(
         return Ok(None);
     }
     let mut out = File::create(&wave.0)?;
-    out.write_all(&audio::wav_header((end * BYTES_PER_MS) as u32))?;
+    out.write_all(&audio::wav_header_long(end * BYTES_PER_MS))?;
     let mut left = end * BYTES_PER_MS;
     let mut buffers = [vec![0u8; 16384], vec![0u8; 16384]];
     while left > 0 {
@@ -89,15 +98,20 @@ pub(crate) fn prepare(
         left -= n as u64;
     }
     out.flush()?;
-    std::fs::write(&graph.0, filter_graph(&input.spans, end, output_ms)?)?;
+    std::fs::write(&graph.0, filter_graph(&input.spans, end, output_ms, fps)?)?;
     Ok(Some(PreparedAudio { wave, graph }))
 }
 pub(crate) fn filter_graph(
     spans: &[Span],
     source_end: u64,
     output_ms: u64,
+    fps: u32,
 ) -> Result<String, MediaError> {
-    if spans.is_empty() || spans.len() > 3600 || output_ms == 0 || output_ms > 600_000 {
+    if spans.is_empty()
+        || spans.len() > 16384
+        || output_ms == 0
+        || ![10, 15, 24, 30, 60].contains(&fps)
+    {
         return Err(MediaError::InvalidPlan("音频区间预算"));
     }
     let mut graph = format!("[1:a]asplit={}", spans.len());
@@ -108,7 +122,6 @@ pub(crate) fn filter_graph(
     let mut total = 0;
     for (i, s) in spans.iter().enumerate() {
         if s.output_ms == 0
-            || s.output_ms > 600_000
             || s.sound_ms == 0
             || s.source_ms
                 .checked_add(s.sound_ms)
@@ -140,7 +153,15 @@ pub(crate) fn filter_graph(
         ));
         total += s.output_ms;
     }
-    if total.abs_diff(output_ms) > 34 {
+    // 视频按实际输出帧率向上补齐；声音仅补同一段尾部静音，不改变语速。
+    let expected_ms = total
+        .checked_mul(fps as u64)
+        .ok_or(MediaError::InvalidPlan("音频时长溢出"))?
+        .div_ceil(1000)
+        .checked_mul(1000)
+        .ok_or(MediaError::InvalidPlan("音频时长溢出"))?
+        .div_ceil(fps as u64);
+    if output_ms != expected_ms {
         return Err(MediaError::InvalidPlan("音视频有效时长不一致"));
     }
     for i in 0..spans.len() {
@@ -158,6 +179,41 @@ pub(crate) fn filter_graph(
 mod tests {
     use super::*;
     #[test]
+    fn audio_tail_matches_the_actual_video_sampling_rate() {
+        use crate::media::{Budget, PlanFrame, SamplingPlan};
+        for fps in [10, 15, 24, 30, 60] {
+            for ms in [1, 10, 999, 1000, 1001, 2345] {
+                let sampling = SamplingPlan::from_frames(
+                    vec![PlanFrame {
+                        src_idx: 0,
+                        duration_ms: ms,
+                    }]
+                    .into(),
+                    1,
+                    &Budget::default(),
+                    fps,
+                )
+                .unwrap();
+                let spans = [Span {
+                    source_ms: 0,
+                    sound_ms: ms as u64,
+                    silence_ms: 0,
+                    output_ms: ms as u64,
+                }];
+                let output = sampling.duration_ms();
+                let graph = filter_graph(&spans, ms as u64, output, fps).unwrap();
+                assert!(graph.contains("atempo=1.000000000"));
+                assert!(graph.ends_with(&format!(
+                    "atrim=end_sample={},asetpts=N/SR/TB[recorded_audio]",
+                    output * 48
+                )));
+                assert!(filter_graph(&spans, ms as u64, output + 1, fps).is_err());
+                assert!(filter_graph(&spans, ms as u64, output, 0).is_err());
+            }
+        }
+    }
+
+    #[test]
     fn graph_cuts_pads_and_preserves_pitch_without_repeating_speech() {
         let graph = filter_graph(
             &[Span {
@@ -168,6 +224,7 @@ mod tests {
             }],
             200,
             100,
+            30,
         )
         .unwrap();
         assert!(graph.contains("start_sample=4800:end_sample=7200"));
@@ -183,8 +240,8 @@ mod tests {
             silence_ms: 0,
             output_ms: 100,
         };
-        assert!(filter_graph(&[s.clone()], 50, 100).is_err());
-        assert!(filter_graph(&[s], 200, 200).is_err());
+        assert!(filter_graph(&[s.clone()], 50, 100, 30).is_err());
+        assert!(filter_graph(&[s], 200, 200, 30).is_err());
     }
     #[test]
     fn source_mix_is_exact_and_cancelled_or_missing_audio_preserves_sources() {
@@ -212,7 +269,7 @@ mod tests {
             gain: [1.0, 0.5],
         };
         let cancel = CancellationToken::new();
-        let prepared = prepare(input.clone(), 10, &cancel).unwrap().unwrap();
+        let prepared = prepare(input.clone(), 34, 30, &cancel).unwrap().unwrap();
         let bytes = std::fs::read(&prepared.wave.0).unwrap();
         assert_eq!(&bytes[..4], b"RIFF");
         assert!(
@@ -225,7 +282,7 @@ mod tests {
         assert!(!temp.exists());
         cancel.cancel();
         assert!(matches!(
-            prepare(input.clone(), 10, &cancel),
+            prepare(input.clone(), 34, 30, &cancel),
             Err(MediaError::Cancelled)
         ));
         assert_eq!(
@@ -234,7 +291,7 @@ mod tests {
         );
         std::fs::remove_file(audio::track_path(dir.path(), 1)).unwrap();
         assert!(matches!(
-            prepare(input, 10, &CancellationToken::new()),
+            prepare(input, 34, 30, &CancellationToken::new()),
             Err(MediaError::Io(_))
         ));
     }

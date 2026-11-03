@@ -58,6 +58,82 @@ test('clampRegionMove：钳制到虚拟屏内（含负坐标多屏），无边�
     assert.deepEqual(clampRegionMove(origin, -100000, 0, null), {x: -99900, y: 100});
 });
 
+test('text input stays visible at the bottom edge, in fullscreen and across scaled viewports', () => {
+    const viewport = {w: 1920, h: 1080}, size = {w: 320, h: 32};
+    assert.deepEqual(placeTextOutsideRegion({x: 200, y: 940}, {x: 100, y: 900, w: 800, h: 180}, viewport, size),
+        {x: 200, y: 860});
+    assert.deepEqual(placeTextOutsideRegion({x: 1900, y: 1070}, {x: 0, y: 0, w: 1920, h: 1080}, viewport, size),
+        {x: 1592, y: 1040});
+    for (const viewport of [{w: 960, h: 540}, {w: 2560, h: 720}]) {
+        const point = placeTextOutsideRegion({x: viewport.w - 1, y: viewport.h - 1},
+            {x: 0, y: 0, ...viewport}, viewport, size);
+        assert.ok(point.x >= 8 && point.x + size.w <= viewport.w - 8);
+        assert.ok(point.y >= 8 && point.y + size.h <= viewport.h - 8);
+    }
+});
+
+function textFixture(initialPhase = 'recording') {
+    const calls = [], paints = [];
+    let phase = initialPhase;
+    const snapshot = () => ({sessionId: 'one', phase, audio: {}, storage: {}});
+    const context = vm.createContext({
+        ss: {selCss: {x: 0, y: 0, w: 1920, h: 1080}},
+        document: {getElementById: () => null}, performance, setTimeout,
+        requestAnimationFrame: fn => paints.push(fn), applyAudioStatus() {},
+        showTransientHint() {}, normalizeError: e => e,
+        invoke: async (cmd, args) => { calls.push({cmd, args}); if (cmd === 'gif_recorder_state') return snapshot(); },
+    });
+    const source = readFileSync(new URL('./ss-gif-rec.js', import.meta.url), 'utf8')
+        .replace(/^import .*;\r?$/gm, '').replace(/export /g, '');
+    vm.runInContext(`${source}\nglobalThis.fixture = {state, openRecordingTextInput};`, context);
+    Object.assign(context.fixture.state, {active: true, sessionId: 'one'});
+    return {...context.fixture, calls, paints, snapshot, setPhase: value => {phase = value;}};
+}
+
+const flush = () => new Promise(resolve => setImmediate(resolve));
+async function flushPaints(f) { await flush(); while (f.paints.length) { f.paints.shift()(); await flush(); } }
+
+test('fullscreen text waits for the real pause and only resumes after the input has disappeared', async () => {
+    const f = textFixture();
+    const open = f.openRecordingTextInput({x: 100, y: 100}, {w: 800, h: 32});
+    await flush();
+    assert.equal(f.calls.some(c => c.cmd === 'gif_pause_recording'), true);
+    assert.equal(f.calls.some(c => c.cmd === 'gif_overlay_focusable'), false);
+    f.setPhase('paused');
+    const release = await open;
+    assert.equal(f.calls.at(-1).args.focusable, true);
+    const close = release();
+    await flush();
+    assert.equal(f.calls.some(c => c.cmd === 'gif_resume_recording'), false);
+    await flushPaints(f); await close;
+    assert.equal(f.calls.at(-1).cmd, 'gif_resume_recording');
+});
+
+test('text cleanup preserves manual pauses and never resumes a replaced recording session', async () => {
+    const f = textFixture('paused');
+    const release = await f.openRecordingTextInput({x: 100, y: 100}, {w: 800, h: 32});
+    await release();
+    assert.equal(f.calls.some(c => c.cmd === 'gif_pause_recording' || c.cmd === 'gif_resume_recording'), false);
+    const staleRelease = await f.openRecordingTextInput({x: 100, y: 100}, {w: 800, h: 32});
+    f.state.sessionId = 'two';
+    const count = f.calls.length;
+    await staleRelease();
+    assert.equal(f.calls.length, count);
+});
+
+test('opening another text input during cleanup postpones the automatic resume', async () => {
+    const f = textFixture();
+    const open = f.openRecordingTextInput({x: 100, y: 100}, {w: 800, h: 32});
+    await flush(); f.setPhase('paused');
+    const release = await open;
+    const close = release(); await flush();
+    const releaseNext = await f.openRecordingTextInput({x: 200, y: 100}, {w: 800, h: 32});
+    await flushPaints(f); await close;
+    assert.equal(f.calls.some(c => c.cmd === 'gif_resume_recording'), false);
+    const closeNext = releaseNext(); await flushPaints(f); await closeNext;
+    assert.equal(f.calls.filter(c => c.cmd === 'gif_resume_recording').length, 1);
+});
+
 test('录制就绪等待透明层绘制；旧会话 idle 不清理新会话，结束时释放定时器', async () => {
     const classes = () => {
         const values = new Set();

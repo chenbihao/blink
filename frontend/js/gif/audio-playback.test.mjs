@@ -42,6 +42,14 @@ test('播放器只从统一时钟同步、静音/暂停不播放，释放旧会�
     assert.equal(elements[0].preservesPitch, true); assert.equal(elements[0].paused, false); assert.equal(elements[1].paused, true);
     p.sync(75, true, spans, mix); assert.equal(elements[0].paused, true);
     p.sync(25, false, spans, mix); assert.equal(elements[0].paused, true);
+    const paged = (sourceMs,key,outputMs=11) => [{sourceMs,key,speed:1.5,soundMs:17,silenceMs:0,outputMs}];
+    p.sync(0,true,paged(2000,'rev:0'),mix);
+    assert.equal(elements[0].playbackRate,1.5);
+    elements[0].currentTime=2.017;
+    p.sync(0,true,paged(2034,'rev:17'),mix);
+    assert.equal(elements[0].currentTime,2.034,'a deleted 17ms gap must seek even below the drift tolerance');
+    p.sync(0,true,paged(2051,'rev:17',12),mix);
+    assert.equal(elements[0].playbackRate,1.5,'millisecond frame rounding must not modulate audio playback rate');
     p.clear(); assert.ok(elements.every(e => e.paused));
     delete window.__TAURI__;
 });

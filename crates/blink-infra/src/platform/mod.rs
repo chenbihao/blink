@@ -6,6 +6,7 @@ pub mod audio;
 pub mod caret; // 0.23.x：前台文本光标矩形（G2 语音浮窗跟随光标）
 pub mod clipboard;
 pub mod context;
+pub mod disk_space;
 #[cfg(windows)]
 pub mod dpi;
 pub mod file_identity; // 0.22.16 H03：平台文件身份原语（AudioResourceRegistry 消费）
@@ -18,6 +19,7 @@ pub mod image_editor;
 pub mod inject;
 pub mod locale;
 pub mod lock; // 0.14.6 §2.3：从 domain/execution/builtin.rs 迁入
+pub mod mapped_file;
 pub mod ocr; // 0.14.7 W2：从 domain/capability/builtins/ocr_engine.rs 迁入
 pub mod process;
 pub mod screenshot;

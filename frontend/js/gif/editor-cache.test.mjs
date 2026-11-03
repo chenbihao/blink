@@ -5,7 +5,7 @@ import vm from 'node:vm';
 
 // 执行编辑器真实的解码/缓存段，DOM 渲染与原生 IPC 使用边界桩。
 const source = readFileSync(new URL('./editor.js', import.meta.url), 'utf8')
-    .split('// ── 时间轴（')[0].replace(/^import .*;\r?$/gm, '');
+    .split('// ── 时间轴（')[0].replace(/^import\s[\s\S]*?;\r?$/gm, '');
 
 function fixture(invoke, createImageBitmap) {
     const context = vm.createContext({
@@ -18,6 +18,7 @@ function fixture(invoke, createImageBitmap) {
     vm.runInContext(`${source}\nglobalThis.fixture = {state, pumpDecode, requestDecode};`, context);
     const {state, pumpDecode, requestDecode} = context.fixture;
     state.sessionId = 'a';
+    state.previewWidth = 1280;
     state.view = {frameCount: 100};
     return {state, pumpDecode, requestDecode};
 }

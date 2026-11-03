@@ -149,7 +149,7 @@ pub fn serve_recording_audio(
         if source > 1 || !manifest.enabled[source] {
             return Err(error("声音来源不存在"));
         }
-        let end = reader.durations().iter().map(|v| *v as u64).sum();
+        let end = reader.total_ms();
         audio::read_wav_range(reader.dir(), source, end, range)
             .map_err(|_| error("声音素材缺失或 Range 无效"))
     };

@@ -12,13 +12,15 @@
 //! - 导出 delay 量化为 GIF 的 1/100s 单位，最小 2（20ms——更小会被多数
 //!   浏览器按 100ms 以上回放），上限 6s（超长停留对演示无意义且兼容性差）。
 
-use std::collections::{BTreeMap, BTreeSet};
+use super::runs::{Change, Runs};
+use std::sync::{Arc, OnceLock};
 
+use blink_infra::media::FrameList;
 use serde::{Deserialize, Serialize};
 
 /// GIF delay 以 10ms 为单位的下限（低于 2 的 delay 被浏览器按 ≥100ms 回放）。
 pub const MIN_DELAY_CS: u32 = 2;
-/// 单帧导出时长上限（60 × 10ms = 600ms 的 10 倍；防止极端 hold 产生不可回放的帧）。
+/// 编辑器手动停留上限；原始素材长静帧不受此限制。
 pub const MAX_DELAY_CS: u32 = 600;
 
 /// 编辑命令（serde 序列化给前端；字段用稳定短名）。
@@ -51,8 +53,22 @@ pub enum EditCommand {
         gain: f32,
         muted: bool,
     },
+    /// Compact batch selection. Ranges are inclusive source indices, validated atomically.
+    EditRanges {
+        operation: RangeOperation,
+        ranges: Vec<(u32, u32)>,
+        ms: u32,
+    },
     /// 重置全部编辑（不可撤销其他命令之后——reset 本身可撤销）。
     Reset,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RangeOperation {
+    Delete,
+    Restore,
+    Hold,
 }
 
 /// 编辑后的单帧导出视图。
@@ -73,7 +89,7 @@ pub struct ExportPlan {
     pub src_w: u32,
     pub src_h: u32,
     /// 量化后的逐帧 delay（单位 1/100s）。
-    pub frames: Vec<PlanFrame>,
+    pub frames: FrameList<PlanFrame>,
     /// None = 无限循环。
     pub loop_count: Option<u16>,
 }
@@ -84,7 +100,7 @@ pub struct ExportSnapshot {
     pub revision: u64,
     pub src_w: u32,
     pub src_h: u32,
-    pub frames: Vec<FrameView>,
+    pub frames: FrameList<FrameView>,
     pub loop_count: Option<u16>,
     pub audio: Vec<AudioSpan>,
     pub mix: [AudioMix; 2],
@@ -121,14 +137,7 @@ impl ExportSnapshot {
             revision: self.revision,
             src_w: self.src_w,
             src_h: self.src_h,
-            frames: self
-                .frames
-                .iter()
-                .map(|f| PlanFrame {
-                    src_idx: f.src_idx,
-                    delay_cs: quantize_delay_ms(f.dur_ms),
-                })
-                .collect(),
+            frames: super::quantized::frames(&self.frames),
             loop_count: self.loop_count,
         }
     }
@@ -141,34 +150,93 @@ pub struct PlanFrame {
     pub delay_cs: u32,
 }
 
-/// 可撤销的编辑核心状态（快照栈的单位；帧数 ≤ 3600，clone 成本可忽略）。
+/// 只保存编辑参数；原始素材基线不进入撤销栈。
 #[derive(Debug, Clone, PartialEq)]
 struct Core {
     trim_start: u32,
     trim_end: u32,
-    deleted: BTreeSet<u32>,
-    /// 删除帧时长置零后的有效素材时长（与 deleted 同步维护）。
-    base_dur_ms: Vec<u32>,
+    deleted: Runs,
     speed: f32,
-    holds: BTreeMap<u32, u32>,
+    holds: Runs,
     loop_count: Option<u16>,
     mix: [AudioMix; 2],
 }
 
 impl Core {
-    fn fresh(base_dur_ms: Vec<u32>) -> Self {
-        let end = base_dur_ms.len().saturating_sub(1) as u32;
+    fn fresh(frame_count: u32) -> Self {
+        let end = frame_count.saturating_sub(1);
         Self {
             trim_start: 0,
             trim_end: end,
-            deleted: BTreeSet::new(),
-            base_dur_ms,
+            deleted: Runs::default(),
             speed: 1.0,
-            holds: BTreeMap::new(),
+            holds: Runs::default(),
             loop_count: None,
             mix: [AudioMix::default(); 2],
         }
     }
+}
+
+/// Undo stores only changed edit parameters, never whole sparse states or material.
+#[derive(Debug, Clone)]
+struct ChangeSet {
+    before: (u32, u32, f32, Option<u16>, [AudioMix; 2]),
+    after: (u32, u32, f32, Option<u16>, [AudioMix; 2]),
+    deleted: Vec<Change>,
+    holds: Vec<Change>,
+}
+impl ChangeSet {
+    fn between(a: &Core, b: &Core) -> Self {
+        let scalar = |c: &Core| (c.trim_start, c.trim_end, c.speed, c.loop_count, c.mix);
+        let deleted = a.deleted.changes(&b.deleted);
+        let holds = a.holds.changes(&b.holds);
+        Self {
+            before: scalar(a),
+            after: scalar(b),
+            deleted,
+            holds,
+        }
+    }
+    fn apply(&self, core: &mut Core, forward: bool) {
+        let (a, b, speed, count, mix) = if forward { self.after } else { self.before };
+        core.trim_start = a;
+        core.trim_end = b;
+        core.speed = speed;
+        core.loop_count = count;
+        core.mix = mix;
+        core.deleted.apply(&self.deleted, forward);
+        core.holds.apply(&self.holds, forward);
+    }
+
+    fn bytes(&self) -> usize {
+        128 + self.deleted.len() * std::mem::size_of::<Change>()
+            + self.holds.len() * std::mem::size_of::<Change>()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PageStart {
+    source: u32,
+    play: usize,
+    output_ms: u64,
+    unscaled_ms: u64,
+    source_ms: u64,
+}
+#[derive(Debug, Default)]
+struct ViewIndex {
+    pages: Vec<PageStart>,
+    count: usize,
+    total_ms: u64,
+}
+
+// Quantize the cumulative edited clock, not each 16/17ms source frame separately.
+// The sparse directory stores both clocks so seeking and export use identical rounding.
+fn scaled_duration(base: u32, speed: f32, unscaled: &mut u64, output: &mut u64) -> u32 {
+    *unscaled = unscaled.saturating_add(base as u64);
+    let target = (*unscaled as f64 / speed as f64).round() as u64;
+    let duration = target.saturating_sub(*output).clamp(1, u32::MAX as u64) as u32;
+    *output = output.saturating_add(duration as u64);
+    duration
 }
 
 /// 时间轴（domain 纯状态；会话存储在 bin/infra 侧）。
@@ -176,12 +244,12 @@ impl Core {
 pub struct Timeline {
     frame_count: u32,
     core: Core,
-    /// 素材原始时长（不可变基线）——`Reset` 恢复用；删除帧把 `core.base_dur_ms`
-    /// 置 0，undo 栈回滚 Core 快照可恢复，但 Reset 不经 undo 栈、需原始基线。
-    origin_durs: Vec<u32>,
-    undo: Vec<Core>,
-    redo: Vec<Core>,
+    /// 不可变素材基线；克隆时间轴/撤销只共享基线，删除仅改变投影。
+    origin_durs: Arc<blink_infra::gif::timing::Timings>,
+    undo: Vec<ChangeSet>,
+    redo: Vec<ChangeSet>,
     revision: u64,
+    index: OnceLock<Arc<ViewIndex>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -213,14 +281,18 @@ impl std::fmt::Display for EditError {
 impl Timeline {
     /// 由素材原始时长表构建（录制 finalize 后产出）。
     pub fn from_durations(base_dur_ms: Vec<u32>) -> Self {
-        let frame_count = base_dur_ms.len() as u32;
+        Self::from_timings(blink_infra::gif::timing::Timings::memory(base_dur_ms))
+    }
+    pub fn from_timings(timings: blink_infra::gif::timing::Timings) -> Self {
+        let frame_count = timings.len() as u32;
         Self {
             frame_count,
-            core: Core::fresh(base_dur_ms.clone()),
-            origin_durs: base_dur_ms,
+            core: Core::fresh(frame_count),
+            origin_durs: Arc::new(timings),
             undo: Vec::new(),
             redo: Vec::new(),
             revision: 1,
+            index: OnceLock::new(),
         }
     }
 
@@ -244,15 +316,22 @@ impl Timeline {
         (self.core.trim_start, self.core.trim_end)
     }
 
-    pub fn deleted_frames(&self) -> Vec<u32> {
-        self.core.deleted.iter().copied().collect()
+    #[cfg(test)]
+    fn deleted_frames(&self) -> Vec<u32> {
+        self.core
+            .deleted
+            .ranges()
+            .iter()
+            .flat_map(|&(a, b, _)| a..=b)
+            .collect()
     }
 
     pub fn speed(&self) -> f32 {
         self.core.speed
     }
 
-    pub fn holds(&self) -> &BTreeMap<u32, u32> {
+    #[cfg(test)]
+    fn holds(&self) -> &Runs {
         &self.core.holds
     }
 
@@ -266,9 +345,11 @@ impl Timeline {
         if next == self.core {
             return Ok(false);
         }
-        self.undo.push(self.core.clone());
+        self.undo.push(ChangeSet::between(&self.core, &next));
+        self.prune_history();
         self.redo.clear();
         self.core = next;
+        self.index = OnceLock::new();
         self.revision += 1;
         Ok(true)
     }
@@ -277,7 +358,9 @@ impl Timeline {
         let Some(prev) = self.undo.pop() else {
             return false;
         };
-        self.redo.push(std::mem::replace(&mut self.core, prev));
+        prev.apply(&mut self.core, false);
+        self.redo.push(prev);
+        self.index = OnceLock::new();
         self.revision += 1;
         true
     }
@@ -286,13 +369,45 @@ impl Timeline {
         let Some(next) = self.redo.pop() else {
             return false;
         };
-        self.undo.push(std::mem::replace(&mut self.core, next));
+        next.apply(&mut self.core, true);
+        self.undo.push(next);
+        self.prune_history();
+        self.index = OnceLock::new();
         self.revision += 1;
         true
     }
 
+    /// 同时约束撤销步数和稀疏编辑状态，长会话不会按帧数复制基线。
+    fn prune_history(&mut self) {
+        let mut bytes = self.undo.iter().map(ChangeSet::bytes).sum::<usize>();
+        while self.undo.len() > 128 || (bytes > 8 << 20 && self.undo.len() > 1) {
+            bytes = bytes.saturating_sub(self.undo.remove(0).bytes());
+        }
+    }
+
     fn apply_core(&self, cmd: &EditCommand) -> Result<Core, EditError> {
         let mut c = self.core.clone();
+        if let EditCommand::EditRanges {
+            operation,
+            ranges,
+            ms,
+        } = cmd
+        {
+            if ranges.len() > 256 || ranges.iter().any(|&(a, b)| a > b || b >= self.frame_count) {
+                return Err(EditError::FrameOutOfRange);
+            }
+            for &(a, b) in ranges {
+                match operation {
+                    RangeOperation::Delete => c.deleted.set(a, b, Some(1)),
+                    RangeOperation::Restore => c.deleted.set(a, b, None),
+                    RangeOperation::Hold => {
+                        c.holds
+                            .set(a, b, (*ms > 0).then_some((*ms).min(MAX_DELAY_CS * 10)))
+                    }
+                }
+            }
+            return Ok(c);
+        }
         // 含 Vec 字段的命令（DeleteFrames/RestoreFrames/SetHoldMany）不能经
         // `match *cmd` 按值解构——前置特判。
         if let EditCommand::DeleteFrames { frames } = cmd {
@@ -301,8 +416,7 @@ impl Timeline {
             }
             let mut changed = false;
             for frame in frames {
-                if c.deleted.insert(*frame) {
-                    c.base_dur_ms[*frame as usize] = 0;
+                if c.deleted.insert(*frame, 1) {
                     changed = true;
                 }
             }
@@ -316,8 +430,6 @@ impl Timeline {
             for frame in frames {
                 // 时长从素材原始基线还原（删除时置 0）
                 if c.deleted.remove(frame) {
-                    c.base_dur_ms[*frame as usize] =
-                        self.origin_durs.get(*frame as usize).copied().unwrap_or(1).max(1);
                     changed = true;
                 }
             }
@@ -369,14 +481,14 @@ impl Timeline {
                 if frame >= self.frame_count {
                     return Err(EditError::FrameOutOfRange);
                 }
-                if !c.deleted.insert(frame) {
+                if !c.deleted.insert(frame, 1) {
                     return Ok(c); // 已删除：幂等，无变化
                 }
                 // 2026-10-26 语义定案（手测反馈）：删除帧 = 画面与时长一并移除
                 // （总时长缩短）。旧「时长并入前一帧」语义已废弃——用户删帧期望
                 // 该帧的显示时间消失，不是跳帧等待。
-                c.base_dur_ms[frame as usize] = 0;
             }
+            EditCommand::EditRanges { .. } => unreachable!("range command handled above"),
             EditCommand::DeleteFrames { .. } => {
                 unreachable!("DeleteFrames 由 apply_core 前置特判处理")
             }
@@ -387,6 +499,9 @@ impl Timeline {
                 unreachable!("SetHoldMany 由 apply_core 前置特判处理")
             }
             EditCommand::SetSpeed { factor } => {
+                if !factor.is_finite() {
+                    return Err(EditError::InvalidSpeed);
+                }
                 c.speed = factor.clamp(0.25, 4.0);
             }
             EditCommand::SetHold { frame, ms } => {
@@ -415,7 +530,7 @@ impl Timeline {
             EditCommand::Reset => {
                 // Reset 回到素材原始状态（含原始时长——删除帧置 0 的时长恢复）；
                 // 本身可撤销（undo 栈回滚 Core 快照）。
-                c = Core::fresh(self.origin_durs.clone());
+                c = Core::fresh(self.frame_count);
             }
         }
         Ok(c)
@@ -426,23 +541,34 @@ impl Timeline {
         self.frame_views().collect()
     }
     fn frame_views(&self) -> impl Iterator<Item = FrameView> + '_ {
-        (0..self.frame_count)
+        self.frame_views_from(self.core.trim_start, 0, 0)
+    }
+    fn frame_views_from(
+        &self,
+        start: u32,
+        unscaled_ms: u64,
+        output_ms: u64,
+    ) -> impl Iterator<Item = FrameView> + '_ {
+        (start..self.frame_count.min(self.core.trim_end.saturating_add(1)))
             .filter(|i| {
                 *i >= self.core.trim_start
                     && *i <= self.core.trim_end
                     && !self.core.deleted.contains(i)
             })
-            .map(|i| {
-                let base = self.core.base_dur_ms[i as usize].max(1);
+            .scan((unscaled_ms, output_ms), move |clock, i| {
+                let base = self.origin_durs.at(i as usize).max(1);
                 let held = self.core.holds.get(&i).copied();
-                let dur = ((held.unwrap_or(base) as f64) / self.core.speed as f64)
-                    .round()
-                    .max(1.0) as u32;
-                FrameView {
+                let dur = scaled_duration(
+                    held.unwrap_or(base),
+                    self.core.speed,
+                    &mut clock.0,
+                    &mut clock.1,
+                );
+                Some(FrameView {
                     src_idx: i,
                     dur_ms: dur,
                     held: held.is_some(),
-                }
+                })
             })
     }
 
@@ -456,11 +582,44 @@ impl Timeline {
             revision: self.revision,
             src_w,
             src_h,
-            frames: self.effective_frames(),
+            frames: self.frozen_frames(),
             loop_count: self.core.loop_count,
             audio: self.audio_spans(),
             mix: self.core.mix,
         }
+    }
+
+    /// Page directory bounds lookup work; the closure shares the immutable baseline
+    /// and freezes only sparse edit state, without retaining undo/redo history.
+    fn frozen_frames(&self) -> FrameList<FrameView> {
+        let directory = self.view_index().clone();
+        let frozen = Self {
+            frame_count: self.frame_count,
+            core: self.core.clone(),
+            origin_durs: self.origin_durs.clone(),
+            undo: Vec::new(),
+            redo: Vec::new(),
+            revision: self.revision,
+            index: OnceLock::from(directory.clone()),
+        };
+        let count = directory.count;
+        let cache = std::sync::Mutex::new((usize::MAX, Vec::<FrameView>::new()));
+        FrameList::generated(count, move |index| {
+            let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
+            let page = index / 128;
+            if cache.0 != page {
+                cache.1 = frozen
+                    .frame_views_from(
+                        directory.pages[page].source,
+                        directory.pages[page].unscaled_ms,
+                        directory.pages[page].output_ms,
+                    )
+                    .take(128)
+                    .collect();
+                cache.0 = page;
+            }
+            cache.1[index % 128]
+        })
     }
 
     pub fn mix(&self) -> [AudioMix; 2] {
@@ -469,23 +628,143 @@ impl Timeline {
 
     /// 有界分页帧源契约：调用方只取可见页；0.28.25 可替换内部存储而不改 IPC。
     pub fn frame_page(&self, offset: usize, limit: usize) -> Vec<FrameView> {
-        self.frame_views()
-            .skip(offset)
-            .take(limit.min(256))
+        let frames = self.frozen_frames();
+        (offset..frames.len().min(offset.saturating_add(limit.min(256))))
+            .filter_map(|i| frames.get(i))
             .collect()
     }
 
-    pub fn audio_spans(&self) -> Vec<AudioSpan> {
-        let frames = self.effective_frames();
-        let mut offsets = Vec::with_capacity(self.origin_durs.len());
-        let mut at = 0u64;
-        for d in &self.origin_durs {
-            offsets.push(at);
-            at += *d as u64;
+    fn view_index(&self) -> &Arc<ViewIndex> {
+        self.index.get_or_init(|| {
+            let mut out = ViewIndex::default();
+            let mut source_ms = 0u64;
+            let mut unscaled_ms = 0u64;
+            for i in 0..self.frame_count {
+                if i >= self.core.trim_start
+                    && i <= self.core.trim_end
+                    && !self.core.deleted.contains(&i)
+                {
+                    if out.count % 128 == 0 {
+                        out.pages.push(PageStart {
+                            source: i,
+                            play: out.count,
+                            output_ms: out.total_ms,
+                            unscaled_ms,
+                            source_ms,
+                        });
+                    }
+                    let base = self
+                        .core
+                        .holds
+                        .get(&i)
+                        .copied()
+                        .unwrap_or(self.origin_durs.at(i as usize));
+                    scaled_duration(
+                        base.max(1),
+                        self.core.speed,
+                        &mut unscaled_ms,
+                        &mut out.total_ms,
+                    );
+                    out.count += 1;
+                }
+                source_ms += self.origin_durs.at(i as usize) as u64;
+            }
+            Arc::new(out)
+        })
+    }
+    pub fn effective_count(&self) -> usize {
+        self.view_index().count
+    }
+
+    /// A sparse directory resolves arbitrary seeks with at most two metadata pages.
+    pub fn window(
+        &self,
+        play: Option<usize>,
+        time: Option<u64>,
+        source: Option<u32>,
+    ) -> serde_json::Value {
+        let index = self.view_index();
+        if index.count == 0 {
+            return serde_json::json!({"revision":self.revision,"offset":0,"frames":[],"effectiveCount":0,"totalMs":0});
         }
+        let page_index = if let Some(play) = play {
+            index.pages.partition_point(|p| p.play <= play)
+        } else if let Some(time) = time {
+            index.pages.partition_point(|p| p.output_ms <= time)
+        } else if let Some(source) = source {
+            index.pages.partition_point(|p| p.source <= source)
+        } else {
+            1
+        };
+        let p = &index.pages[page_index.saturating_sub(1).min(index.pages.len() - 1)];
+        let mut at = p.output_ms;
+        let mut unscaled_at = p.unscaled_ms;
+        let mut source_at = p.source_ms;
+        let mut cursor = p.source;
+        let mut selected = None;
+        let mut frames = Vec::new();
+        for (relative, f) in self
+            .frame_views_from(p.source, p.unscaled_ms, p.output_ms)
+            .enumerate()
+        {
+            let i = p.play + relative;
+            while cursor < f.src_idx {
+                source_at += self.origin_durs.at(cursor as usize) as u64;
+                cursor += 1;
+            }
+            let target = play.is_some_and(|v| i >= v)
+                || time.is_some_and(|v| at + f.dur_ms as u64 > v)
+                || source.is_some_and(|v| f.src_idx >= v)
+                || (play.is_none() && time.is_none() && source.is_none());
+            if selected.is_none() && (target || i + 1 == index.count) {
+                selected = Some(i);
+            }
+            if selected.is_some() {
+                let original = self.origin_durs.at(f.src_idx as usize);
+                let hold = self.core.holds.get(&f.src_idx).copied().unwrap_or(original);
+                frames.push(serde_json::json!({"playIdx":i,"srcIdx":f.src_idx,"startMs":at,"durMs":f.dur_ms,"held":f.held,
+                    "sourceMs":source_at,"soundMs":original.min(hold),"silenceMs":hold.saturating_sub(original),
+                    "speed":self.core.speed,"audioKey":format!("{}:{}",self.revision,source_at as i128 - unscaled_at as i128)}));
+                if frames.len() == 128 {
+                    break;
+                }
+            }
+            at += f.dur_ms as u64;
+            unscaled_at += self
+                .core
+                .holds
+                .get(&f.src_idx)
+                .copied()
+                .unwrap_or(self.origin_durs.at(f.src_idx as usize))
+                .max(1) as u64;
+        }
+        serde_json::json!({"revision":self.revision,"offset":selected.unwrap_or(0),"frames":frames,"effectiveCount":index.count,"totalMs":index.total_ms})
+    }
+
+    pub fn source_page(&self, offset: u32, limit: u32) -> serde_json::Value {
+        let end = offset.saturating_add(limit.min(256)).min(self.frame_count);
+        let frames: Vec<_> = (offset..end).map(|i| {
+            let base = self.origin_durs.at(i as usize);
+            let hold = self.core.holds.get(&i).copied();
+            let in_trim = i >= self.core.trim_start && i <= self.core.trim_end;
+            serde_json::json!({"srcIdx": i, "deleted": self.core.deleted.contains(&i), "inTrim": in_trim,
+                "held": hold.is_some(), "holdMs": hold, "baseMs": base,
+                "durMs": ((hold.unwrap_or(base) as f64 / self.core.speed as f64).round().max(1.0) as u32)})
+        }).collect();
+        serde_json::json!({"revision":self.revision,"frames":frames})
+    }
+
+    pub fn audio_spans(&self) -> Vec<AudioSpan> {
+        let frames = self.frame_views();
+        let mut source_at = 0u64;
+        let mut cursor = 0usize;
         let mut out: Vec<AudioSpan> = Vec::new();
         for f in frames {
-            let original = self.origin_durs[f.src_idx as usize] as u64;
+            while cursor < f.src_idx as usize {
+                source_at += self.origin_durs.at(cursor) as u64;
+                cursor += 1;
+            }
+            let original = self.origin_durs.at(f.src_idx as usize) as u64;
             let held = self
                 .core
                 .holds
@@ -494,7 +773,7 @@ impl Timeline {
                 .map(u64::from)
                 .unwrap_or(original);
             let span = AudioSpan {
-                source_ms: offsets[f.src_idx as usize],
+                source_ms: source_at,
                 sound_ms: original.min(held),
                 silence_ms: held.saturating_sub(original),
                 output_ms: f.dur_ms as u64,
@@ -516,10 +795,7 @@ impl Timeline {
 
     /// 有效总时长（ms，未量化）。
     pub fn effective_total_ms(&self) -> u64 {
-        self.effective_frames()
-            .iter()
-            .map(|f| f.dur_ms as u64)
-            .sum()
+        self.view_index().total_ms
     }
 
     // ── 版本化编辑草稿（0.28.23 §5.7.4）────────────────────────────────────
@@ -530,13 +806,23 @@ impl Timeline {
 
     /// 导出当前编辑状态为草稿（`play_pos_ms` 为前端播放头位置）。
     pub fn to_draft(&self, play_pos_ms: u64) -> TimelineDraft {
+        let deleted_ranges = self
+            .core
+            .deleted
+            .ranges()
+            .iter()
+            .map(|&(a, b, _)| (a, b))
+            .collect();
+        let hold_ranges = self.core.holds.ranges().to_vec();
         TimelineDraft {
             version: TIMELINE_DRAFT_VERSION,
             trim_start: self.core.trim_start,
             trim_end: self.core.trim_end,
-            deleted: self.core.deleted.iter().copied().collect(),
+            deleted: Vec::new(),
+            deleted_ranges,
             speed: self.core.speed,
-            holds: self.core.holds.iter().map(|(k, v)| (*k, *v)).collect(),
+            holds: Vec::new(),
+            hold_ranges,
             loop_count: self.core.loop_count,
             revision: self.revision,
             play_pos_ms,
@@ -548,16 +834,25 @@ impl Timeline {
     /// 应丢弃草稿并如实提示，不能声称恢复全部编辑）。成功后 undo/redo 栈为空，
     /// revision 沿用草稿保存值（前端按 revision 拒绝旧回包的语义继续成立）。
     pub fn restore_draft(&mut self, draft: TimelineDraft) -> Result<(), EditError> {
-        if draft.version != TIMELINE_DRAFT_VERSION {
+        if !(1..=TIMELINE_DRAFT_VERSION).contains(&draft.version) {
             return Err(EditError::InvalidDraftVersion);
         }
         let end = self.frame_count.saturating_sub(1);
-        if (self.frame_count == 0 && (!draft.deleted.is_empty() || !draft.holds.is_empty()))
+        if (self.frame_count == 0
+            && (!draft.deleted.is_empty()
+                || !draft.holds.is_empty()
+                || !draft.deleted_ranges.is_empty()
+                || !draft.hold_ranges.is_empty()))
             || draft.trim_start > end
             || draft.trim_end > end
             || draft.trim_start > draft.trim_end
             || draft.deleted.iter().any(|&f| f > end)
             || draft.holds.iter().any(|&(f, _)| f > end)
+            || draft.deleted_ranges.iter().any(|&(a, b)| a > b || b > end)
+            || draft
+                .hold_ranges
+                .iter()
+                .any(|&(a, b, ms)| a > b || b > end || ms > MAX_DELAY_CS * 10)
         {
             return Err(EditError::FrameOutOfRange);
         }
@@ -571,24 +866,33 @@ impl Timeline {
         {
             return Err(EditError::InvalidAudio);
         }
-        // 草稿的 base_dur_ms 必须重建：deleted 帧时长置零是 Core 的不变式
-        let mut base = self.origin_durs.clone();
-        for &f in &draft.deleted {
-            base[f as usize] = 0;
+        let mut deleted = Runs::default();
+        for &i in &draft.deleted {
+            deleted.insert(i, 1);
+        }
+        for &(a, b) in &draft.deleted_ranges {
+            deleted.set(a, b, Some(1));
+        }
+        let mut holds = Runs::default();
+        for &(i, ms) in &draft.holds {
+            holds.insert(i, ms.min(MAX_DELAY_CS * 10));
+        }
+        for &(a, b, ms) in &draft.hold_ranges {
+            holds.set(a, b, Some(ms));
         }
         self.core = Core {
             trim_start: draft.trim_start,
             trim_end: draft.trim_end,
-            deleted: draft.deleted.iter().copied().collect(),
-            base_dur_ms: base,
+            deleted,
             speed: draft.speed,
-            holds: draft.holds.iter().copied().collect(),
+            holds,
             loop_count: draft.loop_count,
             mix: draft.mix,
         };
         self.undo.clear();
         self.redo.clear();
         self.revision = draft.revision.max(1);
+        self.index = OnceLock::new();
         Ok(())
     }
 }
@@ -605,8 +909,12 @@ pub struct TimelineDraft {
     pub trim_start: u32,
     pub trim_end: u32,
     pub deleted: Vec<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deleted_ranges: Vec<(u32, u32)>,
     pub speed: f32,
     pub holds: Vec<(u32, u32)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hold_ranges: Vec<(u32, u32, u32)>,
     pub loop_count: Option<u16>,
     /// 保存时的 timeline revision（恢复后沿用）。
     pub revision: u64,
@@ -616,7 +924,7 @@ pub struct TimelineDraft {
     pub mix: [AudioMix; 2],
 }
 
-pub const TIMELINE_DRAFT_VERSION: u32 = 1;
+pub const TIMELINE_DRAFT_VERSION: u32 = 2;
 
 /// 草稿文件整体（`sessions/<id>/draft.json`）：编辑态 + 素材身份。
 ///
@@ -636,7 +944,7 @@ pub struct SessionDraftFile {
 impl SessionDraftFile {
     /// 素材身份匹配判定（恢复前置校验）。
     pub fn identity_matches(&self, created_at: u64, material_frames: u32) -> bool {
-        self.version == TIMELINE_DRAFT_VERSION
+        (1..=TIMELINE_DRAFT_VERSION).contains(&self.version)
             && self.session_created_at == created_at
             && self.material_frames == material_frames
     }
@@ -644,7 +952,7 @@ impl SessionDraftFile {
 
 /// ms → 1/100s 量化，clamp [MIN_DELAY_CS, MAX_DELAY_CS]。
 pub fn quantize_delay_ms(ms: u32) -> u32 {
-    (ms / 10).clamp(MIN_DELAY_CS, MAX_DELAY_CS)
+    (ms / 10).max(MIN_DELAY_CS)
 }
 
 // ── 测试 ────────────────────────────────────────────────────────────────────
@@ -658,7 +966,10 @@ mod tests {
         let mut timeline = Timeline::from_durations(vec![100; 2]);
         let mut draft = timeline.to_draft(0);
         draft.version += 1;
-        assert_eq!(timeline.restore_draft(draft), Err(EditError::InvalidDraftVersion));
+        assert_eq!(
+            timeline.restore_draft(draft),
+            Err(EditError::InvalidDraftVersion)
+        );
         assert_eq!(timeline.revision(), 1);
 
         let mut empty = Timeline::from_durations(vec![]);
@@ -666,6 +977,117 @@ mod tests {
         draft.deleted.push(0);
         assert_eq!(empty.restore_draft(draft), Err(EditError::FrameOutOfRange));
         assert_eq!(empty.frame_count(), 0);
+    }
+
+    #[test]
+    fn audio_continuity_keys_only_change_at_edit_discontinuities() {
+        let mut t = Timeline::from_durations(vec![16, 17, 17, 16, 17]);
+        t.apply(&EditCommand::SetSpeed { factor: 1.5 }).unwrap();
+        let page = t.window(None, None, None);
+        assert_eq!(page["frames"][0]["audioKey"], page["frames"][4]["audioKey"]);
+        assert_eq!(page["frames"][1]["speed"], 1.5);
+        t.apply(&EditCommand::DeleteFrame { frame: 1 }).unwrap();
+        let page = t.window(None, None, None);
+        assert_ne!(page["frames"][0]["audioKey"], page["frames"][1]["audioKey"]);
+        assert_eq!(page["frames"][1]["audioKey"], page["frames"][3]["audioKey"]);
+        t.apply(&EditCommand::SetHold { frame: 2, ms: 100 })
+            .unwrap();
+        let page = t.window(None, None, None);
+        assert_ne!(page["frames"][1]["audioKey"], page["frames"][2]["audioKey"]);
+    }
+
+    #[test]
+    fn long_speed_changes_keep_cumulative_clock_across_page_boundaries() {
+        let mut t = Timeline::from_durations(
+            (0..108000u64)
+                .map(|i| ((i + 1) * 1000 / 60 - i * 1000 / 60) as u32)
+                .collect(),
+        );
+        for speed in [0.25, 1.5, 2.0, 4.0] {
+            t.apply(&EditCommand::SetSpeed { factor: speed }).unwrap();
+            let expected = (1_800_000f64 / speed as f64).round() as u64;
+            assert_eq!(t.effective_total_ms(), expected);
+            let snapshot = t.export_snapshot(1920, 1080);
+            assert_eq!(
+                snapshot.frames.iter().map(|f| f.dur_ms as u64).sum::<u64>(),
+                expected
+            );
+            assert_eq!(
+                snapshot.audio.iter().map(|f| f.output_ms).sum::<u64>(),
+                expected
+            );
+            for play in [127usize, 128, 255, 256, 107999] {
+                let frame = t.window(Some(play), None, None);
+                assert_eq!(
+                    frame["frames"][0]["durMs"],
+                    snapshot.frames.get(play).unwrap().dur_ms
+                );
+            }
+        }
+        t.apply(&EditCommand::EditRanges {
+            operation: RangeOperation::Delete,
+            ranges: vec![(1, 107998)],
+            ms: 0,
+        })
+        .unwrap();
+        assert_eq!(t.core.deleted.ranges().len(), 1);
+        assert!(t.undo.last().unwrap().bytes() < 256);
+        assert_eq!(t.to_draft(0).deleted_ranges, vec![(1, 107998)]);
+        assert!(t.undo());
+        assert!(t.redo());
+    }
+
+    #[test]
+    fn long_windows_ranges_and_snapshots_keep_clock_revision_and_undo() {
+        let mut timeline = Timeline::from_durations(
+            (0..108_000u64)
+                .map(|i| ((i + 1) * 1000 / 60 - i * 1000 / 60) as u32)
+                .collect(),
+        );
+        assert_eq!(timeline.effective_total_ms(), 1_800_000);
+        let frozen = timeline.export_snapshot(1920, 1080);
+        assert_eq!(frozen.frames.len(), 108_000);
+        timeline
+            .apply(&EditCommand::EditRanges {
+                operation: RangeOperation::Delete,
+                ranges: vec![(0, 999)],
+                ms: 0,
+            })
+            .unwrap();
+        assert_eq!(timeline.effective_count(), 107_000);
+        assert_eq!(frozen.frames.get(0).unwrap().src_idx, 0);
+        assert_eq!(timeline.frame_page(0, 1)[0].src_idx, 1000);
+        let end = timeline.effective_total_ms();
+        let window = timeline.window(None, Some(end), None);
+        assert_eq!(window["frames"][0]["srcIdx"], 107_999);
+        assert_eq!(window["frames"].as_array().unwrap().len(), 1);
+        assert!(timeline.undo());
+        assert_eq!(timeline.effective_total_ms(), 1_800_000);
+        assert!(timeline.redo());
+        assert_eq!(timeline.effective_count(), 107_000);
+        let revision = timeline.revision();
+        assert!(
+            timeline
+                .apply(&EditCommand::EditRanges {
+                    operation: RangeOperation::Delete,
+                    ranges: vec![(1, 2), (3, 108000)],
+                    ms: 0
+                })
+                .is_err()
+        );
+        assert_eq!(timeline.revision(), revision);
+        for n in 0..200 {
+            timeline
+                .apply(&EditCommand::SetSpeed {
+                    factor: if n % 2 == 0 { 1.5 } else { 1.0 },
+                })
+                .unwrap();
+        }
+        assert!(timeline.undo.len() <= 128);
+        assert!(Arc::ptr_eq(
+            &timeline.origin_durs,
+            &timeline.clone().origin_durs
+        ));
     }
 
     fn tl() -> Timeline {
@@ -738,7 +1160,8 @@ mod tests {
     fn delete_frames_batch_single_undo_granularity() {
         let mut t = tl();
         let rev = t.revision();
-        t.apply(&EditCommand::DeleteFrames { frames: vec![1, 3] }).unwrap();
+        t.apply(&EditCommand::DeleteFrames { frames: vec![1, 3] })
+            .unwrap();
         assert_eq!(t.revision(), rev + 1, "批量删除单命令推进一次 revision");
         let v = t.effective_frames();
         let idx: Vec<u32> = v.iter().map(|f| f.src_idx).collect();
@@ -754,9 +1177,13 @@ mod tests {
         );
         assert_eq!(t.effective_frames().len(), 5, "拒绝后状态不变");
         // 全部已删幂等：不推进 revision
-        t.apply(&EditCommand::DeleteFrames { frames: vec![1, 3] }).unwrap();
+        t.apply(&EditCommand::DeleteFrames { frames: vec![1, 3] })
+            .unwrap();
         let rev = t.revision();
-        assert_eq!(t.apply(&EditCommand::DeleteFrames { frames: vec![1, 3] }), Ok(false));
+        assert_eq!(
+            t.apply(&EditCommand::DeleteFrames { frames: vec![1, 3] }),
+            Ok(false)
+        );
         assert_eq!(t.revision(), rev);
     }
 
@@ -772,15 +1199,20 @@ mod tests {
     #[test]
     fn restore_frames_recovers_duration_single_undo() {
         let mut t = tl();
-        t.apply(&EditCommand::DeleteFrames { frames: vec![1, 3] }).unwrap();
+        t.apply(&EditCommand::DeleteFrames { frames: vec![1, 3] })
+            .unwrap();
         // 恢复 1（3 保持删除）
-        t.apply(&EditCommand::RestoreFrames { frames: vec![1] }).unwrap();
+        t.apply(&EditCommand::RestoreFrames { frames: vec![1] })
+            .unwrap();
         let idx: Vec<u32> = t.effective_frames().iter().map(|f| f.src_idx).collect();
         assert_eq!(idx, vec![0, 1, 2, 4]);
         assert_eq!(t.effective_total_ms(), 400, "恢复帧时长从素材基线还原");
         // 全未删除的恢复 = 幂等，不推进 revision
         let rev = t.revision();
-        assert_eq!(t.apply(&EditCommand::RestoreFrames { frames: vec![1, 2] }), Ok(false));
+        assert_eq!(
+            t.apply(&EditCommand::RestoreFrames { frames: vec![1, 2] }),
+            Ok(false)
+        );
         assert_eq!(t.revision(), rev);
         // 一次 undo 回到「1、3 均删除」
         t.undo();
@@ -810,7 +1242,13 @@ mod tests {
         }
         assert_eq!(v[1].dur_ms, 100, "未选中帧不受影响");
         // 同值幂等
-        assert_eq!(t.apply(&EditCommand::SetHoldMany { frames: vec![0, 2], ms: 300 }), Ok(false));
+        assert_eq!(
+            t.apply(&EditCommand::SetHoldMany {
+                frames: vec![0, 2],
+                ms: 300
+            }),
+            Ok(false)
+        );
         // ms=0 批量清除 → 回速度计算
         t.apply(&EditCommand::SetHoldMany {
             frames: vec![0, 2, 4],
@@ -828,7 +1266,10 @@ mod tests {
         assert_eq!(v[1].dur_ms, 100);
         // 越界整条拒绝
         assert_eq!(
-            t.apply(&EditCommand::SetHoldMany { frames: vec![0, 9], ms: 100 }),
+            t.apply(&EditCommand::SetHoldMany {
+                frames: vec![0, 9],
+                ms: 100
+            }),
             Err(EditError::FrameOutOfRange)
         );
         // 超 clamp 收敛到上限（MAX_DELAY_CS*10 = 6000ms）
@@ -851,7 +1292,8 @@ mod tests {
         t.apply(&EditCommand::SetSpeed { factor: 0.01 }).unwrap();
         assert_eq!(t.speed(), 0.25);
         // hold 覆盖该帧
-        t.apply(&EditCommand::SetHold { frame: 1, ms: 800 }).unwrap();
+        t.apply(&EditCommand::SetHold { frame: 1, ms: 800 })
+            .unwrap();
         let v = t.effective_frames();
         assert_eq!(v[1].dur_ms, 3200);
         assert!(v[1].held);
@@ -909,11 +1351,11 @@ mod tests {
         assert_eq!(plan.revision, t.revision());
         assert_eq!(plan.src_w, 800);
         // 100/1.5 = 66.67ms → 66/10 = 6.6 → 量化 6 → 但 clamp 下限 2 不触发
-        assert_eq!(plan.frames[0].delay_cs, 6);
+        assert_eq!(plan.frames.get(0).unwrap().delay_cs, 6);
         assert_eq!(plan.loop_count, Some(3));
         // 编辑后原 plan 不变（快照语义）
         t.apply(&EditCommand::SetSpeed { factor: 4.0 }).unwrap();
-        assert_eq!(plan.frames[0].delay_cs, 6);
+        assert_eq!(plan.frames.get(0).unwrap().delay_cs, 6);
         assert_ne!(t.export_plan(800, 600).revision, plan.revision);
     }
 
@@ -935,18 +1377,18 @@ mod tests {
             vec![(0, 22), (2, 518), (3, 22)]
         );
         assert_eq!(snapshot.gif_plan(), t.export_plan(65, 67));
-        assert_eq!(snapshot.gif_plan().frames[1].delay_cs, 51);
+        assert_eq!(snapshot.gif_plan().frames.get(1).unwrap().delay_cs, 52);
         t.apply(&EditCommand::Reset).unwrap();
-        assert_eq!(snapshot.frames[1].dur_ms, 518);
+        assert_eq!(snapshot.frames.get(1).unwrap().dur_ms, 518);
         assert_ne!(snapshot.revision, t.revision());
     }
 
     #[test]
-    fn quantize_clamps_min_and_max() {
+    fn quantize_keeps_browser_minimum_without_truncating_long_material() {
         assert_eq!(quantize_delay_ms(0), MIN_DELAY_CS);
         assert_eq!(quantize_delay_ms(5), MIN_DELAY_CS, "20ms 以下抬到 20ms");
         assert_eq!(quantize_delay_ms(30), 3);
-        assert_eq!(quantize_delay_ms(u32::MAX), MAX_DELAY_CS);
+        assert_eq!(quantize_delay_ms(u32::MAX), u32::MAX / 10);
     }
 
     #[test]
@@ -977,7 +1419,8 @@ mod tests {
         t.apply(&EditCommand::TrimStart { frame: 1 }).unwrap();
         t.apply(&EditCommand::DeleteFrame { frame: 3 }).unwrap();
         t.apply(&EditCommand::SetSpeed { factor: 2.0 }).unwrap();
-        t.apply(&EditCommand::SetHold { frame: 2, ms: 1500 }).unwrap();
+        t.apply(&EditCommand::SetHold { frame: 2, ms: 1500 })
+            .unwrap();
         t.apply(&EditCommand::SetLoop { count: Some(3) }).unwrap();
         let before = t.to_draft(1234);
 
@@ -987,7 +1430,7 @@ mod tests {
         assert_eq!(parsed, before);
         assert_eq!(parsed.version, TIMELINE_DRAFT_VERSION);
         // holds 是元组数组（数字键），不是字符串键 map
-        assert!(json.contains("\"holds\":[[2,1500]]"));
+        assert!(json.contains("\"holdRanges\":[[2,2,1500]]"));
 
         // 恢复到全新时间轴：编辑投影一致
         let mut restored = tl();
@@ -1026,8 +1469,10 @@ mod tests {
             trim_start,
             trim_end,
             deleted: vec![],
+            deleted_ranges: vec![],
             speed,
             holds: vec![],
+            hold_ranges: vec![],
             loop_count: None,
             revision: 3,
             play_pos_ms: 0,
@@ -1065,8 +1510,10 @@ mod tests {
             trim_start: 0,
             trim_end: 4,
             deleted: vec![],
+            deleted_ranges: vec![],
             speed: 1.0,
             holds: vec![],
+            hold_ranges: vec![],
             loop_count: None,
             revision: 0,
             play_pos_ms: 0,

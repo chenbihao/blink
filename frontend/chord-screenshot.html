@@ -157,8 +157,10 @@
                 <option value="15" selected>15 fps</option>
                 <option value="24">24 fps</option>
                 <option value="30">30 fps</option>
+                <option value="60">60 fps</option>
             </select>
         </label>
+        <span class="gif-rec-frames" id="gif-prep-storage"></span>
         <label class="gif-prep-field gif-prep-cursor" title="是否录制鼠标光标">
             <input checked id="gif-prep-cursor" type="checkbox"/>
             <span>光标</span>
@@ -191,6 +193,7 @@
         <span class="gif-rec-state" id="gif-rec-state">录制中</span>
         <span class="gif-rec-time" id="gif-rec-time">0:00.0</span>
         <span class="gif-rec-frames" id="gif-rec-frames">0 帧</span>
+        <span class="gif-rec-frames" id="gif-rec-storage"></span>
         <div class="gif-audio-meters" id="gif-rec-audio">
             <button class="tool-btn audio-source hidden" data-source="0" title="麦克风采集静音（静音期间的原声不会保存）"><span class="audio-level"><span class="audio-level-fill"></span><span class="audio-level-peak"></span></span><span class="audio-source-name"></span></button>
             <button class="tool-btn audio-source hidden" data-source="1" title="系统声音采集静音（静音期间的原声不会保存）"><span class="audio-level"><span class="audio-level-fill"></span><span class="audio-level-peak"></span></span><span class="audio-source-name"></span></button>

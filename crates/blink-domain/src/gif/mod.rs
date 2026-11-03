@@ -7,10 +7,12 @@
 //! **非破坏编辑**：素材帧不可变，编辑状态只是投影参数；导出时冻结快照，
 //! 编辑与编码不混用 revision（phase 验收）。
 
+mod quantized;
+mod runs;
 pub mod timeline;
 
 pub use timeline::{
-    quantize_delay_ms, EditCommand, EditError, ExportPlan, ExportSnapshot, FrameView, PlanFrame,
-    SessionDraftFile, Timeline, TimelineDraft, TIMELINE_DRAFT_VERSION, MAX_DELAY_CS,
-    MIN_DELAY_CS,
+    EditCommand, EditError, ExportPlan, ExportSnapshot, FrameView, MAX_DELAY_CS, MIN_DELAY_CS,
+    PlanFrame, SessionDraftFile, TIMELINE_DRAFT_VERSION, Timeline, TimelineDraft,
+    quantize_delay_ms,
 };

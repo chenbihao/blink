@@ -12,8 +12,8 @@ use std::cell::RefCell;
 use windows::Win32::Foundation::{LPARAM, RECT};
 use windows::Win32::Graphics::Dwm::DwmFlush;
 use windows::Win32::Graphics::Gdi::{
-    BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateDCW,
-    DIB_RGB_COLORS, DeleteDC, DeleteObject, EnumDisplayMonitors, GetDIBits, GetMonitorInfoW,
+    BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleDC, CreateDCW, CreateDIBSection,
+    DIB_RGB_COLORS, DeleteDC, DeleteObject, EnumDisplayMonitors, GdiFlush, GetMonitorInfoW,
     HBITMAP, HDC, HGDIOBJ, HMONITOR, MONITORINFO, MONITORINFOEXW, RGBQUAD, SRCCOPY, SelectObject,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -149,6 +149,7 @@ struct GdiCache {
     hbitmap: HBITMAP,
     bitmap_w: i32,
     bitmap_h: i32,
+    bits: *mut core::ffi::c_void,
     old_bmp: HGDIOBJ, // SelectObject 保存的原对象，销毁 bitmap 前需恢复
 }
 
@@ -239,6 +240,7 @@ fn capture_region_bgra_impl(
                     hbitmap: HBITMAP::default(),
                     bitmap_w: 0,
                     bitmap_h: 0,
+                    bits: core::ptr::null_mut(),
                     old_bmp: HGDIOBJ::default(),
                 });
             }
@@ -252,9 +254,32 @@ fn capture_region_bgra_impl(
                     let _ = SelectObject(gdi.hdc_mem, gdi.old_bmp);
                     let _ = DeleteObject(gdi.hbitmap.into());
                 }
-                gdi.hbitmap = CreateCompatibleBitmap(gdi.hdc_screen, w as i32, h as i32);
-                if gdi.hbitmap.is_invalid() {
-                    return Err("CreateCompatibleBitmap 失败".into());
+                gdi.hbitmap = HBITMAP::default();
+                gdi.bitmap_w = 0;
+                gdi.bitmap_h = 0;
+                gdi.bits = core::ptr::null_mut();
+                let bmi = BITMAPINFO {
+                    bmiHeader: BITMAPINFOHEADER {
+                        biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                        biWidth: w as i32,
+                        biHeight: -(h as i32),
+                        biPlanes: 1,
+                        biBitCount: 32,
+                        ..Default::default()
+                    },
+                    bmiColors: [RGBQUAD::default(); 1],
+                };
+                gdi.hbitmap = CreateDIBSection(
+                    Some(gdi.hdc_screen),
+                    &bmi,
+                    DIB_RGB_COLORS,
+                    &mut gdi.bits,
+                    None,
+                    0,
+                )
+                .map_err(|_| "CreateDIBSection 失败")?;
+                if gdi.hbitmap.is_invalid() || gdi.bits.is_null() {
+                    return Err("DIB 像素内存不可用".into());
                 }
                 gdi.old_bmp = SelectObject(gdi.hdc_mem, gdi.hbitmap.into());
                 gdi.bitmap_w = w as i32;
@@ -276,39 +301,16 @@ fn capture_region_bgra_impl(
                 return Err("BitBlt 失败".into());
             }
 
-            let pixel_count = (w * h) as usize;
-            let mut pixels: Vec<u8> = vec![0u8; pixel_count * 4];
-
-            let bmi = BITMAPINFO {
-                bmiHeader: BITMAPINFOHEADER {
-                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                    biWidth: w as i32,
-                    biHeight: -(h as i32), // 负值 = top-down
-                    biPlanes: 1,
-                    biBitCount: 32,
-                    biCompression: 0, // BI_RGB
-                    biSizeImage: 0,
-                    biXPelsPerMeter: 0,
-                    biYPelsPerMeter: 0,
-                    biClrUsed: 0,
-                    biClrImportant: 0,
-                },
-                bmiColors: [RGBQUAD::default(); 1],
-            };
-
-            let lines = GetDIBits(
-                gdi.hdc_mem,
-                gdi.hbitmap,
-                0,
-                h,
-                Some(pixels.as_mut_ptr() as *mut _),
-                &bmi as *const _ as *mut _,
-                DIB_RGB_COLORS,
-            );
-
-            if lines == 0 {
-                return Err("GetDIBits 返回 0 行".into());
+            // Complete this thread's GDI batch before reading the mapped DIB.
+            // The copy owns its pixels before the next BitBlt overwrites the surface.
+            if !GdiFlush().as_bool() {
+                return Err("GdiFlush 失败".into());
             }
+            let len = (w as usize)
+                .checked_mul(h as usize)
+                .and_then(|n| n.checked_mul(4))
+                .ok_or("截图尺寸溢出")?;
+            let pixels = std::slice::from_raw_parts(gdi.bits.cast::<u8>(), len).to_vec();
             Ok(pixels)
         })
     }
@@ -328,6 +330,18 @@ pub fn capture_virtual_screen() -> Result<(Vec<u8>, ScreenCaptureMeta), String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "原生 DIB 截图/连续采集像素契约；需要可见桌面"]
+    fn native_dib_opaque_pixels_and_resize_reuse() {
+        let display = enumerate_displays().remove(0);
+        for (w, h, continuous) in [(64, 64, false), (80, 72, true), (64, 64, true)] {
+            let pixels = capture_region_bgra_impl(display.x, display.y, w, h, !continuous).unwrap();
+            assert_eq!(pixels.len(), (w * h * 4) as usize);
+            let transparent = pixels.chunks_exact(4).filter(|p| p[3] != 255).count();
+            assert_eq!(transparent, 0, "屏幕 PNG/录制预览必须不透明");
+        }
+    }
 
     /// 枚举显示器不 panic，至少返回 1 个（测试机总有屏）。
     /// **依赖桌面环境**：`Path::exists` 守卫无意义，只能靠 GetSystemMetrics 判断。

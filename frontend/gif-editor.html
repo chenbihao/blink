@@ -184,6 +184,7 @@
             </label>
         </div>
         <p class="export-note" id="export-note"></p>
+        <p class="export-note" id="export-estimate" aria-live="polite"></p>
         <div class="export-engine hidden" id="export-engine">
             <p id="export-engine-text"></p>
             <button class="btn" id="btn-export-install" type="button">管理媒体引擎…</button>
@@ -228,6 +229,9 @@
                     </select>
                 </label>
             </div>
+            <div class="form-row" id="export-fps-field"><label>MP4 帧率
+                <select id="export-fps"><option value="" selected>匹配素材</option><option value="10">10 fps</option><option value="15">15 fps</option><option value="24">24 fps</option><option value="30">30 fps</option><option value="60">60 fps</option></select>
+            </label></div>
             <p class="export-note" id="export-size-note">按比例缩小画面以减小文件体积，不会放大原图。保留清晰细节请选择原始分辨率。</p>
         </details>
         <div class="progress-row hidden" id="export-progress-row">

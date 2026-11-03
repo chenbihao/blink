@@ -30,7 +30,7 @@ pub struct EncodePlan {
     /// None = 无限循环。
     pub loop_count: Option<u16>,
     /// 量化后的逐帧 delay（1/100s）。
-    pub frames: Vec<EncodeFrame>,
+    pub frames: crate::media::FrameList<EncodeFrame>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
@@ -164,6 +164,7 @@ pub fn export_gif(
     progress: &ProgressFn<'_>,
 ) -> Result<ExportStats, ExportError> {
     let t0 = std::time::Instant::now();
+    ensure_output_space(out_path)?;
     if out_path.exists() && !opts.overwrite {
         return Err(ExportError::FileExists(out_path.to_path_buf()));
     }
@@ -173,7 +174,9 @@ pub fn export_gif(
     // GIF 逻辑尺寸上限 u16。
     let (out_w, out_h) = target_size(plan.src_w, plan.src_h, opts.max_width);
     if out_w == 0 || out_h == 0 || out_w > u16::MAX as u32 || out_h > u16::MAX as u32 {
-        return Err(ExportError::VerifyFailed(format!("输出尺寸非法: {out_w}x{out_h}")));
+        return Err(ExportError::VerifyFailed(format!(
+            "输出尺寸非法: {out_w}x{out_h}"
+        )));
     }
     let total = plan.frames.len() as u32;
     tracing::debug!(
@@ -184,14 +187,29 @@ pub fn export_gif(
         "GIF 导出开始"
     );
 
-    let tmp_path = out_path.with_file_name(format!(".blink-gif-{}-{}.tmp", std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos()));
-    fs::OpenOptions::new().create_new(true).write(true).open(&tmp_path)?;
+    let tmp_path = out_path.with_file_name(format!(
+        ".blink-gif-{}-{}.tmp",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&tmp_path)?;
     struct Cleanup(PathBuf);
-    impl Drop for Cleanup { fn drop(&mut self) { let _ = fs::remove_file(&self.0); } }
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
     let _cleanup = Cleanup(tmp_path.clone());
 
-    let result = encode_to_tmp(reader, plan, opts, &tmp_path, out_w, out_h, cancel, progress);
+    let result = encode_to_tmp(
+        reader, plan, opts, &tmp_path, out_w, out_h, cancel, progress,
+    );
     if cancel.load(std::sync::atomic::Ordering::Relaxed) {
         let _ = fs::remove_file(&tmp_path);
         return Err(ExportError::Cancelled);
@@ -211,14 +229,18 @@ pub fn export_gif(
         verify_ms = t_verify.elapsed().as_millis() as u64,
         "GIF 导出：独立解码验证完成"
     );
-    if cancel.load(std::sync::atomic::Ordering::Relaxed) { return Err(ExportError::Cancelled); }
+    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err(ExportError::Cancelled);
+    }
     if let Err(e) = verify {
         let _ = fs::remove_file(&tmp_path);
         return Err(ExportError::VerifyFailed(e));
     }
     // 原子提交时复核不覆盖语义，编码期间新建的目标文件也必须保留。
     progress(ExportStage::Committing, stats.written, stats.written);
-    if cancel.load(std::sync::atomic::Ordering::Relaxed) { return Err(ExportError::Cancelled); }
+    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err(ExportError::Cancelled);
+    }
     let commit = crate::utils::fs::commit_file(&tmp_path, out_path, opts.overwrite);
     if let Err(error) = commit {
         let _ = fs::remove_file(&tmp_path);
@@ -233,11 +255,20 @@ pub fn export_gif(
         height: out_h,
         source_frames: total,
         written_frames: stats.written,
-        merged_duplicate_frames: total - stats.written,
+        merged_duplicate_frames: total.saturating_sub(stats.written),
         bytes,
         source_raw_bytes: stats.raw_bytes,
         encode_ms: t0.elapsed().as_millis() as u64,
     })
+}
+
+fn ensure_output_space(path: &Path) -> Result<(), ExportError> {
+    let parent = path.parent().unwrap_or(Path::new("."));
+    let disk = crate::platform::disk_space::query(parent)?;
+    if disk.available_bytes < 32 << 20 {
+        return Err(ExportError::Io(std::io::Error::other("目标磁盘空间不足")));
+    }
+    Ok(())
 }
 
 struct EncodeStats {
@@ -276,18 +307,30 @@ fn encode_to_tmp(
     let mut done = 0u32;
 
     // 重复帧合并：pending = 尚未写出的当前索引帧及其累计 delay。
-    let mut pending: Option<(Vec<u8>, u32)> = None;
+    let mut pending: Option<(Vec<u8>, u64)> = None;
+    let mut space_checked = std::time::Instant::now();
 
     macro_rules! flush_pending {
         () => {
             if let Some((buffer, delay_cs)) = pending.take() {
-                write_one_frame(&mut encoder, &buffer, &mut prev_indexed, out_w, out_h, delay_cs)?;
-                written += 1;
+                written += write_one_frame(
+                    &mut encoder,
+                    &buffer,
+                    &mut prev_indexed,
+                    out_w,
+                    out_h,
+                    delay_cs,
+                    cancel,
+                )?;
             }
         };
     }
 
     for pf in &plan.frames {
+        if space_checked.elapsed().as_millis() >= 250 {
+            ensure_output_space(tmp_path)?;
+            space_checked = std::time::Instant::now();
+        }
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             return Err(ExportError::Cancelled);
         }
@@ -306,15 +349,22 @@ fn encode_to_tmp(
         match pending.take() {
             Some((buf, delay)) if buf == cur_indexed[..] => {
                 // 重复帧：累加 delay，不写帧
-                pending = Some((buf, delay.saturating_add(pf.delay_cs).min(u16::MAX as u32)));
+                pending = Some((buf, delay.saturating_add(pf.delay_cs as u64)));
             }
             Some((buf, delay)) => {
-                write_one_frame(&mut encoder, &buf, &mut prev_indexed, out_w, out_h, delay)?;
-                written += 1;
-                pending = Some((cur_indexed.clone(), pf.delay_cs));
+                written += write_one_frame(
+                    &mut encoder,
+                    &buf,
+                    &mut prev_indexed,
+                    out_w,
+                    out_h,
+                    delay,
+                    cancel,
+                )?;
+                pending = Some((cur_indexed.clone(), pf.delay_cs as u64));
             }
             None => {
-                pending = Some((cur_indexed.clone(), pf.delay_cs));
+                pending = Some((cur_indexed.clone(), pf.delay_cs as u64));
             }
         }
         done += 1;
@@ -338,8 +388,9 @@ fn write_one_frame<W: std::io::Write>(
     prev: &mut Vec<u8>,
     w: u32,
     h: u32,
-    delay_cs: u32,
-) -> Result<(), ExportError> {
+    delay_cs: u64,
+    cancel: &AtomicBool,
+) -> Result<u32, ExportError> {
     let rect = if prev.len() == indexed.len() && !prev.is_empty() {
         dirty_rect(indexed, prev, w, h).unwrap_or((0, 0, w, h))
     } else {
@@ -352,19 +403,32 @@ fn write_one_frame<W: std::io::Write>(
         let start = (y * w + rx) as usize;
         buffer.extend_from_slice(&indexed[start..start + rw as usize]);
     }
-    encoder.write_frame(&Frame {
-        delay: delay_cs.min(u16::MAX as u32) as u16,
-        dispose: DisposalMethod::Keep,
-        transparent: None,
-        needs_user_input: false,
-        top: ry as u16,
-        left: rx as u16,
-        width: rw as u16,
-        height: rh as u16,
-        interlaced: false,
-        palette: None,
-        buffer: std::borrow::Cow::Owned(buffer),
-    })?;
+    let mut remaining = delay_cs;
+    let mut written = 0;
+    while remaining > 0 {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(ExportError::Cancelled);
+        }
+        let mut delay = remaining.min(u16::MAX as u64);
+        if remaining - delay == 1 {
+            delay -= 1;
+        }
+        encoder.write_frame(&Frame {
+            delay: delay as u16,
+            dispose: DisposalMethod::Keep,
+            transparent: None,
+            needs_user_input: false,
+            top: ry as u16,
+            left: rx as u16,
+            width: rw as u16,
+            height: rh as u16,
+            interlaced: false,
+            palette: None,
+            buffer: std::borrow::Cow::Borrowed(&buffer),
+        })?;
+        remaining -= delay;
+        written += 1;
+    }
     // 编码后该帧成为「前一帧」画布状态
     if prev.len() != indexed.len() {
         prev.clear();
@@ -372,7 +436,7 @@ fn write_one_frame<W: std::io::Write>(
     } else {
         prev.copy_from_slice(indexed);
     }
-    Ok(())
+    Ok(written)
 }
 
 /// 求两索引缓冲的变化包围盒；完全相同返回 None。
@@ -425,7 +489,12 @@ fn train_quantizer(
     let t0 = std::time::Instant::now();
     let total = plan.frames.len() as u32;
     let mut pixels = Vec::new();
-    for (i, pf) in plan.frames.iter().enumerate() {
+    // 固定抽样帧数与总训练字节；长素材不汇总全部像素。
+    const SAMPLE_FRAMES: usize = 32;
+    const SAMPLE_BYTES: usize = 4 << 20;
+    let count = plan.frames.len().min(SAMPLE_FRAMES);
+    for i in 0..count {
+        let pf = plan.frames.get(i * plan.frames.len() / count).unwrap();
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             return Err(ExportError::Cancelled);
         }
@@ -436,13 +505,17 @@ fn train_quantizer(
         let scaled = resize_bgra(&bgra, plan.src_w, plan.src_h, out_w, out_h);
         // 训练像素抽稀：每 4 像素取 1（NeuQuant 对 UI 演示场景足够；
         // 全量输入只增加汇总与量化耗时，质量差异不可感知）
-        pixels.extend(scaled.chunks_exact(4).step_by(4).flat_map(|px| px.to_vec()));
+        let per_frame = SAMPLE_BYTES / count / 4;
+        let stride = (scaled.len() / 4).div_ceil(per_frame).max(1);
+        for px in scaled.chunks_exact(4).step_by(stride).take(per_frame) {
+            pixels.extend_from_slice(px);
+        }
         tracing::trace!(
             src_idx = pf.src_idx,
             decode_resize_ms = frame_t0.elapsed().as_millis() as u64,
             "GIF 导出：调色板训练帧完成"
         );
-        progress(ExportStage::Preparing, i as u32 + 1, total);
+        progress(ExportStage::Preparing, i as u32 + 1, count as u32);
     }
     let t_train_pixels = t0.elapsed();
     // 量化阶段单独上报（这是「x/x 卡住」的那段——计算本身不可量化进度）
@@ -488,10 +561,14 @@ pub fn resize_bgra(src: &[u8], src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -
     let y_ratio = src_h as f64 / dst_h as f64;
     for dy in 0..dst_h {
         let sy0 = (dy as f64 * y_ratio) as u32;
-        let sy1 = (((dy + 1) as f64 * y_ratio).ceil() as u32).min(src_h).max(sy0 + 1);
+        let sy1 = (((dy + 1) as f64 * y_ratio).ceil() as u32)
+            .min(src_h)
+            .max(sy0 + 1);
         for dx in 0..dst_w {
             let sx0 = (dx as f64 * x_ratio) as u32;
-            let sx1 = (((dx + 1) as f64 * x_ratio).ceil() as u32).min(src_w).max(sx0 + 1);
+            let sx1 = (((dx + 1) as f64 * x_ratio).ceil() as u32)
+                .min(src_w)
+                .max(sx0 + 1);
             let (mut b, mut g, mut r, mut a, mut n) = (0u64, 0u64, 0u64, 0u64, 0u64);
             for sy in sy0..sy1 {
                 let row = (sy * src_w) as usize;
@@ -550,10 +627,21 @@ fn total_delay_cs(plan: &EncodePlan) -> u64 {
 /// 独立解码验证：帧数、逻辑尺寸、总 delay 与计划一致（重复帧合并会改变
 /// 「GIF 帧数」，故只验证 delay 总和与尺寸；帧数 ≤ 计划数由合并保证）。
 #[cfg(test)]
-fn verify_gif(path: &Path, expect_delay_cs: u64, expect_w: u32, expect_h: u32) -> Result<(), String> {
+fn verify_gif(
+    path: &Path,
+    expect_delay_cs: u64,
+    expect_w: u32,
+    expect_h: u32,
+) -> Result<(), String> {
     verify_gif_inner(path, expect_delay_cs, expect_w, expect_h, None)
 }
-fn verify_gif_inner(path: &Path, expect_delay_cs: u64, expect_w: u32, expect_h: u32, cancel: Option<&AtomicBool>) -> Result<(), String> {
+fn verify_gif_inner(
+    path: &Path,
+    expect_delay_cs: u64,
+    expect_w: u32,
+    expect_h: u32,
+    cancel: Option<&AtomicBool>,
+) -> Result<(), String> {
     let file = BufReader::new(File::open(path).map_err(|e| e.to_string())?);
     let mut opts = gif::DecodeOptions::new();
     opts.set_color_output(gif::ColorOutput::RGBA);
@@ -568,7 +656,9 @@ fn verify_gif_inner(path: &Path, expect_delay_cs: u64, expect_w: u32, expect_h: 
         .read_next_frame()
         .map_err(|e| format!("解码失败于帧 {frames}: {e}"))?
     {
-        if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed)) { return Err("已取消".into()); }
+        if cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed)) {
+            return Err("已取消".into());
+        }
         frames += 1;
         delay_sum += frame.delay as u64;
     }
@@ -576,7 +666,9 @@ fn verify_gif_inner(path: &Path, expect_delay_cs: u64, expect_w: u32, expect_h: 
         return Err("GIF 无帧".into());
     }
     if delay_sum != expect_delay_cs {
-        return Err(format!("总时长不符: {delay_sum} ≠ {expect_delay_cs} (1/100s)"));
+        return Err(format!(
+            "总时长不符: {delay_sum} ≠ {expect_delay_cs} (1/100s)"
+        ));
     }
     Ok(())
 }
@@ -586,8 +678,7 @@ fn verify_gif_inner(path: &Path, expect_delay_cs: u64, expect_w: u32, expect_h: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gif::spool::{generate_session_id, CaptureRegion, SessionMeta, SpoolWriter};
-    
+    use crate::gif::spool::{CaptureRegion, SessionMeta, SpoolWriter, generate_session_id};
 
     /// 合成 8x8 帧：底色 `base`，(2,2) 处一个 2x2 亮块当「运动目标」。
     fn synth_frame(w: u32, h: u32, base: u8, hot: bool) -> Vec<u8> {
@@ -608,7 +699,12 @@ mod tests {
         v
     }
 
-    fn build_session(w: u32, h: u32, frames: &[Vec<u8>], ts: &[u64]) -> (tempfile::TempDir, String) {
+    fn build_session(
+        w: u32,
+        h: u32,
+        frames: &[Vec<u8>],
+        ts: &[u64],
+    ) -> (tempfile::TempDir, String) {
         let root = tempfile::tempdir().unwrap();
         let meta = SessionMeta {
             spool_version: crate::gif::spool::SPOOL_VERSION,
@@ -679,30 +775,62 @@ mod tests {
 
     #[test]
     fn cancel_during_verification_cleans_unique_temp_and_keeps_source() {
-        let frames = vec![synth_frame(8,8,30,false),synth_frame(8,8,50,true)];
-        let (root,id) = build_session(8,8,&frames,&[0,100]);
-        let reader = SpoolReader::open(root.path(),&id).unwrap();
-        let plan = plan_from(&frames,8,8,&[10,10]);
-        let out = root.path().join("cancel.gif"); let cancel = AtomicBool::new(false);
-        let result = export_gif(&reader,&plan,&ExportOptions::default(),&out,&cancel,&|stage,_,_| {
-            if stage == ExportStage::Verifying { cancel.store(true,std::sync::atomic::Ordering::Relaxed); }
-        });
-        assert!(matches!(result,Err(ExportError::Cancelled))); assert!(!out.exists());
+        let frames = vec![synth_frame(8, 8, 30, false), synth_frame(8, 8, 50, true)];
+        let (root, id) = build_session(8, 8, &frames, &[0, 100]);
+        let reader = SpoolReader::open(root.path(), &id).unwrap();
+        let plan = plan_from(&frames, 8, 8, &[10, 10]);
+        let out = root.path().join("cancel.gif");
+        let cancel = AtomicBool::new(false);
+        let result = export_gif(
+            &reader,
+            &plan,
+            &ExportOptions::default(),
+            &out,
+            &cancel,
+            &|stage, _, _| {
+                if stage == ExportStage::Verifying {
+                    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            },
+        );
+        assert!(matches!(result, Err(ExportError::Cancelled)));
+        assert!(!out.exists());
         assert!(reader.read_frame(0).is_ok());
-        assert!(!fs::read_dir(root.path()).unwrap().filter_map(Result::ok).any(|f| f.file_name().to_string_lossy().starts_with(".blink-gif-")));
+        assert!(
+            !fs::read_dir(root.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .any(|f| f.file_name().to_string_lossy().starts_with(".blink-gif-"))
+        );
     }
 
     #[test]
     fn target_created_during_encode_is_not_overwritten() {
-        let frames = vec![synth_frame(8,8,30,false)];
-        let (root,id) = build_session(8,8,&frames,&[0]);
-        let reader = SpoolReader::open(root.path(),&id).unwrap();
-        let plan = plan_from(&frames,8,8,&[10]); let out = root.path().join("race.gif");
-        let result = export_gif(&reader,&plan,&ExportOptions::default(),&out,&AtomicBool::new(false),&|stage,_,_| {
-            if stage == ExportStage::Committing { fs::write(&out,b"keep").unwrap(); }
-        });
-        assert!(result.is_err()); assert_eq!(fs::read(&out).unwrap(),b"keep");
-        assert!(!fs::read_dir(root.path()).unwrap().filter_map(Result::ok).any(|f| f.file_name().to_string_lossy().starts_with(".blink-gif-")));
+        let frames = vec![synth_frame(8, 8, 30, false)];
+        let (root, id) = build_session(8, 8, &frames, &[0]);
+        let reader = SpoolReader::open(root.path(), &id).unwrap();
+        let plan = plan_from(&frames, 8, 8, &[10]);
+        let out = root.path().join("race.gif");
+        let result = export_gif(
+            &reader,
+            &plan,
+            &ExportOptions::default(),
+            &out,
+            &AtomicBool::new(false),
+            &|stage, _, _| {
+                if stage == ExportStage::Committing {
+                    fs::write(&out, b"keep").unwrap();
+                }
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(fs::read(&out).unwrap(), b"keep");
+        assert!(
+            !fs::read_dir(root.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .any(|f| f.file_name().to_string_lossy().starts_with(".blink-gif-"))
+        );
     }
 
     #[test]
@@ -733,22 +861,19 @@ mod tests {
     fn dirty_rect_composes_to_full_canvas_on_decode() {
         // 帧 0 全量（含亮块），帧 1 只移动亮块——dirty-rect 写子矩形，
         // 解码端以画布累积语义还原。验证：解出的帧 1 == 期望全帧。
-        let frames = vec![
-            synth_frame(8, 8, 30, true),
-            {
-                // 亮块移动到 (4,4)
-                let mut v = synth_frame(8, 8, 30, false);
-                for y in 4..6 {
-                    for x in 4..6 {
-                        let i = ((y * 8 + x) * 4) as usize;
-                        v[i] = 255;
-                        v[i + 1] = 255;
-                        v[i + 2] = 255;
-                    }
+        let frames = vec![synth_frame(8, 8, 30, true), {
+            // 亮块移动到 (4,4)
+            let mut v = synth_frame(8, 8, 30, false);
+            for y in 4..6 {
+                for x in 4..6 {
+                    let i = ((y * 8 + x) * 4) as usize;
+                    v[i] = 255;
+                    v[i + 1] = 255;
+                    v[i + 2] = 255;
                 }
-                v
-            },
-        ];
+            }
+            v
+        }];
         let (root, id) = build_session(8, 8, &frames, &[0, 100]);
         let reader = SpoolReader::open(root.path(), &id).unwrap();
         let plan = plan_from(&frames, 8, 8, &[10, 10]);
@@ -860,12 +985,48 @@ mod tests {
         let reader = SpoolReader::open(root.path(), &id).unwrap();
         let plan = plan_from(&frames, 8, 8, &[10]);
         let out = root.path().join("raced.gif");
-        let error = export_gif(&reader, &plan, &ExportOptions::default(), &out, &AtomicBool::new(false), &|_, _, _| {
-            std::fs::write(&out, b"another task's file").unwrap();
-        }).unwrap_err();
+        let error = export_gif(
+            &reader,
+            &plan,
+            &ExportOptions::default(),
+            &out,
+            &AtomicBool::new(false),
+            &|_, _, _| {
+                std::fs::write(&out, b"another task's file").unwrap();
+            },
+        )
+        .unwrap_err();
         assert!(matches!(error, ExportError::FileExists(_)));
         assert_eq!(std::fs::read(&out).unwrap(), b"another task's file");
         assert!(!out.with_extension("gif.tmp").exists());
+    }
+
+    #[test]
+    fn long_static_gif_splits_format_delay_without_losing_time() {
+        let frames = vec![synth_frame(8, 8, 40, false)];
+        let (root, id) = build_session(8, 8, &frames, &[0]);
+        let reader = SpoolReader::open(root.path(), &id).unwrap();
+        let plan = plan_from(&frames, 8, 8, &[180_000]);
+        let out = root.path().join("long-static.gif");
+        let stats = export_gif(
+            &reader,
+            &plan,
+            &ExportOptions::default(),
+            &out,
+            &AtomicBool::new(false),
+            &|_, _, _| {},
+        )
+        .unwrap();
+        assert_eq!(stats.written_frames, 3);
+        let mut decoder = gif::DecodeOptions::new()
+            .read_info(File::open(out).unwrap())
+            .unwrap();
+        let mut total = 0u64;
+        while let Some(frame) = decoder.read_next_frame().unwrap() {
+            assert!(frame.delay >= 2);
+            total += frame.delay as u64;
+        }
+        assert_eq!(total, 180_000);
     }
 
     #[test]
@@ -944,7 +1105,10 @@ mod tests {
         let frame = decoder.read_next_frame().unwrap().expect("首帧");
         let buf = &frame.buffer;
         let (r, g, b) = (buf[0], buf[1], buf[2]);
-        assert!(r > 200 && g < 60 && b < 60, "应为红色，实为 R={r} G={g} B={b}");
+        assert!(
+            r > 200 && g < 60 && b < 60,
+            "应为红色，实为 R={r} G={g} B={b}"
+        );
     }
 
     #[test]

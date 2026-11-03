@@ -59,6 +59,7 @@ pub(crate) struct ActiveRecording {
     /// 不再从磁盘会话元数据回读（录制中索引还在增长，回读既贵又可能失败）。
     region_w: u32,
     region_h: u32,
+    target_fps: u32,
     pub(crate) audio: blink_infra::gif::audio::SharedAudio,
 }
 
@@ -80,6 +81,7 @@ pub struct GifService {
     /// overlay 录制叠层输入态（穿透/命中矩形）。
     pub(crate) overlay_input: Mutex<OverlayInputState>,
     pub(crate) timelines: Mutex<HashMap<String, Timeline>>,
+    pub(crate) readers: Mutex<HashMap<String, Arc<SpoolReader>>>,
     /// 首建时间轴与草稿恢复必须整体发布，避免并发命令看到半初始化状态。
     pub(crate) timeline_init: Mutex<()>,
     /// 编辑器当前会话（复用窗口 + ready/pull）。
@@ -104,6 +106,7 @@ impl GifService {
             recording: Mutex::new(None),
             overlay_input: Mutex::new(OverlayInputState::default()),
             timelines: Mutex::new(HashMap::new()),
+            readers: Mutex::new(HashMap::new()),
             timeline_init: Mutex::new(()),
             editor_session: Mutex::new(None),
             drafts: Mutex::new(HashMap::new()),
@@ -136,7 +139,8 @@ impl GifService {
         if let Some(recording) = recording {
             protected.push(recording);
         }
-        let removed = infra_gif::spool::cleanup_expired_except(&Self::root(), SESSION_TTL, &protected);
+        let removed =
+            infra_gif::spool::cleanup_expired_except(&Self::root(), SESSION_TTL, &protected);
         if removed > 0 {
             tracing::info!(removed, "录制素材 TTL 清理完成");
         }
@@ -149,6 +153,7 @@ impl GifService {
 #[serde(rename_all = "camelCase")]
 pub struct RecorderStatePayload {
     pub audio: blink_infra::gif::audio::AudioStatus,
+    pub storage: blink_infra::gif::space::Snapshot,
     pub phase: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
@@ -159,6 +164,8 @@ pub struct RecorderStatePayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frames: Option<u32>,
     pub paused: bool,
+    pub target_fps: Option<u32>,
+    pub actual_fps: Option<f64>,
 }
 
 fn emit_state(app: &AppHandle, payload: RecorderStatePayload) {
@@ -175,12 +182,15 @@ fn snapshot_state(service: &GifService) -> RecorderStatePayload {
     match rec.as_ref() {
         None => RecorderStatePayload {
             audio: Default::default(),
+            storage: Default::default(),
             phase: "idle",
             session_id: None,
             countdown_ms: None,
             elapsed_ms: None,
             frames: None,
             paused: false,
+            target_fps: None,
+            actual_fps: None,
         },
         Some(r) => {
             // 倒计时是服务层语义（采集线程仍在 waiting Start）——对外统一
@@ -199,6 +209,12 @@ fn snapshot_state(service: &GifService) -> RecorderStatePayload {
                     .as_millis() as u64
             });
             RecorderStatePayload {
+                storage: r
+                    .ctl
+                    .space
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone(),
                 audio: r.audio.lock().unwrap_or_else(|e| e.into_inner()).snapshot(),
                 phase,
                 session_id: Some(r.session_id.clone()),
@@ -206,6 +222,9 @@ fn snapshot_state(service: &GifService) -> RecorderStatePayload {
                 elapsed_ms: Some(r.ctl.elapsed_ms()),
                 frames: Some(r.ctl.captured_frames()),
                 paused: phase == "paused",
+                target_fps: Some(r.target_fps),
+                actual_fps: (r.ctl.elapsed_ms() > 0)
+                    .then(|| r.ctl.captured_frames() as f64 * 1000.0 / r.ctl.elapsed_ms() as f64),
             }
         }
     }
@@ -246,7 +265,7 @@ pub enum GifServiceError {
     AlreadyRecording,
     #[error("没有进行中的录制")]
     NoActiveRecording,
-    #[error("区域尺寸超限（宽 64–2560 / 高 64–1600）")]
+    #[error("区域尺寸无效（至少 64×64，单帧不超过 64MiB）")]
     InvalidRegion,
     #[error("FPS 需在 5–30 之间")]
     InvalidFps,
@@ -278,14 +297,16 @@ pub fn start_recording(
     show_cursor: bool,
     audio_options: blink_infra::gif::audio::AudioOptions,
 ) -> GifResult<String> {
-    if !(64..=2560).contains(&w) || !(64..=1600).contains(&h) {
+    if w < 64 || h < 64 || (w as u64).saturating_mul(h as u64).saturating_mul(4) > (64 << 20) {
         return Err(GifServiceError::InvalidRegion);
     }
-    if !(5..=30).contains(&fps) {
+    if ![10, 15, 24, 30, 60].contains(&fps) {
         return Err(GifServiceError::InvalidFps);
     }
     let service = app.state::<Arc<GifService>>();
-    let _starting = service.start_lock.try_lock()
+    let _starting = service
+        .start_lock
+        .try_lock()
         .map_err(|_| GifServiceError::AlreadyRecording)?;
     {
         let rec = service.recording.lock().unwrap_or_else(|e| e.into_inner());
@@ -302,8 +323,14 @@ pub fn start_recording(
     let region_pos: blink_infra::gif::SharedRegionPos = Arc::new(Mutex::new((x, y)));
     #[cfg(target_os = "windows")]
     let source = blink_infra::gif::GdiFrameSource::with_shared_pos(
-        x, y, w, h, show_cursor, Some(Arc::clone(&region_pos)),
-    );
+        x,
+        y,
+        w,
+        h,
+        show_cursor,
+        Some(Arc::clone(&region_pos)),
+    )
+    .with_fps(fps);
 
     let root = GifService::root();
     let session_id = infra_gif::generate_session_id();
@@ -330,6 +357,7 @@ pub fn start_recording(
         .take();
     let audio = blink_infra::gif::audio::shared(audio_options.clone());
     let source = RecordingSource {
+        storage: root.join("sessions").join(&session_id),
         video: source,
         audio: blink_infra::platform::audio::recording::Session::new(
             audio.clone(),
@@ -344,7 +372,6 @@ pub fn start_recording(
         source,
         writer,
         fps,
-        // 帧上限按 fps 折算（fps × 120s），否则 30fps 只有 60s 有效录制
         infra_gif::RecordingBudget::for_fps(fps),
     );
 
@@ -368,6 +395,7 @@ pub fn start_recording(
         region_pos: region_for_rec,
         region_w: w,
         region_h: h,
+        target_fps: fps,
         audio,
     });
 
@@ -382,7 +410,10 @@ pub fn start_recording(
         tokio::time::sleep(Duration::from_secs(10)).await;
         let service = app2.state::<Arc<GifService>>();
         let rec = service.recording.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(r) = rec.as_ref().filter(|r| Arc::ptr_eq(&r.ctl, &ctl2) && r.countdown_deadline.is_none()) {
+        if let Some(r) = rec
+            .as_ref()
+            .filter(|r| Arc::ptr_eq(&r.ctl, &ctl2) && r.countdown_deadline.is_none())
+        {
             tracing::warn!(session_id = %r.session_id, "录制叠层未就绪，取消未开始的录制");
             r.cancel_flag.store(true, Ordering::SeqCst);
             r.ctl.command(CaptureCommand::Stop);
@@ -415,12 +446,15 @@ pub fn overlay_ready(app: &AppHandle, session_id: &str) -> GifResult<()> {
     let service = app.state::<Arc<GifService>>();
     let ctl = {
         let mut rec = service.recording.lock().unwrap_or_else(|e| e.into_inner());
-        let r = rec.as_mut().filter(|r| r.session_id == session_id)
+        let r = rec
+            .as_mut()
+            .filter(|r| r.session_id == session_id)
             .ok_or(GifServiceError::NoActiveRecording)?;
         if r.countdown_deadline.is_some() || r.cancel_flag.load(Ordering::SeqCst) {
             return Ok(());
         }
-        r.countdown_deadline = Some(std::time::Instant::now() + Duration::from_millis(COUNTDOWN_MS));
+        r.countdown_deadline =
+            Some(std::time::Instant::now() + Duration::from_millis(COUNTDOWN_MS));
         Arc::clone(&r.ctl)
     };
     let app = app.clone();
@@ -428,7 +462,10 @@ pub fn overlay_ready(app: &AppHandle, session_id: &str) -> GifResult<()> {
         tokio::time::sleep(Duration::from_millis(COUNTDOWN_MS)).await;
         let service = app.state::<Arc<GifService>>();
         let rec = service.recording.lock().unwrap_or_else(|e| e.into_inner());
-        if rec.as_ref().is_some_and(|r| Arc::ptr_eq(&r.ctl, &ctl) && !r.cancel_flag.load(Ordering::SeqCst)) {
+        if rec
+            .as_ref()
+            .is_some_and(|r| Arc::ptr_eq(&r.ctl, &ctl) && !r.cancel_flag.load(Ordering::SeqCst))
+        {
             ctl.command(CaptureCommand::Start);
         }
         drop(rec);
@@ -476,7 +513,11 @@ fn finalize_after_stop(
     let root = GifService::root();
     if cancelled {
         let _ = std::fs::remove_dir_all(root.join("sessions").join(session_id));
-        service.timelines.lock().unwrap_or_else(|e| e.into_inner()).remove(session_id);
+        service
+            .timelines
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(session_id);
         tracing::info!(session_id, "GIF 录制已取消，素材已丢弃");
         return;
     }
@@ -485,7 +526,12 @@ fn finalize_after_stop(
     match SpoolReader::open(&root, session_id) {
         Ok(reader) => {
             // 与历史会话共用初始化：同时记录素材身份，确保新录制也能写草稿。
-            crate::app::gif_draft::ensure_timeline(&service, &reader, session_id);
+            if let Err(error) =
+                crate::app::gif_draft::ensure_timeline(&service, &reader, session_id)
+            {
+                tracing::error!(session_id,%error,"录制时间轴初始化失败，素材保留");
+                return;
+            }
             let frames = reader.frame_count();
             tracing::info!(
                 session_id,
@@ -495,6 +541,7 @@ fn finalize_after_stop(
                 "GIF 录制完成，素材已定稿"
             );
             if !open_editor(app, session_id) {
+                crate::app::gif_draft::release_if_saved(&service, session_id);
                 // 录制完成不能静默取消另一段素材的导出；新素材保留在最近录制。
                 open_editor_entry(app);
                 let current = service
@@ -528,8 +575,10 @@ fn enter_overlay_record_mode(app: &AppHandle) {
     crate::infra::platform::window::set_overlay_record_active(true);
     {
         let service = app.state::<Arc<GifService>>();
-        *service.overlay_input.lock().unwrap_or_else(|e| e.into_inner()) =
-            OverlayInputState::default();
+        *service
+            .overlay_input
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = OverlayInputState::default();
     }
     if let Some(win) = overlay_window(app) {
         let _ = win.set_ignore_cursor_events(false);
@@ -548,8 +597,10 @@ fn exit_overlay_record_mode(app: &AppHandle) {
     }
     {
         let service = app.state::<Arc<GifService>>();
-        *service.overlay_input.lock().unwrap_or_else(|e| e.into_inner()) =
-            OverlayInputState::default();
+        *service
+            .overlay_input
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = OverlayInputState::default();
     }
     crate::infra::platform::window::set_overlay_record_active(false);
     crate::infra::platform::window::hide_screenshot_overlay(app);
@@ -564,11 +615,19 @@ pub fn set_overlay_input(
     rects: Vec<[i32; 4]>,
 ) -> GifResult<()> {
     let service = app.state::<Arc<GifService>>();
-    if service.recording.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
+    if service
+        .recording
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_none()
+    {
         return Err(GifServiceError::NoActiveRecording);
     }
     let want_pass = {
-        let mut st = service.overlay_input.lock().unwrap_or_else(|e| e.into_inner());
+        let mut st = service
+            .overlay_input
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         st.desktop_mode = desktop_mode;
         st.hit_rects = rects;
         // 涂画模式立即取消穿透；桌面模式按当前指针位置先算一次，
@@ -587,7 +646,12 @@ pub fn set_overlay_input(
 /// 仅更新命中矩形（工具栏拖动/弹层开合后的周期刷新）。
 pub fn set_overlay_hit_rects(app: &AppHandle, rects: Vec<[i32; 4]>) -> GifResult<()> {
     let service = app.state::<Arc<GifService>>();
-    if service.recording.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
+    if service
+        .recording
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_none()
+    {
         return Err(GifServiceError::NoActiveRecording);
     }
     service
@@ -601,7 +665,12 @@ pub fn set_overlay_hit_rects(app: &AppHandle, rects: Vec<[i32; 4]>) -> GifResult
 /// 文字输入期间 overlay 需要键盘焦点（前端在文字编辑开始/结束时申请/归还）。
 pub fn set_overlay_focusable(app: &AppHandle, focusable: bool) -> GifResult<()> {
     let service = app.state::<Arc<GifService>>();
-    if service.recording.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
+    if service
+        .recording
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_none()
+    {
         return Err(GifServiceError::NoActiveRecording);
     }
     if let Some(win) = overlay_window(app) {
@@ -615,7 +684,10 @@ pub fn set_overlay_focusable(app: &AppHandle, focusable: bool) -> GifResult<()> 
 
 fn apply_pass_through(app: &AppHandle, service: &GifService, want: bool) {
     let changed = {
-        let mut st = service.overlay_input.lock().unwrap_or_else(|e| e.into_inner());
+        let mut st = service
+            .overlay_input
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if st.pass_through == want {
             false
         } else {
@@ -623,9 +695,7 @@ fn apply_pass_through(app: &AppHandle, service: &GifService, want: bool) {
             true
         }
     };
-    if changed
-        && let Some(win) = overlay_window(app)
-    {
+    if changed && let Some(win) = overlay_window(app) {
         let _ = win.set_ignore_cursor_events(want);
     }
 }
@@ -654,19 +724,31 @@ fn cursor_pos() -> (i32, i32) {
 /// 命中轮询：录制期间每 16ms 读指针；「操作桌面」模式下指针在命中矩形内
 /// 取消穿透、否则恢复穿透。录制结束自动退出（按活跃录制判活，单实例）。
 fn spawn_overlay_hit_poller(app: AppHandle) {
-    let session_id = app.state::<Arc<GifService>>().recording.lock().unwrap_or_else(|e| e.into_inner())
-        .as_ref().map(|r| r.session_id.clone());
+    let session_id = app
+        .state::<Arc<GifService>>()
+        .recording
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|r| r.session_id.clone());
     tauri::async_runtime::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_millis(OVERLAY_HIT_POLL_MS)).await;
             let service = app.state::<Arc<GifService>>();
-            let current = service.recording.lock().unwrap_or_else(|e| e.into_inner())
-                .as_ref().map(|r| r.session_id.clone());
+            let current = service
+                .recording
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .map(|r| r.session_id.clone());
             if current.is_none() || current != session_id {
                 break;
             }
             let want = {
-                let st = service.overlay_input.lock().unwrap_or_else(|e| e.into_inner());
+                let st = service
+                    .overlay_input
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 if !st.desktop_mode {
                     false
                 } else {
@@ -682,8 +764,13 @@ fn spawn_overlay_hit_poller(app: AppHandle) {
 /// 录制区域变化的统一广播（overlay 前端据此同步范围框与涂画层位置）。
 fn emit_region_updated(app: &AppHandle, x: i32, y: i32, w: u32, h: u32) {
     let (vx, vy, vw, vh) = virtual_screen_rect();
-    let session_id = app.state::<Arc<GifService>>().recording.lock().unwrap_or_else(|e| e.into_inner())
-        .as_ref().map(|r| r.session_id.clone());
+    let session_id = app
+        .state::<Arc<GifService>>()
+        .recording
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|r| r.session_id.clone());
     let _ = app.emit(
         EventNames::GIF_REGION_UPDATED,
         serde_json::json!({"sessionId": session_id, "x": x, "y": y, "w": w, "h": h, "vx": vx, "vy": vy, "vw": vw, "vh": vh}),
@@ -720,13 +807,18 @@ pub fn open_editor(app: &AppHandle, session_id: &str) -> bool {
     use blink_infra::platform::window::get_or_create_window;
     {
         let service = app.state::<Arc<GifService>>();
-        let mut current = service.editor_session.lock().unwrap_or_else(|e| e.into_inner());
+        let mut current = service
+            .editor_session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(previous) = current.as_deref().filter(|id| *id != session_id) {
             if crate::app::media_service::shared().has_active_job(previous) {
                 tracing::info!(session_id, "编辑器保留在途导出会话，新素材可从最近录制打开");
                 return false;
             }
+            crate::app::media_service::shared().cancel_estimate(previous);
             crate::app::gif_draft::flush_draft(app, previous);
+            crate::app::gif_draft::release_if_saved(&service, previous);
         }
         *current = Some(session_id.to_string());
     }
@@ -793,9 +885,13 @@ pub fn open_editor_home(app: &AppHandle) {
     use blink_infra::platform::window::get_or_create_window;
     {
         let service = app.state::<Arc<GifService>>();
-        let mut current = service.editor_session.lock().unwrap_or_else(|e| e.into_inner());
+        let mut current = service
+            .editor_session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(previous) = current.take() {
             crate::app::gif_draft::flush_draft(app, &previous);
+            crate::app::gif_draft::release_if_saved(&service, &previous);
             crate::app::media_service::shared().cancel(Some(&previous), None);
         }
     }
@@ -829,10 +925,18 @@ fn bind_editor_lifecycle(app: &AppHandle, win: &tauri::WebviewWindow) {
     let service = app.state::<Arc<GifService>>().inner().clone();
     let app = app.clone();
     win.on_window_event(move |event| {
-        if matches!(event, tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed) {
-            let id = service.editor_session.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if matches!(
+            event,
+            tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
+        ) {
+            let id = service
+                .editor_session
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take();
             if let Some(id) = id {
                 crate::app::gif_draft::flush_draft(&app, &id);
+                crate::app::gif_draft::release_if_saved(&service, &id);
                 crate::app::media_service::shared().cancel(Some(&id), None);
             }
         }
@@ -870,42 +974,25 @@ fn now_ms() -> u64 {
 // ── 编辑/查询/导出辅助 ──────────────────────────────────────────────────────
 
 pub fn timeline_view(tl: &Timeline) -> serde_json::Value {
-    let frames: Vec<serde_json::Value> = tl
-        .effective_frames()
-        .iter()
-        .map(|f| {
-            serde_json::json!({
-                "srcIdx": f.src_idx,
-                "durMs": f.dur_ms,
-                "held": f.held,
-            })
-        })
-        .collect();
     serde_json::json!({
-        "frameCount": tl.frame_count(),
-        "revision": tl.revision(),
-        "trimStart": tl.trim_range().0,
-        "trimEnd": tl.trim_range().1,
-        "deleted": tl.deleted_frames(),
-        "speed": tl.speed(),
-        "holds": tl.holds().iter().map(|(k, v)| (k.to_string(), *v)).collect::<HashMap<String, u32>>(),
-        "loopCount": tl.loop_count(),
-        "frames": frames,
-        "totalMs": tl.effective_total_ms(),
-        "canUndo": tl.can_undo(),
-        "canRedo": tl.can_redo(),
-        "audioSpans": tl.audio_spans(),
-        "mix": tl.mix(),
+        "frameCount":tl.frame_count(), "effectiveCount":tl.effective_count(),
+        "revision":tl.revision(), "trimStart":tl.trim_range().0, "trimEnd":tl.trim_range().1,
+        "speed":tl.speed(), "loopCount":tl.loop_count(), "totalMs":tl.effective_total_ms(),
+        "canUndo":tl.can_undo(), "canRedo":tl.can_redo(), "mix":tl.mix(),
     })
 }
 
 /// 音画生命周期由采集线程串行驱动；打开两路成功后才启动共同单调时钟。
 struct RecordingSource {
+    storage: PathBuf,
     video: blink_infra::gif::GdiFrameSource,
     audio: blink_infra::platform::audio::recording::Session,
     enabled: bool,
 }
 impl blink_infra::gif::capture::FrameSource for RecordingSource {
+    fn storage(&self) -> Option<PathBuf> {
+        Some(self.storage.clone())
+    }
     fn capture(&mut self) -> Result<Vec<u8>, String> {
         if let Some(error) = self.audio.fault() {
             return Err(error);
@@ -921,17 +1008,23 @@ impl blink_infra::gif::capture::FrameSource for RecordingSource {
     fn frame_bytes(&self) -> usize {
         self.video.frame_bytes()
     }
+    fn timestamp_ms(&self, fallback: u64) -> u64 {
+        self.video.timestamp_ms(fallback)
+    }
     fn resume(&mut self, offset: u64) -> Result<std::time::Instant, String> {
-        if self.enabled {
-            self.audio.resume(offset)
+        let now = if self.enabled {
+            self.audio.resume(offset)?
         } else {
-            Ok(std::time::Instant::now())
-        }
+            std::time::Instant::now()
+        };
+        self.video.resume_at(now, offset);
+        Ok(now)
     }
     fn pause(&mut self, end: u64) {
         if self.enabled {
             self.audio.pause(end);
         }
+        self.video.pause(end);
     }
     fn recoverable(&self) -> bool {
         self.enabled
@@ -944,19 +1037,166 @@ pub fn to_encode_plan(plan: &blink_domain::gif::ExportPlan) -> EncodePlan {
         src_w: plan.src_w,
         src_h: plan.src_h,
         loop_count: plan.loop_count,
-        frames: plan
-            .frames
-            .iter()
-            .map(|f| EncodeFrame {
-                src_idx: f.src_idx,
-                delay_cs: f.delay_cs,
-            })
-            .collect(),
+        frames: plan.frames.map(|f| EncodeFrame {
+            src_idx: f.src_idx,
+            delay_cs: f.delay_cs,
+        }),
     }
 }
 
 #[cfg(test)]
 mod media_storage_tests {
+    #[test]
+    #[ignore = "真实桌面 30 分钟录制/剪辑/导出；隔离临时目录，显式运行"]
+    fn native_long_recording_edit_export() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .try_init();
+        use blink_domain::gif::{EditCommand, Timeline};
+        use blink_infra::gif::*;
+        let root = tempfile::tempdir().unwrap();
+        let display = blink_infra::platform::screenshot::list_displays().remove(0);
+        let duration = std::env::var("BLINK_RECORDING_LONG_TEST_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(1_800_000);
+        let meta = SessionMeta {
+            spool_version: SPOOL_VERSION,
+            id: "native-long".into(),
+            region: CaptureRegion {
+                x: display.x,
+                y: display.y,
+                w: 64,
+                h: 64,
+            },
+            fps: 10,
+            show_cursor: false,
+            created_at: 0,
+            state: "recording".into(),
+            ts_ms: vec![],
+            last_dur_ms: 100,
+            spool_bytes: 0,
+            stop_reason: None,
+        };
+        let writer = SpoolWriter::create(root.path(), meta).unwrap();
+        let mut source = GdiFrameSource::new(display.x, display.y, 64, 64, false);
+        use blink_infra::gif::capture::FrameSource;
+        source.capture().expect("原生桌面捕获前置核验");
+        let (ctl, rx) = spawn_pipeline(
+            source,
+            writer,
+            10,
+            RecordingBudget {
+                max_duration_ms: duration,
+                max_frames: u32::MAX,
+                max_spool_bytes: 512 << 20,
+                queue_frame_cap: 8,
+            },
+        );
+        ctl.command(CaptureCommand::Start);
+        let began = std::time::Instant::now();
+        let outcome = loop {
+            match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+                Ok(outcome) => break outcome,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    tracing::info!(elapsed_ms=ctl.elapsed_ms(),captured=ctl.captured_frames(),
+                        peak_process_bytes=?blink_infra::platform::process::peak_working_set_bytes(std::process::id()),"native long recording");
+                    assert!(
+                        (began.elapsed().as_millis() as u64) < duration + 60_000,
+                        "长会话超时"
+                    );
+                }
+                Err(error) => panic!("采集线程异常: {error}"),
+            }
+        };
+        assert_eq!(outcome.stop_reason, StopReason::BudgetExhausted);
+        let reader = SpoolReader::open(root.path(), "native-long").unwrap();
+        let mut timeline = Timeline::from_timings(reader.timings().unwrap());
+        assert!(timeline.effective_total_ms() >= duration);
+        timeline
+            .apply(&EditCommand::SetSpeed { factor: 1.5 })
+            .unwrap();
+        let total = timeline.effective_total_ms();
+        let located = timeline.window(None, Some(total - 1), None);
+        assert!(!located["frames"].as_array().unwrap().is_empty());
+        assert!(timeline.undo());
+        assert!(timeline.redo());
+        let plan = super::to_encode_plan(&timeline.export_plan(64, 64));
+        let out = root.path().join("long.gif");
+        let stats = export_gif(
+            &reader,
+            &plan,
+            &ExportOptions::default(),
+            &out,
+            &std::sync::atomic::AtomicBool::new(false),
+            &|_, _, _| {},
+        )
+        .unwrap();
+        assert!(stats.bytes > 0);
+        tracing::info!(source_ms=duration,edited_ms=total,retained=outcome.frames,exported=stats.written_frames,
+            source_bytes=outcome.spool_bytes,output_bytes=stats.bytes,
+            peak_process_bytes=?blink_infra::platform::process::peak_working_set_bytes(std::process::id()),"native long recording done");
+    }
+
+    #[test]
+    #[ignore = "重放已保留的真实 30 分钟夹具；不能代替真实采集，需 BLINK_RECORDING_REPLAY_ROOT"]
+    fn long_recording_fixture_replay_with_current_editor() {
+        use blink_domain::gif::{EditCommand, Timeline, timeline::RangeOperation};
+        use blink_infra::gif::*;
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .try_init();
+        let root = std::path::PathBuf::from(
+            std::env::var_os("BLINK_RECORDING_REPLAY_ROOT").expect("需要真实长素材夹具目录"),
+        );
+        let reader = SpoolReader::open(&root, "native-long").unwrap();
+        let mut timeline = Timeline::from_timings(reader.timings().unwrap());
+        let source_ms = timeline.effective_total_ms();
+        assert!((1_800_000..1_801_000).contains(&source_ms));
+        let count = timeline.effective_count();
+        let at = reader.frame_count() / 2;
+        timeline
+            .apply(&EditCommand::EditRanges {
+                operation: RangeOperation::Delete,
+                ranges: vec![(at, at + 1)],
+                ms: 0,
+            })
+            .unwrap();
+        assert_eq!(timeline.effective_count(), count - 2);
+        assert!(timeline.undo());
+        assert!(timeline.redo());
+        assert!(timeline.undo());
+        timeline
+            .apply(&EditCommand::SetSpeed { factor: 1.5 })
+            .unwrap();
+        let edited_ms = timeline.effective_total_ms();
+        assert_eq!(edited_ms, (source_ms as f64 / 1.5).round() as u64);
+        let window = timeline.window(None, Some(edited_ms - 1), None);
+        assert_eq!(window["frames"][0]["srcIdx"], reader.frame_count() - 1);
+        let draft = timeline.to_draft(edited_ms - 1);
+        let mut restored = Timeline::from_timings(reader.timings().unwrap());
+        restored.restore_draft(draft).unwrap();
+        assert_eq!(restored.effective_total_ms(), edited_ms);
+        let output = tempfile::tempdir().unwrap();
+        let plan = super::to_encode_plan(&restored.export_plan(64, 64));
+        let stats = export_gif(
+            &reader,
+            &plan,
+            &ExportOptions::default(),
+            &output.path().join("replayed.gif"),
+            &std::sync::atomic::AtomicBool::new(false),
+            &|_, _, _| {},
+        )
+        .unwrap();
+        tracing::info!(
+            source_ms,
+            edited_ms,
+            frames = reader.frame_count(),
+            output_bytes = stats.bytes,
+            "current editor replayed native long recording"
+        );
+    }
+
     #[test]
     fn gif_test_storage_uses_the_isolated_runtime_root() {
         assert!(!blink_infra::runtime_mode::is_production());

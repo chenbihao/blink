@@ -24,10 +24,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 mod maintenance;
+mod segmented;
 pub use maintenance::{cleanup_expired, cleanup_expired_except};
 
 /// 素材格式版本（`session.json` 的 `spool_version`；读取端拒绝更高版本）。
-pub const SPOOL_VERSION: u32 = 1;
+pub const SPOOL_VERSION: u32 = 2;
 
 /// zstd 压缩级别（1 = 最快；录制期吞吐优先，压缩率次要）。
 const ZSTD_LEVEL: i32 = 1;
@@ -109,11 +110,22 @@ pub struct SpoolWriter {
     ts: Vec<u64>,
     raw_frame_len: usize,
     meta: SessionMeta,
+    segmented: Option<segmented::Writer>,
 }
 
 impl SpoolWriter {
     /// 创建会话目录并打开写入器。目录已存在时拒绝（防重复会话 id）。
     pub fn create(root: &Path, meta: SessionMeta) -> Result<Self, SpoolError> {
+        if !is_valid_session_id(&meta.id)
+            || meta.region.w == 0
+            || meta.region.h == 0
+            || (meta.region.w as u64)
+                .saturating_mul(meta.region.h as u64)
+                .saturating_mul(4)
+                > 64 << 20
+        {
+            return Err(SpoolError::InvalidSession("素材身份或帧尺寸无效".into()));
+        }
         let dir = session_dir(root, &meta.id);
         if dir.exists() {
             return Err(SpoolError::InvalidSession(format!(
@@ -127,7 +139,10 @@ impl SpoolWriter {
 
         let bin = BufWriter::with_capacity(
             1 << 20,
-            OpenOptions::new().create(true).append(true).open(dir.join("spool.bin"))?,
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("spool.bin"))?,
         );
         let idx = BufWriter::with_capacity(
             1 << 14,
@@ -137,7 +152,13 @@ impl SpoolWriter {
                 .open(dir.join("frames.jsonl"))?,
         );
         let raw_frame_len = (meta.region.w as usize) * (meta.region.h as usize) * 4;
+        let segmented = if meta.spool_version >= 2 {
+            Some(segmented::Writer::create(&dir)?)
+        } else {
+            None
+        };
         Ok(Self {
+            segmented,
             dir,
             _usage: usage,
             bin,
@@ -156,6 +177,11 @@ impl SpoolWriter {
 
     /// 压缩并追加一帧（ts 为有效时间戳 ms）。返回压缩后字节。
     pub fn append_frame(&mut self, ts_ms: u64, bgra: &[u8]) -> Result<u64, SpoolError> {
+        if let Some(writer) = &mut self.segmented {
+            let n = writer.append(ts_ms, bgra, self.raw_frame_len)?;
+            self.meta.spool_bytes = writer.bytes();
+            return Ok(n);
+        }
         if bgra.len() != self.raw_frame_len {
             return Err(SpoolError::CorruptFrame(self.index.len() as u32));
         }
@@ -189,14 +215,24 @@ impl SpoolWriter {
         Ok(compressed.len() as u64)
     }
 
+    /// Publish a valid static hold even when duplicate merging produces no data.
+    pub(super) fn checkpoint_progress(&mut self, elapsed_ms: u64) -> Result<(), SpoolError> {
+        if let Some(writer) = &mut self.segmented {
+            writer.publish_progress(elapsed_ms)?;
+        }
+        Ok(())
+    }
+
     /// 当前已写帧数。
     pub fn frame_count(&self) -> u32 {
-        self.index.len() as u32
+        self.segmented
+            .as_ref()
+            .map_or(self.index.len() as u32, |w| w.count())
     }
 
     /// 已写压缩字节。
     pub fn spool_bytes(&self) -> u64 {
-        self.offset
+        self.segmented.as_ref().map_or(self.offset, |w| w.bytes())
     }
 
     /// 停止定稿：flush、写时长表（时间戳 + 末帧时长）、state=stopped。
@@ -205,8 +241,14 @@ impl SpoolWriter {
         stop_reason: &str,
         elapsed_ms: u64,
     ) -> Result<SessionMeta, SpoolError> {
-        if let Some(last_ts) = self.ts.last() {
-            self.meta.last_dur_ms = elapsed_ms.saturating_sub(*last_ts).clamp(1, u32::MAX as u64) as u32;
+        if let Some(last_ts) = self
+            .segmented
+            .as_ref()
+            .and_then(|w| w.last_ts())
+            .or_else(|| self.ts.last().copied())
+        {
+            self.meta.last_dur_ms =
+                elapsed_ms.saturating_sub(last_ts).clamp(1, u32::MAX as u64) as u32;
         }
         self.finalize(stop_reason)
     }
@@ -215,6 +257,9 @@ impl SpoolWriter {
     pub fn finalize(mut self, stop_reason: &str) -> Result<SessionMeta, SpoolError> {
         self.bin.flush()?;
         self.idx.flush()?;
+        if let Some(writer) = &mut self.segmented {
+            writer.finish(self.meta.last_dur_ms)?;
+        }
         self.meta.state = "stopped".into();
         self.meta.stop_reason = Some(stop_reason.to_string());
         self.meta.ts_ms = std::mem::take(&mut self.ts);
@@ -225,7 +270,7 @@ impl SpoolWriter {
     /// 丢弃（取消）：消费写入器并删除目录。
     pub fn discard(self) {
         let dir = self.dir.clone();
-        drop((self.bin, self.idx, self._usage));
+        drop((self.bin, self.idx, self.segmented, self._usage));
         if let Err(e) = fs::remove_dir_all(&dir) {
             tracing::warn!(dir = %dir.display(), error = %e, "GIF 素材目录删除失败（待 TTL 清理兜底）");
         }
@@ -246,7 +291,9 @@ fn write_session_json(dir: &Path, meta: &SessionMeta) -> Result<(), SpoolError> 
 pub fn is_valid_session_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 100
-        && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 /// 素材读取器（编辑器/导出按需解码）。
@@ -256,11 +303,18 @@ pub struct SpoolReader {
     pub meta: SessionMeta,
     index: Vec<FrameIndexEntry>,
     pub audio_recovered: bool,
+    segmented: Option<segmented::Index>,
 }
 
 impl SpoolReader {
     /// 打开会话：读元数据 + 索引（丢崩溃残行/越界尾块），校验格式版本。
     pub fn open(root: &Path, id: &str) -> Result<Self, SpoolError> {
+        Self::open_with_limit(root, id, None)
+    }
+    pub fn open_thumbnail(root: &Path, id: &str) -> Result<Self, SpoolError> {
+        Self::open_with_limit(root, id, Some(1))
+    }
+    fn open_with_limit(root: &Path, id: &str, limit: Option<u32>) -> Result<Self, SpoolError> {
         if !is_valid_session_id(id) {
             return Err(SpoolError::InvalidSession("会话标识无效".into()));
         }
@@ -275,7 +329,34 @@ impl SpoolReader {
         if meta.spool_version > SPOOL_VERSION {
             return Err(SpoolError::UnsupportedVersion(meta.spool_version));
         }
-        let spool_len = fs::metadata(dir.join("spool.bin")).map(|m| m.len()).unwrap_or(0);
+        if meta.id != id
+            || meta.region.w == 0
+            || meta.region.h == 0
+            || (meta.region.w as u64)
+                .saturating_mul(meta.region.h as u64)
+                .saturating_mul(4)
+                > 64 << 20
+        {
+            return Err(SpoolError::InvalidSession("素材身份或帧尺寸无效".into()));
+        }
+        if meta.spool_version >= 2 {
+            let (index, last_dur_ms, recovered) =
+                segmented::Index::open(&dir, meta.last_dur_ms.max(1), limit)?;
+            let mut meta = meta;
+            meta.last_dur_ms = last_dur_ms;
+            let recovered = recovered || meta.state != "stopped";
+            return Ok(Self {
+                dir,
+                _usage: usage,
+                meta,
+                index: Vec::new(),
+                audio_recovered: recovered,
+                segmented: Some(index),
+            });
+        }
+        let spool_len = fs::metadata(dir.join("spool.bin"))
+            .map(|m| m.len())
+            .unwrap_or(0);
         let mut index = Vec::new();
         if spool_len > 0 {
             let reader = BufReader::new(File::open(dir.join("frames.jsonl"))?);
@@ -297,6 +378,9 @@ impl SpoolReader {
                     break;
                 }
                 index.push(entry);
+                if limit.is_some_and(|n| index.len() >= n as usize) {
+                    break;
+                }
             }
         }
         let mut reader = Self {
@@ -305,6 +389,7 @@ impl SpoolReader {
             meta,
             index,
             audio_recovered: false,
+            segmented: None,
         };
         let total: u64 = reader.durations().iter().map(|v| *v as u64).sum();
         let (end, recovered) = super::audio::recovery_end(&reader.dir, total)?;
@@ -322,11 +407,16 @@ impl SpoolReader {
     }
 
     pub fn frame_count(&self) -> u32 {
-        self.index.len() as u32
+        self.segmented
+            .as_ref()
+            .map_or(self.index.len() as u32, |v| v.count())
     }
 
     /// 帧时间戳（优先元数据定稿值；未定稿回退索引）。
     pub fn timestamps(&self) -> Vec<u64> {
+        if let Some(index) = &self.segmented {
+            return index.timestamps();
+        }
         self.index.iter().map(|e| e.t).collect()
     }
 
@@ -338,13 +428,44 @@ impl SpoolReader {
         durations
     }
 
+    pub fn timings(&self) -> Result<super::timing::Timings, SpoolError> {
+        if self.segmented.is_some() {
+            return Ok(super::timing::Timings::mapped(
+                File::open(self.dir.join("frames.idx"))?,
+                self.frame_count(),
+                self.meta.last_dur_ms,
+                maintenance::usage_lock(&self.dir, false)?,
+            )?);
+        }
+        Ok(super::timing::Timings::memory(self.durations()))
+    }
+    pub fn total_ms(&self) -> u64 {
+        if let Some(index) = &self.segmented {
+            return index.total_ms();
+        }
+        match (self.index.first(), self.index.last()) {
+            (Some(first), Some(last)) => last
+                .t
+                .saturating_sub(first.t)
+                .saturating_add(self.meta.last_dur_ms.max(1) as u64),
+            _ => 0,
+        }
+    }
+
     /// 按需解码单帧（随机访问；校验长度）。
     pub fn read_frame(&self, idx: u32) -> Result<Vec<u8>, SpoolError> {
-        self.read_frame_bounded(idx, 16 << 20)
+        self.read_frame_bounded(idx, 64 << 20)
     }
 
     /// 解压前校验索引预算，解压时限制输出，损坏素材不能突破帧缓冲上限。
     pub fn read_frame_bounded(&self, idx: u32, max_bytes: usize) -> Result<Vec<u8>, SpoolError> {
+        if let Some(index) = &self.segmented {
+            let raw = index.read_frame(&self.dir, idx, max_bytes)?;
+            if raw.len() != (self.meta.region.w as usize) * (self.meta.region.h as usize) * 4 {
+                return Err(SpoolError::CorruptFrame(idx));
+            }
+            return Ok(raw);
+        }
         let Some(entry) = self.index.get(idx as usize) else {
             return Err(SpoolError::FrameOutOfRange(idx, self.index.len() as u32));
         };
@@ -357,10 +478,13 @@ impl SpoolReader {
         f.read_exact(&mut compressed)?;
         let mut decoder = zstd::stream::read::Decoder::new(&compressed[..])
             .map_err(|_| SpoolError::CorruptFrame(idx))?;
-        decoder.window_log_max(24)
+        decoder
+            .window_log_max(26)
             .map_err(|_| SpoolError::CorruptFrame(idx))?;
         let mut raw = Vec::with_capacity(entry.r as usize);
-        decoder.take(max_bytes as u64 + 1).read_to_end(&mut raw)
+        decoder
+            .take(max_bytes as u64 + 1)
+            .read_to_end(&mut raw)
             .map_err(|_| SpoolError::CorruptFrame(idx))?;
         if raw.len() != entry.r as usize || raw.len() > max_bytes {
             return Err(SpoolError::CorruptFrame(idx));
@@ -459,9 +583,7 @@ fn head_tail_entries(dir: &Path) -> Result<Option<((u32, u64), (u32, u64))>, Spo
             .ok()
             .map(|e| (e.i, e.t))
     };
-    let head_first = head
-        .split(|&b| b == b'\n')
-        .find_map(parse_line);
+    let head_first = head.split(|&b| b == b'\n').find_map(parse_line);
     // 尾部（seek 进来的起点不一定在行首，首段可能是半行——非零偏移丢弃第一段）
     let tail_start = len.saturating_sub(CHUNK);
     let tail = read_at(tail_start, len).unwrap_or_default();
@@ -473,7 +595,10 @@ fn head_tail_entries(dir: &Path) -> Result<Option<((u32, u64), (u32, u64))>, Spo
             None => &[],
         }
     };
-    let tail_last = tail_lines.split(|&b| b == b'\n').filter_map(parse_line).last();
+    let tail_last = tail_lines
+        .split(|&b| b == b'\n')
+        .filter_map(parse_line)
+        .last();
     match (head_first, tail_last) {
         (Some(first), Some(last)) => Ok(Some((first, last))),
         _ => Ok(None),
@@ -484,16 +609,29 @@ fn head_tail_entries(dir: &Path) -> Result<Option<((u32, u64), (u32, u64))>, Spo
 pub fn read_summary(root: &Path, id: &str) -> Result<SessionSummary, SpoolError> {
     let meta = read_session_meta(root, id)?;
     let dir = session_dir(root, id);
-    let (frame_count, total_ms) = if !meta.ts_ms.is_empty() {
+    let published = if meta.spool_version >= 2 {
+        Some(segmented::summary(&dir, meta.last_dur_ms.max(1))?)
+    } else {
+        None
+    };
+    let (frame_count, total_ms) = if let Some((frames, total, _)) = published {
+        (frames, total)
+    } else if !meta.ts_ms.is_empty() {
         let n = meta.ts_ms.len() as u32;
-        let span = meta.ts_ms.last().copied().unwrap_or(0)
+        let span = meta
+            .ts_ms
+            .last()
+            .copied()
+            .unwrap_or(0)
             .checked_sub(meta.ts_ms.first().copied().unwrap_or(0))
             .ok_or_else(|| SpoolError::InvalidSession("素材时间戳倒退".into()))?;
         (n, span.saturating_add(meta.last_dur_ms as u64))
     } else if let Some(((_, t0), (i_last, t_last))) = head_tail_entries(&dir)? {
         (
             i_last.saturating_add(1),
-            t_last.saturating_sub(t0).saturating_add(meta.last_dur_ms.max(1) as u64),
+            t_last
+                .saturating_sub(t0)
+                .saturating_add(meta.last_dur_ms.max(1) as u64),
         )
     } else {
         (0, 0)
@@ -517,7 +655,10 @@ pub fn read_summary(root: &Path, id: &str) -> Result<SessionSummary, SpoolError>
         fps: meta.fps,
         frame_count,
         total_ms,
-        spool_bytes: meta.spool_bytes.saturating_add(audio_bytes),
+        spool_bytes: meta
+            .spool_bytes
+            .max(published.map_or(0, |p| p.2))
+            .saturating_add(audio_bytes),
         state: meta.state.clone(),
         stop_reason: meta.stop_reason.clone(),
         has_draft: draft_path(&dir).is_file(),
@@ -537,7 +678,10 @@ pub fn list_summaries(root: &Path, offset: usize, limit: usize) -> (Vec<SessionS
         }
     }
     if failures > 0 {
-        tracing::debug!(failures, "最近录制摘要：部分会话读取失败（并发清理/损坏），已跳过");
+        tracing::debug!(
+            failures,
+            "最近录制摘要：部分会话读取失败（并发清理/损坏），已跳过"
+        );
     }
     metas.sort_by(|a, b| {
         b.created_at
@@ -551,10 +695,12 @@ pub fn list_summaries(root: &Path, offset: usize, limit: usize) -> (Vec<SessionS
         .take(limit)
         .filter_map(|meta| {
             let id = meta.id.clone();
-            read_summary(root, &id).map_err(|e| {
-                tracing::debug!(session_id = %id, error = %e, "会话摘要补充索引失败");
-                e
-            }).ok()
+            read_summary(root, &id)
+                .map_err(|e| {
+                    tracing::debug!(session_id = %id, error = %e, "会话摘要补充索引失败");
+                    e
+                })
+                .ok()
         })
         .collect();
     (items, total)
@@ -575,6 +721,22 @@ pub fn write_draft(dir: &Path, body: &str) -> Result<(), SpoolError> {
     }
     crate::utils::fs::atomic_write_bytes(&draft_path(dir), body.as_bytes())?;
     Ok(())
+}
+
+pub fn write_position(dir: &Path, body: &str) -> Result<(), SpoolError> {
+    let _lease = maintenance::usage_lock(dir, false)?;
+    if !dir.join("session.json").is_file() {
+        return Err(SpoolError::InvalidSession("会话已删除".into()));
+    }
+    crate::utils::fs::atomic_write_bytes(&dir.join("position.json"), body.as_bytes())?;
+    Ok(())
+}
+pub fn read_position(dir: &Path) -> Option<String> {
+    let path = dir.join("position.json");
+    if fs::metadata(&path).ok()?.len() > 4096 {
+        return None;
+    }
+    fs::read_to_string(path).ok()
 }
 
 /// 删除必须取得独占租约，与在途录制、预览、导出、草稿写入互斥。
@@ -622,7 +784,7 @@ mod tests {
 
     pub(super) fn meta(w: u32, h: u32) -> SessionMeta {
         SessionMeta {
-            spool_version: SPOOL_VERSION,
+            spool_version: 1,
             id: generate_session_id(),
             region: CaptureRegion { x: 0, y: 0, w, h },
             fps: 10,
@@ -645,6 +807,29 @@ mod tests {
     }
 
     #[test]
+    fn mapped_timing_survives_reader_drop_and_protects_all_segments() {
+        let root = tempfile::tempdir().unwrap();
+        let mut m = meta(8, 8);
+        m.spool_version = 2;
+        let id = m.id.clone();
+        let mut writer = SpoolWriter::create(root.path(), m).unwrap();
+        writer.append_frame(0, &frame(1, 8, 8)).unwrap();
+        writer.append_frame(100, &frame(2, 8, 8)).unwrap();
+        writer.finalize_at("user", 1_800_000).unwrap();
+        let reader = SpoolReader::open(root.path(), &id).unwrap();
+        let timings = reader.timings().unwrap();
+        assert_eq!(
+            (timings.len(), timings.at(0), timings.at(1)),
+            (2, 100, 1_799_900)
+        );
+        assert!(reader.meta.ts_ms.is_empty());
+        drop(reader);
+        assert!(discard_session(root.path(), &id).is_err());
+        drop(timings);
+        discard_session(root.path(), &id).unwrap();
+    }
+
+    #[test]
     fn session_id_cannot_escape_its_directory() {
         assert!(is_valid_session_id("rec-20261031_1"));
         for id in ["", "..", "../escape", "x/y", "x\\y", "x:y", " x", "x."] {
@@ -662,9 +847,15 @@ mod tests {
         writer.append_frame(0, &frame(0, 8, 8)).unwrap();
         writer.finalize("user").unwrap();
         let mut reader = SpoolReader::open(root.path(), &id).unwrap();
-        assert!(matches!(reader.read_frame_bounded(0, 128), Err(SpoolError::CorruptFrame(0))));
+        assert!(matches!(
+            reader.read_frame_bounded(0, 128),
+            Err(SpoolError::CorruptFrame(0))
+        ));
         reader.index[0].r = 1; // 索引谎报小值，仍不能绕过解压流的真实输出上限。
-        assert!(matches!(reader.read_frame_bounded(0, 128), Err(SpoolError::CorruptFrame(0))));
+        assert!(matches!(
+            reader.read_frame_bounded(0, 128),
+            Err(SpoolError::CorruptFrame(0))
+        ));
     }
 
     #[test]
@@ -686,7 +877,11 @@ mod tests {
         assert_eq!(r.frame_count(), 5);
         assert_eq!(r.timestamps(), vec![0, 100, 200, 300, 400]);
         for i in 0..5 {
-            assert_eq!(r.read_frame(i).unwrap(), frame(i as usize, 64, 48), "帧 {i}");
+            assert_eq!(
+                r.read_frame(i).unwrap(),
+                frame(i as usize, 64, 48),
+                "帧 {i}"
+            );
         }
         assert!(matches!(
             r.read_frame(5),
@@ -727,19 +922,20 @@ mod tests {
         }
         // 模拟崩溃残迹 1：索引半行
         {
-            let mut f = OpenOptions::new().append(true).open(dir.join("frames.jsonl")).unwrap();
+            let mut f = OpenOptions::new()
+                .append(true)
+                .open(dir.join("frames.jsonl"))
+                .unwrap();
             writeln!(f, r#"{{"i":2,"o":123,"c":45"#).unwrap();
         }
         // 模拟崩溃残迹 2：索引行完整但 spool.bin 尾块不足（o 超出实际长度）
         {
             let spool_len = fs::metadata(dir.join("spool.bin")).unwrap().len();
-            let mut f = OpenOptions::new().append(true).open(dir.join("frames.jsonl")).unwrap();
-            writeln!(
-                f,
-                r#"{{"i":2,"o":{},"c":100,"r":4096,"t":99}}"#,
-                spool_len
-            )
-            .unwrap();
+            let mut f = OpenOptions::new()
+                .append(true)
+                .open(dir.join("frames.jsonl"))
+                .unwrap();
+            writeln!(f, r#"{{"i":2,"o":{},"c":100,"r":4096,"t":99}}"#, spool_len).unwrap();
         }
         let r = SpoolReader::open(root.path(), &id).unwrap();
         assert_eq!(r.frame_count(), 2, "残行与不完整尾块均被识别丢弃");
@@ -781,9 +977,12 @@ mod tests {
     fn duplicate_session_dir_rejected_and_discard_allows_rebuild() {
         let root = tempfile::tempdir().unwrap();
         let m = meta(32, 32);
-        let mut w = SpoolWriter::create(root.path(), m.clone()).unwrap();
+        let w = SpoolWriter::create(root.path(), m.clone()).unwrap();
         assert!(
-            matches!(SpoolWriter::create(root.path(), m.clone()), Err(SpoolError::InvalidSession(_))),
+            matches!(
+                SpoolWriter::create(root.path(), m.clone()),
+                Err(SpoolError::InvalidSession(_))
+            ),
             "同 id 已存在目录时拒绝重建"
         );
         w.discard(); // discard 删目录后可重建
@@ -812,7 +1011,10 @@ mod tests {
         write_session_json(&dir, &old).unwrap();
         // 把 session.json mtime 拨回过去（>TTL）
         let past = SystemTime::now() - std::time::Duration::from_secs(3600 * 24 * 8);
-        let f = File::options().write(true).open(dir.join("session.json")).unwrap();
+        let f = File::options()
+            .write(true)
+            .open(dir.join("session.json"))
+            .unwrap();
         f.set_modified(past).unwrap();
 
         let removed = cleanup_expired(root.path(), std::time::Duration::from_secs(3600 * 24 * 3));
@@ -943,7 +1145,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let m = meta(16, 16);
         let id = m.id.clone();
-        SpoolWriter::create(root.path(), m).unwrap().finalize("user").unwrap();
+        SpoolWriter::create(root.path(), m)
+            .unwrap()
+            .finalize("user")
+            .unwrap();
         let reader = SpoolReader::open(root.path(), &id).unwrap();
         assert!(discard_session(root.path(), &id).is_err());
         drop(reader);
@@ -958,7 +1163,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let mut m = meta(16, 16);
         let id = m.id.clone();
-        SpoolWriter::create(root.path(), m.clone()).unwrap().finalize("user").unwrap();
+        SpoolWriter::create(root.path(), m.clone())
+            .unwrap()
+            .finalize("user")
+            .unwrap();
         m.ts_ms = vec![100, 0];
         let path = session_dir(root.path(), &id).join("session.json");
         fs::write(&path, serde_json::to_vec(&m).unwrap()).unwrap();

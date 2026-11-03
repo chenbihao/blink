@@ -29,10 +29,13 @@ pub(super) struct RunOptions<'a> {
 async fn stdout<R: AsyncRead + Unpin>(
     mut reader: R,
     progress: Option<(ProgressCallback, &'static str, u32)>,
+    heartbeat: Arc<AtomicU64>,
+    origin: std::time::Instant,
 ) -> Result<Vec<u8>, MediaError> {
     let mut bytes = [0u8; 4096];
     let mut out = Vec::new();
     let mut line = Vec::new();
+    let mut previous = None;
     loop {
         let len = reader.read(&mut bytes).await?;
         if len == 0 {
@@ -47,7 +50,13 @@ async fn stdout<R: AsyncRead + Unpin>(
                             .strip_prefix("frame=")
                             .and_then(|v| v.trim().parse::<u32>().ok())
                         {
+                            if previous != Some(frame) {
+                                heartbeat
+                                    .store(origin.elapsed().as_millis() as u64, Ordering::Relaxed);
+                                previous = Some(frame);
+                            }
                             callback(Progress {
+                                written_bytes: 0,
                                 stage,
                                 frames_done: frame,
                                 frames_total: *total,
@@ -63,6 +72,7 @@ async fn stdout<R: AsyncRead + Unpin>(
                 }
             }
         } else {
+            heartbeat.store(origin.elapsed().as_millis() as u64, Ordering::Relaxed);
             if out.len() + len > 64 * 1024 {
                 return Err(MediaError::Process("元数据输出超限"));
             }
@@ -149,6 +159,8 @@ pub(super) async fn run(
         }
         Ok::<_, MediaError>(())
     };
+    let origin = std::time::Instant::now();
+    let heartbeat = Arc::new(AtomicU64::new(0));
     let monitor = async {
         let mut ticker = tokio::time::interval(Duration::from_millis(100));
         loop {
@@ -156,13 +168,34 @@ pub(super) async fn run(
             if let Some(peak) = crate::platform::process::peak_working_set_bytes(pid) {
                 options.peak_bytes.fetch_max(peak, Ordering::Relaxed);
             }
+            if origin.elapsed().as_millis() as u64
+                > heartbeat.load(Ordering::Relaxed).saturating_add(60_000)
+            {
+                return MediaError::Process("媒体任务 60 秒无进展");
+            }
             if let Some((path, limit)) = options.output_budget {
-                if tokio::fs::metadata(path)
+                let bytes = tokio::fs::metadata(path)
                     .await
-                    .map(|m| m.len() > limit)
-                    .unwrap_or(false)
-                {
-                    return MediaError::Budget("输出文件最多 256 MB");
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                if bytes > limit {
+                    return MediaError::Budget("输出文件资源预算");
+                }
+                if let Some((callback, stage, total)) = &options.progress {
+                    callback(Progress {
+                        stage,
+                        frames_done: 0,
+                        frames_total: *total,
+                        written_bytes: bytes,
+                    });
+                }
+                let parent = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+                let disk = tokio::task::spawn_blocking(move || {
+                    crate::platform::disk_space::query(&parent)
+                })
+                .await;
+                if !matches!(disk,Ok(Ok(ref d)) if d.available_bytes >= 32<<20) {
+                    return MediaError::Budget("目标磁盘空间不足或无法查询");
                 }
             }
         }
@@ -174,7 +207,7 @@ pub(super) async fn run(
         error = monitor => Err(error),
         result = async {
             let wait = async { child.wait().await.map_err(MediaError::Io) };
-            let (exit, out, err_bytes, _) = tokio::try_join!(wait, stdout(out, options.progress), drain(err), input)?;
+            let (exit, out, err_bytes, _) = tokio::try_join!(wait, stdout(out, options.progress.clone(), heartbeat.clone(), origin), drain(err), input)?;
             tracing::debug!(pid, exit = ?exit.code(), stderr_bytes = err_bytes, "媒体子进程结束");
             if !exit.success() { return Err(MediaError::Process("编码或解码失败，请检查素材并尝试缩小尺寸")); }
             Ok(out)
@@ -238,6 +271,8 @@ mod tests {
         let output = stdout(
             &b"frame=2\nunknown=field\nframe=18\nprogress=end\n"[..],
             Some((callback, "encoding", 18)),
+            Arc::new(AtomicU64::new(0)),
+            std::time::Instant::now(),
         )
         .await
         .unwrap();
@@ -248,13 +283,38 @@ mod tests {
         );
         let long = vec![b'x'; 1025];
         assert!(
-            stdout(&long[..], Some((Arc::new(|_| {}), "encoding", 1)))
-                .await
-                .is_err()
+            stdout(
+                &long[..],
+                Some((Arc::new(|_| {}), "encoding", 1)),
+                Arc::new(AtomicU64::new(0)),
+                std::time::Instant::now()
+            )
+            .await
+            .is_err()
         );
         let large = vec![b'x'; 65537];
-        assert!(stdout(&large[..], None).await.is_err());
-        assert_eq!(stdout(&large[..65536], None).await.unwrap().len(), 65536);
+        assert!(
+            stdout(
+                &large[..],
+                None,
+                Arc::new(AtomicU64::new(0)),
+                std::time::Instant::now()
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            stdout(
+                &large[..65536],
+                None,
+                Arc::new(AtomicU64::new(0)),
+                std::time::Instant::now()
+            )
+            .await
+            .unwrap()
+            .len(),
+            65536
+        );
         assert_eq!(drain(&large[..]).await.unwrap(), 65537);
     }
 }

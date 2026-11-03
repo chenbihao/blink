@@ -558,6 +558,10 @@ body.image-editor-mode #canvas.long-image-editing {
     pointer-events: none;
 }
 
+.text-annot-input.recording-text-input {
+    overflow: auto;
+}
+
 /* ── OCR 结果面板 ──────────────────────────────────────── */
 
 .ocr-panel {

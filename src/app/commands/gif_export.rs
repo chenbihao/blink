@@ -13,7 +13,6 @@ use blink_infra::{
 use std::{
     path::PathBuf,
     sync::{Arc, atomic::Ordering},
-    time::Duration,
 };
 use tauri::{AppHandle, Emitter};
 
@@ -31,13 +30,14 @@ impl ExportFormat {
         }
     }
 }
-#[derive(serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportRequest {
     pub session_id: String,
     pub path: String,
     pub format: ExportFormat,
     pub max_width: Option<u32>,
+    pub fps: Option<u32>,
     pub quality: Option<String>,
     pub preset: Option<media::VideoPreset>,
     pub overwrite: Option<bool>,
@@ -63,7 +63,7 @@ fn require_editor(window: &tauri::WebviewWindow) -> Result<(), CommandError> {
     }
     Ok(())
 }
-fn validate(request: &ExportRequest) -> Result<(), CommandError> {
+pub(super) fn validate(request: &ExportRequest) -> Result<(), CommandError> {
     let path = std::path::Path::new(&request.path);
     if !path.is_absolute()
         || !path
@@ -80,10 +80,16 @@ fn validate(request: &ExportRequest) -> Result<(), CommandError> {
     if !infra_gif::spool::is_valid_session_id(&request.session_id) {
         return Err(CommandError::new("gif_session", "素材会话标识无效", false));
     }
-    if request.max_width.is_some_and(|w| !(80..=2560).contains(&w)) {
+    if request
+        .fps
+        .is_some_and(|fps| ![10, 15, 24, 30, 60].contains(&fps))
+    {
+        return Err(CommandError::new("media_fps", "不支持的导出帧率", false));
+    }
+    if request.max_width.is_some_and(|w| !(80..=8192).contains(&w)) {
         return Err(CommandError::new(
             "media_size",
-            "导出宽度应在 80–2560 像素之间",
+            "导出宽度应在 80–8192 像素之间",
             false,
         ));
     }
@@ -97,7 +103,7 @@ fn validate(request: &ExportRequest) -> Result<(), CommandError> {
     Ok(())
 }
 struct Prepared {
-    reader: infra_gif::SpoolReader,
+    reader: Arc<infra_gif::SpoolReader>,
     snapshot: blink_domain::gif::ExportSnapshot,
     runtime: Option<ffmpeg::RuntimeLease>,
     job: Job,
@@ -119,7 +125,7 @@ async fn start_export(
     let prepared = tauri::async_runtime::spawn_blocking(move || {
         let (reader, service) = super::gif::with_session(&app, &request.session_id)?;
         // 首建即恢复草稿（与查看/编辑路径一致）；导出只需时间轴存在
-        let _ = super::gif::ensure_timeline(&service, &reader, &request.session_id);
+        let _ = super::gif::ensure_timeline(&service, &reader, &request.session_id)?;
         let runtime = if request.format == ExportFormat::Mp4 {
             Some(ffmpeg::acquire().map_err(|error| {
                 if matches!(
@@ -153,12 +159,14 @@ async fn start_export(
         }
         if snapshot.src_w == 0
             || snapshot.src_h == 0
-            || snapshot.src_w > 2560
-            || snapshot.src_h > 1600
+            || (snapshot.src_w as u64)
+                .saturating_mul(snapshot.src_h as u64)
+                .saturating_mul(4)
+                > 64 << 20
         {
             return Err(CommandError::new(
                 "media_size",
-                "素材尺寸超出支持范围（最大 2560×1600），请缩小录制范围",
+                "素材单帧超过 64MiB 解码预算",
                 false,
             ));
         }
@@ -174,6 +182,7 @@ async fn start_export(
                 true,
             ));
         }
+        drop(current);
         let emitter = app.clone();
         let job = media_service::shared()
             .reserve(
@@ -186,7 +195,20 @@ async fn start_export(
                 }),
             )
             .map_err(media_error)?;
-        drop(current);
+        if require_current
+            && service
+                .editor_session
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_deref()
+                != Some(request.session_id.as_str())
+        {
+            return Err(CommandError::new(
+                "media_stale_session",
+                "编辑会话已切换",
+                true,
+            ));
+        }
         Ok::<_, CommandError>(Prepared {
             reader,
             snapshot,
@@ -215,21 +237,25 @@ async fn start_export(
                 let plan = media::VideoPlan {
                     width: snapshot.src_w,
                     height: snapshot.src_h,
-                    frames: snapshot
-                        .frames
-                        .iter()
-                        .map(|f| media::PlanFrame {
-                            src_idx: f.src_idx,
-                            duration_ms: f.dur_ms,
-                        })
-                        .collect(),
+                    frames: snapshot.frames.map(|f| media::PlanFrame {
+                        src_idx: f.src_idx,
+                        duration_ms: f.dur_ms,
+                    }),
                 };
                 let quality = match request.quality.as_deref() {
                     Some("high") => media::Quality::High,
                     Some("low") => media::Quality::Low,
                     _ => media::Quality::Medium,
                 };
+                let budget = media::Budget::for_work(
+                    snapshot.frames.iter().map(|f| f.dur_ms as u64).sum(),
+                    snapshot.frames.len(),
+                    snapshot.src_w,
+                    snapshot.src_h,
+                );
                 let options = media::VideoOptions {
+                    budget,
+                    fps: request.fps.unwrap_or(reader.meta.fps),
                     audio: Some(media::AudioInput {
                         dir: reader.dir().to_path_buf(),
                         spans: snapshot
@@ -272,6 +298,13 @@ async fn start_export(
                 }
             }
             ExportFormat::Gif => {
+                let timeout = media::Budget::for_work(
+                    snapshot.frames.iter().map(|f| f.dur_ms as u64).sum(),
+                    snapshot.frames.len(),
+                    snapshot.src_w,
+                    snapshot.src_h,
+                )
+                .timeout;
                 let plan = gif_service::to_encode_plan(&snapshot.gif_plan());
                 let quality = match request.quality.as_deref() {
                     Some("high") => infra_gif::ExportQuality::High,
@@ -288,6 +321,7 @@ async fn start_export(
                     let progress = |stage: infra_gif::ExportStage, done: u32, total: u32| {
                         if done == total || done % (total / 20).max(1) == 0 {
                             callback(media::Progress {
+                                written_bytes: 0,
                                 stage: stage.as_str(),
                                 frames_done: done,
                                 frames_total: total,
@@ -308,7 +342,7 @@ async fn start_export(
                     biased;
                     result = &mut worker => result,
                     _ = job.cancel.cancelled() => { job.gif_cancel.store(true, Ordering::Relaxed); worker.await },
-                    _ = tokio::time::sleep(Duration::from_secs(1800)) => { timed_out = true; job.gif_cancel.store(true, Ordering::Relaxed); worker.await },
+                    _ = tokio::time::sleep(timeout) => { timed_out = true; job.gif_cancel.store(true, Ordering::Relaxed); worker.await },
                 };
                 match outcome {
                     Ok(Ok(stats)) => {
@@ -368,6 +402,7 @@ pub async fn gif_export(
             session_id,
             path,
             format: ExportFormat::Gif,
+            fps: None,
             max_width,
             quality,
             preset: None,
@@ -453,6 +488,7 @@ mod tests {
             path: "C:\\中文 with space.MP4".into(),
             format: ExportFormat::Mp4,
             max_width: None,
+            fps: None,
             quality: None,
             preset: None,
             overwrite: None,

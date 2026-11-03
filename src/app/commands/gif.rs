@@ -31,18 +31,92 @@ fn io_err(e: std::io::Error) -> CommandError {
     CommandError::new("gif_io", e.to_string(), false)
 }
 
+/// 历史素材的只读校验不依赖当前编辑会话，也不进入活动 reader 缓存。
+fn open_material(
+    service: &GifService,
+    root: &std::path::Path,
+    session_id: &str,
+    thumbnail: bool,
+) -> Result<SpoolReader, CommandError> {
+    ensure_not_recording(service, session_id)?;
+    let reader = if thumbnail {
+        SpoolReader::open_thumbnail(root, session_id)
+    } else {
+        SpoolReader::open(root, session_id)
+    };
+    reader.map_err(|e| CommandError::new("gif_session", e.to_string(), false))
+}
+
+fn ensure_not_recording(service: &GifService, session_id: &str) -> Result<(), CommandError> {
+    if service
+        .recording
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .is_some_and(|r| r.session_id == session_id)
+    {
+        return Err(CommandError::new(
+            "gif_session_busy",
+            "素材仍在录制，请先停止后再编辑或导出",
+            true,
+        ));
+    }
+    Ok(())
+}
+
 /// 打开（或重建）会话时间轴，返回其 reader 元数据与视图。
 pub(super) fn with_session(
     app: &AppHandle,
     session_id: &str,
-) -> Result<(SpoolReader, Arc<GifService>), CommandError> {
+) -> Result<(Arc<SpoolReader>, Arc<GifService>), CommandError> {
     let service = app.state::<Arc<GifService>>().inner().clone();
-    if service.recording.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
-        .is_some_and(|r| r.session_id == session_id) {
-        return Err(CommandError::new("gif_session_busy", "素材仍在录制，请先停止后再编辑或导出", true));
+    ensure_not_recording(&service, session_id)?;
+    {
+        let current = service
+            .editor_session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if current.as_deref() != Some(session_id) {
+            return Err(CommandError::new(
+                "gif_stale_session",
+                "编辑会话已切换",
+                true,
+            ));
+        }
+        if let Some(reader) = service
+            .readers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(session_id)
+            .cloned()
+        {
+            return Ok((reader, service.clone()));
+        }
     }
-    let reader = SpoolReader::open(&GifService::root(), session_id)
-        .map_err(|e| CommandError::new("gif_session", e.to_string(), false))?;
+    // Validate/map material without holding the window state gate.
+    let opened = Arc::new(
+        SpoolReader::open(&GifService::root(), session_id)
+            .map_err(|e| CommandError::new("gif_session", e.to_string(), false))?,
+    );
+    let current = service
+        .editor_session
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if current.as_deref() != Some(session_id) {
+        return Err(CommandError::new(
+            "gif_stale_session",
+            "编辑会话已切换",
+            true,
+        ));
+    }
+    let reader = service
+        .readers
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(session_id.to_owned())
+        .or_insert(opened)
+        .clone();
+    drop(current);
     Ok((reader, service))
 }
 
@@ -53,8 +127,24 @@ pub(super) fn ensure_timeline(
     service: &Arc<GifService>,
     reader: &SpoolReader,
     session_id: &str,
-) -> DraftRestore {
-    crate::app::gif_draft::ensure_timeline(service, reader, session_id)
+) -> Result<DraftRestore, CommandError> {
+    let restored = crate::app::gif_draft::ensure_timeline(service, reader, session_id)
+        .map_err(|e| CommandError::new("gif_timing", e, false))?;
+    if service
+        .editor_session
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_deref()
+        != Some(session_id)
+    {
+        crate::app::gif_draft::release_if_saved(service, session_id);
+        return Err(CommandError::new(
+            "gif_stale_session",
+            "编辑会话已切换",
+            true,
+        ));
+    }
+    Ok(restored)
 }
 
 // ── 录制 ────────────────────────────────────────────────────────────────────
@@ -80,16 +170,21 @@ pub async fn gif_start_recording(
     show_cursor: Option<bool>,
     audio: Option<blink_infra::gif::audio::AudioOptions>,
 ) -> Result<GifStartInfo, CommandError> {
-    let session_id = tauri::async_runtime::spawn_blocking(move || gif_service::start_recording(
-        &app,
-        x,
-        y,
-        w,
-        h,
-        fps.unwrap_or(15).clamp(5, 30),
-        show_cursor.unwrap_or(true),
-        audio.unwrap_or_default(),
-    )).await.map_err(|_| CommandError::new("gif_start", "录制准备任务失败", true))?.map_err(err)?;
+    let session_id = tauri::async_runtime::spawn_blocking(move || {
+        gif_service::start_recording(
+            &app,
+            x,
+            y,
+            w,
+            h,
+            fps.unwrap_or(15),
+            show_cursor.unwrap_or(true),
+            audio.unwrap_or_default(),
+        )
+    })
+    .await
+    .map_err(|_| CommandError::new("gif_start", "录制准备任务失败", true))?
+    .map_err(err)?;
     Ok(GifStartInfo { session_id })
 }
 
@@ -178,15 +273,15 @@ pub fn gif_list_sessions() -> Result<Vec<GifSessionSummary>, CommandError> {
     let root = GifService::root();
     let mut out = Vec::new();
     for id in infra_gif::list_session_ids(&root) {
-        if let Ok(r) = SpoolReader::open(&root, &id) {
+        if let Ok(r) = infra_gif::read_summary(&root, &id) {
             out.push(GifSessionSummary {
                 id,
-                created_at: r.meta.created_at,
-                width: r.meta.region.w,
-                height: r.meta.region.h,
-                fps: r.meta.fps,
-                frames: r.frame_count(),
-                state: r.meta.state.clone(),
+                created_at: r.created_at,
+                width: r.width,
+                height: r.height,
+                fps: r.fps,
+                frames: r.frame_count,
+                state: r.state,
             });
         }
     }
@@ -197,8 +292,8 @@ pub fn gif_list_sessions() -> Result<Vec<GifSessionSummary>, CommandError> {
 /// 丢弃会话素材（录制中会话拒绝——先停止/取消）。
 #[tauri::command]
 pub fn gif_discard_session(app: AppHandle, session_id: String) -> Result<(), CommandError> {
-    let _task = blink_infra::media::acquire_task_lease().map_err(|e| CommandError::new(e.code(), e.to_string(), true))?;
-    let _ = with_session(&app, &session_id)?;
+    let _task = blink_infra::media::acquire_task_lease()
+        .map_err(|e| CommandError::new(e.code(), e.to_string(), true))?;
     let service = app.state::<Arc<GifService>>();
     {
         let rec = service.recording.lock().unwrap_or_else(|e| e.into_inner());
@@ -208,7 +303,10 @@ pub fn gif_discard_session(app: AppHandle, session_id: String) -> Result<(), Com
             ))));
         }
     }
-    let current = service.editor_session.lock().unwrap_or_else(|e| e.into_inner());
+    let current = service
+        .editor_session
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     if current.as_deref() == Some(session_id.as_str()) {
         return Err(CommandError::new(
             "gif_session_busy",
@@ -216,6 +314,7 @@ pub fn gif_discard_session(app: AppHandle, session_id: String) -> Result<(), Com
             true,
         ));
     }
+    crate::app::gif_draft::release_if_saved(&service, &session_id);
     infra_gif::spool::discard_session(&GifService::root(), &session_id)
         .map_err(|e| CommandError::new("gif_session_busy", e.to_string(), true))?;
     service
@@ -232,57 +331,61 @@ pub fn gif_discard_session(app: AppHandle, session_id: String) -> Result<(), Com
 
 /// 会话详情：元数据 + 时间轴视图 + 草稿恢复状态（0.28.23）。
 #[tauri::command]
-pub fn gif_get_session(
+pub async fn gif_get_session(
     app: AppHandle,
     session_id: String,
 ) -> Result<serde_json::Value, CommandError> {
-    let (reader, service) = with_session(&app, &session_id)?;
-    let restore = ensure_timeline(&service, &reader, &session_id);
-    let timelines = service.timelines.lock().unwrap_or_else(|e| e.into_inner());
-    let tl = timelines
-        .get(&session_id)
-        .ok_or_else(|| CommandError::new("gif_session", "时间轴构建失败", false))?;
-    let mut view = gif_service::timeline_view(tl);
-    drop(timelines);
-    // 附加会话元数据（stopReason 供编辑器展示"为何自动停止"）
-    let obj = view.as_object_mut().unwrap();
-    obj.insert(
-        "meta".into(),
-        serde_json::json!({
-            "id": session_id,
-            "width": reader.meta.region.w,
-            "height": reader.meta.region.h,
-            "fps": reader.meta.fps,
-            "showCursor": reader.meta.show_cursor,
-            "createdAt": reader.meta.created_at,
-            "state": reader.meta.state,
-            "stopReason": reader.meta.stop_reason,
-        }),
-    );
-    // 草稿状态：首开恢复结果，或活跃会话的已记录播放位置（重开窗口续播）
-    let (status, play_pos) = match restore {
-        DraftRestore::Restored(pos) => ("restored", pos),
-        DraftRestore::Discarded => ("discarded", 0),
-        DraftRestore::Missing => {
-            let pos = service
-                .drafts
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(&session_id)
-                .map(|s| s.play_pos_ms)
-                .unwrap_or(0);
-            ("none", pos)
-        }
-    };
-    obj.insert("draftStatus".into(), serde_json::json!(status));
-    obj.insert("draftPlayPosMs".into(), serde_json::json!(play_pos));
-    obj.insert(
-        "audio".into(),
-        serde_json::to_value(infra_gif::audio::manifest(reader.dir()).map_err(io_err)?)
-            .unwrap_or_default(),
-    );
-    obj.insert("audioRecovered".into(), reader.audio_recovered.into());
-    Ok(view)
+    tauri::async_runtime::spawn_blocking(move || {
+        let (reader, service) = with_session(&app, &session_id)?;
+        let restore = ensure_timeline(&service, &reader, &session_id)?;
+        let timelines = service.timelines.lock().unwrap_or_else(|e| e.into_inner());
+        let tl = timelines
+            .get(&session_id)
+            .ok_or_else(|| CommandError::new("gif_session", "时间轴构建失败", false))?;
+        let mut view = gif_service::timeline_view(tl);
+        drop(timelines);
+        // 附加会话元数据（stopReason 供编辑器展示"为何自动停止"）
+        let obj = view.as_object_mut().unwrap();
+        obj.insert(
+            "meta".into(),
+            serde_json::json!({
+                "id": session_id,
+                "width": reader.meta.region.w,
+                "height": reader.meta.region.h,
+                "fps": reader.meta.fps,
+                "showCursor": reader.meta.show_cursor,
+                "createdAt": reader.meta.created_at,
+                "state": reader.meta.state,
+                "stopReason": reader.meta.stop_reason,
+            }),
+        );
+        // 草稿状态：首开恢复结果，或活跃会话的已记录播放位置（重开窗口续播）
+        let (status, play_pos) = match restore {
+            DraftRestore::Restored(pos) => ("restored", pos),
+            DraftRestore::Discarded => ("discarded", 0),
+            DraftRestore::Missing => {
+                let pos = service
+                    .drafts
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&session_id)
+                    .map(|s| s.play_pos_ms)
+                    .unwrap_or(0);
+                ("none", pos)
+            }
+        };
+        obj.insert("draftStatus".into(), serde_json::json!(status));
+        obj.insert("draftPlayPosMs".into(), serde_json::json!(play_pos));
+        obj.insert(
+            "audio".into(),
+            serde_json::to_value(infra_gif::audio::manifest(reader.dir()).map_err(io_err)?)
+                .unwrap_or_default(),
+        );
+        obj.insert("audioRecovered".into(), reader.audio_recovered.into());
+        Ok(view)
+    })
+    .await
+    .map_err(|_| CommandError::new("gif_task", "录制任务失败", true))?
 }
 
 /// 编辑器当前会话（ready/pull；None = 等待事件）。
@@ -325,11 +428,27 @@ pub async fn gif_get_frames(
         let (reader, _service) = with_session(&app, &session_id)?;
         let (sw, sh) = (reader.meta.region.w, reader.meta.region.h);
         let max_w = max_w.unwrap_or(240).clamp(80, 4096);
-        let scale = if sw > max_w { max_w as f64 / sw as f64 } else { 1.0 };
+        let scale = if sw > max_w {
+            max_w as f64 / sw as f64
+        } else {
+            1.0
+        };
         let (dw, dh) = (
             ((sw as f64 * scale).round() as u32).max(1),
             ((sh as f64 * scale).round() as u32).max(1),
         );
+        if (dw as u64)
+            .saturating_mul(dh as u64)
+            .saturating_mul(4)
+            .saturating_mul(indices.len() as u64)
+            > 64 << 20
+        {
+            return Err(CommandError::new(
+                "gif_frame_budget",
+                "单次预览解码超过 64MiB，请缩小批次",
+                false,
+            ));
+        }
         let mut out = Vec::with_capacity(indices.len());
         for idx in indices {
             let bgra = reader
@@ -358,18 +477,26 @@ pub async fn gif_get_frames(
 /// `command` 为 JSON：`type: undo|redo` 特判为栈操作（不是 EditCommand 变体），
 /// 其余按 `EditCommand` 反序列化。成功后调度编辑草稿防抖保存（0.28.23）。
 #[tauri::command]
-pub fn gif_edit(
+pub async fn gif_edit(
     app: AppHandle,
     session_id: String,
     command: serde_json::Value,
     incremental: Option<bool>,
+    revision: Option<u64>,
 ) -> Result<serde_json::Value, CommandError> {
+    tauri::async_runtime::spawn_blocking(move || {
     let (reader, service) = with_session(&app, &session_id)?;
-    let _ = ensure_timeline(&service, &reader, &session_id);
+    let _ = ensure_timeline(&service, &reader, &session_id)?;
     let mut timelines = service.timelines.lock().unwrap_or_else(|e| e.into_inner());
     let tl = timelines
         .get_mut(&session_id)
         .ok_or_else(|| CommandError::new("gif_session", "时间轴构建失败", false))?;
+    if revision.is_some_and(|r| r != tl.revision()) {
+        return Err(CommandError::new("gif_revision", "时间轴已变化，请刷新后再编辑", true));
+    }
+    if command.get("frames").and_then(|v|v.as_array()).is_some_and(|v|v.len()>4096) {
+        return Err(CommandError::new("gif_edit", "批量编辑请使用帧范围", false));
+    }
     let invalidated_from = command
         .get("frame")
         .and_then(|v| v.as_u64())
@@ -396,43 +523,81 @@ pub fn gif_edit(
     }
     let view = if incremental.unwrap_or(false) {
         serde_json::json!({"revision": tl.revision(), "frameCount": tl.frame_count(), "totalMs": tl.effective_total_ms(),
-            "invalidatedFrom": invalidated_from, "canUndo": tl.can_undo(), "canRedo": tl.can_redo()})
+            "invalidatedFrom": invalidated_from, "canUndo": tl.can_undo(), "canRedo": tl.can_redo(), "effectiveCount": tl.effective_count(), "speed": tl.speed(), "loopCount": tl.loop_count(), "mix": tl.mix()})
     } else {
         gif_service::timeline_view(tl)
     };
     drop(timelines);
     crate::app::gif_draft::schedule_draft_save(&app, &session_id);
     Ok(view)
+    }).await.map_err(|_|CommandError::new("gif_task","录制任务失败",true))?
 }
 
 /// 分页帧源契约：revision 对账后才返回页，不依赖前端全量帧表；增量编辑返回失效起点。
 #[tauri::command]
-pub fn gif_timeline_page(
+pub async fn gif_timeline_page(
     app: AppHandle,
     session_id: String,
     offset: u32,
     limit: u32,
     revision: Option<u64>,
 ) -> Result<serde_json::Value, CommandError> {
-    let (reader, service) = with_session(&app, &session_id)?;
-    ensure_timeline(&service, &reader, &session_id);
-    let timelines = service.timelines.lock().unwrap_or_else(|e| e.into_inner());
-    let tl = timelines
-        .get(&session_id)
-        .ok_or_else(|| CommandError::new("gif_session", "时间轴不存在", false))?;
-    if revision.is_some_and(|v| v != tl.revision()) {
-        return Err(CommandError::new(
-            "gif_revision",
-            "时间轴已变化，请重新请求",
-            true,
-        ));
-    }
-    let frames: Vec<_> = tl.frame_page(offset as usize, limit.clamp(1, 256) as usize).iter()
-        .map(|f| serde_json::json!({"srcIdx": f.src_idx, "durMs": f.dur_ms, "held": f.held})).collect();
-    Ok(
-        serde_json::json!({"revision": tl.revision(), "offset": offset, "frames": frames,
-        "totalMs": tl.effective_total_ms(), "mix": tl.mix(), "audioSpans": tl.audio_spans()}),
-    )
+    tauri::async_runtime::spawn_blocking(move || {
+        let (reader, service) = with_session(&app, &session_id)?;
+        ensure_timeline(&service, &reader, &session_id)?;
+        let timelines = service.timelines.lock().unwrap_or_else(|e| e.into_inner());
+        let tl = timelines
+            .get(&session_id)
+            .ok_or_else(|| CommandError::new("gif_session", "时间轴不存在", false))?;
+        if revision.is_some_and(|v| v != tl.revision()) {
+            return Err(CommandError::new(
+                "gif_revision",
+                "时间轴已变化，请重新请求",
+                true,
+            ));
+        }
+        let frames: Vec<_> = tl
+            .frame_page(offset as usize, limit.clamp(1, 256) as usize)
+            .iter()
+            .map(|f| serde_json::json!({"srcIdx": f.src_idx, "durMs": f.dur_ms, "held": f.held}))
+            .collect();
+        Ok(
+            serde_json::json!({"revision": tl.revision(), "offset": offset, "frames": frames,
+        "totalMs": tl.effective_total_ms(), "mix": tl.mix()}),
+        )
+    })
+    .await
+    .map_err(|_| CommandError::new("gif_task", "录制任务失败", true))?
+}
+
+/// Bounded source/play/seek query, tied to the exact edit revision.
+#[tauri::command]
+pub async fn gif_timeline_window(
+    app: AppHandle,
+    session_id: String,
+    revision: u64,
+    play: Option<u32>,
+    time_ms: Option<u64>,
+    source: Option<u32>,
+    source_offset: Option<u32>,
+) -> Result<serde_json::Value, CommandError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let service = app.state::<Arc<GifService>>();
+        let timelines = service.timelines.lock().unwrap_or_else(|e| e.into_inner());
+        let tl = timelines
+            .get(&session_id)
+            .ok_or_else(|| CommandError::new("gif_session", "请先打开会话", true))?;
+        if tl.revision() != revision {
+            return Err(CommandError::new("gif_revision", "时间轴已变化", true));
+        }
+        Ok(if let Some(offset) = source_offset {
+            tl.source_page(offset, 256)
+        } else {
+            tl.window(play.map(|v| v as usize), time_ms, source)
+        })
+    })
+    .await
+    .map_err(|_| CommandError::new("gif_timeline", "时间轴查询失败", true))?
 }
 
 // ── 最近录制与编辑进度（0.28.23 §5.7.4） ───────────────────────────────────
@@ -476,13 +641,18 @@ pub async fn gif_session_thumbnail(
     session_id: String,
 ) -> Result<GifFramePng, CommandError> {
     tauri::async_runtime::spawn_blocking(move || {
-        let (reader, _service) = with_session(&app, &session_id)?;
+        let service = app.state::<Arc<GifService>>();
+        let reader = open_material(&service, &GifService::root(), &session_id, true)?;
         if reader.frame_count() == 0 {
             return Err(CommandError::new("gif_frame", "会话没有可显示的帧", false));
         }
         let (sw, sh) = (reader.meta.region.w, reader.meta.region.h);
         let max_w = 200u32;
-        let scale = if sw > max_w { max_w as f64 / sw as f64 } else { 1.0 };
+        let scale = if sw > max_w {
+            max_w as f64 / sw as f64
+        } else {
+            1.0
+        };
         let (dw, dh) = (
             ((sw as f64 * scale).round() as u32).max(1),
             ((sh as f64 * scale).round() as u32).max(1),
@@ -509,32 +679,37 @@ pub async fn gif_session_thumbnail(
 /// 当前编辑会话有在途导出时拒绝切换（0.28.23：须先完成或显式取消，
 /// 不静默取消导出）——前端捕获 `gif_export_busy` 后确认并取消再重试。
 #[tauri::command]
-pub fn gif_open_session(app: AppHandle, session_id: String) -> Result<(), CommandError> {
-    {
+pub async fn gif_open_session(app: AppHandle, session_id: String) -> Result<(), CommandError> {
+    tauri::async_runtime::spawn_blocking(move || {
         let service = app.state::<Arc<GifService>>();
-        let current = service
-            .editor_session
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some(cur) = current.as_deref().filter(|c| *c != session_id.as_str()) {
-            if crate::app::media_service::shared().has_active_job(cur) {
-                return Err(CommandError::new(
-                    "gif_export_busy",
-                    "当前录制正在导出，请先完成或取消导出再切换".to_string(),
-                    true,
-                ));
+        {
+            let current = service
+                .editor_session
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(cur) = current.as_deref().filter(|c| *c != session_id.as_str()) {
+                if crate::app::media_service::shared().has_active_job(cur) {
+                    return Err(CommandError::new(
+                        "gif_export_busy",
+                        "当前录制正在导出，请先完成或取消导出再切换",
+                        true,
+                    ));
+                }
             }
         }
-    }
-    let _ = with_session(&app, &session_id)?; // 会话存在性/可读性校验
-    if !gif_service::open_editor(&app, &session_id) {
-        return Err(CommandError::new(
-            "gif_export_busy",
-            "当前录制正在导出，请先完成或取消导出再切换",
-            true,
-        ));
-    }
-    Ok(())
+        // 保留读租约到切换完成，避免校验后被 TTL/列表删除抢先清理。
+        let _reader = open_material(&service, &GifService::root(), &session_id, false)?;
+        if !gif_service::open_editor(&app, &session_id) {
+            return Err(CommandError::new(
+                "gif_export_busy",
+                "当前录制正在导出，请先完成或取消导出再切换",
+                true,
+            ));
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|_| CommandError::new("gif_session", "打开录制任务失败", true))?
 }
 
 /// 统一功能目录入口：有编辑会话原地激活，无会话进入「最近录制」首页。
@@ -568,4 +743,54 @@ pub fn gif_open_containing_folder(path: String) -> Result<(), CommandError> {
         .spawn()
         .map_err(io_err)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn history_material_opens_without_adopting_the_current_editor_session() {
+        let root = tempfile::tempdir().unwrap();
+        let service = GifService::new();
+        let id = "history-material";
+        let meta = infra_gif::SessionMeta {
+            spool_version: infra_gif::SPOOL_VERSION,
+            id: id.into(),
+            region: infra_gif::CaptureRegion {
+                x: 0,
+                y: 0,
+                w: 8,
+                h: 8,
+            },
+            fps: 10,
+            show_cursor: false,
+            created_at: 42,
+            state: "recording".into(),
+            ts_ms: Vec::new(),
+            last_dur_ms: 100,
+            spool_bytes: 0,
+            stop_reason: None,
+        };
+        let mut writer = infra_gif::SpoolWriter::create(root.path(), meta).unwrap();
+        writer.append_frame(0, &[0; 256]).unwrap();
+        writer.append_frame(100, &[255; 256]).unwrap();
+        writer.finalize("user").unwrap();
+
+        for current in [None, Some("another-session".to_string())] {
+            *service.editor_session.lock().unwrap() = current.clone();
+            let reader = open_material(&service, root.path(), id, false).unwrap();
+            assert_eq!(reader.frame_count(), 2);
+            assert_eq!(reader.read_frame(1).unwrap(), vec![255; 256]);
+            let thumbnail = open_material(&service, root.path(), id, true).unwrap();
+            assert_eq!(thumbnail.frame_count(), 1);
+            assert_eq!(thumbnail.read_frame(0).unwrap(), vec![0; 256]);
+            assert_eq!(*service.editor_session.lock().unwrap(), current);
+            assert!(service.readers.lock().unwrap().is_empty());
+            assert!(infra_gif::spool::discard_session(root.path(), id).is_err());
+        }
+        assert!(open_material(&service, root.path(), "../escape", false).is_err());
+        assert!(open_material(&service, root.path(), "missing", true).is_err());
+        infra_gif::spool::discard_session(root.path(), id).unwrap();
+    }
 }

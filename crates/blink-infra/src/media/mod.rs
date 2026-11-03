@@ -1,5 +1,8 @@
 //! 类型化媒体出口。调用方持有 TaskLease 与托管产物租约，不接受任意 FFmpeg 参数。
 mod audio;
+pub mod estimate;
+mod frame_list;
+pub use frame_list::FrameList;
 mod encode;
 pub use audio::{AudioInput, Span as AudioSpan};
 pub(crate) mod process;
@@ -51,7 +54,7 @@ impl MediaError {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct PlanFrame {
     pub src_idx: u32,
     pub duration_ms: u32,
@@ -60,7 +63,7 @@ pub struct PlanFrame {
 pub struct VideoPlan {
     pub width: u32,
     pub height: u32,
-    pub frames: Vec<PlanFrame>,
+    pub frames: FrameList<PlanFrame>,
 }
 #[derive(Clone, Copy, Debug, Default)]
 pub enum Quality {
@@ -90,23 +93,54 @@ pub struct Budget {
 impl Default for Budget {
     fn default() -> Self {
         Self {
-            max_duration_ms: 600_000,
-            max_source_frames: 3600,
-            max_frame_bytes: 16 << 20,
-            max_output_bytes: 256 << 20,
+            max_duration_ms: u64::MAX / 60,
+            max_source_frames: u32::MAX as usize,
+            max_frame_bytes: 64 << 20,
+            max_output_bytes: i64::MAX as u64,
             timeout: Duration::from_secs(1800),
             threads: 2,
         }
     }
 }
-#[derive(Clone, Debug, Default)]
+impl Budget {
+    /// Scale the total deadline with source/output work; the process additionally
+    /// watches progress, cancellation and live disk space.
+    pub fn for_work(duration_ms: u64, source_frames: usize, width: u32, height: u32) -> Self {
+        let pixels = (width as u64).saturating_mul(height as u64);
+        let seconds = duration_ms
+            .div_ceil(1000)
+            .saturating_mul(8)
+            .saturating_mul(pixels.div_ceil(1920 * 1080).max(1))
+            .saturating_add((source_frames as u64).div_ceil(20));
+        Self {
+            timeout: Duration::from_secs(seconds.max(1800).min(365 * 86400)),
+            ..Self::default()
+        }
+    }
+}
+#[derive(Clone, Debug)]
 pub struct VideoOptions {
+    pub fps: u32,
     pub audio: Option<AudioInput>,
     pub max_width: Option<u32>,
     pub quality: Quality,
     pub preset: Option<VideoPreset>,
     pub overwrite: bool,
     pub budget: Budget,
+}
+
+impl Default for VideoOptions {
+    fn default() -> Self {
+        Self {
+            fps: 30,
+            audio: None,
+            max_width: None,
+            quality: Quality::default(),
+            preset: None,
+            overwrite: false,
+            budget: Budget::default(),
+        }
+    }
 }
 
 /// 固定、类型化的导出配方；不允许调用方传入任意编码器参数。
@@ -167,6 +201,7 @@ pub struct VideoStats {
 }
 #[derive(Clone, Copy, Debug)]
 pub struct Progress {
+    pub written_bytes: u64,
     pub stage: &'static str,
     pub frames_done: u32,
     pub frames_total: u32,
@@ -184,6 +219,19 @@ impl FrameSource for crate::gif::SpoolReader {
     }
     fn frame_count(&self) -> u32 {
         self.frame_count()
+    }
+    fn read_bgra(&mut self, index: u32) -> Result<Vec<u8>, MediaError> {
+        self.read_frame(index)
+            .map_err(|_| MediaError::Source(index))
+    }
+}
+
+impl FrameSource for Arc<crate::gif::SpoolReader> {
+    fn dimensions(&self) -> (u32, u32) {
+        (self.meta.region.w, self.meta.region.h)
+    }
+    fn frame_count(&self) -> u32 {
+        self.as_ref().frame_count()
     }
     fn read_bgra(&mut self, index: u32) -> Result<Vec<u8>, MediaError> {
         self.read_frame(index)

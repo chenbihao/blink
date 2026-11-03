@@ -560,7 +560,7 @@ function openWatermarkForm() {
 }
 
 /** 文本标注输入框 */
-export function showTextInput(x, y) {
+export async function showTextInput(x, y) {
     if (!ss.selCss) return;
     // x/y 是标注 bitmap 坐标，/ renderScale 转回 CSS；fontSize / renderScale 同理。
     const meta = window.__blinkScreenMeta || {vx: 0, vy: 0};
@@ -568,9 +568,24 @@ export function showTextInput(x, y) {
     // 0.28.23：录制叠层下输入框外置出录制区域（原位会入成品），并在编辑
     // 期间申请 overlay 键盘焦点（窗口默认不可聚焦，不抢被录应用焦点）。
     const recHooks = ss.gifRecHooks;
+    const cssFontPx = annot.getTextConfig().fontSize / rsx;
+    const inputSize = {w: Math.min(800, Math.max(8, window.innerWidth - 16)), h: cssFontPx + 4};
     let cssPos = {x: ss.selCss.x + x / rsx, y: ss.selCss.y + y / rsy};
-    if (recHooks?.adjustTextPlacement) cssPos = recHooks.adjustTextPlacement(cssPos);
-    const focusReady = recHooks?.onTextInputOpen?.();
+    if (recHooks?.adjustTextPlacement) cssPos = recHooks.adjustTextPlacement(cssPos, inputSize);
+    let releaseInput;
+    if (recHooks?.onTextInputOpen) {
+        try {
+            releaseInput = await recHooks.onTextInputOpen(cssPos, inputSize);
+        } catch (error) {
+            console.error('[screenshot] 录制文字输入准备失败', error);
+            if (ss.gifRecHooks === recHooks) annot.cancelText();
+            return;
+        }
+        if (ss.gifRecHooks !== recHooks || !ss.selCss) {
+            await releaseInput?.().catch(() => {});
+            return;
+        }
+    }
 
     const input = document.createElement('span');
     input.className = 'text-annot-input';
@@ -579,8 +594,12 @@ export function showTextInput(x, y) {
     input.setAttribute('data-placeholder', '输入文本…');
     input.style.left = cssPos.x + 'px';
     input.style.top = cssPos.y + 'px';
-    const cssFontPx = annot.getTextConfig().fontSize / rsx;
     input.style.fontSize = cssFontPx + 'px';
+    if (recHooks) {
+        input.style.maxWidth = `${inputSize.w}px`;
+        input.style.maxHeight = `${inputSize.h}px`;
+        input.classList.add('recording-text-input');
+    }
     input.style.fontFamily = annot.getTextConfig().fontFamily;
     if (annot.getTextConfig().bold) input.style.fontWeight = 'bold';
     if (annot.getTextConfig().italic) input.style.fontStyle = 'italic';
@@ -589,12 +608,10 @@ export function showTextInput(x, y) {
     input.style.color = annot.getColor();
     input.spellcheck = false;
     document.body.appendChild(input);
-    input.focus();
-    if (focusReady) Promise.resolve(focusReady).then(() => {
-        if (input.isConnected) input.focus();
-    });
+    input.focus({preventScroll: true});
 
     setTimeout(() => {
+        if (!input.isConnected) return;
         const range = document.createRange();
         range.selectNodeContents(input);
         const sel = window.getSelection();
@@ -620,7 +637,7 @@ export function showTextInput(x, y) {
             annot.cancelText();
         }
         cleanup();
-        recHooks?.onTextInputClose?.();
+        if (releaseInput) void releaseInput().catch(error => console.error('[screenshot] 录制文字输入收尾失败', error));
     };
 
     input.addEventListener('keydown', (e) => {
