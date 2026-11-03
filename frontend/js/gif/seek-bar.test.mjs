@@ -8,10 +8,19 @@ import {
     formatTimecode,
     keyboardStep,
     locateTime,
+    playbackOffset,
     pointerRatio,
     ratioToTime,
     timeAt,
 } from './seek-bar.js';
+
+test('暂停和继续保留帧内偏移，暂停墙钟不计入播放时长', () => {
+    const paused = playbackOffset(6000, true, 1000, 0, 2500);
+    assert.equal(paused, 1500);
+    assert.equal(playbackOffset(6000, false, 1000, paused, 12000), 1500);
+    assert.equal(playbackOffset(6000, true, 12000 - paused, 0, 12500), 2000);
+    assert.equal(playbackOffset(6000, true, 0, 0, 99999), 6000);
+});
 
 /** 前缀和构造：[100, 66, 500] → [0, 100, 166, 666] */
 const prefixOf = durs => durs.reduce((acc, d) => (acc.push(acc[acc.length - 1] + d), acc), [0]);

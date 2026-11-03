@@ -45,6 +45,8 @@ export function runAnnotationOperation(operation) {
 
 /** 工具切换统一入口 */
 export function selectTool(tool) {
+    // 录制态快捷键也走此入口，不能绕过工具栏的禁用范围。
+    if (ss.gifRecHooks?.allowsTool && !ss.gifRecHooks.allowsTool(tool)) return;
     const {canvas, hitCanvas} = ss;
     // 0.15.14：聚光灯/多次聚光灯切换时清理旧命令
     // 单次↔多次切换时，旧工具的聚光灯命令不应残留
@@ -568,7 +570,7 @@ export function showTextInput(x, y) {
     const recHooks = ss.gifRecHooks;
     let cssPos = {x: ss.selCss.x + x / rsx, y: ss.selCss.y + y / rsy};
     if (recHooks?.adjustTextPlacement) cssPos = recHooks.adjustTextPlacement(cssPos);
-    recHooks?.onTextInputOpen?.();
+    const focusReady = recHooks?.onTextInputOpen?.();
 
     const input = document.createElement('span');
     input.className = 'text-annot-input';
@@ -588,6 +590,9 @@ export function showTextInput(x, y) {
     input.spellcheck = false;
     document.body.appendChild(input);
     input.focus();
+    if (focusReady) Promise.resolve(focusReady).then(() => {
+        if (input.isConnected) input.focus();
+    });
 
     setTimeout(() => {
         const range = document.createRange();
@@ -606,6 +611,7 @@ export function showTextInput(x, y) {
         if (input.parentNode) input.parentNode.removeChild(input);
     };
     const commit = (text) => {
+        if (cleanedUp) return;
         if (text) {
             annot.commitText(text);
             redrawAnnotFull();

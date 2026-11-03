@@ -157,6 +157,8 @@ pub enum EditError {
     InvalidTrimRange,
     /// 草稿速度因子非法（非有限值或超出 clamp 范围）。
     InvalidSpeed,
+    /// 草稿格式版本未知。
+    InvalidDraftVersion,
 }
 
 impl std::fmt::Display for EditError {
@@ -165,6 +167,7 @@ impl std::fmt::Display for EditError {
             EditError::FrameOutOfRange => write!(f, "帧号超出素材范围"),
             EditError::InvalidTrimRange => write!(f, "修剪终点早于起点"),
             EditError::InvalidSpeed => write!(f, "速度因子非法"),
+            EditError::InvalidDraftVersion => write!(f, "草稿格式版本不受支持"),
         }
     }
 }
@@ -437,8 +440,12 @@ impl Timeline {
     /// 应丢弃草稿并如实提示，不能声称恢复全部编辑）。成功后 undo/redo 栈为空，
     /// revision 沿用草稿保存值（前端按 revision 拒绝旧回包的语义继续成立）。
     pub fn restore_draft(&mut self, draft: TimelineDraft) -> Result<(), EditError> {
+        if draft.version != TIMELINE_DRAFT_VERSION {
+            return Err(EditError::InvalidDraftVersion);
+        }
         let end = self.frame_count.saturating_sub(1);
-        if draft.trim_start > end
+        if (self.frame_count == 0 && (!draft.deleted.is_empty() || !draft.holds.is_empty()))
+            || draft.trim_start > end
             || draft.trim_end > end
             || draft.trim_start > draft.trim_end
             || draft.deleted.iter().any(|&f| f > end)
@@ -527,6 +534,21 @@ pub fn quantize_delay_ms(ms: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn draft_restore_rejects_unknown_version_and_empty_material_indices() {
+        let mut timeline = Timeline::from_durations(vec![100; 2]);
+        let mut draft = timeline.to_draft(0);
+        draft.version += 1;
+        assert_eq!(timeline.restore_draft(draft), Err(EditError::InvalidDraftVersion));
+        assert_eq!(timeline.revision(), 1);
+
+        let mut empty = Timeline::from_durations(vec![]);
+        let mut draft = empty.to_draft(0);
+        draft.deleted.push(0);
+        assert_eq!(empty.restore_draft(draft), Err(EditError::FrameOutOfRange));
+        assert_eq!(empty.frame_count(), 0);
+    }
 
     fn tl() -> Timeline {
         Timeline::from_durations(vec![100, 100, 100, 100, 100])

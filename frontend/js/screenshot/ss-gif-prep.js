@@ -16,7 +16,7 @@ import {cssPointToScreen, cssRectToBitmap} from './ss-selection-geometry.js';
 import {positionToolbar} from './ss-display.js';
 import {invoke, normalizeError} from '../shared/tauri.js';
 import {showTransientHint} from './ss-ocr.js';
-import {annotationsMigratable, enterGifRecordOverlay} from './ss-gif-rec.js';
+import {annotationsMigratable, enterGifRecordOverlay, handleOverlayHidden} from './ss-gif-rec.js';
 
 /** 宿主上的录制准备态 class（对应 CSS 的面切换规则）。 */
 const PREP_MODE_CLASS = 'toolbar-mode-gif-prep';
@@ -109,8 +109,10 @@ export async function startGifRecordingFromPrep() {
     const origin = cssPointToScreen(ss.selCss.x, ss.selCss.y, meta);
     const bmp = cssRectToBitmap(ss.selCss, meta);
     ss.sent = true;
+    ss.gifWindowHold = true;
+    let sessionId;
     try {
-        await invoke('gif_start_recording', {
+        const info = await invoke('gif_start_recording', {
             x: origin.x,
             y: origin.y,
             w: bmp.w,
@@ -118,12 +120,19 @@ export async function startGifRecordingFromPrep() {
             fps,
             showCursor,
         });
+        sessionId = info.sessionId;
         // overlay 不隐藏：同一宿主切到录制面，涂画层就位
-        enterGifRecordOverlay({x: origin.x, y: origin.y, w: bmp.w, h: bmp.h});
+        await enterGifRecordOverlay({x: origin.x, y: origin.y, w: bmp.w, h: bmp.h}, sessionId);
     } catch (err) {
+        if (sessionId) {
+            await invoke('gif_cancel_recording').catch(() => {});
+            handleOverlayHidden();
+        }
         console.error('[screenshot] GIF 录制启动失败', err);
         showTransientHint(`GIF 录制启动失败：${normalizeError(err).message}`, {isError: true, duration: 3000});
         ss.sent = false;
+    } finally {
+        ss.gifWindowHold = false;
     }
 }
 

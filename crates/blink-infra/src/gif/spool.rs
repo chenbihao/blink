@@ -404,6 +404,9 @@ pub fn read_session_meta(root: &Path, id: &str) -> Result<SessionMeta, SpoolErro
     }
     let meta: SessionMeta = serde_json::from_slice(&fs::read(&meta_path)?)
         .map_err(|e| SpoolError::InvalidSession(format!("session.json 解析失败: {e}")))?;
+    if meta.id != id {
+        return Err(SpoolError::InvalidSession("素材身份与目录不匹配".into()));
+    }
     if meta.spool_version > SPOOL_VERSION {
         return Err(SpoolError::UnsupportedVersion(meta.spool_version));
     }
@@ -461,12 +464,13 @@ pub fn read_summary(root: &Path, id: &str) -> Result<SessionSummary, SpoolError>
     let (frame_count, total_ms) = if !meta.ts_ms.is_empty() {
         let n = meta.ts_ms.len() as u32;
         let span = meta.ts_ms.last().copied().unwrap_or(0)
-            - meta.ts_ms.first().copied().unwrap_or(0);
-        (n, span + meta.last_dur_ms as u64)
+            .checked_sub(meta.ts_ms.first().copied().unwrap_or(0))
+            .ok_or_else(|| SpoolError::InvalidSession("素材时间戳倒退".into()))?;
+        (n, span.saturating_add(meta.last_dur_ms as u64))
     } else if let Some(((_, t0), (i_last, t_last))) = head_tail_entries(&dir)? {
         (
-            i_last + 1,
-            t_last.saturating_sub(t0) + meta.last_dur_ms.max(1) as u64,
+            i_last.saturating_add(1),
+            t_last.saturating_sub(t0).saturating_add(meta.last_dur_ms.max(1) as u64),
         )
     } else {
         (0, 0)
@@ -527,7 +531,22 @@ pub fn draft_path(dir: &Path) -> PathBuf {
 
 /// 原子写入草稿（`atomic_write_bytes` 同目录临时文件 + 原子替换；失败保留旧草稿）。
 pub fn write_draft(dir: &Path, body: &str) -> Result<(), SpoolError> {
+    let _lease = maintenance::usage_lock(dir, false)?;
+    if !dir.join("session.json").is_file() {
+        return Err(SpoolError::InvalidSession("会话已删除".into()));
+    }
     crate::utils::fs::atomic_write_bytes(&draft_path(dir), body.as_bytes())?;
+    Ok(())
+}
+
+/// 删除必须取得独占租约，与在途录制、预览、导出、草稿写入互斥。
+pub fn discard_session(root: &Path, id: &str) -> Result<(), SpoolError> {
+    if !is_valid_session_id(id) {
+        return Err(SpoolError::InvalidSession("会话标识无效".into()));
+    }
+    let dir = session_dir(root, id);
+    let _lease = maintenance::usage_lock(&dir, true)?;
+    fs::remove_dir_all(dir)?;
     Ok(())
 }
 
@@ -880,6 +899,38 @@ mod tests {
         assert_eq!(read_draft(root.path(), &id), None);
         // 非法 id 不读
         assert_eq!(read_draft(root.path(), "../x"), None);
+    }
+
+    #[test]
+    fn discard_respects_readers_and_draft_write_never_recreates_deleted_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let m = meta(16, 16);
+        let id = m.id.clone();
+        SpoolWriter::create(root.path(), m).unwrap().finalize("user").unwrap();
+        let reader = SpoolReader::open(root.path(), &id).unwrap();
+        assert!(discard_session(root.path(), &id).is_err());
+        drop(reader);
+        let dir = session_dir(root.path(), &id);
+        discard_session(root.path(), &id).unwrap();
+        assert!(write_draft(&dir, "{}").is_err());
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn corrupt_summary_identity_or_timestamps_does_not_panic_or_redirect() {
+        let root = tempfile::tempdir().unwrap();
+        let mut m = meta(16, 16);
+        let id = m.id.clone();
+        SpoolWriter::create(root.path(), m.clone()).unwrap().finalize("user").unwrap();
+        m.ts_ms = vec![100, 0];
+        let path = session_dir(root.path(), &id).join("session.json");
+        fs::write(&path, serde_json::to_vec(&m).unwrap()).unwrap();
+        assert!(read_summary(root.path(), &id).is_err());
+        assert!(list_summaries(root.path(), 0, 20).0.is_empty());
+        m.id = generate_session_id();
+        fs::write(&path, serde_json::to_vec(&m).unwrap()).unwrap();
+        assert!(read_session_meta(root.path(), &id).is_err());
+        assert_eq!(list_summaries(root.path(), 0, 20).1, 0);
     }
 
     fn now_ms() -> u64 {

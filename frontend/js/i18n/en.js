@@ -2713,6 +2713,7 @@ export const en = {
     "gif.editor.durPh.multi": "{n} frames",
     "gif.editor.durPh.select": "Select frames to set",
     "gif.editor.draftDiscarded": "Saved editing progress didn't match the footage; restored to the original recording",
+    "gif.editor.recordingSaved": "New recording saved to Recent Recordings; the current export continues",
     // Recent recordings (0.28.23 §5.7.4)
     "gif.recent.title": "Recent recordings",
     "gif.recent.note": "Temporary footage is kept for 72 hours; closing the window keeps it and editing progress is saved automatically.",

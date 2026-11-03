@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use tauri::{AppHandle, Manager};
 
-use blink_domain::gif::{SessionDraftFile, TimelineDraft, TIMELINE_DRAFT_VERSION};
+use blink_domain::gif::{SessionDraftFile, Timeline, TimelineDraft, TIMELINE_DRAFT_VERSION};
 use blink_infra::gif::{self as infra_gif, SpoolReader};
 
 use crate::app::gif_service::GifService;
@@ -81,9 +81,11 @@ fn schedule(app: &AppHandle, session_id: &str) {
                 .unwrap_or(false)
         };
         if still_current {
-            if let Err(e) = save_now(&app, &session) {
-                tracing::warn!(session_id = %session, error = %e, "编辑草稿保存失败（下次编辑/关闭时重试）");
-            }
+            tauri::async_runtime::spawn_blocking(move || {
+                if let Err(e) = save_now(&app, &session) {
+                    tracing::warn!(session_id = %session, error = %e, "编辑草稿保存失败（下次编辑/关闭时重试）");
+                }
+            });
         }
     });
 }
@@ -107,19 +109,36 @@ pub(crate) fn flush_draft(app: &AppHandle, session_id: &str) {
     }
 }
 
+/// 退出时也保存已切走会话中尚在防抖的编辑。
+pub(crate) fn flush_all_drafts(app: &AppHandle) {
+    let ids: Vec<_> = app.state::<Arc<GifService>>().drafts
+        .lock().unwrap_or_else(|e| e.into_inner()).keys().cloned().collect();
+    for id in ids {
+        flush_draft(app, &id);
+    }
+}
+
 fn save_now(app: &AppHandle, session_id: &str) -> Result<(), String> {
     let service = app.state::<Arc<GifService>>();
-    let dir = GifService::root().join("sessions").join(session_id);
+    save_to(&service, &GifService::root(), session_id)
+}
+
+fn save_to(service: &Arc<GifService>, root: &Path, session_id: &str) -> Result<(), String> {
+    let dir = root.join("sessions").join(session_id);
     // 会话已被删除（显式丢弃/TTL 清理与防抖任务竞态）：不写盘——
     // atomic_write 的 create_dir_all 会复活只含草稿的空目录。
     if !dir.join("session.json").is_file() {
         forget_session(&service, session_id);
         return Err("会话已删除，草稿随目录清理".into());
     }
+    // 写盘与状态变更串行，禁止旧快照后落盘或清除新一轮 dirty 标记。
+    let mut drafts = service.drafts.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(state) = drafts.get_mut(session_id).filter(|s| s.dirty) else {
+        return Ok(());
+    };
     let (draft, identity) = {
-        let drafts = service.drafts.lock().unwrap_or_else(|e| e.into_inner());
         let identities = service.session_identity.lock().unwrap_or_else(|e| e.into_inner());
-        let play = drafts.get(session_id).map(|s| s.play_pos_ms).unwrap_or(0);
+        let play = state.play_pos_ms;
         let Some(&(created_at, material_frames)) = identities.get(session_id) else {
             return Err("缺少素材身份记录，跳过草稿写入".into());
         };
@@ -138,10 +157,7 @@ fn save_now(app: &AppHandle, session_id: &str) -> Result<(), String> {
     let body = serde_json::to_string(&file).map_err(|e| e.to_string())?;
     infra_gif::spool::write_draft(&dir, &body).map_err(|e| e.to_string())?;
     // 落地完成：清脏标记（代次保留——后续 schedule 会再递增）
-    let mut drafts = service.drafts.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(state) = drafts.get_mut(session_id) {
-        state.dirty = false;
-    }
+    state.dirty = false;
     Ok(())
 }
 
@@ -156,11 +172,40 @@ pub enum DraftRestore {
     Discarded,
 }
 
+/// 初始化及草稿恢复整体完成后才允许其他命令使用时间轴。
+pub(crate) fn ensure_timeline(
+    service: &Arc<GifService>, reader: &SpoolReader, session_id: &str,
+) -> DraftRestore {
+    ensure_timeline_at(service, reader, session_id, &GifService::root())
+}
+
+fn ensure_timeline_at(
+    service: &Arc<GifService>, reader: &SpoolReader, session_id: &str, root: &Path,
+) -> DraftRestore {
+    let _initializing = service.timeline_init.lock().unwrap_or_else(|e| e.into_inner());
+    let fresh = {
+        let mut timelines = service.timelines.lock().unwrap_or_else(|e| e.into_inner());
+        if timelines.contains_key(session_id) {
+            false
+        } else {
+            let durs = reader.durations();
+            timelines.insert(session_id.to_string(), Timeline::from_durations(durs));
+            true
+        }
+    };
+    if fresh {
+        try_restore_draft(service, session_id, reader, root)
+    } else {
+        DraftRestore::Missing
+    }
+}
+
 /// 首建时间轴后尝试恢复草稿（ensure_timeline 调用；时间轴已在 map 中）。
-pub(crate) fn try_restore_draft(
+fn try_restore_draft(
     service: &Arc<GifService>,
     session_id: &str,
     reader: &SpoolReader,
+    root: &Path,
 ) -> DraftRestore {
     let identity = (reader.meta.created_at, reader.frame_count());
     service
@@ -169,7 +214,7 @@ pub(crate) fn try_restore_draft(
         .unwrap_or_else(|e| e.into_inner())
         .insert(session_id.to_string(), identity);
 
-    let Some(raw) = infra_gif::spool::read_draft(&GifService::root(), session_id) else {
+    let Some(raw) = infra_gif::spool::read_draft(root, session_id) else {
         return DraftRestore::Missing;
     };
     let restore = (|| -> Option<(TimelineDraft, u64)> {
@@ -230,4 +275,73 @@ pub(crate) fn forget_session(service: &Arc<GifService>, session_id: &str) {
 #[allow(dead_code)]
 pub(crate) fn has_draft(session_dir: &Path) -> bool {
     infra_gif::spool::draft_path(session_dir).is_file()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use blink_domain::gif::EditCommand;
+
+    fn material(root: &Path) -> SpoolReader {
+        let id = infra_gif::generate_session_id();
+        let meta = infra_gif::SessionMeta {
+            spool_version: infra_gif::SPOOL_VERSION,
+            id: id.clone(),
+            region: infra_gif::CaptureRegion { x: 0, y: 0, w: 8, h: 8 },
+            fps: 10, show_cursor: false, created_at: 42,
+            state: "recording".into(), ts_ms: vec![], last_dur_ms: 100,
+            spool_bytes: 0, stop_reason: None,
+        };
+        let mut writer = infra_gif::SpoolWriter::create(root, meta).unwrap();
+        writer.append_frame(0, &[0; 256]).unwrap();
+        writer.append_frame(100, &[255; 256]).unwrap();
+        writer.finalize("user").unwrap();
+        SpoolReader::open(root, &id).unwrap()
+    }
+
+    #[test]
+    fn new_recording_saves_identity_edits_and_position_then_restores() {
+        let root = tempfile::tempdir().unwrap();
+        let reader = material(root.path());
+        let id = &reader.meta.id;
+        let service = Arc::new(GifService::new());
+        assert_eq!(ensure_timeline_at(&service, &reader, id, root.path()), DraftRestore::Missing);
+        service.timelines.lock().unwrap().get_mut(id).unwrap()
+            .apply(&EditCommand::SetSpeed { factor: 2.0 }).unwrap();
+        service.drafts.lock().unwrap().insert(id.clone(), DraftState {
+            play_pos_ms: 75, dirty: true, generation: 1,
+        });
+        save_to(&service, root.path(), id).unwrap();
+        assert!(!service.drafts.lock().unwrap()[id].dirty);
+        let raw = infra_gif::read_draft(root.path(), id).unwrap();
+        let file: SessionDraftFile = serde_json::from_str(&raw).unwrap();
+        assert!(file.identity_matches(42, 2));
+        assert_eq!(file.draft.speed, 2.0);
+        assert_eq!(file.draft.play_pos_ms, 75);
+
+        let reopened = Arc::new(GifService::new());
+        assert_eq!(ensure_timeline_at(&reopened, &reader, id, root.path()), DraftRestore::Restored(75));
+        assert_eq!(reopened.timelines.lock().unwrap()[id].speed(), 2.0);
+        assert_eq!(ensure_timeline_at(&reopened, &reader, id, root.path()), DraftRestore::Missing);
+        assert_eq!(reopened.drafts.lock().unwrap()[id].play_pos_ms, 75);
+    }
+
+    #[test]
+    fn failed_save_keeps_dirty_and_deleted_session_is_not_recreated() {
+        let root = tempfile::tempdir().unwrap();
+        let reader = material(root.path());
+        let id = reader.meta.id.clone();
+        let service = Arc::new(GifService::new());
+        ensure_timeline_at(&service, &reader, &id, root.path());
+        service.drafts.lock().unwrap().insert(id.clone(), DraftState { dirty: true, ..Default::default() });
+        let dir = root.path().join("sessions").join(&id);
+        std::fs::create_dir(dir.join("draft.json")).unwrap();
+        assert!(save_to(&service, root.path(), &id).is_err());
+        assert!(service.drafts.lock().unwrap()[&id].dirty);
+        drop(reader);
+        infra_gif::spool::discard_session(root.path(), &id).unwrap();
+        assert!(save_to(&service, root.path(), &id).is_err());
+        assert!(!dir.exists());
+        assert!(!service.drafts.lock().unwrap().contains_key(&id));
+    }
 }

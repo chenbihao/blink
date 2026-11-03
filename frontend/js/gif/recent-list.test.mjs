@@ -17,9 +17,9 @@ test('itemMetaText 汇总时长/尺寸/帧数/占用（KB 与 MB 分档）', () 
     );
 });
 
-test('itemTimeText 本地时间 MM-dd HH:mm:ss；非法输入空串', () => {
+test('itemTimeText 本地时间 YYYY-MM-DD HH:mm；非法输入空串', () => {
     const text = itemTimeText(new Date(2026, 10, 1, 9, 5, 3).getTime());
-    assert.equal(text, '11-01 09:05:03');
+    assert.equal(text, '2026-11-01 09:05');
     assert.equal(itemTimeText(NaN), '');
 });
 
@@ -81,7 +81,7 @@ class FakeElement {
     }
 }
 
-function fixture({summaries, onOpenResult} = {}) {
+function fixture({summaries = [], onOpenResult, respond} = {}) {
     const calls = [];
     const dom = {
         pane: new FakeElement('section'),
@@ -108,6 +108,7 @@ function fixture({summaries, onOpenResult} = {}) {
     const list = createRecentList({
         invoke: async (cmd, args) => {
             calls.push({cmd, args});
+            if (respond) return respond(cmd, args);
             if (cmd === 'gif_recent_sessions') {
                 return {items: summaries, total: summaries.length, offset: 0, limit: 20};
             }
@@ -151,7 +152,7 @@ test('refresh 拉取摘要并渲染条目（含缩略图请求与徽章）', asy
     assert.equal(calls[0].args.offset, 0);
     const first = dom.list.children[0];
     assert.equal(first.dataset.id, 'rec-a');
-    assert.equal(first.children[1].children[0].textContent, '11-01 09:05:03');
+    assert.equal(first.children[1].children[0].textContent, '2026-11-01 09:05');
     assert.equal(first.children[1].children[1].textContent, '7.4s · 1280×720 · 15fps · 111 帧 · 1.8 MB');
     // hasDraft 徽章
     assert.equal(first.children[1].children[2].classList.contains('badge-draft'), true);
@@ -203,4 +204,55 @@ test('当前编辑会话的删除按钮禁用', async () => {
     await list.refresh();
     const btnDelete = dom.list.children[0].children[2].children[1];
     assert.equal(btnDelete.disabled, true);
+});
+
+test('分页遇到重复项仍推进服务端游标，不用去重后的条数重复请求旧页', async () => {
+    const {list, dom, calls} = fixture({respond: (cmd, args) => {
+        if (cmd !== 'gif_recent_sessions') return null;
+        const pages = {0: ['a', 'b'], 2: ['b', 'c'], 4: ['d']};
+        return {items: pages[args.offset].map(id => ({id})), total: 5, limit: 2};
+    }});
+    list.bind();
+    await list.refresh();
+    dom.list.scrollTop = 100;
+    dom.list.clientHeight = dom.list.scrollHeight = 100;
+    dom.list.listeners.get('scroll')();
+    await new Promise(resolve => setImmediate(resolve));
+    dom.list.listeners.get('scroll')();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(calls.filter(c => c.cmd === 'gif_recent_sessions').map(c => c.args.offset), [0, 2, 4]);
+    assert.deepEqual(dom.list.children.map(el => el.dataset.id), ['a', 'b', 'c', 'd']);
+});
+
+test('刷新期间再次刷新：旧响应不得覆盖新列表', async () => {
+    const pending = [];
+    const {list, dom} = fixture({respond: cmd => cmd === 'gif_recent_sessions'
+        ? new Promise(resolve => pending.push(resolve)) : null});
+    const old = list.refresh();
+    const latest = list.refresh();
+    pending[1]({items: [{id: 'new'}], total: 1, limit: 20});
+    await latest;
+    pending[0]({items: [{id: 'old'}], total: 1, limit: 20});
+    await old;
+    assert.deepEqual(dom.list.children.map(el => el.dataset.id), ['new']);
+});
+
+test('缩略图解码同时至多两个请求，翻页重绘复用缓存', async () => {
+    const pending = [];
+    const {list, calls} = fixture({respond: cmd => {
+        if (cmd === 'gif_recent_sessions') return {items: ['a', 'b', 'c'].map(id => ({id})), total: 3};
+        if (cmd === 'gif_session_thumbnail') return new Promise(resolve => pending.push(resolve));
+        return null;
+    }});
+    await list.refresh();
+    assert.equal(pending.length, 2);
+    pending[0]({pngBase64: 'a'});
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(pending.length, 3);
+    pending[1]({pngBase64: 'b'});
+    pending[2]({pngBase64: 'c'});
+    await new Promise(resolve => setImmediate(resolve));
+    await list.refresh();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(calls.filter(c => c.cmd === 'gif_session_thumbnail').length, 3);
 });

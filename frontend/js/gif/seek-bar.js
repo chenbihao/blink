@@ -39,6 +39,12 @@ export function timeAt(prefix, playIdx, inFrameMs = 0) {
     return prefix[i] + Math.min(Math.max(inFrameMs, 0), dur);
 }
 
+/** 当前帧已播放时长：暂停期间只用已提交偏移，恢复时不计入暂停墙钟时间。 */
+export function playbackOffset(duration, playing, frameShownAt, pausedOffset, now) {
+    return Math.min(Math.max(0, duration), Math.max(0,
+        playing ? now - frameShownAt : pausedOffset));
+}
+
 /** 指针 clientX → 轨道比例 [0,1]；轨道宽 0 返回 0。 */
 export function pointerRatio(clientX, rect) {
     const w = rect.width || 0;

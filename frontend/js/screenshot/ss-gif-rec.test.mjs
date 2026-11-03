@@ -2,6 +2,8 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import vm from 'node:vm';
 
 // 模块导入链（ss-display/ss-toolbar/shared）在顶层访问 window——
 // 先注入最小 stub 再动态导入。
@@ -54,4 +56,56 @@ test('clampRegionMove：钳制到虚拟屏内（含负坐标多屏），无边�
     assert.deepEqual(clampRegionMove(origin, 0, 100000, vs), {x: 100, y: 1440 - 300});
     // 无虚拟屏信息（边界未知）→ 不钳制
     assert.deepEqual(clampRegionMove(origin, -100000, 0, null), {x: -99900, y: 100});
+});
+
+test('录制就绪等待透明层绘制；旧会话 idle 不清理新会话，结束时释放定时器', async () => {
+    const classes = () => {
+        const values = new Set();
+        return {add: (...cs) => cs.forEach(c => values.add(c)),
+            remove: (...cs) => cs.forEach(c => values.delete(c)),
+            contains: c => values.has(c)};
+    };
+    const toolbar = {classList: classes(), dataset: {},
+        getBoundingClientRect: () => ({x: 0, y: 200, width: 200, height: 40})};
+    const body = {classList: classes()};
+    const root = {classList: classes()};
+    const paints = [], calls = [], timers = new Set();
+    let timerId = 0;
+    const context = vm.createContext({
+        ss: {toolbar, selCss: {x: 0, y: 0, w: 100, h: 100}},
+        window: {__blinkScreenMeta: {vx: 0, vy: 0, w: 1920, h: 1080}},
+        document: {body, documentElement: root, getElementById: () => null, querySelectorAll: () => []},
+        annot: {getTool: () => 'pencil'}, positionToolbar() {}, selectTool() {},
+        getRenderScale: () => ({scaleX: 1, scaleY: 1}), cssPointToScreen: (x, y) => ({x, y}),
+        listen: async () => () => {}, EVENTS: {}, performance: {now: () => 1000},
+        setInterval: () => { timers.add(++timerId); return timerId; },
+        clearInterval: id => timers.delete(id), clearTimeout() {},
+        requestAnimationFrame: fn => paints.push(fn),
+        invoke: async (cmd, args) => {
+            calls.push({cmd, args});
+            if (cmd === 'gif_recorder_state') return {sessionId: 'new', phase: 'recording', elapsedMs: 0};
+        },
+    });
+    const source = readFileSync(new URL('./ss-gif-rec.js', import.meta.url), 'utf8')
+        .replace(/^import .*;\r?$/gm, '').replace(/export /g, '');
+    vm.runInContext(`${source}\nglobalThis.fixture = {state, enterGifRecordOverlay, applyRecorderState};`, context);
+    const f = context.fixture;
+    const task = f.enterGifRecordOverlay({x: 0, y: 0, w: 100, h: 100}, 'new');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(root.classList.contains('gif-recording'), true);
+    assert.equal(calls.some(c => c.cmd === 'gif_overlay_ready'), false);
+    paints.shift()();
+    assert.equal(calls.some(c => c.cmd === 'gif_overlay_ready'), false);
+    paints.shift()();
+    await task;
+    assert.deepEqual(calls.map(c => c.cmd), ['gif_overlay_input', 'gif_overlay_ready', 'gif_recorder_state']);
+    f.state.cancelArmed = true;
+    f.applyRecorderState({sessionId: 'old', phase: 'idle'});
+    assert.equal(f.state.active, true);
+    assert.equal(timers.size, 2);
+    f.applyRecorderState({sessionId: 'new', phase: 'idle'});
+    assert.equal(f.state.active, false);
+    assert.equal(f.state.cancelArmed, false);
+    assert.equal(timers.size, 0);
+    assert.equal(root.classList.contains('gif-recording'), false);
 });

@@ -45,6 +45,7 @@ const CANCEL_ARM_MS = 3000;
 /** 模块状态（会话真源在后端；此为 UI 投影）。 */
 const state = {
     active: false,
+    sessionId: null,
     phase: 'recording',
     elapsedBase: 0,
     elapsedAt: 0,
@@ -60,7 +61,6 @@ const state = {
     cancelArmed: false,
     cancelTimer: 0,
     stopping: false,
-    listenersBound: false,
 };
 
 function toolbarEl() {
@@ -108,18 +108,27 @@ export function annotationsMigratable() {
  * 进入录制叠层模式（`gif_start_recording` 成功后由准备态调用）。
  * @param {{x:number, y:number, w:number, h:number}} regionPhys 录制区域（物理屏幕坐标）
  */
-export function enterGifRecordOverlay(regionPhys) {
+export async function enterGifRecordOverlay(regionPhys, sessionId) {
     const toolbar = toolbarEl();
-    if (!toolbar) return;
+    if (!toolbar) throw new Error('录制工具栏未就绪');
     state.active = true;
+    state.sessionId = sessionId;
     state.stopping = false;
     state.desktopMode = false;
     state.regionPhys = {...regionPhys};
     state.phase = 'recording';
+    state.elapsedBase = 0;
+    state.elapsedAt = performance.now();
+    state.frames = 0;
+    state.moveDrag = null;
+    resetCancel();
+    const meta = window.__blinkScreenMeta || {};
+    state.vs = {vx: meta.vx, vy: meta.vy, vw: meta.w, vh: meta.h};
 
     toolbar.classList.remove('toolbar-mode-gif-prep');
     toolbar.classList.add(REC_MODE_CLASS);
     document.body.classList.add(BODY_REC_CLASS);
+    document.documentElement.classList.add(BODY_REC_CLASS);
     document.body.classList.remove(PAUSED_CLASS);
 
     // 静态截图层清空（保留元素——它是指针事件承接面；位图清空即透明）。
@@ -145,11 +154,13 @@ export function enterGifRecordOverlay(regionPhys) {
 
     syncRegionVisual();
     el('gif-region-frame')?.classList.remove('hidden');
-    bindListenersOnce();
+    await bindListenersOnce();
+    if (!state.active || state.sessionId !== sessionId) return;
 
     // 文字输入适配钩子（ss-toolbar showTextInput 消费）：输入框外置出录制
     // 区域 + 编辑期间申请 overlay 键盘焦点（不可聚焦不抢被录应用焦点）。
     ss.gifRecHooks = {
+        allowsTool: tool => REC_TOOLS.has(tool),
         adjustTextPlacement,
         onTextInputOpen: () => invoke('gif_overlay_focusable', {focusable: true}).catch(() => {}),
         onTextInputClose: () => invoke('gif_overlay_focusable', {focusable: false}).catch(() => {}),
@@ -159,17 +170,27 @@ export function enterGifRecordOverlay(regionPhys) {
     setDesktopMode(true);
     renderRecState();
     startTick();
+    // 两次 rAF 之间完成一次透明叠层绘制，再通知采集线程 Start。
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    if (!state.active || state.sessionId !== sessionId) return;
+    await invoke('gif_overlay_ready', {sessionId});
+    const snapshot = await invoke('gif_recorder_state');
+    if (state.active && state.sessionId === sessionId) applyRecorderState(snapshot || {});
 }
 
 /** 录制会话结束（停止/取消由后端收场并隐藏 overlay）——仅复位 UI 投影。 */
 function endOverlaySession() {
     state.active = false;
+    state.sessionId = null;
     state.stopping = false;
     clearInterval(state.tickTimer);
     state.tickTimer = 0;
     clearInterval(state.hitRectTimer);
     state.hitRectTimer = 0;
+    state.moveDrag = null;
+    resetCancel();
     document.body.classList.remove(BODY_REC_CLASS, PAUSED_CLASS);
+    document.documentElement.classList.remove(BODY_REC_CLASS);
     toolbarEl()?.classList.remove(REC_MODE_CLASS);
     el('gif-region-frame')?.classList.add('hidden');
     delete ss.gifRecHooks;
@@ -192,23 +213,28 @@ export function clampRegionMove(origin, dx, dy, vs) {
 
 // ── 状态显示（GIF_RECORDER_STATE 事件 + 时长插值） ───────────────────────
 
+let listenersReady;
 function bindListenersOnce() {
-    if (state.listenersBound) return;
-    state.listenersBound = true;
-    listen(EVENTS.GIF_RECORDER_STATE, event => {
+    if (listenersReady) return listenersReady;
+    listenersReady = Promise.all([listen(EVENTS.GIF_RECORDER_STATE, event => {
         if (!state.active) return;
         applyRecorderState(event.payload || {});
-    });
-    listen(EVENTS.GIF_REGION_UPDATED, event => {
+    }), listen(EVENTS.GIF_REGION_UPDATED, event => {
         if (!state.active) return;
         applyRegionUpdated(event.payload || {});
-    });
+    })]);
+    return listenersReady;
 }
 
 function applyRecorderState(p) {
+    if (p.sessionId !== state.sessionId) return;
+    if (p.phase === 'idle') {
+        endOverlaySession();
+        return;
+    }
     // 会话已收场（正常/取消/异常）——UI 冻结在收尾态，等 overlay 隐藏或
     // 下一轮截图会话 reset。
-    if (p.phase === 'idle' || p.phase === 'done') {
+    if (p.phase === 'done') {
         // 后端已收场/即将隐藏 overlay；停止响应输入
         state.stopping = true;
         renderRecState();
@@ -359,6 +385,7 @@ function syncRegionVisual() {
 
 /** 后端对账（含拖动钳制结果与新录制会话初始区域）。 */
 function applyRegionUpdated(p) {
+    if (p.sessionId !== state.sessionId) return;
     if (typeof p.x !== 'number' || typeof p.w !== 'number') return;
     state.regionPhys = {x: p.x, y: p.y, w: p.w, h: p.h};
     state.vs = {vx: p.vx, vy: p.vy, vw: p.vw, vh: p.vh};
@@ -375,12 +402,12 @@ function bindMoveButton() {
         if (!state.active || state.stopping || e.button !== 0 || !state.regionPhys) return;
         e.preventDefault();
         btn.setPointerCapture(e.pointerId);
-        const dpr = window.devicePixelRatio || 1;
+        const {scaleX, scaleY} = getRenderScale(window.__blinkScreenMeta);
         state.moveDrag = {
             pointerId: e.pointerId,
-            startX: e.screenX,
-            startY: e.screenY,
-            dpr,
+            startX: e.clientX,
+            startY: e.clientY,
+            scaleX, scaleY,
             origin: {...state.regionPhys},
         };
     });
@@ -388,8 +415,8 @@ function bindMoveButton() {
         const drag = state.moveDrag;
         if (!drag || e.pointerId !== drag.pointerId) return;
         const {vx, vy, vw, vh} = state.vs || {};
-        const dx = Math.round((e.screenX - drag.startX) * drag.dpr);
-        const dy = Math.round((e.screenY - drag.startY) * drag.dpr);
+        const dx = Math.round((e.clientX - drag.startX) * drag.scaleX);
+        const dy = Math.round((e.clientY - drag.startY) * drag.scaleY);
         const clamped = clampRegionMove(drag.origin, dx, dy,
             typeof vx === 'number' ? {vx, vy, vw, vh} : null);
         const nx = clamped.x;
@@ -428,6 +455,14 @@ async function stopRecording() {
 }
 
 /** 取消并丢弃：受保护的二次确认（首击点亮按钮，3 秒内再击确认）。 */
+function resetCancel() {
+    clearTimeout(state.cancelTimer);
+    state.cancelTimer = 0;
+    state.cancelArmed = false;
+    el('gif-rec-cancel')?.classList.remove('confirming');
+    el('gif-rec-cancel')?.setAttribute('title', '取消并丢弃本次录制（需再次点击确认）');
+}
+
 function cancelRecording() {
     if (state.stopping) return;
     const btn = el('gif-rec-cancel');
@@ -482,6 +517,7 @@ function adjustTextPlacement(cssPos) {
 
 /** 绑定录制面按钮（index.js 初始化调用一次）。 */
 export function bindGifRecBar() {
+    void bindListenersOnce();
     bindMoveButton();
     el('gif-rec-mode')?.addEventListener('click', () => {
         if (!state.active || state.stopping) return;
@@ -490,15 +526,7 @@ export function bindGifRecBar() {
     el('gif-rec-pause')?.addEventListener('click', togglePause);
     el('gif-rec-stop')?.addEventListener('click', stopRecording);
     el('gif-rec-cancel')?.addEventListener('click', cancelRecording);
-    // 录制态 Esc：不退出会话（下拉/面板的关闭已在 index.js 分层链处理），
-    // 这里只在捕获层兜底阻断「选区/标注」退出链误触。
-    window.addEventListener('keydown', event => {
-        if (event.key !== 'Escape' || event.isComposing || !state.active) return;
-        if (event.target?.classList?.contains('text-annot-input')) return;
-        // 关闭打开的下拉/弹层后消费 Esc；没有可关闭项也消费（录制不退出）
-        event.preventDefault();
-        event.stopImmediatePropagation();
-    }, true);
+    // Esc 由 index.js 的分层链先处理输入框/弹层，再在录制态消费。
 }
 
 /** 会话外部收场兜底（overlay 被 hide_screenshot_overlay 隐藏后调用）。 */

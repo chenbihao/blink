@@ -2707,6 +2707,7 @@ export const zh = {
     "gif.editor.durPh.multi": "{n} 帧",
     "gif.editor.durPh.select": "选中帧后设置",
     "gif.editor.draftDiscarded": "已保存的编辑进度与素材不匹配，已回退到原始素材",
+    "gif.editor.recordingSaved": "新录制已保存到最近录制，当前导出继续进行",
     // 最近录制列表（0.28.23 §5.7.4）
     "gif.recent.title": "最近录制",
     "gif.recent.note": "临时素材保留 72 小时；关闭窗口不删除素材，编辑进度自动保存。",

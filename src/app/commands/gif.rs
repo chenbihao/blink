@@ -17,7 +17,6 @@ use base64::Engine;
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
 
-use blink_domain::gif::Timeline;
 use blink_infra::gif::{
     self as infra_gif, CaptureCommand, SpoolReader,
 };
@@ -54,21 +53,7 @@ pub(super) fn ensure_timeline(
     reader: &SpoolReader,
     session_id: &str,
 ) -> DraftRestore {
-    let fresh = {
-        let mut timelines = service.timelines.lock().unwrap_or_else(|e| e.into_inner());
-        if timelines.contains_key(session_id) {
-            false
-        } else {
-            let durs = reader.durations();
-            timelines.insert(session_id.to_string(), Timeline::from_durations(durs));
-            true
-        }
-    };
-    if fresh {
-        crate::app::gif_draft::try_restore_draft(service, session_id, reader)
-    } else {
-        DraftRestore::Missing
-    }
+    crate::app::gif_draft::ensure_timeline(service, reader, session_id)
 }
 
 // ── 录制 ────────────────────────────────────────────────────────────────────
@@ -135,6 +120,11 @@ pub fn gif_move_recording_region(app: AppHandle, x: i32, y: i32) -> Result<(), C
 }
 
 // ── overlay 录制叠层输入（0.28.23：统一浮栏由 chord-screenshot overlay 承担）──
+
+#[tauri::command]
+pub fn gif_overlay_ready(app: AppHandle, session_id: String) -> Result<(), CommandError> {
+    gif_service::overlay_ready(&app, &session_id).map_err(err)
+}
 
 /// 上报 overlay 输入模式与命中矩形：`desktop=true` 操作桌面（穿透 + 命中
 /// 矩形内可点），`desktop=false` 涂画（整窗接收指针）。矩形为物理屏幕坐标。
@@ -219,6 +209,12 @@ pub fn gif_discard_session(app: AppHandle, session_id: String) -> Result<(), Com
             )));
         }
     }
+    let current = service.editor_session.lock().unwrap_or_else(|e| e.into_inner());
+    if current.as_deref() == Some(session_id.as_str()) {
+        return Err(CommandError::new("gif_session_busy", "当前编辑会话不能删除，请先切换", true));
+    }
+    infra_gif::spool::discard_session(&GifService::root(), &session_id)
+        .map_err(|e| CommandError::new("gif_session_busy", e.to_string(), true))?;
     service
         .timelines
         .lock()
@@ -227,8 +223,6 @@ pub fn gif_discard_session(app: AppHandle, session_id: String) -> Result<(), Com
     // 内存草稿/身份数据一并清理（目录删除已带走草稿文件；防抖任务因
     // 状态缺失自然失效，不复活已删会话）
     crate::app::gif_draft::forget_session(&service, &session_id);
-    let dir = GifService::root().join("sessions").join(&session_id);
-    std::fs::remove_dir_all(&dir).map_err(io_err)?;
     tracing::info!(session_id, "GIF 会话素材已丢弃");
     Ok(())
 }
@@ -479,7 +473,9 @@ pub fn gif_open_session(app: AppHandle, session_id: String) -> Result<(), Comman
         }
     }
     let _ = with_session(&app, &session_id)?; // 会话存在性/可读性校验
-    gif_service::open_editor(&app, &session_id);
+    if !gif_service::open_editor(&app, &session_id) {
+        return Err(CommandError::new("gif_export_busy", "当前录制正在导出，请先完成或取消导出再切换", true));
+    }
     Ok(())
 }
 

@@ -25,12 +25,12 @@ export function itemMetaText(s) {
     return `${formatSeconds(s.totalMs || 0)} · ${s.width}×${s.height} · ${s.fps}fps · ${s.frameCount} 帧 · ${kb}`;
 }
 
-/** 纯函数：摘要项的时间标题（本地时间 `MM-dd HH:mm:ss`）。 */
+/** 纯函数：摘要项的本地日期时间。 */
 export function itemTimeText(createdAtMs) {
     const d = new Date(createdAtMs);
     if (Number.isNaN(d.getTime())) return '';
     const p = n => String(n).padStart(2, '0');
-    return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
 /** 纯函数：状态徽章 key 列表（异常中断 / 已保存编辑）。 */
@@ -54,6 +54,41 @@ export function createRecentList(deps) {
     let items = [];
     let total = 0;
     let loading = false;
+    let loadVersion = 0;
+    let nextOffset = 0;
+    const thumbnails = new Map();
+    let thumbnailActive = 0;
+    const thumbnailQueue = [];
+    const observer = typeof IntersectionObserver === 'undefined' ? null : new IntersectionObserver(entries => {
+        for (const entry of entries) {
+            if (!entry.isIntersecting) continue;
+            observer.unobserve(entry.target);
+            thumbnailQueue.push(entry.target);
+        }
+        pumpThumbnails();
+    });
+
+    function pumpThumbnails() {
+        while (thumbnailActive < 2 && thumbnailQueue.length) {
+            const img = thumbnailQueue.shift();
+            if (!img.isConnected) continue;
+            const id = img.dataset.sessionId;
+            thumbnailActive++;
+            let task = thumbnails.get(id);
+            if (!task) {
+                task = invoke('gif_session_thumbnail', {sessionId: id});
+                thumbnails.set(id, task);
+                // 只保留近期缓存；离屏项不触发解码，在途任务也至多两个。
+                if (thumbnails.size > 100) thumbnails.delete(thumbnails.keys().next().value);
+            }
+            task.then(r => {
+                if (img.isConnected && r?.pngBase64) img.src = `data:image/png;base64,${r.pngBase64}`;
+            }).catch(() => thumbnails.delete(id)).finally(() => {
+                thumbnailActive--;
+                pumpThumbnails();
+            });
+        }
+    }
 
     const els = {
         pane: document.getElementById('recent-pane'),
@@ -65,25 +100,33 @@ export function createRecentList(deps) {
     };
 
     async function load(reset) {
-        if (loading) return;
+        if (loading && !reset) return;
+        const version = ++loadVersion;
         loading = true;
         els.loading?.classList.remove('hidden');
         try {
-            const offset = reset ? 0 : items.length;
+            const offset = reset ? 0 : nextOffset;
             const res = await invoke('gif_recent_sessions', {offset, limit: PAGE_SIZE});
+            if (version !== loadVersion) return;
             if (reset) items = [];
             // 追加去重（后端分页窗口内新录制可能挤位）：按 id 过滤已存在项
             const seen = new Set(items.map(i => i.id));
             for (const it of (res?.items || [])) {
-                if (!seen.has(it.id)) items.push(it);
+                if (!seen.has(it.id)) {
+                    items.push(it);
+                    seen.add(it.id);
+                }
             }
             total = res?.total ?? items.length;
+            nextOffset = offset + (res?.limit ?? PAGE_SIZE);
             render();
         } catch (err) {
             console.error('[gif-editor] 最近录制加载失败', err);
         } finally {
-            loading = false;
-            els.loading?.classList.add('hidden');
+            if (version === loadVersion) {
+                loading = false;
+                els.loading?.classList.add('hidden');
+            }
         }
     }
 
@@ -91,8 +134,11 @@ export function createRecentList(deps) {
         const list = els.list;
         if (!list) return;
         list.textContent = '';
+        observer?.disconnect();
+        thumbnailQueue.length = 0;
         els.empty?.classList.toggle('hidden', items.length > 0);
         for (const s of items) list.appendChild(buildItem(s));
+        pumpThumbnails();
         const back = els.back;
         if (back) back.classList.toggle('hidden', currentSessionId() == null);
     }
@@ -108,15 +154,11 @@ export function createRecentList(deps) {
         const img = document.createElement('img');
         img.alt = '';
         img.loading = 'lazy';
+        img.dataset.sessionId = s.id;
         thumb.appendChild(img);
         // 缩略图失败静默占位（列表不因单帧解码失败阻塞）
-        void invoke('gif_session_thumbnail', {sessionId: s.id})
-            .then(r => {
-                if (article.isConnected && r?.pngBase64) {
-                    img.src = `data:image/png;base64,${r.pngBase64}`;
-                }
-            })
-            .catch(() => {});
+        if (observer) observer.observe(img);
+        else thumbnailQueue.push(img);
 
         const info = document.createElement('div');
         info.className = 'recent-info';
@@ -202,13 +244,15 @@ export function createRecentList(deps) {
         }
         items = items.filter(i => i.id !== s.id);
         total = Math.max(0, total - 1);
+        nextOffset = Math.max(0, nextOffset - 1);
+        thumbnails.delete(s.id);
         render();
     }
 
     function bind() {
         els.list?.addEventListener('scroll', () => {
             const el = els.list;
-            if (!el || loading || items.length >= total) return;
+            if (!el || loading || nextOffset >= total) return;
             if (el.scrollTop + el.clientHeight + LOAD_MORE_THRESHOLD >= el.scrollHeight) {
                 void load(false);
             }

@@ -79,6 +79,8 @@ pub struct GifService {
     /// overlay 录制叠层输入态（穿透/命中矩形）。
     pub(crate) overlay_input: Mutex<OverlayInputState>,
     pub(crate) timelines: Mutex<HashMap<String, Timeline>>,
+    /// 首建时间轴与草稿恢复必须整体发布，避免并发命令看到半初始化状态。
+    pub(crate) timeline_init: Mutex<()>,
     /// 编辑器当前会话（复用窗口 + ready/pull）。
     pub(crate) editor_session: Mutex<Option<String>>,
     /// 编辑进度草稿状态（0.28.23；播放位置 + 防抖代次，见 gif_draft.rs）。
@@ -100,6 +102,7 @@ impl GifService {
             recording: Mutex::new(None),
             overlay_input: Mutex::new(OverlayInputState::default()),
             timelines: Mutex::new(HashMap::new()),
+            timeline_init: Mutex::new(()),
             editor_session: Mutex::new(None),
             drafts: Mutex::new(HashMap::new()),
             session_identity: Mutex::new(HashMap::new()),
@@ -327,36 +330,34 @@ pub fn start_recording(
     // 0.28.23 统一浮栏：overlay 不隐藏，转为录制叠层模式（前端在 invoke 成功
     // 后切换 UI：隐藏静态截图层、工具栏切录制面、#annot-canvas 变实时涂画层）。
     // 后端只管窗口属性与看门狗豁免；静态截图位图此时可释放（底图不再需要）。
-    enter_overlay_record_mode(app);
-    blink_infra::platform::screenshot::end_session();
-    emit_region_updated(app, x, y, w, h);
 
     // 倒计时基准在窗口就绪后才起算（COUNTDOWN_MS>0 时可见倒计时恒为
     // 完整时长；当前 0 = 点击即录，此行仅为恢复倒计时时保序）。
     *service.recording.lock().unwrap_or_else(|e| e.into_inner()) = Some(ActiveRecording {
         session_id: session_id.clone(),
         ctl: Arc::clone(&ctl),
-        countdown_deadline: Some(std::time::Instant::now() + Duration::from_millis(COUNTDOWN_MS)),
+        countdown_deadline: None,
         cancel_flag: Arc::clone(&cancel_flag),
         region_pos: region_for_rec,
         region_w: w,
         region_h: h,
     });
 
-    // 倒计时 → Start
+    enter_overlay_record_mode(app);
+    blink_infra::platform::screenshot::end_session();
+    emit_region_updated(app, x, y, w, h);
+
+    // 前端消失/初始化失败时不能永久占住唯一录制槽。
     let app2 = app.clone();
     let ctl2 = Arc::clone(&ctl);
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(COUNTDOWN_MS)).await;
-        ctl2.command(CaptureCommand::Start);
-        // 倒计时结束可能已被取消
+        tokio::time::sleep(Duration::from_secs(10)).await;
         let service = app2.state::<Arc<GifService>>();
-        let still = {
-            let rec = service.recording.lock().unwrap_or_else(|e| e.into_inner());
-            matches!(rec.as_ref(), Some(r) if Arc::ptr_eq(&r.ctl, &ctl2))
-        };
-        if still {
-            emit_state(&app2, snapshot_state(&service));
+        let rec = service.recording.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(r) = rec.as_ref().filter(|r| Arc::ptr_eq(&r.ctl, &ctl2) && r.countdown_deadline.is_none()) {
+            tracing::warn!(session_id = %r.session_id, "录制叠层未就绪，取消未开始的录制");
+            r.cancel_flag.store(true, Ordering::SeqCst);
+            r.ctl.command(CaptureCommand::Stop);
         }
     });
 
@@ -373,6 +374,33 @@ pub fn start_recording(
     emit_state(app, snapshot_state(&service));
     tracing::info!(session_id, region = ?(x, y, w, h), fps, "GIF 录制会话已创建（倒计时）");
     Ok(session_id)
+}
+
+/// 前端透明叠层完成绘制后才开采集，避免首帧捕获静态截图/准备栏。
+pub fn overlay_ready(app: &AppHandle, session_id: &str) -> GifResult<()> {
+    let service = app.state::<Arc<GifService>>();
+    let ctl = {
+        let mut rec = service.recording.lock().unwrap_or_else(|e| e.into_inner());
+        let r = rec.as_mut().filter(|r| r.session_id == session_id)
+            .ok_or(GifServiceError::NoActiveRecording)?;
+        if r.countdown_deadline.is_some() || r.cancel_flag.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        r.countdown_deadline = Some(std::time::Instant::now() + Duration::from_millis(COUNTDOWN_MS));
+        Arc::clone(&r.ctl)
+    };
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(COUNTDOWN_MS)).await;
+        let service = app.state::<Arc<GifService>>();
+        let rec = service.recording.lock().unwrap_or_else(|e| e.into_inner());
+        if rec.as_ref().is_some_and(|r| Arc::ptr_eq(&r.ctl, &ctl) && !r.cancel_flag.load(Ordering::SeqCst)) {
+            ctl.command(CaptureCommand::Start);
+        }
+        drop(rec);
+        emit_state(&app, snapshot_state(&service));
+    });
+    Ok(())
 }
 
 /// 暂停 / 恢复 / 停止 / 取消（指令下发；停止结果由 finalize_after_stop 分派）。
@@ -407,26 +435,24 @@ fn finalize_after_stop(
         }
     }
     exit_overlay_record_mode(app);
+    // 携带结束会话身份，前端仅清理所属叠层/定时器，不接受跨会话 idle。
+    let mut finished = snapshot_state(&service);
+    finished.session_id = Some(session_id.to_string());
+    emit_state(app, finished);
     let root = GifService::root();
     if cancelled {
         let _ = std::fs::remove_dir_all(root.join("sessions").join(session_id));
         service.timelines.lock().unwrap_or_else(|e| e.into_inner()).remove(session_id);
         tracing::info!(session_id, "GIF 录制已取消，素材已丢弃");
-        emit_state(app, snapshot_state(&service));
         return;
     }
 
     // 正常停止：读取定稿素材，构建时间轴
     match SpoolReader::open(&root, session_id) {
         Ok(reader) => {
-            let durs = reader.durations();
-            let timeline = Timeline::from_durations(durs);
-            let frames = timeline.frame_count();
-            service
-                .timelines
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(session_id.to_string(), timeline);
+            // 与历史会话共用初始化：同时记录素材身份，确保新录制也能写草稿。
+            crate::app::gif_draft::ensure_timeline(&service, &reader, session_id);
+            let frames = reader.frame_count();
             tracing::info!(
                 session_id,
                 frames,
@@ -434,12 +460,16 @@ fn finalize_after_stop(
                 duplicates = outcome.as_ref().map(|o| o.duplicates_merged).unwrap_or(0),
                 "GIF 录制完成，素材已定稿"
             );
-            emit_state(app, snapshot_state(&service));
-            open_editor(app, session_id);
+            if !open_editor(app, session_id) {
+                // 录制完成不能静默取消另一段素材的导出；新素材保留在最近录制。
+                open_editor_entry(app);
+                let current = service.editor_session.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let _ = app.emit_to(EDITOR_LABEL, EventNames::GIF_EDITOR_SESSION,
+                    serde_json::json!({"sessionId": current, "recordingSaved": true}));
+            }
         }
         Err(e) => {
             tracing::error!(session_id, error = %e, "GIF 素材定稿读取失败");
-            emit_state(app, snapshot_state(&service));
         }
     }
 }
@@ -579,11 +609,15 @@ fn cursor_pos() -> (i32, i32) {
 /// 命中轮询：录制期间每 16ms 读指针；「操作桌面」模式下指针在命中矩形内
 /// 取消穿透、否则恢复穿透。录制结束自动退出（按活跃录制判活，单实例）。
 fn spawn_overlay_hit_poller(app: AppHandle) {
+    let session_id = app.state::<Arc<GifService>>().recording.lock().unwrap_or_else(|e| e.into_inner())
+        .as_ref().map(|r| r.session_id.clone());
     tauri::async_runtime::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_millis(OVERLAY_HIT_POLL_MS)).await;
             let service = app.state::<Arc<GifService>>();
-            if service.recording.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
+            let current = service.recording.lock().unwrap_or_else(|e| e.into_inner())
+                .as_ref().map(|r| r.session_id.clone());
+            if current.is_none() || current != session_id {
                 break;
             }
             let want = {
@@ -603,9 +637,11 @@ fn spawn_overlay_hit_poller(app: AppHandle) {
 /// 录制区域变化的统一广播（overlay 前端据此同步范围框与涂画层位置）。
 fn emit_region_updated(app: &AppHandle, x: i32, y: i32, w: u32, h: u32) {
     let (vx, vy, vw, vh) = virtual_screen_rect();
+    let session_id = app.state::<Arc<GifService>>().recording.lock().unwrap_or_else(|e| e.into_inner())
+        .as_ref().map(|r| r.session_id.clone());
     let _ = app.emit(
         EventNames::GIF_REGION_UPDATED,
-        serde_json::json!({"x": x, "y": y, "w": w, "h": h, "vx": vx, "vy": vy, "vw": vw, "vh": vh}),
+        serde_json::json!({"sessionId": session_id, "x": x, "y": y, "w": w, "h": h, "vx": vx, "vy": vy, "vw": vw, "vh": vh}),
     );
 }
 
@@ -627,21 +663,25 @@ pub fn move_recording_region(app: &AppHandle, x: i32, y: i32) -> GifResult<()> {
     if let Ok(mut g) = r.region_pos.lock() {
         *g = (x, y);
     }
-    emit_region_updated(app, x, y, r.region_w, r.region_h);
+    let (w, h) = (r.region_w, r.region_h);
+    drop(rec);
+    emit_region_updated(app, x, y, w, h);
     Ok(())
 }
 
 /// 打开编辑器窗口（复用 + 会话事件；初始会话由页面 ready 后拉取）。
-/// 换会话前 flush 上一会话的编辑草稿；在途导出按既有语义取消
-/// （列表入口在前端先确认，见 recent-list）。
-pub fn open_editor(app: &AppHandle, session_id: &str) {
+/// 换会话前 flush 草稿；在途导出拒绝切换并返回 false，所有入口统一保护。
+pub fn open_editor(app: &AppHandle, session_id: &str) -> bool {
     use blink_infra::platform::window::get_or_create_window;
     {
         let service = app.state::<Arc<GifService>>();
         let mut current = service.editor_session.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(previous) = current.as_deref().filter(|id| *id != session_id) {
+            if crate::app::media_service::shared().has_active_job(previous) {
+                tracing::info!(session_id, "编辑器保留在途导出会话，新素材可从最近录制打开");
+                return false;
+            }
             crate::app::gif_draft::flush_draft(app, previous);
-            crate::app::media_service::shared().cancel(Some(previous), None);
         }
         *current = Some(session_id.to_string());
     }
@@ -662,18 +702,7 @@ pub fn open_editor(app: &AppHandle, session_id: &str) {
     match built {
         Ok((win, created)) => {
             if created {
-                let service = app.state::<Arc<GifService>>().inner().clone();
-                let app_for_close = app.clone();
-                win.on_window_event(move |event| {
-                    if matches!(event, tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed) {
-                        let mut current = service.editor_session.lock().unwrap_or_else(|e| e.into_inner());
-                        if let Some(id) = current.take() {
-                            // 关闭前 flush 编辑草稿（素材保留，进度下次可恢复）
-                            crate::app::gif_draft::flush_draft(&app_for_close, &id);
-                            crate::app::media_service::shared().cancel(Some(&id), None);
-                        }
-                    }
-                });
+                bind_editor_lifecycle(app, &win);
             }
             let _ = win.show();
             let _ = win.set_focus();
@@ -685,6 +714,7 @@ pub fn open_editor(app: &AppHandle, session_id: &str) {
         }
         Err(e) => tracing::error!(error = %e, "GIF 编辑器窗口打开失败"),
     }
+    true
 }
 
 /// 主窗口/功能目录入口（0.28.23 §5.7.4）：有编辑会话则原地激活保留工作，
@@ -741,7 +771,10 @@ pub fn open_editor_home(app: &AppHandle) {
         .build()
     });
     match built {
-        Ok((win, _created)) => {
+        Ok((win, created)) => {
+            if created {
+                bind_editor_lifecycle(app, &win);
+            }
             let _ = win.show();
             let _ = win.set_focus();
             let _ = app.emit_to(
@@ -752,6 +785,21 @@ pub fn open_editor_home(app: &AppHandle) {
         }
         Err(e) => tracing::error!(error = %e, "GIF 编辑器窗口打开失败"),
     }
+}
+
+/// 所有窗口创建入口共用收尾钩子，首页先创建的窗口也必须 flush/取消导出。
+fn bind_editor_lifecycle(app: &AppHandle, win: &tauri::WebviewWindow) {
+    let service = app.state::<Arc<GifService>>().inner().clone();
+    let app = app.clone();
+    win.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed) {
+            let id = service.editor_session.lock().unwrap_or_else(|e| e.into_inner()).take();
+            if let Some(id) = id {
+                crate::app::gif_draft::flush_draft(&app, &id);
+                crate::app::media_service::shared().cancel(Some(&id), None);
+            }
+        }
+    });
 }
 
 // ── 简单屏幕几何（Win32 直查；避免引入窗口管理依赖） ──────────────────────────

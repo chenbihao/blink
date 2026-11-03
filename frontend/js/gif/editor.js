@@ -29,7 +29,7 @@ import {confirmDialog, getCurrentWindow, invoke, listen, normalizeError} from '.
 import {EVENTS} from '../shared/event-names.js';
 import {applyI18nFromConfig, onLangChange, t} from '../i18n/index.js';
 import {commands, formatFrameDur, formatSeconds, frameState, nextPlayStep, playToSrc, srcToPlayIndex} from './timeline-view.js';
-import {clampPreviewLeft, formatTimecode, keyboardStep, locateTime, pointerRatio, ratioToTime, timeAt} from './seek-bar.js';
+import {clampPreviewLeft, formatTimecode, keyboardStep, locateTime, playbackOffset, pointerRatio, ratioToTime, timeAt} from './seek-bar.js';
 import {createRecentList} from './recent-list.js';
 
 ensureSpriteLoaded();
@@ -123,6 +123,7 @@ const state = {
     /** 解码批次队列（串行执行，防并发 invoke 爆炸）。 */
     decoding: false,
     pendingBatches: [],
+    decodeKeys: new Set(),
     /** 瞬时提示定时器。 */
     hintTimer: 0,
     /** 进度条拖动中（pointer capture 期间）。 */
@@ -135,11 +136,30 @@ const state = {
     seekInFrameMs: 0,
     /** 播放位置上报节流句柄（草稿播放头；提交定位/暂停/步进时上报）。 */
     posReportTimer: 0,
+    seekPreviewSrc: null,
 };
 
 // ── 帧解码（批量懒加载 + 缓存淘汰） ─────────────────────────────────────
 
 function requestDecode(sessionId, indices, maxW, cache, priority = false) {
+    const epoch = state.epoch;
+    const unique = [];
+    for (const idx of indices) {
+        if (cache.has(idx)) continue;
+        const key = decodeKey(epoch, cache, maxW, idx);
+        if (state.decodeKeys.has(key)) {
+            // 已排队的目标提升优先级；在途目标复用原请求。
+            if (priority) {
+                const at = state.pendingBatches.findIndex(b => b.epoch === epoch && b.cache === cache
+                    && b.maxW === maxW && b.indices.includes(idx));
+                if (at > 0) state.pendingBatches.unshift(...state.pendingBatches.splice(at, 1));
+            }
+            continue;
+        }
+        state.decodeKeys.add(key);
+        unique.push(idx);
+    }
+    indices = unique;
     if (!indices.length) return;
     const batches = [];
     for (let i = 0; i < indices.length; i += 24) {
@@ -151,45 +171,58 @@ function requestDecode(sessionId, indices, maxW, cache, priority = false) {
     pumpDecode();
 }
 
+function decodeKey(epoch, cache, maxW, idx) {
+    return `${epoch}:${cache === state.thumbCache ? 'thumb' : 'preview'}:${maxW}:${idx}`;
+}
+
 async function pumpDecode() {
     if (state.decoding) return;
     state.decoding = true;
     while (state.pendingBatches.length) {
         const {sessionId, indices, maxW, cache, epoch} = state.pendingBatches.shift();
-        const missing = indices.filter(i => !cache.has(i) && i < (state.view?.frameCount ?? 0));
-        if (!missing.length || sessionId !== state.sessionId || epoch !== state.epoch) continue;
-        for (let i = 0; i < missing.length; i += 24) {
-            const batch = missing.slice(i, i + 24);
-            try {
-                const frames = await invoke('gif_get_frames', {sessionId, indices: batch, maxW});
-                if (epoch !== state.epoch) break;
-                for (const f of frames) {
-                    if (cache === state.thumbCache) {
-                        cache.set(f.index, `data:image/png;base64,${f.pngBase64}`);
-                    } else {
-                        const blob = await (await fetch(`data:image/png;base64,${f.pngBase64}`)).blob();
-                        const bmp = await createImageBitmap(blob);
-                        if (epoch !== state.epoch) {
-                            bmp.close();
-                            break;
+        try {
+            const missing = indices.filter(i => !cache.has(i) && i < (state.view?.frameCount ?? 0));
+            if (!missing.length || sessionId !== state.sessionId || epoch !== state.epoch) continue;
+            for (let i = 0; i < missing.length; i += 24) {
+                const batch = missing.slice(i, i + 24);
+                try {
+                    const frames = await invoke('gif_get_frames', {sessionId, indices: batch, maxW});
+                    if (epoch !== state.epoch) break;
+                    for (const f of frames) {
+                        if (cache === state.thumbCache) {
+                            cache.set(f.index, `data:image/png;base64,${f.pngBase64}`);
+                        } else {
+                            const blob = await (await fetch(`data:image/png;base64,${f.pngBase64}`)).blob();
+                            const bmp = await createImageBitmap(blob);
+                            if (epoch !== state.epoch) {
+                                bmp.close();
+                                break;
+                            }
+                            const old = cache.get(f.index);
+                            if (old) {
+                                state.previewBytes -= old.width * old.height * 4;
+                                old.close();
+                            }
+                            cache.set(f.index, bmp);
+                            state.previewBytes += bmp.width * bmp.height * 4;
                         }
-                        const old = cache.get(f.index);
-                        if (old) {
-                            state.previewBytes -= old.width * old.height * 4;
-                            old.close();
-                        }
-                        cache.set(f.index, bmp);
-                        state.previewBytes += bmp.width * bmp.height * 4;
+                        evictPreviewCache();
                     }
-                    evictPreviewCache();
+                } catch (err) {
+                    console.error('[gif-editor] 帧解码失败', err);
                 }
-            } catch (err) {
-                console.error('[gif-editor] 帧解码失败', err);
+                if (epoch !== state.epoch) break;
             }
-            if (epoch !== state.epoch) break;
+            evictPreviewCache();
+            refreshLiveThumbs();
+            // 解码完成按当前会话/播放头回填，避免每次 cache miss 建永久轮询器。
+            const current = state.view?.frames?.[state.playIdx]?.srcIdx;
+            if (epoch === state.epoch && cache === state.previewCache && cache.has(current)) {
+                drawPreview(cache.get(current));
+            }
+        } finally {
+            for (const idx of indices) state.decodeKeys.delete(decodeKey(epoch, cache, maxW, idx));
         }
-        evictPreviewCache();
-        refreshLiveThumbs();
     }
     state.decoding = false;
 }
@@ -270,6 +303,8 @@ function refreshLiveThumbs() {
             if (url) img.src = url;
         }
     }
+    const url = state.thumbCache.get(state.seekPreviewSrc);
+    if (state.seekPreviewSrc != null && url && els.seekPreviewImg) els.seekPreviewImg.src = url;
 }
 
 let scrollRaf = 0;
@@ -377,13 +412,6 @@ function renderPreview() {
         // 就是"大图变小"的直接表现。
         drawThumbFallback(srcIdx);
         requestDecode(state.sessionId, [srcIdx], state.previewWidth, state.previewCache, true);
-        const wait = setInterval(() => {
-            const b = state.previewCache.get(srcIdx);
-            if (b || currentPlaySrc() !== srcIdx || !state.view) {
-                clearInterval(wait);
-                if (b && currentPlaySrc() === srcIdx) drawPreview(b);
-            }
-        }, 30);
     }
     els.pos.textContent = `${cur + 1} / ${view.frames.length}`;
     els.dur.textContent = formatFrameDur(view.frames[cur].durMs) + (view.frames[cur].held ? t('gif.editor.held') : '');
@@ -398,8 +426,9 @@ function drawThumbFallback(srcIdx) {
     const thumbUrl = state.thumbCache.get(srcIdx);
     if (!thumbUrl) return;
     const fallback = new Image();
+    const epoch = state.epoch;
     fallback.onload = () => {
-        if (currentPlaySrc() === srcIdx && !state.previewCache.has(srcIdx)) {
+        if (epoch === state.epoch && currentPlaySrc() === srcIdx && !state.previewCache.has(srcIdx)) {
             drawFallback(fallback);
         }
     };
@@ -476,6 +505,10 @@ function prefetchAhead() {
 }
 
 function setPlaying(on) {
+    const duration = state.view?.frames[state.playIdx]?.durMs || 0;
+    const elapsed = playbackOffset(duration, state.playing, state.frameShownAt,
+        state.seekInFrameMs, performance.now());
+    state.seekInFrameMs = elapsed;
     state.playing = on;
     const icons = els.btnPlay.querySelectorAll('.icon');
     if (icons.length === 2) {
@@ -491,9 +524,6 @@ function setPlaying(on) {
         const view = state.view;
         if (view && view.frames.length) {
             const cur = Math.min(state.playIdx, view.frames.length - 1);
-            const elapsed = state.seekInFrameMs > 0
-                ? state.seekInFrameMs
-                : performance.now() - state.frameShownAt;
             state.seekInFrameMs = 0;
             state.frameShownAt = performance.now() - elapsed;
             const remaining = Math.max(5, view.frames[cur].durMs - elapsed);
@@ -616,14 +646,16 @@ async function restoreSelected() {
 
 async function loadSession(sessionId) {
     exportController.setSession(sessionId);
-    if (!sessionId) return;
     const epoch = ++state.epoch;
     state.sessionId = sessionId;
     state.view = null;
     state.playIdx = 0;
+    state.seekInFrameMs = 0;
+    clearTimeout(state.posReportTimer);
+    clearTimeout(state.seekDecodeTimer);
     state.selectedSet.clear();
     state.anchor = null;
-    state.playing = false;
+    setPlaying(false);
     clearTimeout(state.playTimer);
     cancelAnimationFrame(state.progressRaf);
     state.progressRaf = 0;
@@ -634,10 +666,15 @@ async function loadSession(sessionId) {
     state.previewCache.clear();
     state.previewBytes = 0;
     state.pendingBatches.length = 0;
+    state.decodeKeys.clear();
     for (const [, el] of state.liveThumbs) el.remove();
     state.liveThumbs.clear();
     els.stripScroll.scrollLeft = 0;
     state.frameShownAt = performance.now();
+    if (!sessionId) {
+        showRecentView();
+        return;
+    }
     const view = await invoke('gif_get_session', {sessionId});
     if (epoch !== state.epoch) return;
     state.view = view;
@@ -653,7 +690,7 @@ async function loadSession(sessionId) {
         const loc = locateTime(state.durPrefix, draftPos);
         if (loc) {
             state.playIdx = loc.playIdx;
-            state.seekInFrameMs = loc.atEnd ? 0 : loc.inFrameMs;
+            state.seekInFrameMs = loc.inFrameMs;
             state.frameShownAt = performance.now() - state.seekInFrameMs;
         }
     }
@@ -752,6 +789,7 @@ async function edit(command) {
     // revision 双校验丢弃，不回填旧位置
     hideSeekPreview();
     state.playIdx = anchorPlayIndex(view, srcAnchor, state.playIdx);
+    state.seekInFrameMs = 0;
     state.frameShownAt = performance.now();
     layoutGeometry(view);
     renderSessionHeader();
@@ -843,7 +881,7 @@ function seekToTime(t) {
     const loc = locateTime(state.durPrefix, t);
     if (!loc) return;
     state.playIdx = loc.playIdx;
-    state.seekInFrameMs = loc.atEnd ? 0 : loc.inFrameMs;
+    state.seekInFrameMs = loc.inFrameMs;
     // frameShownAt 反推到"已展示 seekInFrameMs"——恢复播放时从指针位置续播
     state.frameShownAt = performance.now() - state.seekInFrameMs;
     renderPreview();
@@ -892,6 +930,7 @@ function showSeekPreview(clientX) {
     const loc = locateTime(state.durPrefix, ratioToTime(ratio, total));
     if (!loc) return;
     const src = view.frames[loc.playIdx].srcIdx;
+    state.seekPreviewSrc = src;
     const timeMs = state.durPrefix[loc.playIdx] + loc.inFrameMs;
     els.seekPreviewLabel.textContent = t('gif.editor.seek.preview', {
         frame: src,
@@ -910,6 +949,7 @@ function showSeekPreview(clientX) {
 }
 
 function hideSeekPreview() {
+    state.seekPreviewSrc = null;
     els.seekPreview?.classList.add('hidden');
     els.seekPreviewImg?.removeAttribute('src');
 }
@@ -1126,10 +1166,13 @@ els.btnBackEdit?.addEventListener('click', () => {
 /** 上报播放头位置给草稿（节流 500ms；`immediate` 用于切换/关闭前）。 */
 function reportPlayPosition(immediate = false) {
     if (!state.sessionId || !state.view) return;
+    const sessionId = state.sessionId;
     const send = () => {
-        if (!state.sessionId) return;
-        const pos = Math.round(timeAt(state.durPrefix, state.playIdx, state.seekInFrameMs));
-        invoke('gif_set_play_position', {sessionId: state.sessionId, posMs: pos}).catch(() => {});
+        if (sessionId !== state.sessionId || !state.view) return;
+        const offset = playbackOffset(state.view.frames[state.playIdx]?.durMs || 0,
+            state.playing, state.frameShownAt, state.seekInFrameMs, performance.now());
+        const pos = Math.round(timeAt(state.durPrefix, state.playIdx, offset));
+        invoke('gif_set_play_position', {sessionId, posMs: pos}).catch(() => {});
     };
     clearTimeout(state.posReportTimer);
     if (immediate) send();
@@ -1138,13 +1181,12 @@ function reportPlayPosition(immediate = false) {
 
 window.addEventListener('pagehide', () => reportPlayPosition(true));
 
-listen(EVENTS.GIF_EDITOR_SESSION, event => {
+const sessionListener = listen(EVENTS.GIF_EDITOR_SESSION, event => {
+    if (event.payload?.recordingSaved) showHint(t('gif.editor.recordingSaved'), false);
     const sid = event.payload?.sessionId;
     if (!sid) {
         // 空会话（主窗口入口无活动会话）：进入最近录制首页
-        state.sessionId = null;
-        state.view = null;
-        showRecentView();
+        void loadSession(null);
         return;
     }
     if (sid !== state.sessionId) {
@@ -1186,10 +1228,10 @@ listen(EVENTS.CONFIG_CHANGED, event => {
 });
 void applyI18nFromConfig();
 
-invoke('gif_editor_current')
-    .then(sid => {
-        if (sid) return loadSession(sid);
-        showRecentView();
-        return undefined;
+sessionListener.then(async () => {
+        const epoch = state.epoch;
+        const sid = await invoke('gif_editor_current');
+        if (epoch !== state.epoch) return;
+        return loadSession(sid);
     })
     .catch(err => console.error('[gif-editor] 初始会话拉取失败', normalizeError(err)));

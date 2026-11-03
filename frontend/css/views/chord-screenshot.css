@@ -2633,7 +2633,7 @@ html.eyedropper-picking * {
 }
 
 /* 依赖实时底图的效果在录制叠层不可用（无截图底图像素）：整组隐藏 */
-#toolbar.toolbar-mode-gif-rec > #blur-main,
+#toolbar.toolbar-mode-gif-rec > .dropdown-wrap:has(#blur-main),
 #toolbar.toolbar-mode-gif-rec [data-tool="spotlight"],
 #toolbar.toolbar-mode-gif-rec [data-tool="spotlight-multi"],
 #toolbar.toolbar-mode-gif-rec [data-tool="magnifier"],

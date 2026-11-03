@@ -414,6 +414,7 @@ fn main() {
                 // 0.16.11：标记应用正在退出——便签窗口的 CloseRequested handler
                 // 据此跳过 set_visible(false)，保证退出不把所有便签写成 hidden
                 crate::infra::platform::window::set_app_exiting();
+                crate::app::gif_draft::flush_all_drafts(_app);
                 tauri::async_runtime::block_on(crate::app::media_service::shutdown());
                 tauri::async_runtime::block_on(crate::app::commands::shutdown_ffmpeg_runtime());
 
@@ -2221,6 +2222,7 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
         app::commands::gif_move_recording_region,
         app::commands::gif_recorder_state,
         app::commands::gif_overlay_input,
+        app::commands::gif_overlay_ready,
         app::commands::gif_overlay_hit_rects,
         app::commands::gif_overlay_focusable,
         app::commands::gif_list_sessions,

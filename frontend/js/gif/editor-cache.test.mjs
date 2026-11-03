@@ -14,11 +14,11 @@ function fixture(invoke, createImageBitmap) {
         invoke, createImageBitmap,
         fetch: async () => ({blob: async () => ({})}), console,
     });
-    vm.runInContext(`${source}\nglobalThis.fixture = {state, pumpDecode};`, context);
-    const {state, pumpDecode} = context.fixture;
+    vm.runInContext(`${source}\nglobalThis.fixture = {state, pumpDecode, requestDecode};`, context);
+    const {state, pumpDecode, requestDecode} = context.fixture;
     state.sessionId = 'a';
     state.view = {frameCount: 100};
-    return {state, pumpDecode};
+    return {state, pumpDecode, requestDecode};
 }
 
 test('preview preloading releases bitmaps as each batch reaches the memory budget', async () => {
@@ -58,4 +58,27 @@ test('a decode response from an old session cannot populate the new session cach
     assert.equal(decoded, 0);
     assert.equal(state.previewCache.size, 0);
     assert.equal(state.previewBytes, 0);
+});
+
+test('repeated hover targets share pending decode and priority targets move ahead of preloading', async () => {
+    let resolve;
+    const requests = [];
+    const {state, pumpDecode, requestDecode} = fixture((_cmd, {indices}) => {
+        requests.push([...indices]);
+        return new Promise(r => { resolve = r; });
+    }, async () => {});
+    requestDecode('a', [0], 160, state.thumbCache);
+    for (let i = 1; i <= 3; i++) requestDecode('a', [i], 160, state.thumbCache);
+    for (let i = 0; i < 100; i++) requestDecode('a', [3], 160, state.thumbCache, true);
+    assert.equal(state.pendingBatches.length, 3);
+    assert.equal(state.pendingBatches[0].indices[0], 3);
+    resolve([{index: 0, pngBase64: 'a'}]);
+    await new Promise(r => setImmediate(r));
+    assert.deepEqual(requests, [[0], [3]]);
+    // 清理待处理请求，验证结束后代次键释放。
+    state.epoch++;
+    resolve([]);
+    await new Promise(r => setImmediate(r));
+    assert.equal(state.decodeKeys.size, 0);
+    await pumpDecode();
 });
