@@ -7,7 +7,8 @@ import {cssPointToScreen, cssRectToBitmap} from './ss-selection-geometry.js';
 import {positionToolbar} from './ss-display.js';
 import {invoke, normalizeError} from '../shared/tauri.js';
 import {showTransientHint} from './ss-ocr.js';
-import {annotationsMigratable, enterGifRecordOverlay, handleOverlayHidden, prepareRecordingTools} from './ss-gif-rec.js';
+import {annotationsMigratable, enterGifRecordOverlay, handleOverlayHidden, prepareRecordingTools, waitForRecordingPreparation, restorePreparationAnnotations, commitRecordingSelection} from './ss-gif-rec.js';
+import {drawStaticBase, drawFinalSelection} from './ss-draw.js';
 import {audioOptions, enterAudioPrep, stopAudioMonitor, bindAudioControls} from './ss-gif-audio.js';
 
 export function isGifPrepActive() { return state.mode === 'ready' || (state.mode === 'starting' && !state.active); }
@@ -24,13 +25,18 @@ export function enterGifRecordMode() {
     if (!regionSizeValid()) {
         showTransientHint(t('gif.rec.invalidRegion'),{isError:true,duration:3000}); return;
     }
+    if (!annotationsMigratable()) return;
     state.reset('ready');
     retainToolbarAnchor(); closeRecordingPanel(); showRecordingMessage('');
     ss._closeActionMenu?.(); ss._closeLayoutEditor?.();
     ss.sent=false;
-    prepareRecordingTools();
-    renderRecordingUi(); enterAudioPrep();
     const epoch=state.epoch;
+    void prepareRecordingTools().catch(error=>{
+        if(!state.owns(epoch,null)) return;
+        exitGifRecordMode();
+        showTransientHint(t('gif.rec.startFailed',{message:normalizeError(error).message}),{isError:true,duration:3000});
+    });
+    renderRecordingUi(); enterAudioPrep();
     invoke('gif_storage_status').then(disk=>{
         if (!state.owns(epoch,null) || !state.preparing) return;
         state.storage={disk}; renderRecordingUi();
@@ -42,6 +48,8 @@ export function exitGifRecordMode() {
     if (!state.preparing) return;
     retainToolbarAnchor();
     handleOverlayHidden();
+    drawStaticBase();drawFinalSelection();
+    restorePreparationAnnotations();
     ss.sent=false;
     ss.toolbar?.classList.remove('hidden');
     if(ss.selCss) positionToolbar({...ss.selCss},true);
@@ -50,6 +58,7 @@ export function exitGifRecordMode() {
 
 export async function startGifRecordingFromPrep() {
     if (!state.preparing || ss.sent) return;
+    commitRecordingSelection();
     if (!regionSizeValid()) {showTransientHint(t('gif.rec.invalidRegion'),{isError:true,duration:3000});return;}
     if (!annotationsMigratable()) return;
     const epoch=state.epoch;
@@ -61,6 +70,7 @@ export async function startGifRecordingFromPrep() {
     closeRecordingPanel(); renderRecordingUi();
     let sessionId=null;
     try {
+        await waitForRecordingPreparation();
         await stopAudioMonitor();
         if(!state.owns(epoch,null)) return;
         const info=await invoke('gif_start_recording',{x:origin.x,y:origin.y,w:bmp.w,h:bmp.h,fps,showCursor:true,audio});
@@ -71,6 +81,8 @@ export async function startGifRecordingFromPrep() {
         if(state.epoch!==epoch) return;
         if(sessionId) await invoke('gif_cancel_recording',{sessionId}).catch(()=>{});
         handleOverlayHidden();
+        drawStaticBase();drawFinalSelection();
+        restorePreparationAnnotations();
         ss.sent=false;
         console.error('[recording] startup failed',error);
         showTransientHint(t('gif.rec.startFailed',{message:normalizeError(error).message}),{isError:true,duration:3000});
@@ -82,7 +94,7 @@ export async function startGifRecordingFromPrep() {
 export function bindGifPrepBar() {
     bindRecordingControls(); bindAudioControls();
     ss._resetRecordingUi=()=>{if(state.visible) handleOverlayHidden();};
-    ss._recordingPreventsCleanup=()=>state.active || state.mode==='starting';
+    ss._recordingPreventsCleanup=()=>state.visible;
     window.addEventListener('keydown',event=>{
         if(event.key!=='Escape'||event.isComposing||!state.preparing) return;
         event.preventDefault();event.stopImmediatePropagation();exitGifRecordMode();

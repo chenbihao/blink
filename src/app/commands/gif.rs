@@ -233,6 +233,34 @@ pub fn gif_move_recording_region(
 
 // ── overlay 录制叠层输入（0.28.23：统一浮栏由 chord-screenshot overlay 承担）──
 
+/// 原生窗口操作可能等待主循环；会话门锁也可能正由收尾线程持有。
+/// 两者都不能在同步 IPC 的主线程执行，统一交给阻塞池，异步等待结果。
+async fn run_overlay_command<T: Send + 'static>(
+    operation: impl FnOnce() -> Result<T, GifServiceError> + Send + 'static,
+) -> Result<T, CommandError> {
+    tauri::async_runtime::spawn_blocking(operation)
+        .await
+        .map_err(|e| CommandError::new("gif_overlay", format!("录制浮层任务失败: {e}"), true))?
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn gif_overlay_prepare(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    active: bool,
+    preparation_id: Option<u64>,
+) -> Result<Option<u64>, CommandError> {
+    if window.label() != "chord-screenshot" {
+        return Err(CommandError::new(
+            "permission_denied",
+            "此操作仅用于录制准备",
+            false,
+        ));
+    }
+    run_overlay_command(move || gif_service::prepare_overlay(&app, active, preparation_id)).await
+}
+
 /// 原生控件整窗排除；标注通过有界二进制快照单独合成进采集帧。
 #[tauri::command]
 pub async fn gif_overlay_annotation(
@@ -347,24 +375,38 @@ pub async fn gif_overlay_ready(app: AppHandle, session_id: String) -> Result<(),
 /// 上报 overlay 输入模式与命中矩形：`desktop=true` 操作桌面（穿透 + 命中
 /// 矩形内可点），`desktop=false` 涂画（整窗接收指针）。矩形为物理屏幕坐标。
 #[tauri::command]
-pub fn gif_overlay_input(
+pub async fn gif_overlay_input(
     app: AppHandle,
     desktop: bool,
     rects: Option<Vec<[i32; 4]>>,
+    preparation_id: Option<u64>,
 ) -> Result<(), CommandError> {
-    gif_service::set_overlay_input(&app, desktop, rects.unwrap_or_default()).map_err(err)
+    run_overlay_command(move || {
+        gif_service::set_overlay_input(&app, desktop, rects.unwrap_or_default(), preparation_id)
+    })
+    .await
 }
 
 /// 仅刷新命中矩形（工具栏拖动/弹层开合后的周期上报）。
 #[tauri::command]
-pub fn gif_overlay_hit_rects(app: AppHandle, rects: Vec<[i32; 4]>) -> Result<(), CommandError> {
-    gif_service::set_overlay_hit_rects(&app, rects).map_err(err)
+pub async fn gif_overlay_hit_rects(
+    app: AppHandle,
+    rects: Vec<[i32; 4]>,
+    preparation_id: Option<u64>,
+) -> Result<(), CommandError> {
+    run_overlay_command(move || gif_service::set_overlay_hit_rects(&app, rects, preparation_id))
+        .await
 }
 
 /// 文字输入期间申请/归还 overlay 键盘焦点。
 #[tauri::command]
-pub fn gif_overlay_focusable(app: AppHandle, focusable: bool) -> Result<(), CommandError> {
-    gif_service::set_overlay_focusable(&app, focusable).map_err(err)
+pub async fn gif_overlay_focusable(
+    app: AppHandle,
+    focusable: bool,
+    preparation_id: Option<u64>,
+) -> Result<(), CommandError> {
+    run_overlay_command(move || gif_service::set_overlay_focusable(&app, focusable, preparation_id))
+        .await
 }
 
 /// 控制条 ready 拉取当前状态。
@@ -373,6 +415,12 @@ pub fn gif_recorder_state(app: AppHandle, restore: Option<bool>) -> serde_json::
     let service = app.state::<Arc<GifService>>();
     let payload = gif_service::snapshot_state_public(&service);
     let mut value = serde_json::to_value(payload).unwrap_or_default();
+    let preparing = service
+        .preparation
+        .load(std::sync::atomic::Ordering::SeqCst);
+    if preparing != 0 {
+        value["preparationId"] = serde_json::json!(preparing);
+    }
     if restore == Some(true) && value["sessionId"].is_string() {
         value["overlayMeta"] = gif_service::overlay_restore_meta();
     }
@@ -775,6 +823,7 @@ pub async fn gif_timeline_window(
     time_ms: Option<u64>,
     source: Option<u32>,
     source_offset: Option<u32>,
+    selection: Option<Vec<(u32, u32)>>,
 ) -> Result<serde_json::Value, CommandError> {
     tauri::async_runtime::spawn_blocking(move || {
         let service = app.state::<Arc<GifService>>();
@@ -785,7 +834,16 @@ pub async fn gif_timeline_window(
         if tl.revision() != revision {
             return Err(CommandError::new("gif_revision", "时间轴已变化", true));
         }
-        Ok(if let Some(offset) = source_offset {
+        Ok(if let Some(ranges) = selection {
+            if ranges.len() > 256 || ranges.iter().any(|&(a, b)| a > b || b >= tl.frame_count()) {
+                return Err(CommandError::new(
+                    "gif_selection",
+                    "选区无效或超过 256 个区间",
+                    false,
+                ));
+            }
+            tl.selection_summary(&ranges)
+        } else if let Some(offset) = source_offset {
             tl.source_page(offset, 256)
         } else {
             tl.window(play.map(|v| v as usize), time_ms, source)
@@ -943,6 +1001,50 @@ pub fn gif_open_containing_folder(path: String) -> Result<(), CommandError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn gif_overlay_lock_wait_keeps_dispatcher_responsive() {
+        use std::sync::{Mutex, mpsc};
+        use std::time::Duration;
+
+        // 后台收尾占有会话门锁；模拟主循环必须继续调度，才能放行收尾。
+        // 所有等待有界，即使误改成同步执行也会失败退出，不挂死测试进程。
+        let gate = Arc::new(Mutex::new(()));
+        let (held_tx, held_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let finalizing_gate = gate.clone();
+        let finalizer = std::thread::spawn(move || {
+            let _guard = finalizing_gate.lock().unwrap();
+            held_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(3))
+        });
+        held_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        let dispatcher_thread = std::thread::current().id();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let command = run_overlay_command(move || {
+            let _ = entered_tx.send(std::thread::current().id());
+            let _guard = gate.lock().unwrap();
+            Ok(37)
+        });
+        let dispatch = async move {
+            let worker = tokio::time::timeout(Duration::from_secs(1), entered_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_ne!(worker, dispatcher_thread);
+            release_tx.send(()).unwrap();
+        };
+        let (result, ()) = tokio::join!(command, dispatch);
+        assert_eq!(result.unwrap(), 37);
+        assert!(finalizer.join().unwrap().is_ok());
+
+        // 后台业务错误仍需透传，不能当作成功或丢失 Promise 的结束状态。
+        assert!(
+            run_overlay_command::<()>(|| Err(GifServiceError::NoActiveRecording))
+                .await
+                .is_err()
+        );
+    }
 
     #[test]
     fn deleting_current_recording_requires_consent_and_preserves_current_on_lease_failure() {

@@ -1,16 +1,21 @@
 //! 录屏双源 WASAPI worker。cpal 对象只活在此线程；回调不做磁盘 IO。
 use crate::gif::audio::*;
+use crate::gif::audio_capture::CaptureSignal;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::{
     fs::{File, OpenOptions},
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
     time::{Duration, Instant},
 };
+
+#[path = "recording_monitor.rs"]
+mod monitor;
+pub use monitor::Monitor;
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -228,6 +233,7 @@ fn run(
     let mut streams = Vec::new();
     let mut tracks = Vec::new();
     let mut files: [Option<File>; 2] = [None, None];
+    let mut signals = Vec::new();
     let (tx, rx) = mpsc::sync_channel::<Packet>(16);
     for source in 0..2 {
         if !options.enabled(source) {
@@ -277,6 +283,10 @@ fn run(
         let errors = shared.clone();
         let tx = tx.clone();
         let mut diagnosed = false;
+        let clock = Arc::new(OnceLock::<(cpal::StreamInstant, Instant)>::new());
+        let callback_clock = clock.clone();
+        let signal = Arc::new(Mutex::new(CaptureSignal::new(channels, rate)));
+        signals.push((source, signal.clone()));
         let stream = d
             .build_input_stream_raw(
                 config.into(),
@@ -298,23 +308,45 @@ fn run(
                         g.fail("声音回调超过缓冲预算");
                         return;
                     }
-                    let first = super::pcm::block_start(now, count, rate, latency);
+                    // Stream::now 与 capture 属于同一 QPC 时基。只在启动时映射一次，
+                    // 不能把每次回调到达时间减去 IAudioClock 的滞后值当成块首。
+                    let Some(&(device_anchor, wall_anchor)) = callback_clock.get() else {
+                        return;
+                    };
+                    let first = if stamp.capture < stamp.callback {
+                        if stamp.capture >= device_anchor {
+                            wall_anchor.checked_add(stamp.capture.duration_since(device_anchor))
+                        } else {
+                            wall_anchor.checked_sub(device_anchor.duration_since(stamp.capture))
+                        }
+                        .unwrap_or(now)
+                    } else {
+                        // 部分 loopback 端点没有有效 capture 时间；连续样本游标仍吸收回调抖动。
+                        super::pcm::block_start(now, count, rate, latency)
+                    };
                     let relative = if first >= start {
                         first.duration_since(start).as_secs_f64()
                     } else {
                         -start.duration_since(first).as_secs_f64()
                     };
-                    let begin =
-                        ((g.offset_ms as f64 / 1000.0 + relative) * RATE as f64).round() as i64;
-                    let (start, samples, (rms, peak)) = canonical_samples(
-                        &input,
-                        channels,
-                        rate,
-                        begin,
-                        g.offset_ms * 48,
-                        g.frame_end(now),
-                        |ms| g.muted_at(source, ms),
-                    );
+                    let begin = (g.offset_ms as f64 / 1000.0 + relative) * RATE as f64;
+                    let mut signal = signal.lock().unwrap_or_else(|e| e.into_inner());
+                    match signal.push(&input, begin) {
+                        Ok(Some(delta_frames)) => {
+                            tracing::debug!(source, delta_frames, "录屏声音设备时间不连续")
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            g.fail(error);
+                            return;
+                        }
+                    }
+                    let blocks = signal.drain(g.offset_ms * 48, g.frame_end(now), |ms| {
+                        g.muted_at(source, ms)
+                    });
+                    let (rms, peak) = blocks.iter().fold((0.0_f32, 0.0_f32), |(r, p), b| {
+                        (r.max(b.level.0), p.max(b.level.1))
+                    });
                     if !diagnosed {
                         tracing::debug!(
                             source,
@@ -323,7 +355,7 @@ fn run(
                             latency_ms = latency.as_secs_f64() * 1000.0,
                             begin,
                             upper = g.frame_end(now),
-                            saved_samples = samples.len(),
+                            saved_samples = blocks.iter().map(|b| b.samples.len()).sum::<usize>(),
                             rms,
                             "录屏音频首块时钟与能量"
                         );
@@ -332,16 +364,19 @@ fn run(
                     g.meter_updated[source] = Some(now);
                     g.status.rms[source] = rms;
                     g.status.peak[source] = g.status.peak[source].max(peak);
-                    if !g.preview && !samples.is_empty() {
-                        if tx
-                            .try_send(Packet {
-                                source,
-                                start,
-                                samples,
-                            })
-                            .is_err()
-                        {
-                            g.fail("声音写入跟不上采集，已暂停全部来源");
+                    if !g.preview {
+                        for block in blocks {
+                            if tx
+                                .try_send(Packet {
+                                    source,
+                                    start: block.start,
+                                    samples: block.samples,
+                                })
+                                .is_err()
+                            {
+                                g.fail("声音写入跟不上采集，已暂停全部来源");
+                                break;
+                            }
                         }
                     }
                 },
@@ -357,6 +392,10 @@ fn run(
                 tracing::error!(source, %error, rate, channels, ?format, "录屏声音设备打开失败");
                 format!("无法打开声音设备：{error}")
             })?;
+        let before = Instant::now();
+        let device_now = stream.now();
+        let midpoint = before + before.elapsed() / 2;
+        let _ = clock.set((device_now, midpoint));
         stream.play().map_err(|error| {
             tracing::error!(source, %error, "录屏声音设备启动失败");
             format!("无法启动声音设备：{error}")
@@ -452,6 +491,16 @@ fn run(
     if let Some(dir) = &dir {
         let g = shared.lock().unwrap_or_else(|e| e.into_inner());
         let end = g.offset_ms.min(MAX_AUDIO_MS);
+        for (source, signal) in signals {
+            let mut signal = signal.lock().unwrap_or_else(|e| e.into_inner());
+            signal.finish();
+            for block in signal.drain(0, end * 48, |ms| g.muted_at(source, ms)) {
+                if let Some(file) = files[source].as_mut() {
+                    write_packet(file, block.start, &block.samples)
+                        .map_err(|_| "声音尾块写入失败")?;
+                }
+            }
+        }
         for file in files.iter_mut().flatten() {
             file.set_len(end * BYTES_PER_MS)
                 .map_err(|_| "声音尾部提交失败")?;

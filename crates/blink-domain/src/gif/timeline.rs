@@ -741,6 +741,26 @@ impl Timeline {
         serde_json::json!({"revision":self.revision,"offset":selected.unwrap_or(0),"frames":frames,"effectiveCount":index.count,"totalMs":index.total_ms})
     }
 
+    /// 选区摘要直接查询压缩时长区间，不展开长录制的逐帧表。
+    pub fn selection_summary(&self, ranges: &[(u32, u32)]) -> serde_json::Value {
+        let holds = self.core.holds.ranges();
+        let has_hold = ranges.iter().any(|&(a, b)| {
+            let first = holds.partition_point(|r| r.1 < a);
+            holds.get(first).is_some_and(|r| r.0 <= b)
+        });
+        let duration = match ranges {
+            &[(a, b)] if a == b && a < self.frame_count => Some(
+                self.core
+                    .holds
+                    .get(&a)
+                    .copied()
+                    .unwrap_or(self.origin_durs.at(a as usize)),
+            ),
+            _ => None,
+        };
+        serde_json::json!({"revision":self.revision,"hasHold":has_hold,"durationMs":duration})
+    }
+
     pub fn source_page(&self, offset: u32, limit: u32) -> serde_json::Value {
         let end = offset.saturating_add(limit.min(256)).min(self.frame_count);
         let frames: Vec<_> = (offset..end).map(|i| {
@@ -960,6 +980,37 @@ pub fn quantize_delay_ms(ms: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selection_duration_summary_tracks_holds_reset_and_undo_without_expanding_ranges() {
+        let mut t = Timeline::from_durations(vec![17; 100_000]);
+        assert_eq!(t.selection_summary(&[(99_999, 99_999)])["durationMs"], 17);
+        assert_eq!(t.selection_summary(&[(0, 99_999)])["hasHold"], false);
+        t.apply(&EditCommand::EditRanges {
+            operation: RangeOperation::Hold,
+            ranges: vec![(50_000, 99_999)],
+            ms: 800,
+        })
+        .unwrap();
+        assert_eq!(t.selection_summary(&[(1, 49_999)])["hasHold"], false);
+        assert_eq!(t.selection_summary(&[(0, 99_999)])["hasHold"], true);
+        assert_eq!(t.selection_summary(&[(99_999, 99_999)])["durationMs"], 800);
+        assert!(t.selection_summary(&[(0, 99_999)])["durationMs"].is_null());
+        t.apply(&EditCommand::EditRanges {
+            operation: RangeOperation::Hold,
+            ranges: vec![(50_000, 99_999)],
+            ms: 0,
+        })
+        .unwrap();
+        assert_eq!(t.selection_summary(&[(99_999, 99_999)])["durationMs"], 17);
+        assert_eq!(t.selection_summary(&[(0, 99_999)])["hasHold"], false);
+        assert!(t.undo());
+        assert_eq!(
+            t.selection_summary(&[(0, 0), (99_999, 99_999)])["hasHold"],
+            true
+        );
+        assert_eq!(t.selection_summary(&[(99_999, 99_999)])["durationMs"], 800);
+    }
 
     #[test]
     fn draft_restore_rejects_unknown_version_and_empty_material_indices() {

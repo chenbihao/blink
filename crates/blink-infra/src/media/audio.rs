@@ -92,7 +92,7 @@ pub(crate) fn prepare(
                         * input.gain[i]
                 })
                 .sum::<f32>();
-            mixed.extend((v.round().clamp(-32768.0, 32767.0) as i16).to_le_bytes());
+            mixed.extend(((audio::soft_limit(v / 32768.0) * 32768.0).round() as i16).to_le_bytes());
         }
         out.write_all(&mixed)?;
         left -= n as u64;
@@ -178,6 +178,85 @@ pub(crate) fn filter_graph(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn hot_dual_source_mix_is_limited_without_changing_quiet_audio_or_source_pcm() {
+        let dir = tempfile::tempdir().unwrap();
+        audio::write_manifest(
+            dir.path(),
+            &audio::AudioManifest {
+                version: 1,
+                enabled: [true, true],
+                committed_ms: 10,
+                complete: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let samples: Vec<i16> = (0..960)
+            .map(|n| match n % 6 {
+                0 => 1000,
+                1 => -1000,
+                2 => 32767,
+                3 => -32768,
+                4 => 8000,
+                _ => -8000,
+            })
+            .collect();
+        let source: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+        for i in 0..2 {
+            std::fs::write(audio::track_path(dir.path(), i), &source).unwrap();
+        }
+        let prepared = prepare(
+            AudioInput {
+                dir: dir.path().to_owned(),
+                spans: vec![Span {
+                    source_ms: 0,
+                    sound_ms: 10,
+                    silence_ms: 0,
+                    output_ms: 10,
+                }],
+                gain: [2.0, 2.0],
+            },
+            34,
+            30,
+            &CancellationToken::new(),
+        )
+        .unwrap()
+        .unwrap();
+        let wave = std::fs::read(&prepared.wave.0).unwrap();
+        assert_eq!(wave.len(), source.len() + 44);
+        let mixed: Vec<i16> = wave[44..]
+            .chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]))
+            .collect();
+        assert_eq!(&mixed[..2], &[4000, -4000]);
+        assert!(mixed.iter().all(|s| s.unsigned_abs() <= 32113));
+        assert!(
+            mixed[2] > mixed[4] && mixed[3] < mixed[5],
+            "大峰值平滑压缩，不截成相同方波平台"
+        );
+        for i in 0..2 {
+            assert_eq!(
+                std::fs::read(audio::track_path(dir.path(), i)).unwrap(),
+                source
+            );
+        }
+    }
+
+    #[test]
+    fn preview_and_export_soft_limit_share_the_same_transfer_curve() {
+        for (input, expected) in [
+            (0.0, 0.0),
+            (0.5, 0.5),
+            (0.9, 0.9),
+            (1.0, 0.957079616),
+            (2.0, 0.979999915),
+            (4.0, 0.98),
+        ] {
+            assert!((audio::soft_limit(input) - expected).abs() < 1e-7);
+            assert!((audio::soft_limit(-input) + expected).abs() < 1e-7);
+        }
+    }
     #[test]
     fn audio_tail_matches_the_actual_video_sampling_rate() {
         use crate::media::{Budget, PlanFrame, SamplingPlan};

@@ -3,7 +3,7 @@ const MODES = new Set(['screenshot', 'ready', 'starting', 'recording', 'paused',
 
 export function createRecordingSession() {
     return {
-        mode: 'screenshot', epoch: 0, sessionId: null, drawing: false,
+        mode: 'screenshot', epoch: 0, sessionId: null, preparationId: null, drawing: false,
         snapshotRevision: 0, elapsedBase: 0, elapsedAt: 0, frames: 0,
         regionPhys: null, storage: null, targetFps: 15, actualFps: null,
         audioError: null, restoredControlsOnly: false,
@@ -23,7 +23,7 @@ export function createRecordingSession() {
             if (!MODES.has(mode)) throw new TypeError(`Invalid recording mode: ${mode}`);
             this.epoch++;
             Object.assign(this, {
-                mode, sessionId:null, drawing:false, snapshotRevision:0,
+                mode, sessionId:null, preparationId:null, drawing:false, snapshotRevision:0,
                 elapsedBase:0, elapsedAt:0, frames:0, regionPhys:null,
                 storage:null, actualFps:null, audioError:null, restoredControlsOnly:false,
                 tickTimer:0, hitRectTimer:0, cancelArmed:false, resumeAfterText:false,

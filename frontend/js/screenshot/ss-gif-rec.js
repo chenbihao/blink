@@ -29,6 +29,8 @@ import {showTransientHint} from './ss-ocr.js';
 import * as annot from './annotation-engine.js';
 import {formatTimecode} from '../gif/seek-bar.js';
 import {beginAudioRecording, endAudioRecording, applyAudioStatus, closeAudioSettings} from './ss-gif-audio.js';
+import {createPreparationLease} from './recording-preparation.js';
+import {bindRecordingSelection} from './recording-selection.js';
 
 /** 录制叠层不可用的已有标注类型（依赖截图底图像素）。 */
 const UNSUPPORTED_TYPES = new Set(['blur', 'pixelate', 'mosaic', 'magnifier', 'spotlight', 'spotlight-multi']);
@@ -42,6 +44,27 @@ let annotationUploader = null;
 let panelFocusTask = Promise.resolve();
 let lastStatusWarning = '';
 let regionDrag = null;
+let preparationSelection = null, selectionInputTask = Promise.resolve();
+const preparation = createPreparationLease((...args) => invoke(...args));
+
+export function waitForRecordingPreparation() { return preparation.ready(); }
+export function commitRecordingSelection() { preparationSelection?.commit(); }
+function overlayInput(command, args) {
+    return invoke(command, {...args, preparationId: state.active ? null : state.preparationId});
+}
+
+function installPanelFocus(epoch, sessionId) {
+    return focusable => {
+        panelFocusTask = panelFocusTask.catch(() => {}).then(async () => {
+            if (!state.owns(epoch, sessionId) || state.stopping) return;
+            await waitForRecordingPreparation();
+            if (!state.owns(epoch, sessionId)) return;
+            await overlayInput('gif_overlay_focusable', {focusable: focusable || state.textInputs.size > 0});
+        }).catch(error => {
+            if (state.owns(epoch, sessionId)) showRecordingMessage(`焦点切换失败：${normalizeError(error).message}`);
+        });
+    };
+}
 
 function toolbarEl() {
     return ss.toolbar || document.getElementById('toolbar');
@@ -151,14 +174,7 @@ export async function enterGifRecordOverlay(regionPhys, sessionId, {restoring = 
     annot.setRenderListener?.(() => annotationUploader?.notify());
     ss.gifRecHooks = {
         onDraw: () => annotationUploader?.notify(),
-        onPanelFocus: focusable => {
-            panelFocusTask = panelFocusTask.catch(() => {}).then(async () => {
-                if (!state.active || state.sessionId !== sessionId || state.stopping) return;
-                await invoke('gif_overlay_focusable', {focusable: focusable || state.textInputs.size > 0});
-            }).catch(error => {
-                if (state.active && state.sessionId === sessionId) showRecordingMessage(`焦点切换失败：${normalizeError(error).message}`);
-            });
-        },
+        onPanelFocus: installPanelFocus(state.epoch, sessionId),
         ...drawingHooks(),
         adjustTextPlacement,
         onTextInputOpen: openRecordingTextInput,
@@ -183,6 +199,7 @@ export async function enterGifRecordOverlay(regionPhys, sessionId, {restoring = 
 let restoringOverlay = null;
 /** 同一后端会话可被重新接管；重复唤起只刷新状态，绝不重启采集或重置截图。 */
 export function restoreRecordingOverlay(notify = false) {
+    if (state.preparing) return Promise.resolve(true);
     // 自己的启动调用尚未拿到 session id 时，不允许另一个恢复请求抢先接管它。
     if(state.mode==='starting' && !state.active) return Promise.resolve(true);
     if (restoringOverlay) return restoringOverlay;
@@ -191,6 +208,8 @@ export function restoreRecordingOverlay(notify = false) {
         const sessionAtRequest = state.sessionId;
         const snapshot = await invoke('gif_recorder_state', {restore: true});
         if (!snapshot?.sessionId || !snapshot.region) {
+            // 页面重载未保留原截图/准备 UI 时归还旧准备租约，不能遗留整窗穿透。
+            if (snapshot?.preparationId && !state.visible) await invoke('gif_overlay_prepare', {active: false, preparationId: snapshot.preparationId});
             if (state.active && state.sessionId === sessionAtRequest && snapshot?.phase === 'idle') endOverlaySession();
             return state.active;
         }
@@ -236,12 +255,41 @@ function drawingHooks() {
     };
 }
 export function prepareRecordingTools() {
-    ss.gifRecHooks = drawingHooks();
+    const epoch = state.epoch;
+    ss.gifRecHooks = {...drawingHooks(), onPanelFocus: installPanelFocus(epoch, null)};
+    const base = el('canvas');
+    if (base) base.getContext('2d').clearRect(0, 0, base.width, base.height);
+    const canvas = ss.annotCanvas || el('annot-canvas');
+    if (canvas) annot.updateCropData(null, canvas.width, canvas.height);
+    const meta = window.__blinkScreenMeta || {};
+    const point = cssPointToScreen(ss.selCss.x, ss.selCss.y, meta), size = cssRectToBitmap(ss.selCss, meta);
+    state.regionPhys = {...point, w: size.w, h: size.h};
+    syncRegionVisual(); el('gif-region-frame')?.classList.remove('hidden');
     setDesktopMode(true);
+    return preparation.open().then(id => {
+        if (!state.owns(epoch, null)) return;
+        state.preparationId = id;
+        setDesktopMode(state.desktopMode, {select: false});
+    });
+}
+
+export function restorePreparationAnnotations() {
+    if (!ss.annotCanvas) return;
+    const source = ss.screenshotOffscreen || ss.screenshot;
+    if (!source || !ss.selCss) return;
+    const bmp = cssRectToBitmap(ss.selCss, window.__blinkScreenMeta || {});
+    try {
+        const canvas = document.createElement('canvas');canvas.width=bmp.w;canvas.height=bmp.h;
+        const ctx=canvas.getContext('2d');
+        ctx.drawImage(source,bmp.x,bmp.y,bmp.w,bmp.h,0,0,bmp.w,bmp.h);
+        annot.updateCropData(ctx.getImageData(0,0,bmp.w,bmp.h),bmp.w,bmp.h);
+    } catch (error) { console.error('[recording] preparation annotation restore failed', error); }
 }
 
 /** 录制会话结束（停止/取消由后端收场并隐藏 overlay）——仅复位 UI 投影。 */
 function endOverlaySession() {
+    preparationSelection?.cancel();
+    void preparation.close().catch(error => console.error('[recording] preparation cleanup failed', error));
     regionDrag = null;
     annotationUploader?.stop(); annotationUploader = null;
     annot.setRenderListener?.(null);
@@ -354,6 +402,7 @@ function collectHitRects() {
         ]);
     };
     push(toolbarEl());
+    if (state.preparing) for (const handle of document.querySelectorAll('#gif-region-frame [data-recording-resize], #gif-region-frame [data-recording-edge]')) push(handle);
     for (const panel of document.querySelectorAll('.recording-panel:not(.hidden)')) push(panel);
     // 打开的下拉（data-open="true"）与浮层
     for (const dom of document.querySelectorAll('#toolbar .dropdown[data-open="true"]')) push(dom);
@@ -372,15 +421,16 @@ function setDesktopMode(desktop, {select = true} = {}) {
     renderRecordingUi();
     if(select && (!state.active || (!desktop && !REC_TOOLS.has(annot.getTool())))) selectTool(desktop ? 'select' : 'pencil');
     clearInterval(state.hitRectTimer); state.hitRectTimer=0;
-    if(!state.active) return;
+    if(!state.active && state.preparationId == null) return;
     const sessionId=state.sessionId,epoch=state.epoch;
-    invoke('gif_overlay_input',{desktop,rects:collectHitRects()}).catch(error=>{
+    const applied = overlayInput('gif_overlay_input',{desktop,rects:collectHitRects()}).catch(error=>{
         if(state.owns(epoch,sessionId)) console.error('[recording] input mode failed',error);
     });
     if(desktop) state.hitRectTimer=setInterval(()=>{
         if(!state.owns(epoch,sessionId)||!state.desktopMode) return;
-        invoke('gif_overlay_hit_rects',{rects:collectHitRects()}).catch(()=>{});
+        overlayInput('gif_overlay_hit_rects',{rects:collectHitRects()}).catch(()=>{});
     },HIT_RECT_INTERVAL_MS);
+    return applied;
 }
 
 // ── 区域（范围框 + 移动 + 对账） ─────────────────────────────────────────
@@ -398,6 +448,30 @@ function syncRegionVisual() {
         const {scaleX, scaleY} = getRenderScale(meta);
         const geometry = recordingFrameGeometry(state.regionPhys, meta, scaleX, scaleY);
         Object.assign(frame.style, geometry);
+        const size = el('gif-prep-size');
+        if (size && state.regionPhys) {
+            size.textContent = `${state.regionPhys.w} × ${state.regionPhys.h}`;
+            size.style.top = ss.selCss.y < 24 ? '4px' : '-24px';
+        }
+    }
+}
+
+function changePreparationSelection(rect, commit) {
+    if (!state.preparing || state.active) return;
+    ss.selCss = {...rect};
+    const meta = window.__blinkScreenMeta || {};
+    const point = cssPointToScreen(rect.x, rect.y, meta), size = cssRectToBitmap(rect, meta);
+    state.regionPhys = {...point, w: size.w, h: size.h};
+    if (ss.annotCanvas) {
+        if (commit) {
+            Object.assign(ss.annotCanvas.style, {width: `${rect.w}px`, height: `${rect.h}px`});
+            ss.annotCanvas.width = size.w; ss.annotCanvas.height = size.h;
+            annot.updateCropData(null, size.w, size.h);
+        }
+    }
+    syncRegionVisual();
+    if (commit) {
+        ss._syncRecordingToolbar?.();
     }
 }
 
@@ -447,6 +521,8 @@ function beginRecordingGripDrag() {
             } else {
                 updateLiveSelection(ss.selCss);
                 if(ss.annotCanvas) {ss.annotCanvas.style.left=ss.selCss.x+'px';ss.annotCanvas.style.top=ss.selCss.y+'px';}
+                const point=cssPointToScreen(ss.selCss.x,ss.selCss.y,meta),size=cssRectToBitmap(ss.selCss,meta);
+                state.regionPhys={...point,w:size.w,h:size.h};syncRegionVisual();
             }
             return delta;
         },
@@ -461,18 +537,7 @@ function beginRecordingGripDrag() {
                 if(state.owns(epoch,sessionId) && !regionDrag && snapshot?.region) applyRegionUpdated({sessionId:snapshot.sessionId,...snapshot.region});
             } else {
                 regionDrag=null;
-                const bmp=cssRectToBitmap(ss.selCss,meta),source=ss.screenshotOffscreen || ss.screenshot;
-                if(source) {
-                    try {
-                        const canvas=document.createElement('canvas');canvas.width=bmp.w;canvas.height=bmp.h;
-                        const ctx=canvas.getContext('2d');
-                        ctx.drawImage(source,bmp.x,bmp.y,bmp.w,bmp.h,0,0,bmp.w,bmp.h);
-                        annot.updateCropData(ctx.getImageData(0,0,bmp.w,bmp.h),bmp.w,bmp.h);
-                    } catch(error) {
-                        console.warn('[recording] moved selection crop failed',error);
-                        showRecordingMessage(normalizeError(error).message);
-                    }
-                }
+                if(state.preparationId != null) setDesktopMode(state.desktopMode,{select:false});
                 drawFinalSelection();
             }
         },
@@ -480,7 +545,7 @@ function beginRecordingGripDrag() {
     regionDrag=drag;
     closeRecordingPanel();ss._closeToolDropdowns?.();
     if(!state.active) ss._invalidateSelectionContent?.({preservePresentation:true});
-    if(state.active) void invoke('gif_overlay_input',{desktop:false,rects:collectHitRects()}).catch(()=>{});
+    if(state.active || state.preparationId != null) void overlayInput('gif_overlay_input',{desktop:false,rects:collectHitRects()}).catch(()=>{});
     return drag;
 }
 
@@ -488,6 +553,7 @@ function beginRecordingGripDrag() {
 
 async function stopRecording() {
     if (!state.active || state.stopping) return;
+    closeRecordingPanel();
     const epoch=state.epoch,sessionId=state.sessionId,previousMode=state.mode;
     state.setMode('stopping');
     renderRecState();
@@ -508,7 +574,7 @@ function resetCancel() {
 }
 function cancelRecording() {
     if (state.stopping) return;
-    const panel = el('gif-discard-confirm'), anchor = el('gif-record-exit');
+    const panel = el('gif-discard-confirm'), anchor = el('gif-rec-stop');
     if (!panel || !anchor) return;
     state.cancelArmed = openRecordingPanel(panel, anchor, resetCancel);
     if (state.cancelArmed) el('gif-discard-keep')?.focus({preventScroll: true});
@@ -644,13 +710,27 @@ async function openRecordingTextInput(pos, size) {
 /** 绑定录制面按钮（index.js 初始化调用一次）。 */
 export function bindGifRecBar() {
     void bindListenersOnce();
+    const frame = el('gif-region-frame');
+    if (frame && !preparationSelection) preparationSelection = bindRecordingSelection({frame, state, ss,
+        onChange: changePreparationSelection,
+        onInvalidate: () => ss._invalidateSelectionContent?.({preservePresentation: true}),
+        onInteraction(active, epoch) {
+            closeRecordingPanel();
+            selectionInputTask = selectionInputTask.catch(() => {}).then(async () => {
+                await waitForRecordingPreparation();
+                if (!state.owns(epoch, null) || !state.preparing) return;
+                return active ? overlayInput('gif_overlay_input', {desktop: false, rects: collectHitRects()}) :
+                    setDesktopMode(state.desktopMode, {select: false});
+            }).catch(error => { if (state.owns(epoch, null)) console.error('[recording] selection input failed', error); });
+        },
+    });
     el('gif-rec-draw')?.addEventListener('click',()=>{
         if(state.visible && !state.busy) setDesktopMode(state.drawing);
     });
     el('gif-discard-yes')?.addEventListener('click', confirmDiscard);
     el('gif-discard-keep')?.addEventListener('click', () => closeRecordingPanel({focus: true}));
     setRecordingUiListener(() => {
-        if (state.active && state.desktopMode) invoke('gif_overlay_hit_rects', {rects: collectHitRects()}).catch(() => {});
+        if (state.visible && state.desktopMode && (state.active || state.preparationId != null)) overlayInput('gif_overlay_hit_rects', {rects: collectHitRects()}).catch(() => {});
     });
     if (typeof MutationObserver === 'function') {
         const observer = new MutationObserver(() => { if (state.active) reflowRecordingPanels(); });
@@ -660,7 +740,7 @@ export function bindGifRecBar() {
     }
     el('gif-record-toggle')?.addEventListener('click',()=>{if(state.active&&!state.busy) void togglePause();});
     el('gif-rec-stop')?.addEventListener('click', stopRecording);
-    el('gif-record-exit')?.addEventListener('click',()=>{if(state.active&&!state.busy) cancelRecording();});
+    el('gif-rec-discard')?.addEventListener('click',()=>{if(state.active&&!state.busy) cancelRecording();});
     // Esc 由 index.js 的分层链先处理输入框/弹层，再在录制态消费。
 }
 

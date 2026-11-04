@@ -14,7 +14,7 @@ function harness() {
     nodes.set('btn-gif', {focus() { this.focused = true; }});
     const ss = {toolbar, selCss: {x: 0, y: 0, w: 100, h: 100}, sent: false};
     const context = vm.createContext({ss,state,renderRecordingUi() {},handleOverlayHidden(){state.reset();}, window: {addEventListener: (k, fn) => handlers.set(k, fn)},
-        leaveRecordingPreparation() {}, document: {body: {classList: {contains: () => false}}, getElementById: id => nodes.get(id),
+        leaveRecordingPreparation() {}, commitRecordingSelection() {}, drawStaticBase() {}, drawFinalSelection() {}, restorePreparationAnnotations() {}, waitForRecordingPreparation:async()=>{}, document: {body: {classList: {contains: () => false}}, getElementById: id => nodes.get(id),
             querySelectorAll: () => []}, positionToolbar() {}, bindAudioControls() {}, bindRecordingControls() {}, retainToolbarAnchor() {}, closeRecordingPanel() {}, showRecordingMessage() {}, stopAudioMonitor: async () => {}});
     const source = readFileSync(new URL('./ss-gif-prep.js', import.meta.url), 'utf8')
         .replace(/^import .*;\r?$/gm, '').replace(/export /g, '');
@@ -25,6 +25,8 @@ function harness() {
 
 test('capture Escape returns from recording prep with focused controls, retaining the selection', () => {
     const h = harness();
+    const restored=[];
+    h.context.drawStaticBase=()=>restored.push('base');h.context.drawFinalSelection=()=>restored.push('selection');
     let prevented = false;
     let stopped = false;
     h.escape({key: 'Escape', target: {tagName: 'SELECT'}, preventDefault() { prevented = true; },
@@ -33,6 +35,7 @@ test('capture Escape returns from recording prep with focused controls, retainin
     assert.equal(h.nodes.get('btn-gif').focused, true);
     assert.ok(h.ss.selCss);
     assert.equal(prevented && stopped, true);
+    assert.deepEqual(restored,['base','selection']);
 });
 
 test('Escape during recording startup leaves its lifecycle in control', () => {

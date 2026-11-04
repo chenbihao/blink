@@ -66,6 +66,9 @@ pub struct AudioStatus {
     pub rms: [f32; 2],
     pub peak: [f32; 2],
     pub error: Option<String>,
+    /// 准备态独立设备试音的逐源错误；正式录制仍保留共同暂停语义。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_errors: Option<[Option<String>; 2]>,
     pub active: bool,
 }
 pub struct Gate {
@@ -99,7 +102,8 @@ impl Gate {
     }
     /// PCM 排他边界保留采样精度，避免逐块截断到毫秒形成周期性静音空洞。
     pub fn frame_end(&self, now: Instant) -> u64 {
-        let elapsed = self.start
+        let elapsed = self
+            .start
             .map(|start| now.saturating_duration_since(start).as_nanos())
             .unwrap_or(0);
         (u128::from(self.offset_ms) * 48 + (elapsed * u128::from(RATE)).div_ceil(1_000_000_000))
@@ -135,63 +139,18 @@ pub fn levels(samples: &[f32]) -> (f32, f32) {
     let level = crate::platform::audio::signal::measure(samples);
     (level.rms as f32, level.peak)
 }
-/// 样本级时钟/隐私门控。只接受本轮有效区间内且已经发生的声音；排队前抹掉静音样本。
-pub fn canonical_samples(
-    input: &[f32],
-    channels: u16,
-    rate: u32,
-    begin: i64,
-    lower: u64,
-    upper: u64,
-    muted: impl Fn(u64) -> bool,
-) -> (u64, Vec<i16>, (f32, f32)) {
-    let count = input.len() / channels.max(1) as usize;
-    if count == 0 || rate == 0 || channels == 0 {
-        return (lower, Vec::new(), (0.0, 0.0));
+/// 与编辑器 audio-playback.js 相同的软拐点。正常音量保持线性，
+/// 超过 0.9 后平滑趋近 0.98，避免双源/200% 增益直接截成方波。
+pub fn soft_limit(value: f32) -> f32 {
+    if !value.is_finite() {
+        return 0.0;
     }
-    let output_count = ((count as f64 * RATE as f64 / rate as f64).round() as usize).max(1);
-    let start = begin.max(lower.min(i64::MAX as u64) as i64).max(0) as u64;
-    let mut samples = Vec::with_capacity(output_count.min(RATE as usize) * 2);
-    let mut meter = Vec::with_capacity(samples.capacity());
-    let skip = (start as i128 - begin as i128)
-        .max(0)
-        .min(output_count as i128) as usize;
-    for n in skip..output_count {
-        let frame = begin + n as i64;
-        if frame < 0 || frame as u64 >= upper {
-            break;
-        }
-        let idx = n as f64 * rate as f64 / RATE as f64;
-        let a = (idx.floor() as usize).min(count - 1);
-        let b = (a + 1).min(count - 1);
-        let f = idx.fract() as f32;
-        for c in 0..2 {
-            let channel = c.min(channels as usize - 1);
-            let at = |frame: usize| {
-                if channels <= 2 {
-                    input[frame * channels as usize + channel]
-                } else {
-                    input[frame * channels as usize..(frame + 1) * channels as usize]
-                        .iter()
-                        .sum::<f32>()
-                        / channels as f32
-                }
-            };
-            let v = if muted(frame as u64 / 48) {
-                0.0
-            } else {
-                at(a) * (1.0 - f) + at(b) * f
-            };
-            let v = if v.is_finite() {
-                v.clamp(-1.0, 1.0)
-            } else {
-                0.0
-            };
-            meter.push(v);
-            samples.push((v * 32767.0).round() as i16);
-        }
+    let magnitude = value.abs();
+    if magnitude <= 0.9 {
+        value
+    } else {
+        value.signum() * (0.9 + 0.08 * (1.0 - (-(magnitude - 0.9) / 0.08).exp()))
     }
-    (start, samples, levels(&meter))
 }
 pub fn track_path(dir: &Path, source: usize) -> PathBuf {
     dir.join(if source == 0 {
@@ -380,6 +339,17 @@ pub fn write_packet(file: &mut File, start_frame: u64, samples: &[i16]) -> std::
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn gated_samples(
+        input: &[f32],
+        begin: i64,
+        lower: u64,
+        upper: u64,
+        muted: impl Fn(u64) -> bool,
+    ) -> super::super::audio_capture::AudioBlock {
+        let mut signal = super::super::audio_capture::CaptureSignal::new(1, RATE);
+        signal.push(input, begin as f64).unwrap();
+        signal.drain(lower, upper, muted).remove(0)
+    }
     #[test]
     fn rf64_keeps_u64_sizes_and_large_reads_require_bounded_ranges() {
         let size = u32::MAX as u64 + 1;
@@ -442,15 +412,13 @@ mod tests {
         let state = shared(AudioOptions::default());
         let mut g = state.lock().unwrap();
         g.mute_edges[0] = vec![(20, true), (40, false)];
-        let (_, pcm, _) = canonical_samples(&vec![0.5; 2880], 1, RATE, 0, 0, 2880, |ms| {
-            g.muted_at(0, ms)
-        });
+        let pcm = gated_samples(&vec![0.5; 2880], 0, 0, 2880, |ms| g.muted_at(0, ms)).samples;
         assert!(pcm[..20 * 48 * 2].iter().all(|v| *v > 0));
         assert!(pcm[20 * 48 * 2..40 * 48 * 2].iter().all(|v| *v == 0));
         assert!(pcm[40 * 48 * 2..].iter().all(|v| *v > 0));
-        let (_, silent, level) = canonical_samples(&[1.0; 480], 1, RATE, 0, 0, 480, |_| true);
-        assert!(silent.iter().all(|v| *v == 0));
-        assert_eq!(level, (0.0, 0.0));
+        let silent = gated_samples(&[1.0; 480], 0, 0, 480, |_| true);
+        assert!(silent.samples.iter().all(|v| *v == 0));
+        assert_eq!(silent.level, (0.0, 0.0));
     }
     #[test]
     fn callback_frame_boundary_keeps_submillisecond_samples() {
@@ -463,15 +431,19 @@ mod tests {
         assert_eq!(gate.time_ms(now), 300);
         assert_eq!(gate.frame_end(now), 14_437);
         let begin = ((100.0 + 200.751 - 10.0) * 48.0_f64).round() as i64;
-        let (_, pcm, level) = canonical_samples(&[0.5; 480], 1, RATE, begin, 4800, gate.frame_end(now), |_| false);
-        assert_eq!(pcm.len(), 960, "the entire occurred 10ms packet must survive clock gating");
-        assert_eq!(level, (0.5, 0.5));
+        let block = gated_samples(&[0.5; 480], begin, 4800, gate.frame_end(now), |_| false);
+        assert_eq!(
+            block.samples.len(),
+            960,
+            "the entire occurred 10ms packet must survive clock gating"
+        );
+        assert_eq!(block.level, (0.5, 0.5));
     }
     #[test]
     fn sample_clock_clips_before_resume_and_future_buffers() {
-        let (start, pcm, _) = canonical_samples(&[0.5; 480], 1, RATE, 0, 120, 360, |_| false);
-        assert_eq!(start, 120);
-        assert_eq!(pcm.len(), (360 - 120) * 2);
+        let block = gated_samples(&[0.5; 480], 0, 120, 360, |_| false);
+        assert_eq!(block.start, 120);
+        assert_eq!(block.samples.len(), (360 - 120) * 2);
     }
     #[test]
     fn wav_ranges_cover_header_pcm_and_bound_open_ranges() {

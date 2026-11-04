@@ -383,7 +383,7 @@ window.__blinkClearScreenshotVisual = function () {
  * 时多个 fire-and-forget eval 只执行了一部分，留下“只有暗罩、无法拖选”的半会话。
  */
 window.__blinkStartScreenshotSession = function (meta, activeDisplay) {
-    if (isGifRecActive() || isRecordingStarting()) {
+    if (isGifRecActive() || isGifPrepActive() || isRecordingStarting()) {
         void restoreRecordingOverlay(true).then(restored => {
             if (!restored && !isRecordingStarting()) window.__blinkStartScreenshotSession(meta, activeDisplay);
         }).catch(error => console.error('[recording] restore failed', error));
@@ -422,7 +422,7 @@ window.__blinkReloadScreenshot = function () {
 };
 
 window.__blinkOpenImageEditor = function () {
-    if (isGifRecActive() || isRecordingStarting()) {
+    if (isGifRecActive() || isGifPrepActive() || isRecordingStarting()) {
         void restoreRecordingOverlay(true).then(restored => {if (!restored && !isRecordingStarting()) window.__blinkOpenImageEditor();});
         return;
     }
@@ -2458,7 +2458,7 @@ window.addEventListener('blur', () => {
     // 0.28.23：录制叠层期 blur 是常态（用户操作被录桌面应用）——overlay
     // 由录制服务管理隐藏，这里不退出；后端看门狗也被 OVERLAY_RECORD_ACTIVE
     // 豁免。
-    if (isGifRecActive()) {
+    if (isGifRecActive() || isGifPrepActive()) {
         console.debug('[screenshot] window blur ignored during gif recording overlay');
         return;
     }

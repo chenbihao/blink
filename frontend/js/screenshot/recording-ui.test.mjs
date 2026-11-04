@@ -14,14 +14,25 @@ function node() {
 }
 function fixture() {
     const state=createRecordingSession(),nodes=new Map();
-    for(const id of ['gif-record-toggle','gif-record-toggle-label','gif-rec-stop','gif-rec-stop-label','gif-record-exit','gif-record-exit-label','gif-rec-draw','gif-audio-open','gif-prep-fps','gif-recording-status','gif-rec-time','gif-rec-storage'])nodes.set(id,node());
+    for(const id of ['gif-record-toggle','gif-record-toggle-label','gif-rec-stop','gif-rec-stop-label','gif-record-exit','gif-record-exit-label','gif-rec-discard','gif-rec-draw','gif-audio-open','gif-prep-fps','gif-recording-status','gif-rec-time'])nodes.set(id,node());
     const toolbar=node();toolbar.dataset={mode:'screenshot',drawing:'false'};
     const context=vm.createContext({state,ss:{toolbar},document:{getElementById:id=>nodes.get(id),body:node(),documentElement:node()},
         t:(key,params={})=>Object.entries(params).reduce((s,[k,v])=>s.replaceAll('{'+k+'}',v),zh[key]||key)});
     const source=readFileSync(new URL('./ss-recording-ui.js',import.meta.url),'utf8').replace(/^import .*;\r?$/gm,'').replace(/export /g,'');
     vm.runInContext(`${source}\nglobalThis.render=renderRecordingUi;`,context);
-    return {state,nodes,toolbar,render:context.render};
+    return {state,nodes,toolbar,render:context.render,body:context.document.body,root:context.document.documentElement};
 }
+
+test('ready preparation uses the transparent live desktop surface and restores screenshot styling on exit',()=>{
+    const f=fixture();
+    f.state.reset('ready');f.render();
+    assert.equal(f.state.active,false);
+    assert.equal(f.body.classList.contains('gif-recording'),true);
+    assert.equal(f.root.classList.contains('gif-recording'),true);
+    f.state.reset();f.render();
+    assert.equal(f.body.classList.contains('gif-recording'),false);
+    assert.equal(f.root.classList.contains('gif-recording'),false);
+});
 
 test('a second preparation fully re-enables recording, sound and drawing after an interrupted session',()=>{
     const f=fixture();
@@ -35,24 +46,27 @@ test('a second preparation fully re-enables recording, sound and drawing after a
     assert.equal(f.toolbar.dataset.drawing,'false');
 });
 
-test('one main action follows start/pause/resume while exit changes to explicit discard',()=>{
+test('start becomes pause/resume and exit gives the same slot to finish without an extra toolbar action',()=>{
     const f=fixture();f.state.reset('ready');f.render();
     assert.equal(f.nodes.get('gif-record-exit').title,'退出录制');
     assert.equal(f.nodes.get('gif-record-exit-label').textContent,'退出');
     f.state.sessionId='one';f.state.setMode('recording');f.render();
     assert.equal(f.nodes.get('gif-record-toggle-label').textContent,'暂停');
     assert.equal(f.nodes.get('gif-rec-stop').hidden,false);
-    assert.equal(f.nodes.get('gif-record-exit').title,'撤销当前录制');
-    assert.equal(f.nodes.get('gif-record-exit-label').textContent,'撤销');
-    assert.equal(f.nodes.get('gif-rec-stop-label').textContent,'结束');
+    assert.equal(f.nodes.get('gif-record-exit').hidden,true);
+    assert.equal(f.nodes.get('gif-rec-discard').textContent,'撤销录制');
+    assert.equal(f.nodes.get('gif-rec-stop-label').textContent,'完成');
     f.state.setMode('paused');f.render();assert.equal(f.nodes.get('gif-record-toggle-label').textContent,'继续');
     f.state.setMode('recording');f.render();assert.equal(f.nodes.get('gif-record-toggle-label').textContent,'暂停');
+    f.state.reset('ready');f.render();
+    assert.equal(f.nodes.get('gif-record-exit').hidden,false);assert.equal(f.nodes.get('gif-rec-stop').hidden,true);
 });
 
-test('the lower status line reports available space during recording, including unknown disks',()=>{
+test('time-only details retain available space in the hover title, including unknown disks',()=>{
     const f=fixture();f.state.sessionId='one';f.state.setMode('recording');
     f.state.storage={disk:{volume:'D:',availableBytes:2*1024**3},materialBytes:500*1024**2};f.render();
-    assert.equal(f.nodes.get('gif-rec-storage').textContent,'可用 2.0 GB');
+    assert.ok(f.nodes.get('gif-recording-status').title.includes('可用 2.0 GB'));
+    assert.equal(f.nodes.has('gif-rec-storage'),false);
     f.state.storage={materialBytes:500*1024**2};f.render();
-    assert.equal(f.nodes.get('gif-rec-storage').textContent,'空间未知');
+    assert.ok(f.nodes.get('gif-recording-status').title.includes('空间未知'));
 });

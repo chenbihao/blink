@@ -79,6 +79,7 @@ pub(crate) struct OverlayInputState {
 
 /// GIF 服务（managed state）。
 pub struct GifService {
+    pub(crate) preparation: AtomicU64,
     start_lock: Mutex<()>,
     pub(crate) recording: Mutex<Option<ActiveRecording>>,
     /// overlay 录制叠层输入态（穿透/命中矩形）。
@@ -93,7 +94,7 @@ pub struct GifService {
     pub(crate) drafts: Mutex<HashMap<String, crate::app::gif_draft::DraftState>>,
     /// 会话素材身份（创建时间, 索引帧数）——草稿保存/恢复共用。
     pub(crate) session_identity: Mutex<HashMap<String, (u64, u32)>>,
-    pub(crate) audio_preview: Mutex<Option<blink_infra::platform::audio::recording::Session>>,
+    pub(crate) audio_preview: blink_infra::platform::audio::recording::Monitor,
 }
 
 impl Default for GifService {
@@ -111,6 +112,7 @@ impl GifService {
 
     pub fn new() -> Self {
         Self {
+            preparation: AtomicU64::new(0),
             start_lock: Mutex::new(()),
             recording: Mutex::new(None),
             overlay_input: Mutex::new(OverlayInputState::default()),
@@ -120,7 +122,7 @@ impl GifService {
             editor_session: Mutex::new(None),
             drafts: Mutex::new(HashMap::new()),
             session_identity: Mutex::new(HashMap::new()),
-            audio_preview: Mutex::new(None),
+            audio_preview: Default::default(),
         }
     }
 
@@ -192,9 +194,19 @@ pub fn snapshot_state_public(service: &Arc<GifService>) -> RecorderStatePayload 
 /// 调用方持有 overlay session gate：活跃录制只恢复控制，不初始化截图或停止采集。
 pub(crate) fn restore_active_overlay(app: &AppHandle) -> Result<bool, String> {
     let service = app.state::<Arc<GifService>>();
-    let session = service.recording.lock().unwrap_or_else(|e| e.into_inner())
-        .as_ref().map(|r| r.session_id.clone());
-    let Some(session_id) = session else { return Ok(false); };
+    let session = service
+        .recording
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|r| r.session_id.clone());
+    let owner = session.or_else(|| {
+        let id = service.preparation.load(Ordering::SeqCst);
+        (id != 0).then(|| format!("preparation-{id}"))
+    });
+    let Some(session_id) = owner else {
+        return Ok(false);
+    };
     blink_infra::platform::window::restore_recording_overlay(app)?;
     if let Some(win) = overlay_window(app) {
         win.eval("window.__blinkRestoreRecording && window.__blinkRestoreRecording(true);")
@@ -254,7 +266,12 @@ fn snapshot_state(service: &GifService) -> RecorderStatePayload {
                 revision,
                 region: {
                     let (x, y) = *r.region_pos.lock().unwrap_or_else(|e| e.into_inner());
-                    Some(infra_gif::CaptureRegion { x, y, w: r.region_w, h: r.region_h })
+                    Some(infra_gif::CaptureRegion {
+                        x,
+                        y,
+                        w: r.region_w,
+                        h: r.region_h,
+                    })
                 },
                 audio_options: Some(audio_options),
                 storage: r
@@ -409,11 +426,7 @@ pub fn start_recording(
     let writer = SpoolWriter::create(&root, meta).map_err(GifServiceError::from)?;
 
     // 准备态试音先释放，采集资源在 worker 内重新解析/核验，不继承旧默认设备。
-    service
-        .audio_preview
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .take();
+    service.audio_preview.stop();
     let audio = blink_infra::gif::audio::shared(audio_options.clone());
     let source = RecordingSource {
         storage: root.join("sessions").join(&session_id),
@@ -460,6 +473,7 @@ pub fn start_recording(
         audio,
     });
 
+    service.preparation.store(0, Ordering::SeqCst);
     enter_overlay_record_mode(app);
     blink_infra::platform::screenshot::end_session();
     emit_region_updated(app, x, y, w, h);
@@ -583,18 +597,24 @@ fn finalize_after_stop(
     outcome: Option<CaptureOutcome>,
 ) {
     let service = app.state::<Arc<GifService>>();
-    let _finalizing = service.start_lock.lock().unwrap_or_else(|e| e.into_inner());
-    // 清活跃录制（同一会话才清）
-    {
-        let mut rec = service.recording.lock().unwrap_or_else(|e| e.into_inner());
-        if matches!(rec.as_ref(), Some(r) if Arc::ptr_eq(&r.ctl, ctl)) {
-            *rec = None;
+    let finished = {
+        let _finalizing = service.lock_overlay_session();
+        // 清活跃录制（同一会话才清），并在同一事务内归还浮层。
+        {
+            let mut rec = service.recording.lock().unwrap_or_else(|e| e.into_inner());
+            if matches!(rec.as_ref(), Some(r) if Arc::ptr_eq(&r.ctl, ctl)) {
+                *rec = None;
+            }
         }
-    }
-    exit_overlay_record_mode(app);
+        exit_overlay_record_mode(app);
+        // 状态快照也属于原会话事务；发事件和编辑器工作留在门锁之外。
+        let mut finished = snapshot_state(&service);
+        finished.session_id = Some(session_id.to_string());
+        finished
+    };
+    // 必须先释放 overlay 所有权门，再广播结束或创建编辑器。页面收到结束
+    // 会归还准备租约；若主线程等待同一门锁，后台 build 又等待主线程，会死锁。
     // 携带结束会话身份，前端仅清理所属叠层/定时器，不接受跨会话 idle。
-    let mut finished = snapshot_state(&service);
-    finished.session_id = Some(session_id.to_string());
     emit_state(app, finished);
     let root = GifService::root();
     if cancelled {
@@ -695,9 +715,18 @@ fn enter_overlay_record_mode(app: &AppHandle) {
     spawn_overlay_hit_poller(app.clone());
 }
 
-/// 退出录制叠层模式：复位窗口属性 → 清标志 → 走既有隐藏链（含 cloak 与会话清理）。
+/// 退出录制叠层模式：解除样式保护 → 复位窗口属性 → 隐藏（含 cloak 与会话清理）。
 fn exit_overlay_record_mode(app: &AppHandle) {
+    leave_overlay_interaction(app);
+    crate::infra::platform::window::hide_screenshot_overlay(app);
+}
+
+fn leave_overlay_interaction(app: &AppHandle) {
+    crate::infra::platform::window::set_overlay_record_active(false);
     if let Some(win) = overlay_window(app) {
+        // 强制一次样式变更，移除录制期钉扎的 layered/toolwindow；即使当前
+        // 已是不穿透且可聚焦，框架也不能因属性未变化而跳过原生样式恢复。
+        let _ = win.set_ignore_cursor_events(true);
         let _ = win.set_ignore_cursor_events(false);
         let _ = win.set_focusable(true);
     }
@@ -708,8 +737,73 @@ fn exit_overlay_record_mode(app: &AppHandle) {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = OverlayInputState::default();
     }
-    crate::infra::platform::window::set_overlay_record_active(false);
-    crate::infra::platform::window::hide_screenshot_overlay(app);
+}
+
+/// 准备只借用透明浮层与输入控制，不创建采集线程/素材；退出必须匹配原租约。
+pub fn prepare_overlay(
+    app: &AppHandle,
+    active: bool,
+    preparation_id: Option<u64>,
+) -> GifResult<Option<u64>> {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let service = app.state::<Arc<GifService>>();
+    let _gate = service.lock_overlay_session();
+    if active {
+        if service
+            .recording
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+            || service.preparation.load(Ordering::SeqCst) != 0
+        {
+            return Err(GifServiceError::AlreadyRecording);
+        }
+        let id = NEXT.fetch_add(1, Ordering::SeqCst);
+        service.preparation.store(id, Ordering::SeqCst);
+        enter_overlay_record_mode(app);
+        tracing::debug!(id, "录制准备切换为实时桌面");
+        Ok(Some(id))
+    } else {
+        let id = service.preparation.load(Ordering::SeqCst);
+        if id != 0 && preparation_id == Some(id) {
+            service.preparation.store(0, Ordering::SeqCst);
+            leave_overlay_interaction(app);
+            if let Some(win) = overlay_window(app) {
+                let _ = win.set_focus();
+            }
+            tracing::debug!(id, "录制准备归还截图输入");
+        }
+        Ok(None)
+    }
+}
+
+fn overlay_input_owner(service: &GifService, preparation_id: Option<u64>) -> bool {
+    if service
+        .recording
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some()
+    {
+        preparation_id.is_none()
+    } else {
+        let id = service.preparation.load(Ordering::SeqCst);
+        id != 0 && preparation_id == Some(id)
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn gif_preparation_input_requires_the_current_lease() {
+    let service = GifService::new();
+    assert!(!overlay_input_owner(&service, None));
+    service.preparation.store(1, Ordering::SeqCst);
+    assert!(overlay_input_owner(&service, Some(1)));
+    assert!(!overlay_input_owner(&service, None));
+    service.preparation.store(2, Ordering::SeqCst);
+    assert!(!overlay_input_owner(&service, Some(1)));
+    assert!(overlay_input_owner(&service, Some(2)));
+    service.preparation.store(0, Ordering::SeqCst);
+    assert!(!overlay_input_owner(&service, Some(2)));
 }
 
 /// 前端上报 overlay 输入模式与命中矩形（物理屏幕坐标）。
@@ -719,14 +813,11 @@ pub fn set_overlay_input(
     app: &AppHandle,
     desktop_mode: bool,
     rects: Vec<[i32; 4]>,
+    preparation_id: Option<u64>,
 ) -> GifResult<()> {
     let service = app.state::<Arc<GifService>>();
-    if service
-        .recording
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .is_none()
-    {
+    let _gate = service.lock_overlay_session();
+    if !overlay_input_owner(&service, preparation_id) {
         return Err(GifServiceError::NoActiveRecording);
     }
     let want_pass = {
@@ -750,14 +841,14 @@ pub fn set_overlay_input(
 }
 
 /// 仅更新命中矩形（工具栏拖动/弹层开合后的周期刷新）。
-pub fn set_overlay_hit_rects(app: &AppHandle, rects: Vec<[i32; 4]>) -> GifResult<()> {
+pub fn set_overlay_hit_rects(
+    app: &AppHandle,
+    rects: Vec<[i32; 4]>,
+    preparation_id: Option<u64>,
+) -> GifResult<()> {
     let service = app.state::<Arc<GifService>>();
-    if service
-        .recording
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .is_none()
-    {
+    let _gate = service.lock_overlay_session();
+    if !overlay_input_owner(&service, preparation_id) {
         return Err(GifServiceError::NoActiveRecording);
     }
     service
@@ -769,14 +860,14 @@ pub fn set_overlay_hit_rects(app: &AppHandle, rects: Vec<[i32; 4]>) -> GifResult
 }
 
 /// 文字输入期间 overlay 需要键盘焦点（前端在文字编辑开始/结束时申请/归还）。
-pub fn set_overlay_focusable(app: &AppHandle, focusable: bool) -> GifResult<()> {
+pub fn set_overlay_focusable(
+    app: &AppHandle,
+    focusable: bool,
+    preparation_id: Option<u64>,
+) -> GifResult<()> {
     let service = app.state::<Arc<GifService>>();
-    if service
-        .recording
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .is_none()
-    {
+    let _gate = service.lock_overlay_session();
+    if !overlay_input_owner(&service, preparation_id) {
         return Err(GifServiceError::NoActiveRecording);
     }
     if let Some(win) = overlay_window(app) {
@@ -830,6 +921,10 @@ fn cursor_pos() -> (i32, i32) {
 /// 命中轮询：录制期间每 16ms 读指针；「操作桌面」模式下指针在命中矩形内
 /// 取消穿透、否则恢复穿透。录制结束自动退出（按活跃录制判活，单实例）。
 fn spawn_overlay_hit_poller(app: AppHandle) {
+    let prep_id = app
+        .state::<Arc<GifService>>()
+        .preparation
+        .load(Ordering::SeqCst);
     let session_id = app
         .state::<Arc<GifService>>()
         .recording
@@ -847,7 +942,24 @@ fn spawn_overlay_hit_poller(app: AppHandle) {
                 .unwrap_or_else(|e| e.into_inner())
                 .as_ref()
                 .map(|r| r.session_id.clone());
-            if current.is_none() || current != session_id {
+            let preparation = service.preparation.load(Ordering::SeqCst);
+            if current != session_id
+                || (current.is_none() && (prep_id == 0 || preparation != prep_id))
+            {
+                break;
+            }
+            if current.is_none()
+                && overlay_window(&app).is_none_or(|win| !win.is_visible().unwrap_or(false))
+            {
+                let _gate = service.lock_overlay_session();
+                if service
+                    .preparation
+                    .compare_exchange(prep_id, 0, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    leave_overlay_interaction(&app);
+                    tracing::debug!(prep_id, "录制准备窗口丢失，归还输入控制");
+                }
                 break;
             }
             let want = {
@@ -857,6 +969,8 @@ fn spawn_overlay_hit_poller(app: AppHandle) {
                     .unwrap_or_else(|e| e.into_inner());
                 if !st.desktop_mode {
                     false
+                } else if blink_infra::platform::window::is_left_button_down() {
+                    st.pass_through
                 } else {
                     let (cx, cy) = cursor_pos();
                     !st.hit_rects.iter().any(|r| rect_contains(r, cx, cy))
@@ -919,6 +1033,7 @@ pub fn move_recording_region(
 /// 换会话前 flush 草稿；在途导出拒绝切换并返回 false，所有入口统一保护。
 pub fn open_editor(app: &AppHandle, session_id: &str) -> bool {
     use blink_infra::platform::window::get_or_create_window;
+    let opening = std::time::Instant::now();
     {
         let service = app.state::<Arc<GifService>>();
         let mut current = service
@@ -936,6 +1051,7 @@ pub fn open_editor(app: &AppHandle, session_id: &str) -> bool {
         }
         *current = Some(session_id.to_string());
     }
+    tracing::debug!(session_id, "录制素材移交编辑器，开始创建或复用窗口");
     let built = get_or_create_window(app, EDITOR_LABEL, || {
         WebviewWindowBuilder::new(app, EDITOR_LABEL, WebviewUrl::App("gif-editor.html".into()))
             // 0.28.23 改名「录制编辑器」；窗口 label / IPC 保持 gif-* 不迁移，
@@ -957,6 +1073,12 @@ pub fn open_editor(app: &AppHandle, session_id: &str) -> bool {
                 EDITOR_LABEL,
                 EventNames::GIF_EDITOR_SESSION,
                 serde_json::json!({ "sessionId": session_id }),
+            );
+            tracing::debug!(
+                session_id,
+                created,
+                elapsed_ms = opening.elapsed().as_millis(),
+                "录制编辑器窗口已打开"
             );
         }
         Err(e) => tracing::error!(error = %e, "GIF 编辑器窗口打开失败"),

@@ -35,6 +35,7 @@
     --screenshot-hover-text: #fff;
     --screenshot-hover-bg: rgba(255, 255, 255, 0.08);
     --screenshot-shadow: rgba(0, 0, 0, 0.5);
+    --recording-indicator: #ff3b30; /* 实时录制状态保持鲜明红色，不随主题危险色变成粉色 */
 
     /* 状态色 */
     --green: #a6e3a1;

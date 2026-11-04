@@ -48,6 +48,7 @@ import {
 import {
     createAudioPlayback
 } from './audio-playback.js';
+import {PreviewFrames, readyPreview} from './preview-frames.js';
 
 ensureSpriteLoaded();
 const syncEditorSelects = bindEditorSelects();
@@ -121,6 +122,7 @@ const state = {
     selectedSet: new Set(),
     anchor: null,
     playing: false,
+    previewSound: true,
     playTimer: 0,
     /** 当前帧开始展示的时刻（空格启动时据此保留剩余时长）。 */
     frameShownAt: 0,
@@ -154,8 +156,11 @@ const state = {
 };
 
 // ── 帧解码（批量懒加载 + 缓存淘汰） ─────────────────────────────────────
+const previewFrames = new PreviewFrames({state, invoke, evict: evictPreviewCache,
+    onReady() { if (state.current) presentPreview(); }});
 
 function requestDecode(sessionId, indices, maxW, cache, priority = false) {
+    if (cache === state.previewCache) { previewFrames.request(indices, priority); return; }
     const epoch = state.epoch;
     const unique = [];
     for (const idx of indices) {
@@ -201,9 +206,10 @@ function decodeKey(epoch, cache, maxW, idx) {
 }
 
 async function pumpDecode() {
-    if (state.decoding) return;
+    if (state.decoding || state.playing) return;
     state.decoding = true;
     while (state.pendingBatches.length) {
+        if (state.playing) break;
         const {
             sessionId,
             indices,
@@ -224,23 +230,7 @@ async function pumpDecode() {
                     });
                     if (epoch !== state.epoch || (cache === state.previewCache && maxW !== state.previewWidth)) break;
                     for (const f of frames) {
-                        if (cache === state.thumbCache) {
-                            cache.set(f.index, `data:image/png;base64,${f.pngBase64}`);
-                        } else {
-                            const blob = await (await fetch(`data:image/png;base64,${f.pngBase64}`)).blob();
-                            const bmp = await createImageBitmap(blob);
-                            if (epoch !== state.epoch || maxW !== state.previewWidth) {
-                                bmp.close();
-                                break;
-                            }
-                            const old = cache.get(f.index);
-                            if (old) {
-                                state.previewBytes -= old.width * old.height * 4;
-                                old.close();
-                            }
-                            cache.set(f.index, bmp);
-                            state.previewBytes += bmp.width * bmp.height * 4;
-                        }
+                        cache.set(f.index, `data:image/png;base64,${f.pngBase64}`);
                         evictPreviewCache();
                     }
                 } catch (err) {
@@ -250,11 +240,6 @@ async function pumpDecode() {
             }
             evictPreviewCache();
             refreshLiveThumbs();
-            // 解码完成按当前会话/播放头回填，避免每次 cache miss 建永久轮询器。
-            const current = state.current?.srcIdx;
-            if (epoch === state.epoch && cache === state.previewCache && cache.has(current)) {
-                drawPreview(cache.get(current));
-            }
         } finally {
             for (const idx of indices) state.decodeKeys.delete(decodeKey(epoch, cache, maxW, idx));
         }
@@ -292,6 +277,7 @@ state.selectionRange = null;
 let querySerial = 0,
     hoverSerial = 0,
     stripSerial = 0,
+    playGeneration = 0,
     editTail = Promise.resolve();
 
 function selected(idx) {
@@ -448,6 +434,11 @@ function drawPreview(image) {
     els.canvasEmpty.classList.add('hidden');
 }
 
+function presentPreview() {
+    const image = readyPreview(state.previewCache, state.current?.srcIdx, state.playing);
+    if (image) drawPreview(image);
+}
+
 function renderPreview() {
     const f = state.current;
     if (!f) {
@@ -464,7 +455,10 @@ function renderPreview() {
         state.previewCache.delete(f.srcIdx);
         state.previewCache.set(f.srcIdx, image);
         drawPreview(image);
-    } else requestDecode(state.sessionId, [f.srcIdx], state.previewWidth, state.previewCache, true);
+    } else {
+        presentPreview();
+        requestDecode(state.sessionId, [f.srcIdx], state.previewWidth, state.previewCache, true);
+    }
     els.pos.textContent = `${f.playIdx + 1} / ${state.view.effectiveCount}`;
     els.dur.textContent = formatFrameDur(f.durMs) + (f.held ? t('gif.editor.held') : '');
     els.totalDur.textContent = t('gif.editor.totalDur', {
@@ -485,11 +479,14 @@ async function locate(request, select = false, inFrame = 0) {
         state.frameShownAt = performance.now() - state.seekInFrameMs;
         renderPreview();
         syncPlayhead(frame.srcIdx, select);
-        renderControls();
+        // 播放只更新画面/播放头；参数面板不随每一帧反复赋值。
+        if (select) renderControls();
         prefetchAhead();
         return frame;
     } catch (error) {
         if (epoch === state.epoch) {
+            // 编辑提交与旧版本分页请求可能交错；新 revision 会随编辑结果发布。
+            if (state.editing && error.kind === 'gif_revision') return;
             setPlaying(false);
             showHint(normalizeError(error).message);
         }
@@ -500,11 +497,9 @@ function prefetchAhead() {
     const f = state.current;
     if (!f) return;
     const epoch = state.epoch;
-    void pages.locate({
-        play: f.playIdx + 1
-    }).then(next => {
-        if (next && epoch === state.epoch) requestDecode(state.sessionId, [next.srcIdx], state.previewWidth,
-            state.previewCache);
+    void pages.ahead(f.playIdx + 1, state.playing ? 16 : 2).then(frames => {
+        if (epoch === state.epoch) requestDecode(state.sessionId, frames.map(next => next.srcIdx),
+            state.previewWidth, state.previewCache);
     }).catch(() => {});
 }
 
@@ -517,15 +512,18 @@ function positionMs() {
 function setPlaying(on) {
     if (on && state.deleting) return;
     if (on === state.playing) return;
+    playGeneration++;
     const at = positionMs();
     state.playing = on && Boolean(state.current);
     clearTimeout(state.playTimer);
     if (state.playing) {
         state.playClockAt = performance.now() - at;
+        prefetchAhead();
         void playTick();
     } else {
         state.seekInFrameMs = Math.max(0, Math.min(state.current?.durMs || 0, at - (state.current?.startMs || 0)));
         audioPlayback.pause();
+        void pumpDecode();
         reportPlayPosition();
     }
     const icons = els.btnPlay.querySelectorAll('.icon');
@@ -533,14 +531,15 @@ function setPlaying(on) {
     icons[1]?.classList.toggle('hidden', !state.playing);
 }
 async function playTick() {
-    if (!state.playing) return;
+    if (!state.playing || state.retiming) return;
     const epoch = state.epoch,
+        generation = playGeneration,
         at = positionMs();
     if (!state.current || at < state.current.startMs || at >= state.current.startMs + state.current.durMs)
         await locate({
             timeMs: Math.floor(at)
         });
-    if (!state.playing || epoch !== state.epoch) return;
+    if (!state.playing || state.retiming || epoch !== state.epoch || generation !== playGeneration) return;
     updatePlayProgress();
     state.playTimer = setTimeout(playTick, Math.min(16, Math.max(1, (state.current?.startMs || 0) + (state.current
         ?.durMs || 16) - positionMs())));
@@ -558,7 +557,7 @@ function updatePlayProgress() {
     els.seekBar.setAttribute('aria-valuetext', formatTimecode(at));
     els.seekTime.textContent = `${formatTimecode(at)} / ${formatTimecode(total)}`;
     const f = state.current;
-    if (state.playing && f) audioPlayback.sync(Math.max(0, at - f.startMs), true,
+    if (state.playing && !state.retiming && f) audioPlayback.sync(Math.max(0, at - f.startMs), state.previewSound,
         [{
             sourceMs: f.sourceMs,
             key: f.audioKey,
@@ -566,7 +565,7 @@ function updatePlayProgress() {
             soundMs: f.soundMs,
             silenceMs: f.silenceMs,
             outputMs: f.durMs
-        }], state.view.mix);
+        }], state.previewMix || state.view.mix);
 }
 
 function handleThumbClick(i, event) {
@@ -601,24 +600,44 @@ async function editSelection(operation, ms = 0) {
     });
 }
 
+let durationKey = '', durationSerial = 0;
+function refreshSelectionDuration() {
+    const ranges = selectionRanges(), n = selectionCount();
+    els.durInput.disabled = !n;
+    if (!n) {
+        durationKey = ''; durationSerial++;
+        els.durClear.disabled = true;
+        els.durInput.value = ''; els.durInput.placeholder = '—';
+        return;
+    }
+    const key = `${state.epoch}:${state.view.revision}:${JSON.stringify(ranges)}`;
+    if (key === durationKey) return;
+    durationKey = key;
+    const serial = ++durationSerial;
+    els.durClear.disabled = true;
+    void pages.selection(ranges).then(summary => {
+        if (serial !== durationSerial || !summary || summary.revision !== state.view?.revision) return;
+        els.durClear.disabled = !summary.hasHold;
+        if (document.activeElement !== els.durInput) {
+            els.durInput.value = summary.durationMs == null ? '' : String(summary.durationMs);
+            els.durInput.placeholder = n > 1 ? t('gif.editor.durPh.multi', {n}) : '—';
+        }
+    }).catch(error => {
+        if (serial === durationSerial) showHint(normalizeError(error).message);
+    });
+}
+
 function renderControls() {
     const v = state.view;
     if (!v) return;
     els.undo.disabled = !v.canUndo;
     els.redo.disabled = !v.canRedo;
-    els.speed.value = String(v.speed);
-    els.loop.value = v.loopCount == null ? '' : String(v.loopCount);
+    const speed = String(v.speed), loop = v.loopCount == null ? '' : String(v.loopCount);
+    if (els.speed.value !== speed) els.speed.value = speed;
+    if (els.loop.value !== loop) els.loop.value = loop;
     syncEditorSelects();
     els.exportBtn.disabled = !v.effectiveCount;
-    const n = selectionCount(),
-        one = selectionRanges()[0]?.[0],
-        info = state.sourceViews.get(one);
-    if (document.activeElement !== els.durInput) {
-        els.durInput.value = n === 1 && info ? String(info.holdMs ?? info.baseMs) : '';
-        els.durInput.placeholder = n > 1 ? t('gif.editor.durPh.multi', {
-            n
-        }) : '—';
-    }
+    refreshSelectionDuration();
 }
 
 function renderSessionHeader() {
@@ -635,7 +654,7 @@ function renderSessionHeader() {
 function renderAudioMix(view) {
     for (let i = 0; i < 2; i++) {
         const row = $(`audio-mix-${i}`),
-            mix = view.mix?.[i] || {
+            mix = (state.previewMix || view.mix)?.[i] || {
                 gain: 1,
                 muted: false
             };
@@ -645,6 +664,8 @@ function renderAudioMix(view) {
         row.querySelector('output').textContent = `${Math.round(mix.gain*100)}%`;
     }
     $('audio-mix').classList.toggle('hidden', !view.audio?.enabled?.some(Boolean));
+    $('preview-audio').classList.toggle('hidden', !view.audio?.enabled?.some(Boolean));
+    $('preview-audio-enabled').checked = state.previewSound;
 }
 
 function showHint(message, isError = true) {
@@ -668,8 +689,13 @@ function edit(command) {
         epoch = state.epoch;
     editTail = editTail.catch(() => {}).then(async () => {
         if (!sessionId || epoch !== state.epoch) return;
-        setPlaying(false);
+        const liveMix = command.type === 'set_audio' || command.type === 'set_loop';
+        const liveSpeed = command.type === 'set_speed';
+        if (!liveMix && !liveSpeed) setPlaying(false);
+        if (!liveMix) state.previewMix = null;
         const source = currentPlaySrc();
+        let retiming = false;
+        state.editing = true;
         try {
             const view = await invoke('gif_edit', {
                 sessionId,
@@ -678,6 +704,24 @@ function edit(command) {
                 revision: state.view.revision
             });
             if (epoch !== state.epoch || view.revision < state.view.revision) return;
+            if (liveMix) {
+                // 混音/循环不改变帧位置，保留播放时钟与有界元数据缓存。
+                state.view = {...state.view, ...view};
+                pages.reset(sessionId, view.revision, true);
+                renderAudioMix(state.view);
+                renderControls();
+                updatePlayProgress();
+                exportController.invalidate?.();
+                return;
+            }
+            let anchor = null;
+            if (liveSpeed) {
+                retiming = state.retiming = true;
+                playGeneration++; clearTimeout(state.playTimer); querySerial++;
+                const at = positionMs();
+                const frame = pages.cached({timeMs: Math.floor(at)}) || state.current;
+                if (frame) anchor = {source: frame.srcIdx, ratio: Math.max(0, Math.min(1, (at - frame.startMs) / frame.durMs))};
+            }
             state.view = {
                 ...state.view,
                 ...view
@@ -689,7 +733,17 @@ function edit(command) {
             state.liveThumbs.clear();
             renderAudioMix(state.view);
             renderControls();
-            if (view.effectiveCount) await locate(source == null ? {play: 0} : {source});
+            if (view.effectiveCount) {
+                const target = anchor?.source ?? source;
+                const frame = await locate(target == null ? {play: 0} : {source: target});
+                if (epoch !== state.epoch) return;
+                if (anchor && frame) {
+                    state.seekInFrameMs = anchor.ratio * frame.durMs;
+                    state.frameShownAt = performance.now() - state.seekInFrameMs;
+                    if (state.playing) state.playClockAt = performance.now() - frame.startMs - state.seekInFrameMs;
+                    renderPreview();
+                }
+            }
             else {
                 state.current = null;
                 state.playIdx = 0;
@@ -700,12 +754,24 @@ function edit(command) {
             exportController.invalidate?.();
         } catch (error) {
             if (epoch === state.epoch) showHint(normalizeError(error).message);
+        } finally {
+            if (epoch === state.epoch) state.editing = false;
+            if (retiming && epoch === state.epoch) {
+                state.retiming = false;
+                if (state.playing) void playTick();
+            }
         }
     });
     return editTail;
 }
 async function loadSession(sessionId) {
     setPlaying(false);
+    durationSerial++; durationKey = '';
+    els.durClear.disabled = true;
+    els.durInput.disabled = true;
+    state.retiming = false;
+    state.editing = false;
+    state.previewMix = null;
     audioPlayback.clear();
     const epoch = ++state.epoch;
     querySerial++;
@@ -749,7 +815,7 @@ async function loadSession(sessionId) {
     });
     pages.reset(sessionId, view.revision);
     state.previewWidth = Math.min(view.meta.width, Math.max(80, Math.ceil(($('preview-stage').clientWidth || 800) *
-        devicePixelRatio)));
+        devicePixelRatio)), 1280);
     void audioPlayback.load(sessionId, view.audio?.enabled);
     renderAudioMix(view);
     renderSessionHeader();
@@ -876,33 +942,67 @@ els.speed.addEventListener('change', () => edit(commands.setSpeed(Number(els.spe
 els.loop.addEventListener('change', () => edit(commands.setLoop(els.loop.value === '' ? null : Number(els.loop
 .value))));
 els.btnDelete.addEventListener('click', () => editSelection('delete'));
-els.durClear.addEventListener('click', () => editSelection('hold', 0));
+els.durClear.addEventListener('click', () => {
+    els.durClear.disabled = true;
+    return editSelection('hold', 0);
+});
 els.durInput.addEventListener('change', () => {
     const n = Number(els.durInput.value);
-    if (Number.isFinite(n)) void editSelection('hold', Math.min(6000, Math.max(10, n)));
+    if (els.durInput.value.trim() && Number.isFinite(n)) void editSelection('hold', Math.min(6000, Math.max(10, n)));
 });
+els.durInput.addEventListener('blur', () => {
+    durationKey = '';
+    if (state.view) refreshSelectionDuration();
+});
+let audioMixVersion = 0;
 for (let i = 0; i < 2; i++) {
     const row = $(`audio-mix-${i}`);
-    row.addEventListener('input', () => {
-        row.querySelector('output').textContent = `${row.querySelector('input[type="range"]').value}%`;
-    });
-    row.addEventListener('change', () => edit({
-        type: 'set_audio',
-        source: i,
+    const readMix = () => ({
         gain: Number(row.querySelector('input[type="range"]').value) / 100,
         muted: row.querySelector('input[type="checkbox"]').checked
-    }));
+    });
+    const previewMix = () => {
+        state.previewMix = Array.from({length: 2}, (_, source) => ({gain: 1, muted: false, ...(state.previewMix || state.view.mix)?.[source]}));
+        state.previewMix[i] = readMix();
+        updatePlayProgress();
+    };
+    row.addEventListener('input', () => {
+        audioMixVersion++;
+        row.querySelector('output').textContent = `${row.querySelector('input[type="range"]').value}%`;
+        if (state.view) previewMix();
+    });
+    row.addEventListener('change', () => {
+        const version = ++audioMixVersion, epoch = state.epoch;
+        previewMix();
+        return edit({type: 'set_audio', source: i, ...readMix()}).finally(() => {
+            if (epoch !== state.epoch || version !== audioMixVersion) return;
+            state.previewMix = null;
+            renderAudioMix(state.view); updatePlayProgress();
+        });
+    });
 }
+$('preview-audio-enabled').addEventListener('change', event => {
+    state.previewSound = event.target.checked;
+    // 预览静音只暂停源轨；继续播放的画面不必反复释放/重开音频上下文。
+    updatePlayProgress();
+});
 els.stopBannerClose.addEventListener('click', () => els.stopBanner.classList.add('hidden'));
 document.addEventListener('keydown', e => {
-    if (els.dialog.open || ['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement?.tagName) ||
-        document.activeElement?.closest('.editor-select-trigger, .editor-select-menu')) return;
+    const target = document.activeElement;
+    if (els.dialog.open || !state.view || els.editorRoot.classList.contains('hidden') ||
+        e.isComposing || e.ctrlKey || e.altKey || e.metaKey ||
+        target?.isContentEditable || target?.tagName === 'TEXTAREA' || target?.tagName === 'SELECT' ||
+        (target?.tagName === 'INPUT' && !['checkbox', 'radio', 'range', 'button'].includes(target.type)) ||
+        target?.closest('.editor-select-menu')) return;
+    if (e.code === 'Space') {
+        e.preventDefault(); e.stopPropagation();
+        if (!e.repeat) setPlaying(!state.playing);
+        return;
+    }
+    if (target?.tagName === 'INPUT' || target?.closest('.editor-select-trigger')) return;
     if (document.activeElement === els.seekBar && e.code !== 'Space' && !['Delete', 'Backspace'].includes(e
             .code)) return;
-    if (e.code === 'Space') {
-        e.preventDefault();
-        setPlaying(!state.playing);
-    } else if (e.code === 'ArrowLeft') {
+    if (e.code === 'ArrowLeft') {
         e.preventDefault();
         stepFrame(-1);
     } else if (e.code === 'ArrowRight') {
@@ -912,7 +1012,7 @@ document.addEventListener('keydown', e => {
         e.preventDefault();
         void editSelection('delete');
     }
-});
+}, true);
 const exportController = createExportController();
 $('btn-discard-recording').addEventListener('click', async () => {
     const sessionId = state.sessionId;
@@ -954,7 +1054,7 @@ window.addEventListener('beforeunload', () => exportController.dispose());
 
 function refreshPreviewSize() {
     if (!state.view) return;
-    const width = Math.min(state.view.meta.width, Math.max(80, Math.ceil(($('preview-stage').clientWidth || 800) * devicePixelRatio)));
+    const width = Math.min(state.view.meta.width, Math.max(80, Math.ceil(($('preview-stage').clientWidth || 800) * devicePixelRatio)), 1280);
     if (width === state.previewWidth) return;
     state.previewWidth = width;
     for (const image of state.previewCache.values()) image.close();

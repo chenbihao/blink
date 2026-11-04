@@ -1,3 +1,4 @@
+import {createPreparationLease} from './recording-preparation.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
@@ -10,10 +11,10 @@ test('preparation drag preserves the real screenshot presentation cleanup contra
     const ss={toolbar,annotCanvas:canvas,sizeHint:hint,selCss:{x:300,y:200,w:640,h:300},selectionRevision:0,translationRevision:0};
     const state=createRecordingSession();state.reset('ready');
     let committed=0;
-    const context=vm.createContext({ss,state,
+    const context=vm.createContext({createPreparationLease,ss,state,
         window:{innerWidth:1920,innerHeight:1080,__blinkScreenMeta:{}},document:{getElementById:()=>null},
         annot:{clearOverlay(){}},resetQrPanel(){},updateOutputButtonsDisabled(){},exitReadingMode(){},updateOverlayButtonsActive(){},
-        closeRecordingPanel(){},cssRectToBitmap:r=>r,drawFinalSelection(){committed++;},updateLiveSelection(){}});
+        closeRecordingPanel(){},cssPointToScreen:(x,y)=>({x,y}),cssRectToBitmap:r=>r,drawFinalSelection(){committed++;},updateLiveSelection(){}});
     const index=readFileSync(new URL('./index.js',import.meta.url),'utf8');
     const a=index.indexOf('function invalidateSelectionContent('),b=index.indexOf('// ═',a);
     vm.runInContext(index.slice(a,b),context);

@@ -11,7 +11,7 @@
   仍沿用历史 `gif-editor` / `gif_*`，不为改名机械迁移）。
   - 会话：加载后 `gif_editor_current` 拉取；复用窗口换会话走
     `blink://gif-editor-session` 事件。
-  - 预览：canvas 逐帧播放（帧按需 `gif_get_frames` 解码，PNG base64）；
+  - 预览：canvas 逐帧播放（`gif_get_preview_frame` 二进制 RGBA，有界预取）；
     时间轴分页缩略图懒加载，不整段驻内存。
   - 进度条：可聚焦滑块——单击定位 / 按住拖动连续浏览 / 方向键与 Home/End /
     悬浮显示目标帧与时间；定位按编辑后有效时长前缀和映射，不改编辑多选。
@@ -33,12 +33,12 @@
             <span class="meta" id="session-meta"></span>
         </div>
         <div class="topbar-actions">
+            <button class="btn btn-icon" data-i18n-title="gif.editor.discard" id="btn-discard-recording" title="删除当前录制" type="button">
+                <svg aria-hidden="true" class="icon"><use href="#icon-trash-2"/></svg>
+            </button>
             <button class="btn" data-i18n-title="gif.recent.title" id="btn-recent" title="最近录制" type="button">
                 <svg aria-hidden="true" class="icon"><use href="#icon-list"/></svg>
                 <span data-i18n="gif.recent.title">最近录制</span>
-            </button>
-            <button class="btn btn-icon" data-i18n-title="gif.editor.discard" id="btn-discard-recording" title="删除当前录制" type="button">
-                <svg aria-hidden="true" class="icon"><use href="#icon-trash-2"/></svg>
             </button>
             <button class="btn" data-i18n-title="gif.editor.export.title" id="btn-export" title="导出 GIF 或 MP4 文件" type="button">
                 <svg aria-hidden="true" class="icon"><use href="#icon-save"/></svg>
@@ -74,6 +74,10 @@
             <span class="preview-dur" id="preview-dur"></span>
             <span class="total-dur" id="total-dur">总时长 0.0s</span>
             <span class="spacer"></span>
+            <label class="preview-audio hidden" id="preview-audio" data-i18n-title="gif.audio.previewOnly" title="仅控制预览声音，不改变导出">
+                <span class="switch switch-sm"><input id="preview-audio-enabled" type="checkbox" role="switch" checked data-i18n-aria-label="gif.audio.previewSound" aria-label="预览声音"/><span class="slider"></span></span>
+                <span data-i18n="gif.audio.previewSound">预览声音</span>
+            </label>
             <label class="param" data-i18n-title="gif.editor.speed.title" title="全局速度因子">
                 <span data-i18n="gif.editor.speed">速度</span>
                 <select id="sel-speed">
@@ -87,8 +91,8 @@
             <label class="param" data-i18n-title="gif.editor.frameDur.title" title="所选帧在全局变速前的停留时长（ms，10–6000；多选批量应用，单次撤销）">
                 <span data-i18n="gif.editor.frameDur">停留（变速前）</span>
                 <input id="inp-dur" max="6000" min="10" placeholder="—" step="10" type="number"/>
-                <button class="btn btn-icon" data-i18n-title="gif.editor.frameDur.clear" id="btn-dur-clear" title="恢复自动时长（清除手动设置）" type="button">
-                    <svg aria-hidden="true" class="icon"><use href="#icon-x"/></svg>
+                <button class="btn btn-icon" data-i18n-title="gif.editor.frameDur.clear" id="btn-dur-clear" disabled title="恢复自动时长（清除手动设置）" type="button">
+                    <svg aria-hidden="true" class="icon"><use href="#icon-rotate-ccw"/></svg>
                 </button>
             </label>
             <label class="param" data-i18n-title="gif.editor.loop.title" title="循环次数">
@@ -102,10 +106,10 @@
         </div>
     </section>
 
-    <section class="audio-mix hidden" id="audio-mix" aria-label="音轨混音（可撤销）">
-        <span data-i18n="gif.audio.mix">音轨混音（可撤销）</span>
-        <label id="audio-mix-0"><span data-i18n="gif.audio.microphone">麦克风</span> <input aria-label="麦克风音量" type="range" min="0" max="200" step="5" value="100"/><output>100%</output><input type="checkbox"/><span data-i18n="gif.audio.mute">编辑器静音</span></label>
-        <label id="audio-mix-1"><span data-i18n="gif.audio.system">系统声音</span> <input aria-label="系统声音音量" type="range" min="0" max="200" step="5" value="100"/><output>100%</output><input type="checkbox"/><span data-i18n="gif.audio.mute">编辑器静音</span></label>
+    <section class="audio-mix hidden" id="audio-mix" data-i18n-aria-label="gif.audio.mix" aria-label="音轨混音（预览及导出，可撤销）">
+        <span data-i18n="gif.audio.mix">音轨混音（预览及导出，可撤销）</span>
+        <div class="audio-mix-track" id="audio-mix-0"><span data-i18n="gif.audio.microphone">麦克风</span> <input aria-label="麦克风音量" type="range" min="0" max="200" step="5" value="100"/><output>100%</output><label><span class="switch switch-sm"><input type="checkbox" role="switch" data-i18n-aria-label="gif.audio.muteMicrophone" aria-label="麦克风静音（影响导出）"/><span class="slider"></span></span><span data-i18n="gif.audio.mute">静音（影响导出）</span></label></div>
+        <div class="audio-mix-track" id="audio-mix-1"><span data-i18n="gif.audio.system">系统声音</span> <input aria-label="系统声音音量" type="range" min="0" max="200" step="5" value="100"/><output>100%</output><label><span class="switch switch-sm"><input type="checkbox" role="switch" data-i18n-aria-label="gif.audio.muteSystem" aria-label="系统声音静音（影响导出）"/><span class="slider"></span></span><span data-i18n="gif.audio.mute">静音（影响导出）</span></label></div>
     </section>
 
     <!-- 时间轴：全量连续缩略图（虚拟化渲染——只建可视区 DOM，滚动懒解码；

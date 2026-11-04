@@ -150,6 +150,32 @@ fn real_loopback_has_energy_in_preview_and_saved_pcm() {
                 .max()
                 .unwrap_or(0);
             assert!(energy > 32, "saved loopback is silent (peak={energy})");
+            // 旧实现虽有能量，但每个回调块可能插入 2–34 帧零洞。跳过启动/停止，
+            // 连续测试音的内部不能出现两侧非零的多帧静音。
+            let frames: Vec<[i16; 2]> = pcm
+                .chunks_exact(4)
+                .map(|b| {
+                    [
+                        i16::from_le_bytes([b[0], b[1]]),
+                        i16::from_le_bytes([b[2], b[3]]),
+                    ]
+                })
+                .collect();
+            let interior = &frames[4800..frames.len() - 4800];
+            let mut holes = 0;
+            let mut zeros = 0;
+            for frame in interior {
+                if *frame == [0, 0] {
+                    zeros += 1;
+                } else {
+                    if zeros >= 2 {
+                        holes += 1;
+                    }
+                    zeros = 0;
+                }
+            }
+            tracing::info!(energy, holes, "真实 loopback 连续波形验证");
+            assert_eq!(holes, 0, "连续 loopback 音频存在块边界零洞");
             let audio = manifest(temp.path()).unwrap().unwrap();
             assert!(audio.complete && audio.committed_ms >= 600);
         }

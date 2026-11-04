@@ -43,7 +43,21 @@
 <!-- 0.28.23：录制范围框——overlay 录制叠层模式下替代原 gif-region 窗口。
      边框画在录制区域外侧（窗口 DOM，不入 BitBlt 采集矩形内的成品——边框
      中心线落在区域边界上、外半在区域外）；随区域移动由 JS 同步。 -->
-<div aria-hidden="true" class="gif-region-frame hidden" id="gif-region-frame"></div>
+<div aria-hidden="true" class="gif-region-frame hidden" id="gif-region-frame" data-resizable="false">
+    <span class="gif-prep-size" id="gif-prep-size"></span>
+    <span class="gif-prep-edge" data-recording-edge="n"></span>
+    <span class="gif-prep-edge" data-recording-edge="e"></span>
+    <span class="gif-prep-edge" data-recording-edge="s"></span>
+    <span class="gif-prep-edge" data-recording-edge="w"></span>
+    <span class="gif-prep-handle" data-recording-resize="nw"></span>
+    <span class="gif-prep-handle" data-recording-resize="n"></span>
+    <span class="gif-prep-handle" data-recording-resize="ne"></span>
+    <span class="gif-prep-handle" data-recording-resize="e"></span>
+    <span class="gif-prep-handle" data-recording-resize="se"></span>
+    <span class="gif-prep-handle" data-recording-resize="s"></span>
+    <span class="gif-prep-handle" data-recording-resize="sw"></span>
+    <span class="gif-prep-handle" data-recording-resize="w"></span>
+</div>
 
 <!-- 标注 canvas：覆盖在裁剪区上，显示标注内容（0.11.7-b）。
      录制叠层模式下兼作实时涂画层：底图已清、透明区域透出桌面，
@@ -146,18 +160,30 @@
     <!-- 录制只替换输出区；原标注工具始终留在 #toolbar 内。 -->
     <div id="gif-recording-bar" class="toolbar-group recording-bar">
         <button type="button" class="tool-btn" id="gif-rec-move" aria-label="拖动录制区域与工具栏"><svg aria-hidden="true" class="icon"><use href="#icon-hand-grab"/></svg></button>
+        <span class="toolbar-divider"></span>
         <input type="hidden" id="gif-prep-fps" value="15"/>
-        <button type="button" class="tool-btn recording-select recording-fps-select" data-recording-select="gif-prep-fps" aria-label="录制帧率"><span class="recording-select-label">15 fps</span><svg aria-hidden="true" class="icon"><use href="#icon-chevron-down"/></svg></button>
-        <button type="button" class="tool-btn recording-sound" id="gif-audio-open" aria-haspopup="dialog" aria-expanded="false"><span id="gif-audio-label">无声</span><span class="gif-audio-meters" id="gif-audio-meters"><span class="audio-source audio-inactive" data-source="0"><span class="audio-level" aria-hidden="true"><i class="audio-level-segment" data-level="1"></i><i class="audio-level-segment" data-level="2"></i><i class="audio-level-segment" data-level="3"></i><i class="audio-level-segment" data-level="4"></i><i class="audio-level-segment" data-level="5"></i><i class="audio-level-segment" data-level="6"></i><i class="audio-level-segment" data-level="7"></i><i class="audio-level-segment" data-level="8"></i><i class="audio-level-segment" data-level="9"></i><i class="audio-level-segment" data-level="10"></i></span></span><span class="audio-source audio-inactive" data-source="1"><span class="audio-level" aria-hidden="true"><i class="audio-level-segment" data-level="1"></i><i class="audio-level-segment" data-level="2"></i><i class="audio-level-segment" data-level="3"></i><i class="audio-level-segment" data-level="4"></i><i class="audio-level-segment" data-level="5"></i><i class="audio-level-segment" data-level="6"></i><i class="audio-level-segment" data-level="7"></i><i class="audio-level-segment" data-level="8"></i><i class="audio-level-segment" data-level="9"></i><i class="audio-level-segment" data-level="10"></i></span></span></span><svg aria-hidden="true" class="icon"><use href="#icon-chevron-down"/></svg></button>
+        <div class="recording-split recording-fps-select" role="group" aria-label="录制帧率">
+            <button type="button" class="tool-btn recording-select" data-recording-select="gif-prep-fps" aria-label="切换录制帧率"><span class="recording-select-label">15 fps</span></button>
+            <button type="button" class="tool-btn recording-menu-toggle" data-recording-menu="gif-prep-fps" aria-haspopup="listbox" aria-expanded="false" aria-label="展开帧率选项"><svg aria-hidden="true" class="icon"><use href="#icon-chevron-down"/></svg></button>
+        </div>
+        <span class="toolbar-divider"></span>
+        <div class="recording-split recording-sound" role="group" aria-label="录制声音来源">
+            <button type="button" class="tool-btn recording-sound-main" id="gif-audio-open" aria-label="切换声音来源"><span id="gif-audio-label">无声</span><span class="gif-audio-meters" id="gif-audio-meters"><span class="audio-source audio-inactive" data-source="0"><span class="audio-level" aria-hidden="true"><i class="audio-level-fill"></i><i class="audio-level-peak"></i></span></span><span class="audio-source audio-inactive" data-source="1"><span class="audio-level" aria-hidden="true"><i class="audio-level-fill"></i><i class="audio-level-peak"></i></span></span></span></button>
+            <button type="button" class="tool-btn recording-menu-toggle" id="gif-audio-menu" aria-haspopup="dialog" aria-controls="gif-audio-settings" aria-expanded="false" aria-label="展开声音来源设置"><svg aria-hidden="true" class="icon"><use href="#icon-chevron-down"/></svg></button>
+        </div>
+        <span class="toolbar-divider"></span>
         <button type="button" class="tool-btn recording-summary" id="gif-recording-status" aria-haspopup="dialog" aria-expanded="false">
             <span class="recording-time-line"><span class="gif-rec-dot"></span><span class="gif-rec-time" id="gif-rec-time">00:00</span></span>
-            <span class="recording-storage" id="gif-rec-storage">—</span>
         </button>
-        <button type="button" class="tool-btn recording-start" id="gif-record-toggle"><span class="recording-start-dot"></span><svg aria-hidden="true" class="icon hidden"><use href="#icon-pause"/></svg><svg aria-hidden="true" class="icon hidden"><use href="#icon-play"/></svg><span id="gif-record-toggle-label">开始</span></button>
-        <button type="button" class="tool-btn recording-stop" id="gif-rec-stop" aria-label="结束"><svg aria-hidden="true" class="icon"><use href="#icon-square"/></svg><span id="gif-rec-stop-label">结束</span></button>
-        <button type="button" class="tool-btn" id="gif-record-exit" aria-label="退出录制"><svg aria-hidden="true" class="icon"><use href="#icon-x"/></svg><span id="gif-record-exit-label">退出</span></button>
         <span class="toolbar-divider"></span>
-        <button type="button" class="tool-btn" id="gif-rec-draw" aria-pressed="false" aria-expanded="false" aria-label="涂画"><svg aria-hidden="true" class="icon"><use href="#icon-pencil"/></svg></button>
+        <button type="button" class="tool-btn recording-start" id="gif-record-toggle"><svg aria-hidden="true" class="icon hidden"><use href="#icon-pause"/></svg><svg aria-hidden="true" class="icon"><use href="#icon-play"/></svg><span id="gif-record-toggle-label">开始</span></button>
+        <span class="toolbar-divider"></span>
+        <div class="recording-finish">
+            <button type="button" class="tool-btn recording-stop" id="gif-rec-stop" hidden aria-haspopup="menu" aria-controls="gif-recording-finish-menu" aria-expanded="false" aria-label="完成"><svg aria-hidden="true" class="icon"><use href="#icon-square"/></svg><span id="gif-rec-stop-label">完成</span></button>
+            <button type="button" class="tool-btn" id="gif-record-exit" aria-label="退出录制"><svg aria-hidden="true" class="icon"><use href="#icon-x"/></svg><span id="gif-record-exit-label">退出</span></button>
+        </div>
+        <span class="toolbar-divider"></span>
+        <button type="button" class="tool-btn" id="gif-rec-draw" aria-pressed="false" aria-expanded="false" aria-label="展开涂画工具"><svg aria-hidden="true" class="icon"><use href="#icon-paintbrush"/></svg><svg aria-hidden="true" class="icon recording-draw-chevron"><use href="#icon-chevron-right"/></svg></button>
     </div>
 
     <!-- 选取工具（0.11.10-a/k）：默认工具，负责选区重选、移动和缩放。
@@ -663,11 +689,14 @@
     <div class="recording-panel-title" data-recording-text="gif.rec.sound">录制声音来源</div>
     <input type="hidden" id="gif-audio-mode" value="silent"/>
     <div class="recording-sources" role="group" aria-label="录制声音来源"><button type="button" class="recording-option" data-audio-mode="silent" aria-pressed="true" data-recording-text="gif.rec.silent">无声</button><button type="button" class="recording-option" data-audio-mode="microphone" aria-pressed="false" data-recording-text="gif.audio.microphone">麦克风</button><button type="button" class="recording-option" data-audio-mode="system" aria-pressed="false" data-recording-text="gif.audio.system">系统声音</button><button type="button" class="recording-option" data-audio-mode="both" aria-pressed="false" data-recording-text="gif.rec.bothShort">双声源</button></div>
-    <section id="gif-audio-field-0" class="hidden"><div class="recording-device-heading"><span class="recording-device-title" data-recording-text="gif.audio.microphone">麦克风</span><button type="button" class="recording-mute" data-audio-mute="0" aria-pressed="false"></button></div><input type="hidden" id="gif-audio-device-0"/><div id="gif-audio-devices-0" class="recording-device-list" role="group" aria-label="麦克风设备"></div><output class="recording-level-value" id="gif-audio-level-0"></output></section>
-    <section id="gif-audio-field-1" class="hidden"><div class="recording-device-heading"><span class="recording-device-title" data-recording-text="gif.audio.system">系统声音</span><button type="button" class="recording-mute" data-audio-mute="1" aria-pressed="false"></button></div><input type="hidden" id="gif-audio-device-1"/><div id="gif-audio-devices-1" class="recording-device-list" role="group" aria-label="系统声音设备"></div><output class="recording-level-value" id="gif-audio-level-1"></output></section>
+    <section id="gif-audio-field-0" class="hidden"><div class="recording-device-heading"><span class="recording-device-title" data-recording-text="gif.audio.microphone">麦克风</span><span class="audio-source audio-inactive" data-source="0"><span class="audio-level" aria-hidden="true"><i class="audio-level-fill"></i><i class="audio-level-peak"></i></span></span><button type="button" class="recording-mute" data-audio-mute="0" aria-pressed="false"></button></div><input type="hidden" id="gif-audio-device-0"/><div id="gif-audio-devices-0" class="recording-device-list" role="group" aria-label="麦克风设备"></div></section>
+    <section id="gif-audio-field-1" class="hidden"><div class="recording-device-heading"><span class="recording-device-title" data-recording-text="gif.audio.system">系统声音</span><span class="audio-source audio-inactive" data-source="1"><span class="audio-level" aria-hidden="true"><i class="audio-level-fill"></i><i class="audio-level-peak"></i></span></span><button type="button" class="recording-mute" data-audio-mute="1" aria-pressed="false"></button></div><input type="hidden" id="gif-audio-device-1"/><div id="gif-audio-devices-1" class="recording-device-list" role="group" aria-label="系统声音设备"></div></section>
     <p id="gif-audio-device-note" data-recording-text="gif.rec.previewNote">准备时实时试音，开始录制后才保存声音。</p>
     <p id="gif-audio-error" role="status"></p>
     <button type="button" class="recording-option" id="gif-audio-close" data-recording-text="gif.rec.close">收起</button>
+</section>
+<section id="gif-recording-finish-menu" class="recording-panel recording-finish-menu hidden" role="menu" aria-label="录制操作">
+    <button type="button" class="recording-option recording-danger" id="gif-rec-discard" role="menuitem" data-recording-text="gif.rec.discardAction">撤销录制</button>
 </section>
 <section id="gif-discard-confirm" class="recording-panel recording-confirm hidden" role="dialog" aria-label="丢弃录制">
     <p data-recording-text="gif.rec.confirm">丢弃本次录制？素材和声音将被删除。</p>

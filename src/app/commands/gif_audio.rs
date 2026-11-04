@@ -35,11 +35,8 @@ pub async fn gif_audio_monitor(
     let handle = app.clone();
     let monitored = tauri::async_runtime::spawn_blocking(move || {
         let service = handle.state::<Arc<GifService>>();
-        let mut preview = service
-            .audio_preview
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        preview.take();
+        // 与正式录制启动共用所有权门，避免试音迟到占用录制的设备。
+        let _session = service.lock_overlay_session();
         if let Some(options) = options.filter(|v| v.mode != audio::AudioMode::Silent) {
             if service
                 .recording
@@ -49,18 +46,15 @@ pub async fn gif_audio_monitor(
             {
                 return Err(error("录制期间不能启动试音"));
             }
-            let mut session = recording::Session::new(audio::shared(options), None);
-            session.resume(0).map_err(error)?;
-            let shared = session.shared.clone();
-            *preview = Some(session);
-            Ok(Some(shared))
+            Ok(Some(service.audio_preview.configure(options)))
         } else {
+            service.audio_preview.stop();
             Ok(None)
         }
     })
     .await
     .map_err(|_| error("声音试音任务失败"))??;
-    if let Some(shared) = monitored {
+    if let Some(generation) = monitored {
         tauri::async_runtime::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
@@ -68,18 +62,10 @@ pub async fn gif_audio_monitor(
                     .get_webview_window("chord-screenshot")
                     .is_some_and(|window| window.is_visible().unwrap_or(false));
                 let service = app.state::<Arc<GifService>>().inner().clone();
-                let monitored = shared.clone();
                 // 试音启动和设备释放可能占锁并 join worker，检测与释放均留在 blocking 池。
                 let current = tauri::async_runtime::spawn_blocking(move || {
-                    let mut preview = service
-                        .audio_preview
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner());
-                    let current = preview
-                        .as_ref()
-                        .is_some_and(|p| Arc::ptr_eq(&p.shared, &monitored));
-                    if current && !visible {
-                        preview.take();
+                    let current = service.audio_preview.generation() == generation;
+                    if current && !visible && service.audio_preview.stop_if_generation(generation) {
                         tracing::info!("录制准备窗口已隐藏，释放试音设备");
                     }
                     current
@@ -102,19 +88,7 @@ pub fn gif_audio_monitor_status(
 ) -> Result<AudioStatus, CommandError> {
     overlay(&window)?;
     let service = app.state::<Arc<GifService>>();
-    let preview = service
-        .audio_preview
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    Ok(preview
-        .as_ref()
-        .map(|s| {
-            s.shared
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .snapshot()
-        })
-        .unwrap_or_default())
+    Ok(service.audio_preview.snapshot())
 }
 #[tauri::command]
 pub fn gif_audio_control(

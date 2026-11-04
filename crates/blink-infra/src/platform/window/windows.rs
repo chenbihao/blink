@@ -3404,6 +3404,18 @@ unsafe extern "system" fn screenshot_overlay_dpichanged_proc(
     _uidsubclass: usize,
     _dwrefdata: usize,
 ) -> LRESULT {
+    // tao 的 set_ignore_cursor_events(false) 会连带移除 WS_EX_LAYERED。
+    // 全屏透明浮层因而被 Chromium 当作不透明遮挡，底下视频会停止呈现。
+    // 在原生样式提交前保留录制浮层身份，穿透/焦点仍由框架原有标志控制。
+    if msg == windows::Win32::UI::WindowsAndMessaging::WM_STYLECHANGING
+        && wparam.0 as i32 == windows::Win32::UI::WindowsAndMessaging::GWL_EXSTYLE.0
+        && OVERLAY_RECORD_ACTIVE.load(Ordering::SeqCst)
+        && lparam.0 != 0
+    {
+        use windows::Win32::UI::WindowsAndMessaging::{STYLESTRUCT, WS_EX_LAYERED, WS_EX_TOOLWINDOW};
+        let style = unsafe { &mut *(lparam.0 as *mut STYLESTRUCT) };
+        style.styleNew |= WS_EX_LAYERED.0 | WS_EX_TOOLWINDOW.0;
+    }
     if msg == WM_DPICHANGED && OVERLAY_PIN_ACTIVE.load(Ordering::SeqCst) {
         let pin = (
             OVERLAY_PIN_X.load(Ordering::SeqCst),
@@ -3442,7 +3454,11 @@ unsafe extern "system" fn screenshot_overlay_dpichanged_proc(
     unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
 }
 
-/// 主线程上给截图 overlay HWND 安装 DPICHANGED 拦截子类（幂等，HWND 变化后重装）。
+#[cfg(test)]
+#[path = "recording_overlay_tests.rs"]
+mod tests_recording_overlay;
+
+/// 主线程上给截图 overlay HWND 安装 DPI/录制样式拦截子类（幂等，HWND 变化后重装）。
 fn ensure_screenshot_overlay_subclass(app: &AppHandle, hwnd_raw: isize) {
     if OVERLAY_SUBCLASSED_HWND.load(Ordering::SeqCst) == hwnd_raw {
         return;

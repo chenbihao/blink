@@ -89,6 +89,8 @@ export function bindEditorSelects(documentRef = document) {
     }
     window.addEventListener('resize', () => close());
     documentRef.addEventListener('scroll', event => {
+        // 播放头会自动横滚时间轴，参数菜单的锚点没有移动。
+        if (event.target.id === 'timeline-scroll') return;
         if (opened?.menu.contains(event.target)) return;
         close();
     }, true);

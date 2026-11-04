@@ -13,12 +13,14 @@
 
 pub mod annotation;
 pub mod audio;
+pub(crate) mod audio_capture;
 pub mod capture;
 mod capture_ahead;
 #[cfg(target_os = "windows")]
 pub mod capture_windows;
 pub mod encode;
 pub mod overload;
+pub mod preview;
 pub mod space;
 pub mod spool;
 pub mod timing;

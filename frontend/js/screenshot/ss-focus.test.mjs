@@ -47,7 +47,7 @@ function harness() {
     };
     let editorLoads = 0;
     const context = {
-        isRecordingStarting:()=>false, isGifRecActive: () => false, restoreRecordingOverlay: async () => true,
+        isRecordingStarting:()=>false, isGifRecActive: () => false, isGifPrepActive:()=>false, restoreRecordingOverlay: async () => true,
         ss, document, frames, performance, annotationOperationShortcut,
         console: {debug() {}, info() {}, warn() {}, error() {}},
         IMAGE_SOURCE: {LONG_SCREENSHOT: 'long-screenshot', CLIPBOARD: 'clipboard', PIN: 'pin'},
@@ -79,10 +79,11 @@ function harness() {
 }
 
 test('repeated screenshot during recording or startup never clears the recording host', async () => {
-    for (const phase of ['recording', 'starting']) {
+    for (const phase of ['ready', 'recording', 'starting']) {
         const h = harness();
         let restored = 0;
         h.context.isGifRecActive = () => phase === 'recording';
+        h.context.isGifPrepActive = () => phase === 'ready';
         h.context.isRecordingStarting = () => phase === 'starting';
         h.context.restoreRecordingOverlay = async () => {restored++; return true;};
         const previous = h.context.window.__blinkScreenMeta;

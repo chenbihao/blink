@@ -5,12 +5,19 @@ export class TimelinePages {
         this.inflight = new Set();
         this.reset(null, 0);
     }
-    reset(sessionId, revision) {
+    reset(sessionId, revision, keepFrames = false) {
+        const retain = keepFrames && sessionId === this.sessionId;
         this.generation = (this.generation || 0) + 1;
         this.sessionId = sessionId;
         this.revision = revision;
-        this.playPages = new Map();
-        this.sourcePages = new Map();
+        if (!retain) {
+            this.playPages = new Map();
+            this.sourcePages = new Map();
+            this.selectionPages = new Map();
+        } else {
+            for (const cache of [this.playPages, this.sourcePages, this.selectionPages])
+                for (const value of cache.values()) value.revision = revision;
+        }
         this.pending = new Map();
     }
     async query(key, request, cache) {
@@ -41,13 +48,18 @@ export class TimelinePages {
         this.inflight.add(task);
         return task;
     }
-    async locate(request) {
+    cached(request) {
         for (const page of this.playPages.values()) {
             const frame = page.frames.find(f => request.play != null ? f.playIdx === request.play :
                 request.source != null ? f.srcIdx === request.source :
                 f.startMs <= request.timeMs && request.timeMs < f.startMs + f.durMs);
             if (frame) return frame;
         }
+        return null;
+    }
+    async locate(request) {
+        const cached = this.cached(request);
+        if (cached) return cached;
         const key = `play:${JSON.stringify(request)}`;
         const page = await this.query(key, request, this.playPages);
         return page?.frames[0] || null;
@@ -57,5 +69,28 @@ export class TimelinePages {
         return (await this.query(`source:${first}`, {
             sourceOffset: first
         }, this.sourcePages))?.frames || [];
+    }
+    async selection(ranges) {
+        const generation = this.generation;
+        while (this.pending.size >= 4) {
+            await Promise.race([...this.pending.values()].map(p => p.catch(() => null)));
+            if (generation !== this.generation) return null;
+        }
+        return this.query(`selection:${JSON.stringify(ranges)}`, {selection: ranges}, this.selectionPages);
+    }
+    async ahead(first, count) {
+        count = Math.max(0, Math.min(32, count));
+        const generation = this.generation, frames = [];
+        let next = first;
+        while (frames.length < count) {
+            if (!await this.locate({play: next}) || generation !== this.generation) break;
+            const available = new Map();
+            for (const page of this.playPages.values()) for (const frame of page.frames)
+                if (frame.playIdx >= next && frame.playIdx < first + count) available.set(frame.playIdx, frame);
+            const before = next;
+            while (available.has(next) && frames.length < count) frames.push(available.get(next++));
+            if (before === next) break;
+        }
+        return generation === this.generation ? frames : [];
     }
 }

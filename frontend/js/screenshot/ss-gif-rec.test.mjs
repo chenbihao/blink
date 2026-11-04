@@ -1,3 +1,4 @@
+import {createPreparationLease} from './recording-preparation.js';
 //! 录制叠层模式纯逻辑测试（node --test）。
 
 import test from 'node:test';
@@ -10,6 +11,59 @@ import {createRecordingSession} from './recording-session.js';
 // 先注入最小 stub 再动态导入。
 globalThis.window = globalThis.window || {devicePixelRatio: 1, __blinkScreenMeta: {vx: 0, vy: 0}};
 const {placeTextOutsideRegion, unsupportedKindsOf, recordingFrameGeometry, recordingDragDelta} = await import('./ss-gif-rec.js');
+
+test('discard stays behind explicit confirmation and finish only stops and keeps the recording',async()=>{
+    const state=createRecordingSession();state.sessionId='one';state.setMode('recording');
+    const stop={}, confirm={}, keep={focus(){this.focused=true;}}, calls=[];let anchor;
+    const context=vm.createContext({createPreparationLease,state,ss:{},window:{},
+        document:{getElementById:id=>({'gif-rec-stop':stop,'gif-discard-confirm':confirm,'gif-discard-keep':keep})[id]},
+        openRecordingPanel:(panel,trigger)=>{assert.equal(panel,confirm);anchor=trigger;return true;},
+        closeRecordingPanel(){state.cancelArmed=false;},renderRecordingUi(){},t:key=>key,
+        invoke:async(command,args)=>calls.push({command,args}),performance:{now:()=>0},
+    });
+    const source=readFileSync(new URL('./ss-gif-rec.js',import.meta.url),'utf8').replace(/^import .*;\r?$/gm,'').replace(/export /g,'');
+    vm.runInContext(source,context);
+    context.cancelRecording();assert.equal(anchor,stop);assert.equal(calls.length,0);assert.equal(keep.focused,true);
+    await context.confirmDiscard();assert.equal(calls[0].command,'gif_cancel_recording');assert.equal(calls[0].args.sessionId,'one');
+    state.setMode('recording');await context.stopRecording();
+    assert.equal(calls[1].command,'gif_stop_recording');assert.equal(calls.length,2);
+});
+
+test('entering preparation clears only the displayed still image and opens desktop input without starting capture',async()=>{
+    const state=createRecordingSession();state.reset('ready');
+    let cleared=0;const calls=[],styles={},crops=[];
+    const base={width:1920,height:1080,getContext:()=>({clearRect(){cleared++;}})};
+    const frame={style:styles,classList:{remove(){}}};
+    const original={};
+    const ss={selCss:{x:100,y:100,w:640,h:360},screenshot:original,annotCanvas:{width:640,height:360,style:{}}};
+    const context=vm.createContext({createPreparationLease,state,ss,
+        window:{__blinkScreenMeta:{}},document:{getElementById:id=>id==='canvas'?base:id==='gif-region-frame'?frame:null,querySelectorAll:()=>[]},
+        retainToolbarAnchor(){},renderRecordingUi(){},selectTool(){},annot:{updateCropData:(...args)=>crops.push(args)},
+        cssPointToScreen:(x,y)=>({x,y}),cssRectToBitmap:r=>r,screenRectToCss:r=>r,getRenderScale:()=>({scaleX:1,scaleY:1}),
+        clearInterval(){},setInterval:()=>1,
+        invoke:async(command,args)=>{calls.push({command,args});return command==='gif_overlay_prepare'?17:null;},
+    });
+    const source=readFileSync(new URL('./ss-gif-rec.js',import.meta.url),'utf8').replace(/^import .*;\r?$/gm,'').replace(/export /g,'');
+    vm.runInContext(source,context);
+    await context.prepareRecordingTools();
+    assert.equal(cleared,1);assert.equal(ss.screenshot,original,'退出时仍能恢复原截图');
+    assert.deepEqual(crops,[[null,640,360]],'标注层也必须与截图底图脱离');
+    assert.equal(state.active,false);assert.equal(state.preparationId,17);
+    assert.equal(calls[0].command,'gif_overlay_prepare');
+    assert.ok(calls.some(c=>c.command==='gif_overlay_input'&&c.args.desktop&&c.args.preparationId===17));
+    assert.ok(!calls.some(c=>c.command==='gif_start_recording'));
+    const resized={x:110,y:120,w:700,h:400};
+    context.changePreparationSelection(resized,false);
+    assert.deepEqual({...state.regionPhys},{...resized});
+    assert.equal(crops.length,1,'拖动过程只更新几何，不读取旧截图或反复重建画布');
+    context.changePreparationSelection(resized,true);
+    assert.deepEqual(crops.at(-1),[null,700,400]);
+    assert.equal(ss.annotCanvas.width,700);assert.equal(ss.annotCanvas.height,400);
+    state.setMode('starting');
+    context.changePreparationSelection({x:0,y:0,w:900,h:600},true);
+    assert.deepEqual({...state.regionPhys},{...resized},'开始录制后不能再提交准备态尺寸');
+    assert.ok(styles.width,'实时范围框仍可见');
+});
 
 test('the shared grip applies one clamped delta to capture area and toolbar',()=>{
     const region={x:100,y:80,w:640,h:300},viewport={w:1920,h:1080};
@@ -24,7 +78,7 @@ test('capture dragging coalesces native updates and cannot move a replacement re
         state.regionPhys={x:100,y:80,w:640,h:300};
         const calls=[];let resolveMove;
         const ss={selCss:{x:100,y:80,w:640,h:300}};
-        const context=vm.createContext({ss,state,window:{innerWidth:1920,innerHeight:1080,__blinkScreenMeta:{}},
+        const context=vm.createContext({createPreparationLease,ss,state,window:{innerWidth:1920,innerHeight:1080,__blinkScreenMeta:{}},
             document:{getElementById:()=>null,querySelectorAll:()=>[]},
             closeRecordingPanel(){},retainToolbarAnchor(){},renderRecordingUi(){},selectTool(){},
             getRenderScale:()=>({scaleX:1,scaleY:1}),cssPointToScreen:(x,y)=>({x,y}),
@@ -102,7 +156,7 @@ function textFixture(initialPhase = 'recording') {
     const calls = [], paints = [];
     let phase = initialPhase;
     const snapshot = () => ({sessionId: 'one', phase, audio: {}, storage: {}});
-    const context = vm.createContext({state:createRecordingSession(), renderRecordingUi() {}, t:key=>key,
+    const context = vm.createContext({createPreparationLease,state:createRecordingSession(), renderRecordingUi() {}, t:key=>key,
         ss: {selCss: {x: 0, y: 0, w: 1920, h: 1080}},
         document: {getElementById: () => null}, performance, setTimeout,
         requestAnimationFrame: fn => paints.push(fn), applyAudioStatus() {},
@@ -174,7 +228,7 @@ test('录制就绪等待透明层绘制；旧会话 idle 不清理新会话，�
     const paints = [], calls = [], timers = new Set();
     let timerId = 0;
     const recordingState=createRecordingSession();
-    const context = vm.createContext({state:recordingState, renderRecordingUi() {if(recordingState.active) root.classList.add('gif-recording');else root.classList.remove('gif-recording');},
+    const context = vm.createContext({createPreparationLease,state:recordingState, renderRecordingUi() {if(recordingState.active) root.classList.add('gif-recording');else root.classList.remove('gif-recording');},
         ss: {toolbar, selCss: {x: 0, y: 0, w: 100, h: 100}},
         window: {__blinkScreenMeta: {vx: 0, vy: 0, w: 1920, h: 1080}},
         document: {body, documentElement: root, getElementById: () => null, querySelectorAll: () => []},
@@ -219,7 +273,7 @@ test('录制就绪等待透明层绘制；旧会话 idle 不清理新会话，�
 function recoveryFixture() {
     let respond;
     const classes = {remove() {}, add() {}, toggle() {}};
-    const context = vm.createContext({state:createRecordingSession(), renderRecordingUi() {}, t:key=>key,
+    const context = vm.createContext({createPreparationLease,state:createRecordingSession(), renderRecordingUi() {}, t:key=>key,
         ss:{_loadGen:1}, document:{getElementById:()=>null,body:{classList:classes},documentElement:{classList:classes}},
         annot:{setRenderListener() {}}, performance, clearInterval() {}, clearTimeout() {},
         endAudioRecording() {}, closeRecordingPanel() {}, showRecordingMessage() {}, applyAudioStatus() {},
