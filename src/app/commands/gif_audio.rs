@@ -32,8 +32,9 @@ pub async fn gif_audio_monitor(
     options: Option<AudioOptions>,
 ) -> Result<(), CommandError> {
     overlay(&window)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let service = app.state::<Arc<GifService>>();
+    let handle = app.clone();
+    let monitored = tauri::async_runtime::spawn_blocking(move || {
+        let service = handle.state::<Arc<GifService>>();
         let mut preview = service
             .audio_preview
             .lock()
@@ -50,13 +51,50 @@ pub async fn gif_audio_monitor(
             }
             let mut session = recording::Session::new(audio::shared(options), None);
             session.resume(0).map_err(error)?;
+            let shared = session.shared.clone();
             *preview = Some(session);
+            Ok(Some(shared))
+        } else {
+            Ok(None)
         }
-        Ok(())
     })
     .await
-    .map_err(|_| error("声音试音任务失败"))?
+    .map_err(|_| error("声音试音任务失败"))??;
+    if let Some(shared) = monitored {
+        tauri::async_runtime::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                let visible = app
+                    .get_webview_window("chord-screenshot")
+                    .is_some_and(|window| window.is_visible().unwrap_or(false));
+                let service = app.state::<Arc<GifService>>().inner().clone();
+                let monitored = shared.clone();
+                // 试音启动和设备释放可能占锁并 join worker，检测与释放均留在 blocking 池。
+                let current = tauri::async_runtime::spawn_blocking(move || {
+                    let mut preview = service
+                        .audio_preview
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    let current = preview
+                        .as_ref()
+                        .is_some_and(|p| Arc::ptr_eq(&p.shared, &monitored));
+                    if current && !visible {
+                        preview.take();
+                        tracing::info!("录制准备窗口已隐藏，释放试音设备");
+                    }
+                    current
+                })
+                .await
+                .unwrap_or(false);
+                if !current || !visible {
+                    break;
+                }
+            }
+        });
+    }
+    Ok(())
 }
+
 #[tauri::command]
 pub fn gif_audio_monitor_status(
     app: AppHandle,
@@ -96,8 +134,8 @@ pub fn gif_audio_control(
         .ok_or_else(|| error("录制会话已结束"))?;
     let mut gate = r.audio.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(options) = options {
-        if r.ctl.phase() != "paused" || gate.status.active || gate.status.error.is_none() {
-            return Err(error("只能在设备异常暂停时更换同类声音设备"));
+        if r.ctl.phase() != "paused" || gate.status.active {
+            return Err(error("请先暂停录制，再更换同类声音设备"));
         }
         if options.mode != gate.options.mode {
             return Err(error("恢复时不能改变声音模式"));

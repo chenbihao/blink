@@ -2,6 +2,9 @@
 //! 播放/seek 由后端 revision 绑定的时间窗口定位，不持有整段帧表。
 //! 连续多选以范围表达，编辑串行提交；关闭前保存位置，最近录制恢复草稿。
 
+import {discardRecording} from './session-discard.js';
+import {bindEditorSelects} from './editor-controls.js';
+import {applyThemeFromConfig} from '../shared/theme.js';
 import {
     createExportController
 } from './export-controller.js';
@@ -47,6 +50,8 @@ import {
 } from './audio-playback.js';
 
 ensureSpriteLoaded();
+const syncEditorSelects = bindEditorSelects();
+void applyThemeFromConfig();
 const audioPlayback = createAudioPlayback({
     onError: error => showHint(t('gif.audio.previewFailed', {
         msg: normalizeError(error).message
@@ -109,6 +114,7 @@ const els = {
 /** 会话状态。 */
 const state = {
     sessionId: null,
+    deleting: false,
     epoch: 0,
     view: null,
     playIdx: 0,
@@ -509,6 +515,7 @@ function positionMs() {
 }
 
 function setPlaying(on) {
+    if (on && state.deleting) return;
     if (on === state.playing) return;
     const at = positionMs();
     state.playing = on && Boolean(state.current);
@@ -601,6 +608,7 @@ function renderControls() {
     els.redo.disabled = !v.canRedo;
     els.speed.value = String(v.speed);
     els.loop.value = v.loopCount == null ? '' : String(v.loopCount);
+    syncEditorSelects();
     els.exportBtn.disabled = !v.effectiveCount;
     const n = selectionCount(),
         one = selectionRanges()[0]?.[0],
@@ -655,6 +663,7 @@ function renderStopBanner(reason) {
 }
 
 function edit(command) {
+    if (state.deleting) return Promise.resolve();
     const sessionId = state.sessionId,
         epoch = state.epoch;
     editTail = editTail.catch(() => {}).then(async () => {
@@ -886,7 +895,8 @@ for (let i = 0; i < 2; i++) {
 }
 els.stopBannerClose.addEventListener('click', () => els.stopBanner.classList.add('hidden'));
 document.addEventListener('keydown', e => {
-    if (els.dialog.open || ['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement?.tagName)) return;
+    if (els.dialog.open || ['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement?.tagName) ||
+        document.activeElement?.closest('.editor-select-trigger, .editor-select-menu')) return;
     if (document.activeElement === els.seekBar && e.code !== 'Space' && !['Delete', 'Backspace'].includes(e
             .code)) return;
     if (e.code === 'Space') {
@@ -904,6 +914,40 @@ document.addEventListener('keydown', e => {
     }
 });
 const exportController = createExportController();
+$('btn-discard-recording').addEventListener('click', async () => {
+    const sessionId = state.sessionId;
+    if (!sessionId || state.deleting) return;
+    state.deleting = true;
+    exportController.setLocked(true);
+    const button = $('btn-discard-recording');
+    button.disabled = true;
+    els.btnRecent.disabled = true;
+    try {
+        if (!await confirmDialog(t('gif.editor.discardConfirm'))) return;
+        if (state.sessionId !== sessionId) return;
+        setPlaying(false);
+        audioPlayback.clear();
+        await editTail;
+        ++state.epoch;
+        state.pendingBatches.length = 0;
+        showHint(t('gif.editor.discarding'), false);
+        await discardRecording({sessionId, invoke,
+            isCurrent: () => state.sessionId === sessionId,
+            pendingStart: exportController.pendingStart,
+        });
+        if (state.sessionId === sessionId) await loadSession(null);
+    } catch (error) {
+        if (state.sessionId === sessionId) {
+            await loadSession(sessionId).catch(() => {});
+            showHint(t('gif.editor.discardFailed', {msg: normalizeError(error).message}));
+        }
+    } finally {
+        state.deleting = false;
+        button.disabled = false;
+        els.btnRecent.disabled = false;
+        exportController.setLocked(false);
+    }
+});
 $('btn-export').addEventListener('click', () => setPlaying(false));
 window.addEventListener('beforeunload', () => exportController.dispose());
 // ── 视图切换 / 最近录制（0.28.23 §5.7.4）────────────────────────────────
@@ -953,10 +997,11 @@ els.btnBackEdit?.addEventListener('click', () => {
 
 /** 上报播放头位置给草稿（节流 500ms；`immediate` 用于切换/关闭前）。 */
 function reportPlayPosition(immediate = false) {
+    if (state.deleting) return;
     if (!state.sessionId || !state.view) return;
     const sessionId = state.sessionId;
     const send = () => {
-        if (sessionId !== state.sessionId || !state.view) return;
+        if (state.deleting || sessionId !== state.sessionId || !state.view) return;
         const offset = playbackOffset(state.current?.durMs || 0,
             state.playing, state.frameShownAt, state.seekInFrameMs, performance.now());
         const pos = Math.round((state.current?.startMs || 0) + offset);
@@ -974,6 +1019,8 @@ window.addEventListener('pagehide', () => reportPlayPosition(true));
 
 const sessionListener = listen(EVENTS.GIF_EDITOR_SESSION, event => {
     if (event.payload?.recordingSaved) showHint(t('gif.editor.recordingSaved'), false);
+    if (event.payload?.discardFailed) showHint(t('gif.rec.discardCleanupFailed'));
+    if (event.payload?.discardedSessionId && event.payload.discardedSessionId !== state.sessionId) return;
     const sid = event.payload?.sessionId;
     if (!sid) {
         // 空会话（主窗口入口无活动会话）：进入最近录制首页
@@ -998,6 +1045,7 @@ function applyWindowTitle() {
 
 /** 语言切换后刷新全部 JS 动态文案（静态 data-i18n 由 applyI18n 处理）。 */
 function refreshLocalizedTexts() {
+    syncEditorSelects();
     applyWindowTitle();
     if (state.view) {
         renderSessionHeader();
@@ -1013,6 +1061,7 @@ function refreshLocalizedTexts() {
 
 onLangChange(refreshLocalizedTexts);
 listen(EVENTS.CONFIG_CHANGED, event => {
+    if (!event.payload?.key || ['appearance', 'general_config', 'theme'].includes(event.payload.key)) void applyThemeFromConfig();
     if (!event.payload?.key || event.payload.key === 'language') {
         void applyI18nFromConfig();
     }

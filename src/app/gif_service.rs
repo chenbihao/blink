@@ -19,7 +19,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -37,6 +37,7 @@ use blink_infra::gif::{
 const COUNTDOWN_MS: u64 = 0;
 /// 状态广播周期。
 const STATE_TICK_MS: u64 = 250;
+static SNAPSHOT_REVISION: AtomicU64 = AtomicU64::new(1);
 /// 素材 TTL。
 const SESSION_TTL: Duration = Duration::from_secs(72 * 3600);
 /// 截图 overlay 窗口 label（录制期间作为统一浮栏 + 涂画层宿主）。
@@ -57,9 +58,11 @@ pub(crate) struct ActiveRecording {
     region_pos: std::sync::Arc<std::sync::Mutex<(i32, i32)>>,
     /// 区域尺寸（物理像素）。拖动只改位置；尺寸恒定——移动区域时直接取用，
     /// 不再从磁盘会话元数据回读（录制中索引还在增长，回读既贵又可能失败）。
-    region_w: u32,
-    region_h: u32,
+    pub(crate) region_w: u32,
+    pub(crate) region_h: u32,
     target_fps: u32,
+    pub(crate) annotation: blink_infra::gif::annotation::SharedAnnotation,
+    pub(crate) annotation_updates: Arc<tokio::sync::Semaphore>,
     pub(crate) audio: blink_infra::gif::audio::SharedAudio,
 }
 
@@ -100,6 +103,12 @@ impl Default for GifService {
 }
 
 impl GifService {
+    /// 录制启动/收尾与截图、图片编辑共享的 overlay 所有权门。
+    /// 调用者必须持有到窗口会话提交完成，不能只保护状态检查。
+    pub(crate) fn lock_overlay_session(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.start_lock.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     pub fn new() -> Self {
         Self {
             start_lock: Mutex::new(()),
@@ -152,6 +161,9 @@ impl GifService {
 #[derive(serde::Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct RecorderStatePayload {
+    pub revision: u64,
+    pub region: Option<infra_gif::CaptureRegion>,
+    pub audio_options: Option<blink_infra::gif::audio::AudioOptions>,
     pub audio: blink_infra::gif::audio::AudioStatus,
     pub storage: blink_infra::gif::space::Snapshot,
     pub phase: &'static str,
@@ -177,10 +189,36 @@ pub fn snapshot_state_public(service: &Arc<GifService>) -> RecorderStatePayload 
     snapshot_state(service)
 }
 
+/// 调用方持有 overlay session gate：活跃录制只恢复控制，不初始化截图或停止采集。
+pub(crate) fn restore_active_overlay(app: &AppHandle) -> Result<bool, String> {
+    let service = app.state::<Arc<GifService>>();
+    let session = service.recording.lock().unwrap_or_else(|e| e.into_inner())
+        .as_ref().map(|r| r.session_id.clone());
+    let Some(session_id) = session else { return Ok(false); };
+    blink_infra::platform::window::restore_recording_overlay(app)?;
+    if let Some(win) = overlay_window(app) {
+        win.eval("window.__blinkRestoreRecording && window.__blinkRestoreRecording(true);")
+            .map_err(|e| e.to_string())?;
+    }
+    tracing::info!(session_id, "已有录制占用截图窗口，恢复原控制栏");
+    Ok(true)
+}
+
+/// 仅恢复 UI 时枚举显示器；高频录制 ticker 不做平台几何查询。
+pub(crate) fn overlay_restore_meta() -> serde_json::Value {
+    let (vx, vy, w, h) = virtual_screen_rect();
+    serde_json::json!({"vx": vx, "vy": vy, "w": w, "h": h,
+        "physicalDisplays": blink_infra::platform::screenshot::list_displays()})
+}
+
 fn snapshot_state(service: &GifService) -> RecorderStatePayload {
     let rec = service.recording.lock().unwrap_or_else(|e| e.into_inner());
+    let revision = SNAPSHOT_REVISION.fetch_add(1, Ordering::Relaxed);
     match rec.as_ref() {
         None => RecorderStatePayload {
+            revision,
+            region: None,
+            audio_options: None,
             audio: Default::default(),
             storage: Default::default(),
             phase: "idle",
@@ -208,14 +246,24 @@ fn snapshot_state(service: &GifService) -> RecorderStatePayload {
                 d.saturating_duration_since(std::time::Instant::now())
                     .as_millis() as u64
             });
+            let (audio, audio_options) = {
+                let mut gate = r.audio.lock().unwrap_or_else(|e| e.into_inner());
+                (gate.snapshot(), gate.options.clone())
+            };
             RecorderStatePayload {
+                revision,
+                region: {
+                    let (x, y) = *r.region_pos.lock().unwrap_or_else(|e| e.into_inner());
+                    Some(infra_gif::CaptureRegion { x, y, w: r.region_w, h: r.region_h })
+                },
+                audio_options: Some(audio_options),
                 storage: r
                     .ctl
                     .space
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .clone(),
-                audio: r.audio.lock().unwrap_or_else(|e| e.into_inner()).snapshot(),
+                audio,
                 phase,
                 session_id: Some(r.session_id.clone()),
                 countdown_ms,
@@ -231,13 +279,13 @@ fn snapshot_state(service: &GifService) -> RecorderStatePayload {
 }
 
 /// 启动状态 ticker（录制期间 250ms 广播；录制结束自动停）。
-fn spawn_state_ticker(app: AppHandle) {
+fn spawn_state_ticker(app: AppHandle, session_id: String) {
     tauri::async_runtime::spawn(async move {
         loop {
             let service = app.state::<Arc<GifService>>();
             let (phase, keep) = {
                 let rec = service.recording.lock().unwrap_or_else(|e| e.into_inner());
-                match rec.as_ref() {
+                match rec.as_ref().filter(|r| r.session_id == session_id) {
                     Some(r) => (
                         Some(r.ctl.phase()),
                         r.ctl.is_running() || r.ctl.phase() != "done",
@@ -247,6 +295,13 @@ fn spawn_state_ticker(app: AppHandle) {
             };
             if !keep && phase.is_none() {
                 break;
+            }
+            if keep
+                && app
+                    .get_webview_window(OVERLAY_LABEL)
+                    .is_none_or(|window| !window.is_visible().unwrap_or(false))
+            {
+                stop_lost_overlay(&app, Some(&session_id));
             }
             emit_state(&app, snapshot_state(&service));
             if !keep {
@@ -321,6 +376,9 @@ pub fn start_recording(
     }
     #[cfg(target_os = "windows")]
     let region_pos: blink_infra::gif::SharedRegionPos = Arc::new(Mutex::new((x, y)));
+    let annotation = Arc::new(Mutex::new(
+        blink_infra::gif::annotation::AnnotationState::default(),
+    ));
     #[cfg(target_os = "windows")]
     let source = blink_infra::gif::GdiFrameSource::with_shared_pos(
         x,
@@ -330,7 +388,8 @@ pub fn start_recording(
         show_cursor,
         Some(Arc::clone(&region_pos)),
     )
-    .with_fps(fps);
+    .with_fps(fps)
+    .with_annotation(annotation.clone());
 
     let root = GifService::root();
     let session_id = infra_gif::generate_session_id();
@@ -396,6 +455,8 @@ pub fn start_recording(
         region_w: w,
         region_h: h,
         target_fps: fps,
+        annotation,
+        annotation_updates: Arc::new(tokio::sync::Semaphore::new(1)),
         audio,
     });
 
@@ -435,7 +496,7 @@ pub fn start_recording(
         );
     });
 
-    spawn_state_ticker(app.clone());
+    spawn_state_ticker(app.clone(), session_id.clone());
     emit_state(app, snapshot_state(&service));
     tracing::info!(session_id, region = ?(x, y, w, h), fps, "GIF 录制会话已创建（倒计时）");
     Ok(session_id)
@@ -475,10 +536,18 @@ pub fn overlay_ready(app: &AppHandle, session_id: &str) -> GifResult<()> {
 }
 
 /// 暂停 / 恢复 / 停止 / 取消（指令下发；停止结果由 finalize_after_stop 分派）。
-pub fn command_recording(app: &AppHandle, cmd: CaptureCommand, cancel: bool) -> GifResult<()> {
+pub fn command_recording(
+    app: &AppHandle,
+    cmd: CaptureCommand,
+    cancel: bool,
+    session_id: Option<&str>,
+) -> GifResult<()> {
     let service = app.state::<Arc<GifService>>();
     let rec = service.recording.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(r) = rec.as_ref() else {
+    let Some(r) = rec
+        .as_ref()
+        .filter(|r| session_id.is_none_or(|id| id == r.session_id))
+    else {
         return Err(GifServiceError::NoActiveRecording);
     };
     if matches!(cmd, CaptureCommand::Stop) && cancel {
@@ -486,6 +555,23 @@ pub fn command_recording(app: &AppHandle, cmd: CaptureCommand, cancel: bool) -> 
     }
     r.ctl.command(cmd);
     Ok(())
+}
+
+/// 非预期关窗/隐藏按停止保留素材处理，不能留下一条失去控制面的后台录制。
+/// 正常失焦不走这里；用户操作桌面时透明控制层仍保持可见。
+pub(crate) fn stop_lost_overlay(app: &AppHandle, session_id: Option<&str>) {
+    let Some(service) = app.try_state::<Arc<GifService>>() else {
+        return;
+    };
+    let rec = service.recording.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(recording) = rec
+        .as_ref()
+        .filter(|r| session_id.is_none_or(|id| id == r.session_id))
+        && !matches!(recording.ctl.phase(), "stopping" | "done")
+    {
+        tracing::warn!(session_id = %recording.session_id, "录制控制窗口丢失，停止并保留已录素材");
+        recording.ctl.command(CaptureCommand::Stop);
+    }
 }
 
 /// 停止后的分派：cancel 删素材；正常停止构建 Timeline 并打开编辑器。
@@ -512,7 +598,23 @@ fn finalize_after_stop(
     emit_state(app, finished);
     let root = GifService::root();
     if cancelled {
-        let _ = std::fs::remove_dir_all(root.join("sessions").join(session_id));
+        if let Err(error) = infra_gif::spool::discard_session(&root, session_id) {
+            tracing::error!(session_id, %error, "录制已停止，但临时素材删除失败，可从最近录制重试删除");
+            if !open_editor(app, session_id) {
+                open_editor_entry(app);
+            }
+            let current = service
+                .editor_session
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let _ = app.emit_to(
+                EDITOR_LABEL,
+                EventNames::GIF_EDITOR_SESSION,
+                serde_json::json!({"sessionId":current,"discardFailed":true}),
+            );
+            return;
+        }
         service
             .timelines
             .lock()
@@ -573,6 +675,10 @@ fn overlay_window(app: &AppHandle) -> Option<tauri::WebviewWindow> {
 /// 模式上报命中矩形并切换）。启动命中轮询任务。
 fn enter_overlay_record_mode(app: &AppHandle) {
     crate::infra::platform::window::set_overlay_record_active(true);
+    // 启动前的迟到失焦可能已隐藏宿主；先找回窗口，再等前端 ready 开始采集。
+    if let Err(error) = blink_infra::platform::window::restore_recording_overlay(app) {
+        tracing::warn!(%error, "录制宿主恢复失败，等待前端就绪超时兜底");
+    }
     {
         let service = app.state::<Arc<GifService>>();
         *service
@@ -782,10 +888,18 @@ fn emit_region_updated(app: &AppHandle, x: i32, y: i32, w: u32, h: u32) {
 /// 坐标钳制到虚拟屏幕矩形——BitBlt 越界部分是黑边。尺寸取 `ActiveRecording`
 /// 内存值（录制中索引仍在增长，不回读元数据）。范围框/涂画层由 overlay
 /// 前端按 `GIF_REGION_UPDATED` 对账同步（拖动端就地钳制为主）。
-pub fn move_recording_region(app: &AppHandle, x: i32, y: i32) -> GifResult<()> {
+pub fn move_recording_region(
+    app: &AppHandle,
+    x: i32,
+    y: i32,
+    session_id: Option<&str>,
+) -> GifResult<()> {
     let service = app.state::<Arc<GifService>>();
     let rec = service.recording.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(r) = rec.as_ref() else {
+    let Some(r) = rec
+        .as_ref()
+        .filter(|r| session_id.is_none_or(|id| id == r.session_id))
+    else {
         return Err(GifServiceError::NoActiveRecording);
     };
     let (w, h) = (r.region_w as i32, r.region_h as i32);

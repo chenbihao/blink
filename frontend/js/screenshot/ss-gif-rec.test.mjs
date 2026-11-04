@@ -4,11 +4,51 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
+import {createRecordingSession} from './recording-session.js';
 
 // 模块导入链（ss-display/ss-toolbar/shared）在顶层访问 window——
 // 先注入最小 stub 再动态导入。
 globalThis.window = globalThis.window || {devicePixelRatio: 1, __blinkScreenMeta: {vx: 0, vy: 0}};
-const {clampRegionMove, placeTextOutsideRegion, unsupportedKindsOf} = await import('./ss-gif-rec.js');
+const {placeTextOutsideRegion, unsupportedKindsOf, recordingFrameGeometry, recordingDragDelta} = await import('./ss-gif-rec.js');
+
+test('the shared grip applies one clamped delta to capture area and toolbar',()=>{
+    const region={x:100,y:80,w:640,h:300},viewport={w:1920,h:1080};
+    assert.deepEqual(recordingDragDelta(region,20,30,viewport),{dx:20,dy:30});
+    assert.deepEqual(recordingDragDelta(region,-500,-300,viewport),{dx:-100,dy:-80});
+    assert.deepEqual(recordingDragDelta(region,2000,2000,viewport),{dx:1180,dy:700});
+});
+
+test('capture dragging coalesces native updates and cannot move a replacement recording',async()=>{
+    for(const replace of [false,true]) {
+        const state=createRecordingSession();state.reset('ready');state.sessionId='one';state.setMode('recording');
+        state.regionPhys={x:100,y:80,w:640,h:300};
+        const calls=[];let resolveMove;
+        const ss={selCss:{x:100,y:80,w:640,h:300}};
+        const context=vm.createContext({ss,state,window:{innerWidth:1920,innerHeight:1080,__blinkScreenMeta:{}},
+            document:{getElementById:()=>null,querySelectorAll:()=>[]},
+            closeRecordingPanel(){},retainToolbarAnchor(){},renderRecordingUi(){},selectTool(){},
+            getRenderScale:()=>({scaleX:1,scaleY:1}),cssPointToScreen:(x,y)=>({x,y}),
+            screenRectToCss:r=>r,clearInterval(){},setInterval:()=>0,showRecordingMessage:assert.fail,
+            invoke:async(cmd,args)=>{
+                calls.push({cmd,args});
+                if(cmd==='gif_move_recording_region' && !resolveMove) await new Promise(r=>{resolveMove=r;});
+                if(cmd==='gif_recorder_state') return {sessionId:'one',region:{x:300,y:80,w:640,h:300}};
+            },
+        });
+        const source=readFileSync(new URL('./ss-gif-rec.js',import.meta.url),'utf8').replace(/^import .*;\r?$/gm,'').replace(/export /g,'');
+        vm.runInContext(source,context);
+        const drag=context.beginRecordingGripDrag();
+        drag.move(50,0);drag.move(100,0);drag.move(200,0);
+        const ending=drag.end();
+        if(replace) {state.reset('ready');state.sessionId='two';state.setMode('recording');}
+        resolveMove();await ending;
+        const moves=calls.filter(c=>c.cmd==='gif_move_recording_region');
+        assert.equal(moves.length,replace?1:2);
+        assert.equal(moves[0].args.sessionId,'one');
+        if(!replace) assert.equal(moves[1].args.x,300);
+        else assert.equal(calls.some(c=>c.cmd==='gif_recorder_state'),false);
+    }
+});
 
 test('unsupportedKindsOf：底图依赖效果去重收集，水印独立计入', () => {
     assert.deepEqual(
@@ -44,20 +84,6 @@ test('placeTextOutsideRegion：区域内挪到正下方，区域外保持原位'
     assert.deepEqual(placeTextOutsideRegion({x: 10, y: 10}, null), {x: 10, y: 10});
 });
 
-test('clampRegionMove：钳制到虚拟屏内（含负坐标多屏），无边距丢失', () => {
-    const origin = {x: 100, y: 100, w: 400, h: 300};
-    const vs = {vx: -1920, vy: 0, vw: 5760, vh: 1440};
-    assert.deepEqual(clampRegionMove(origin, 50, 60, vs), {x: 150, y: 160});
-    // 左/上边界（负坐标合法）
-    assert.deepEqual(clampRegionMove(origin, -10000, 0, vs), {x: -1920, y: 100});
-    assert.deepEqual(clampRegionMove(origin, 0, -10000, vs), {x: 100, y: 0});
-    // 右/下边界按右下角贴边（w/h 保持）
-    assert.deepEqual(clampRegionMove(origin, 100000, 0, vs), {x: 5760 - 1920 - 400, y: 100});
-    assert.deepEqual(clampRegionMove(origin, 0, 100000, vs), {x: 100, y: 1440 - 300});
-    // 无虚拟屏信息（边界未知）→ 不钳制
-    assert.deepEqual(clampRegionMove(origin, -100000, 0, null), {x: -99900, y: 100});
-});
-
 test('text input stays visible at the bottom edge, in fullscreen and across scaled viewports', () => {
     const viewport = {w: 1920, h: 1080}, size = {w: 320, h: 32};
     assert.deepEqual(placeTextOutsideRegion({x: 200, y: 940}, {x: 100, y: 900, w: 800, h: 180}, viewport, size),
@@ -76,7 +102,7 @@ function textFixture(initialPhase = 'recording') {
     const calls = [], paints = [];
     let phase = initialPhase;
     const snapshot = () => ({sessionId: 'one', phase, audio: {}, storage: {}});
-    const context = vm.createContext({
+    const context = vm.createContext({state:createRecordingSession(), renderRecordingUi() {}, t:key=>key,
         ss: {selCss: {x: 0, y: 0, w: 1920, h: 1080}},
         document: {getElementById: () => null}, performance, setTimeout,
         requestAnimationFrame: fn => paints.push(fn), applyAudioStatus() {},
@@ -86,7 +112,7 @@ function textFixture(initialPhase = 'recording') {
     const source = readFileSync(new URL('./ss-gif-rec.js', import.meta.url), 'utf8')
         .replace(/^import .*;\r?$/gm, '').replace(/export /g, '');
     vm.runInContext(`${source}\nglobalThis.fixture = {state, openRecordingTextInput};`, context);
-    Object.assign(context.fixture.state, {active: true, sessionId: 'one'});
+    Object.assign(context.fixture.state, {mode:initialPhase, sessionId:'one'});
     return {...context.fixture, calls, paints, snapshot, setPhase: value => {phase = value;}};
 }
 
@@ -141,18 +167,20 @@ test('录制就绪等待透明层绘制；旧会话 idle 不清理新会话，�
             remove: (...cs) => cs.forEach(c => values.delete(c)),
             contains: c => values.has(c)};
     };
-    const toolbar = {classList: classes(), dataset: {},
+    const toolbar = {classList: classes(), dataset: {}, setAttribute() {},
         getBoundingClientRect: () => ({x: 0, y: 200, width: 200, height: 40})};
     const body = {classList: classes()};
     const root = {classList: classes()};
     const paints = [], calls = [], timers = new Set();
     let timerId = 0;
-    const context = vm.createContext({
+    const recordingState=createRecordingSession();
+    const context = vm.createContext({state:recordingState, renderRecordingUi() {if(recordingState.active) root.classList.add('gif-recording');else root.classList.remove('gif-recording');},
         ss: {toolbar, selCss: {x: 0, y: 0, w: 100, h: 100}},
         window: {__blinkScreenMeta: {vx: 0, vy: 0, w: 1920, h: 1080}},
         document: {body, documentElement: root, getElementById: () => null, querySelectorAll: () => []},
         annot: {getTool: () => 'pencil'}, positionToolbar() {}, selectTool() {},
         beginAudioRecording: async () => {}, endAudioRecording() {}, applyAudioStatus() {},
+        retainToolbarAnchor() {}, closeRecordingPanel() {}, showRecordingMessage() {}, t:key=>key,
         getRenderScale: () => ({scaleX: 1, scaleY: 1}), cssPointToScreen: (x, y) => ({x, y}),
         listen: async () => () => {}, EVENTS: {}, performance: {now: () => 1000},
         setInterval: () => { timers.add(++timerId); return timerId; },
@@ -185,4 +213,57 @@ test('录制就绪等待透明层绘制；旧会话 idle 不清理新会话，�
     assert.equal(f.state.cancelArmed, false);
     assert.equal(timers.size, 0);
     assert.equal(root.classList.contains('gif-recording'), false);
+});
+
+
+function recoveryFixture() {
+    let respond;
+    const classes = {remove() {}, add() {}, toggle() {}};
+    const context = vm.createContext({state:createRecordingSession(), renderRecordingUi() {}, t:key=>key,
+        ss:{_loadGen:1}, document:{getElementById:()=>null,body:{classList:classes},documentElement:{classList:classes}},
+        annot:{setRenderListener() {}}, performance, clearInterval() {}, clearTimeout() {},
+        endAudioRecording() {}, closeRecordingPanel() {}, showRecordingMessage() {}, applyAudioStatus() {},
+        invoke:()=>new Promise(resolve=>{respond=resolve;}),
+    });
+    const source=readFileSync(new URL('./ss-gif-rec.js',import.meta.url),'utf8').replace(/^import .*;\r?$/gm,'').replace(/export /g,'');
+    vm.runInContext(`${source}\nglobalThis.fixture={state,restoreRecordingOverlay,applyRecorderState};`,context);
+    const f=context.fixture;
+    Object.assign(f.state,{mode:'recording',sessionId:'current',snapshotRevision:5});
+    return {...f,respond:value=>respond(value)};
+}
+
+test('returning to recording preserves a newer pause event than an in-flight state response', async () => {
+    const f=recoveryFixture();
+    const task=f.restoreRecordingOverlay();
+    f.applyRecorderState({sessionId:'current',revision:7,phase:'paused',elapsedMs:2000});
+    f.respond({sessionId:'current',revision:6,phase:'recording',elapsedMs:1900,region:{x:0,y:0,w:100,h:100}});
+    assert.equal(await task,true);
+    assert.equal(f.state.mode,'paused');
+    assert.equal(f.state.elapsedBase,2000);
+});
+
+test('old restore responses cannot replace a new recording, and missed idle events release stale controls', async () => {
+    const f=recoveryFixture();
+    const task=f.restoreRecordingOverlay();
+    f.state.sessionId='replacement';
+    f.respond({sessionId:'current',revision:6,phase:'recording',region:{x:0,y:0,w:100,h:100}});
+    assert.equal(await task,true);
+    assert.equal(f.state.sessionId,'replacement');
+    const cleanup=f.restoreRecordingOverlay();
+    f.respond({phase:'idle',revision:9});
+    assert.equal(await cleanup,false);
+    assert.equal(f.state.active,false);
+});
+
+test('recording frame remains entirely outside capture pixels at fractional and mixed DPI', () => {
+    const region = {x: -1000, y: 100, w: 800, h: 600};
+    for (const dpi of [96, 120, 144, 192]) for (const scale of [1, 1.25, 1.5, 2]) {
+        const meta = {vx: -1920, vy: 0, physicalDisplays: [{x:-1920,y:0,w:1920,h:1080,dpi}]};
+        const result = recordingFrameGeometry(region, meta, scale, scale);
+        const value = key => parseFloat(result[key]) * scale;
+        assert.equal(value('left') + value('borderLeftWidth'), region.x - meta.vx);
+        assert.equal(value('top') + value('borderTopWidth'), region.y);
+        assert.equal(value('left') + value('width') - value('borderRightWidth'), region.x - meta.vx + region.w);
+        assert.equal(value('top') + value('height') - value('borderBottomWidth'), region.y + region.h);
+    }
 });

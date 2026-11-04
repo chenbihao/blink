@@ -13,11 +13,11 @@ export function createExportController({documentRef = document, windowRef = wind
     const state = new ExportJobState();
     let pathRevision = 0;
     let estimateTimer = null, estimateVersion = 0, sourceFps = null;
-    let epoch = 0, queryVersion = 0, timer = null, starting = false, disposed = false;
+    let epoch = 0, queryVersion = 0, timer = null, starting = false, disposed = false, locked = false;
     let availability = null, availabilityError = '', availabilityVersion = 0;
     let statusBusy = false, statusAgain = null, unlisten = null;
     const format = () => els['export-format'].value;
-    const busy = () => starting || state.running;
+    const busy = () => locked || starting || state.running;
     const hint = text => { els['export-progress-text'].textContent = text; els['export-progress-row'].classList.remove('hidden'); };
     function render() {
         const mp4 = format() === 'mp4';
@@ -208,6 +208,8 @@ export function createExportController({documentRef = document, windowRef = wind
             render(); refreshJob(true);
         },
         invalidate: estimate,
+        pendingStart: () => starting,
+        setLocked(value) { locked = value; render(); },
         setSource({fps}) { sourceFps = fps; render(); estimate(); },
         dispose() {
             cancelEstimate();

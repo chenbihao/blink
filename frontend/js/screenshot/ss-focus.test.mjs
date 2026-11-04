@@ -47,6 +47,7 @@ function harness() {
     };
     let editorLoads = 0;
     const context = {
+        isRecordingStarting:()=>false, isGifRecActive: () => false, restoreRecordingOverlay: async () => true,
         ss, document, frames, performance, annotationOperationShortcut,
         console: {debug() {}, info() {}, warn() {}, error() {}},
         IMAGE_SOURCE: {LONG_SCREENSHOT: 'long-screenshot', CLIPBOARD: 'clipboard', PIN: 'pin'},
@@ -77,8 +78,38 @@ function harness() {
     };
 }
 
+test('repeated screenshot during recording or startup never clears the recording host', async () => {
+    for (const phase of ['recording', 'starting']) {
+        const h = harness();
+        let restored = 0;
+        h.context.isGifRecActive = () => phase === 'recording';
+        h.context.isRecordingStarting = () => phase === 'starting';
+        h.context.restoreRecordingOverlay = async () => {restored++; return true;};
+        const previous = h.context.window.__blinkScreenMeta;
+        h.context.window.__blinkStartScreenshotSession({vx:100,vy:100,w:800,h:600},0);
+        await Promise.resolve();
+        assert.equal(restored,1);
+        assert.equal(h.context.window.__blinkScreenMeta,previous);
+        assert.equal(h.document.activeElement,h.more);
+        assert.equal(h.frames.length,0);
+    }
+});
+
 test('canvas accepts programmatic focus without entering the Tab order', () => {
     assert.match(html, /<canvas\b[^>]*id="canvas"[^>]*tabindex="-1"/);
+});
+
+test('an idle backend clears stale recording ownership and opens the requested screenshot immediately', async () => {
+    const h=harness();
+    let active=true;
+    h.context.isGifRecActive=()=>active;
+    h.context.restoreRecordingOverlay=async()=>{active=false;return false;};
+    const meta={vx:10,vy:20,w:800,h:600};
+    h.context.window.__blinkStartScreenshotSession(meta,0);
+    await new Promise(setImmediate);
+    assert.equal(h.context.window.__blinkScreenMeta,meta);
+    assert.equal(h.document.activeElement,h.canvas);
+    assert.equal(h.frames.length,1);
 });
 
 test('reused screenshot session clears focus restored by old panel cleanup, after becoming visible', () => {

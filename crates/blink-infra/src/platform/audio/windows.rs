@@ -24,9 +24,9 @@
 //!
 //! ## 默认设备
 //!
-//! cpal 通过 `GetDefaultAudioEndpoint(eCapture, eConsole)` 获取系统默认输入设备。
-//! 注意：某些虚拟声卡驱动（如 VR/远程桌面）可能劫持此 API，导致返回的默认设备
-//! 与 mmsys.cpl 面板显示的不一致。设置页设备列表会标注当前默认设备名称供用户参考。
+//! cpal 通过 `GetDefaultAudioEndpoint(eCapture, eConsole)` 获取默认输入设备。
+//! Windows 的每应用音频首选项优先于全局默认，因此 Blink 的默认输入可能与
+//! 系统声音页不同；应在音量混合器中将 Blink 的输入设为“默认”以跟随系统。
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,7 +36,7 @@ use super::normalize::AudioNormalizer;
 use super::{AudioCapture, AudioChunk, AudioError, AudioFormat};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Data, Error as CpalError, InputCallbackInfo, SampleFormat, StreamConfig};
+use cpal::{Data, Error as CpalError, InputCallbackInfo, StreamConfig};
 
 // ── 采集器 ──────────────────────────────────────────────────────────────────
 
@@ -154,6 +154,10 @@ fn capture_thread(
         "cpal: 设备配置"
     );
 
+    if !super::pcm::supported(sample_format) {
+        tracing::error!(?sample_format, "cpal: 不支持的 PCM 格式");
+        return;
+    }
     let stream_config: StreamConfig = supported_config.into();
     // target_rate 和 target_channels 由 AudioNormalizer 内部管理（0.22.16 H02）
 
@@ -164,7 +168,7 @@ fn capture_thread(
 
     // ── 构建输入流（统一回调，build_input_stream_raw）──
     // 使用 build_input_stream_raw 统一回调类型，所有采样格式在回调内通过
-    // convert_to_f32 统一转换，避免 match-on-format 产生的多个重复闭包分支。
+    // 通过公共 pcm::to_f32 转换，与录屏使用相同格式支持和样本归一化。
     let cb_capturing = capturing.clone();
     let cb_tx = tx.clone();
 
@@ -179,7 +183,7 @@ fn capture_thread(
             if !cb_capturing.load(Ordering::Relaxed) {
                 return;
             }
-            let f32_data = convert_to_f32(data, sample_format);
+            let f32_data = super::pcm::to_f32(data, sample_format);
             // 使用公共规范化链路：downmix → stateful resample → 16kHz mono
             let normalized = normalizer.borrow_mut().process(&f32_data);
             if normalized.is_empty() {
@@ -224,54 +228,15 @@ fn capture_thread(
 
 // ── 辅助函数 ────────────────────────────────────────────────────────────────
 
-/// 将 cpal 原始 `Data` 转换为 f32 归一化样本。
-///
-/// `build_input_stream_raw` 回调接收 `&Data`（动态类型），
-/// 此函数根据 `SampleFormat` 将其统一转换为 `Vec<f32>`。
-fn convert_to_f32(data: &Data, format: SampleFormat) -> Vec<f32> {
-    match format {
-        SampleFormat::F32 => data.as_slice::<f32>().unwrap_or_default().to_vec(),
-        SampleFormat::I16 => data
-            .as_slice::<i16>()
-            .unwrap_or_default()
-            .iter()
-            .map(|&s| s as f32 / 32768.0)
-            .collect(),
-        SampleFormat::U16 => data
-            .as_slice::<u16>()
-            .unwrap_or_default()
-            .iter()
-            .map(|&s| (s as f32 - 32768.0) / 32768.0)
-            .collect(),
-        SampleFormat::I32 => data
-            .as_slice::<i32>()
-            .unwrap_or_default()
-            .iter()
-            .map(|&s| s as f32 / 2_147_483_648.0)
-            .collect(),
-        SampleFormat::U32 => data
-            .as_slice::<u32>()
-            .unwrap_or_default()
-            .iter()
-            .map(|&s| (s as f32 - 2_147_483_648.0) / 2_147_483_648.0)
-            .collect(),
-        _ => {
-            // 未知格式（I8/U8/I64/U64 等），尝试 f32 回退
-            tracing::warn!(?format, "cpal: 未知采样格式，尝试以 f32 解析");
-            data.as_slice::<f32>().unwrap_or_default().to_vec()
-        }
-    }
-}
-
 /// 枚举所有输入设备并打印诊断日志（含默认设备标记）。
 fn log_device_list(host: &cpal::Host) {
-    let default_name = host.default_input_device().map(|d| d.to_string());
+    let default_id = host.default_input_device().and_then(|d| d.id().ok());
 
     if let Ok(devices) = host.input_devices() {
         let mut device_list: Vec<String> = Vec::new();
         for d in devices {
             let name = d.to_string();
-            let is_default = default_name.as_deref() == Some(&name);
+            let is_default = default_id.is_some() && d.id().ok().as_ref() == default_id.as_ref();
             device_list.push(if is_default {
                 format!("[默认] {}", name)
             } else {
@@ -386,12 +351,11 @@ fn find_device(host: &cpal::Host, name: Option<&str>) -> Option<cpal::Device> {
 
 /// 列出可用的音频输入设备。
 ///
-/// 使用 cpal 的 WASAPI 后端枚举设备，返回设备名称作为 ID
-/// （cpal 的 `Device` 不暴露稳定数值 ID，名称是唯一标识）。
+/// 使用 cpal 的 WASAPI 后端枚举设备，保留语音配置已有的设备名称 ID 契约。
 /// 标注 `is_default` 以便前端在「系统默认」选项旁显示实际设备名。
 pub fn list_input_devices() -> Vec<super::AudioDevice> {
     let host = cpal::default_host();
-    let default_name = host.default_input_device().map(|d| d.to_string());
+    let default_id = host.default_input_device().and_then(|d| d.id().ok());
     let mut devices = Vec::new();
 
     if let Ok(input_devices) = host.input_devices() {
@@ -401,7 +365,8 @@ pub fn list_input_devices() -> Vec<super::AudioDevice> {
                 .default_input_config()
                 .map(|c| c.channels())
                 .unwrap_or(1);
-            let is_default = default_name.as_deref() == Some(&name);
+            // 默认身份按 endpoint id 比较，同名设备也不能被误标为默认。
+            let is_default = default_id.is_some() && device.id().ok().as_ref() == default_id.as_ref();
             devices.push(super::AudioDevice {
                 id: name.clone(),
                 name,

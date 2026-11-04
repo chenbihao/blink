@@ -464,6 +464,7 @@ export function redrawAnnotPreview() {
         }
     }
     annotCtx.restore();
+    ss.gifRecHooks?.onDraw?.();
 }
 
 /** 全量重绘标注层（已提交的命令）
@@ -473,4 +474,5 @@ export function redrawAnnotFull() {
     if (!selCss || annotCanvas.width === 0) return;
     annotCtx.clearRect(0, 0, annotCanvas.width, annotCanvas.height);
     annot.renderCommandsTo(annot.getCommands(), annotCtx, annotCanvas.width, annotCanvas.height);
+    ss.gifRecHooks?.onDraw?.();
 }

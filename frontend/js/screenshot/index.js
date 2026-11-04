@@ -99,8 +99,8 @@ import {
     updateOverlayButtonsActive,
 } from "./ss-ocr.js";
 import {updateOcrButtonBusy} from "./ss-ocr-busy.js";
-import {bindGifPrepBar, exitGifRecordMode, isGifPrepActive} from './ss-gif-prep.js';
-import {bindGifRecBar, handleOverlayHidden, isGifRecActive} from './ss-gif-rec.js';
+import {bindGifPrepBar, exitGifRecordMode, isGifPrepActive, isRecordingStarting} from './ss-gif-prep.js';
+import {bindGifRecBar, handleOverlayHidden, isGifRecActive, restoreRecordingOverlay} from './ss-gif-rec.js';
 import {
     cleanupCanvasVisuals,
     compositeSelection,
@@ -248,14 +248,6 @@ annot.setTool('select');
 const initialParams = new URLSearchParams(window.location.search);
 const isPreheat = initialParams.get('preheat') === '1';
 const initialSource = initialParams.get('source');
-if (!isPreheat) {
-    if (initialSource === IMAGE_SOURCE.CLIPBOARD) {
-        loadEditorImage(IMAGE_SOURCE.CLIPBOARD);
-    } else {
-        loadScreenshot();
-        // 窗口列表在 img.onload 的 rAF 中加载（syncRenderScale 之后）
-    }
-}
 // 0.15.7：绑定长截图专属工具栏
 bindScrollToolbar();
 refreshOcrDiagnosticsVisibility();
@@ -391,6 +383,12 @@ window.__blinkClearScreenshotVisual = function () {
  * 时多个 fire-and-forget eval 只执行了一部分，留下“只有暗罩、无法拖选”的半会话。
  */
 window.__blinkStartScreenshotSession = function (meta, activeDisplay) {
+    if (isGifRecActive() || isRecordingStarting()) {
+        void restoreRecordingOverlay(true).then(restored => {
+            if (!restored && !isRecordingStarting()) window.__blinkStartScreenshotSession(meta, activeDisplay);
+        }).catch(error => console.error('[recording] restore failed', error));
+        return;
+    }
     window.__blinkScreenMeta = meta;
     window.__blinkActiveDisplay = activeDisplay ?? meta?.activeDisplay ?? 0;
     window.__blinkClearScreenshotVisual();
@@ -424,6 +422,10 @@ window.__blinkReloadScreenshot = function () {
 };
 
 window.__blinkOpenImageEditor = function () {
+    if (isGifRecActive() || isRecordingStarting()) {
+        void restoreRecordingOverlay(true).then(restored => {if (!restored && !isRecordingStarting()) window.__blinkOpenImageEditor();});
+        return;
+    }
     console.info('[image-editor] __blinkOpenImageEditor called');
     try {
         resetState();
@@ -581,6 +583,8 @@ function resetState() {
     ss.screenshotOffscreen = null;
     ss.editorSession.reset();
     document.body.classList.remove('image-editor-mode');
+    // 先归还录制工具及输入钩子，selectTool('select') 才不会被录制工具白名单拦下。
+    handleOverlayHidden();
     // 0.23.19：每次会话重置默认工具为「选取」——复用窗口时上一会话的工具不应跨会话
     // 残留。必须在 editorSession.reset() 之后调用：selectTool 读取 canvasBacked 决定
     // 光标语义，读到上一会话的旧状态会把 crosshair 误设为 grab。
@@ -598,10 +602,6 @@ function resetState() {
     // 0.28.7：GIF 录制按钮同长截图恢复显式重置
     const gifButton = document.getElementById('btn-gif');
     if (gifButton) gifButton.hidden = false;
-    // 0.28.7：宿主双面架构——新会话一律从标注面开始（防上一会话的准备面残留）
-    toolbar.classList.remove('toolbar-mode-gif-prep');
-    // 0.28.23：录制叠层投影随新会话复位（overlay 隐藏/重开会话的兜底路径）
-    handleOverlayHidden();
     // 0.20.x：恢复 pin 来源编辑时隐藏的「钉图」按钮
     const pinButton = document.getElementById('btn-pin');
     if (pinButton) pinButton.hidden = false;
@@ -1241,8 +1241,6 @@ function enterCanvasImageEditor(cropData, pw, ph, source = IMAGE_SOURCE.LONG_SCR
     // 0.28.7：GIF 录制只对实时屏幕区域有意义（剪贴板/编辑器会话无对应区域）
     const gifButton = document.getElementById('btn-gif');
     if (gifButton) gifButton.hidden = source === IMAGE_SOURCE.CLIPBOARD;
-    // 画布编辑器工具栏永远是标注面（防准备面残留）
-    toolbar.classList.remove('toolbar-mode-gif-prep');
     // 0.20.x：pin 来源编辑器的勾按钮已是「替换回原窗口」，再保留「钉图」会制造第二份 pin，隐藏掉。
     const pinButton = document.getElementById('btn-pin');
     if (pinButton) pinButton.hidden = source === IMAGE_SOURCE.PIN;
@@ -1396,7 +1394,7 @@ function exitAnnotationMode() {
 }
 
 /** 选区内容失效（移动/缩放/重框后清 OCR/阅读/overlay） */
-function invalidateSelectionContent() {
+function invalidateSelectionContent({preservePresentation = false} = {}) {
     const {annotCanvas, toolbar, sizeHint} = ss;
     resetQrPanel();
     ss.selectionRevision++;
@@ -1412,6 +1410,8 @@ function invalidateSelectionContent() {
     exitReadingMode();
     annot.clearOverlay();
     updateOverlayButtonsActive();
+    // 录制区域平移只使 OCR/译文失效，继续使用同一工具栏和标注画布。
+    if (preservePresentation) return;
     annotCanvas.classList.add('hidden');
     toolbar.classList.add('hidden');
     sizeHint.classList.add('hidden');
@@ -2462,10 +2462,10 @@ window.addEventListener('blur', () => {
         console.debug('[screenshot] window blur ignored during gif recording overlay');
         return;
     }
-    // 0.28.7：GIF 辅助窗口预热/操作期的焦点瞬移不视为退出意图。
+    // 启动中的焦点瞬移不视为退出意图。
     // 真正切走（异进程前台）仍由后端看门狗 150ms 兜底隐藏。
-    if (ss.gifWindowHold) {
-        console.debug('[screenshot] window blur ignored (gif window ops hold)');
+    if (isRecordingStarting()) {
+        console.debug('[screenshot] window blur ignored during recording startup');
         return;
     }
     // 0.20.4：图片编辑器模式下用更长的 blurGuard 防止主窗口关闭导致的
@@ -2517,6 +2517,15 @@ bindToolbar();
 // 0.28.7：GIF 录制准备栏（两段式录制第一段）
 bindGifPrepBar();
 bindGifRecBar();
+window.__blinkRestoreRecording = notify => restoreRecordingOverlay(notify)
+    .catch(error => { console.error('[recording] restore failed', error); showTransientHint(normalizeError(error).message, {isError:true}); return false; });
+// 预热 URL 的页面也可能是录制中的 WebView 重载；先恢复控制，再考虑静态截图。
+const initialLoadGeneration = ss._loadGen;
+void restoreRecordingOverlay().then(restored => {
+    if (restored || isPreheat || initialLoadGeneration !== ss._loadGen) return;
+    if (initialSource === IMAGE_SOURCE.CLIPBOARD) loadEditorImage(IMAGE_SOURCE.CLIPBOARD);
+    else loadScreenshot();
+}).catch(error => console.error('[recording] initial restore failed', error));
 // 0.23.19：自定义 tooltip——原生 title 提示在多屏混合 DPI 下会漂到别的屏幕
 initSsTooltip();
 

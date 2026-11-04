@@ -3119,23 +3119,8 @@ async fn finalize_engine(engine: Option<Arc<dyn SttEngine>>) -> String {
 /// - RMS 0.001~0.15 映射到 0.0~1.0，用 sqrt 曲线增强小信号区域
 /// - 平方根曲线让安静说话也能有 20-30% 的音量指示，不会"看起来没反应"
 fn compute_rms(samples: &[f32]) -> f64 {
-    if samples.is_empty() {
-        return 0.0;
-    }
-    let sum_sq: f64 = samples.iter().map(|s| (*s as f64) * (*s as f64)).sum();
-    let rms = (sum_sq / samples.len() as f64).sqrt();
-
-    // 噪声门限：低于此值视为静默
-    const NOISE_FLOOR: f64 = 0.001;
-    if rms < NOISE_FLOOR {
-        return 0.0;
-    }
-
-    // 线性映射到 0~1（参考电平 0.15 = 正常说话音量）
-    let normalized = ((rms - NOISE_FLOOR) / (0.15 - NOISE_FLOOR)).min(1.0);
-
-    // 平方根曲线：增强小信号区域，让安静说话也有明显指示
-    normalized.sqrt()
+    let level = crate::infra::platform::audio::signal::measure(samples);
+    crate::infra::platform::audio::signal::feedback_level(level.rms)
 }
 
 #[cfg(test)]

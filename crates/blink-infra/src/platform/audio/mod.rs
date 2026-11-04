@@ -155,6 +155,10 @@ pub mod wav;
 
 // 共享 downmix + stateful resample 规范化链路（0.22.16 H02）
 pub mod normalize;
+pub mod signal;
+
+#[cfg(target_os = "windows")]
+pub mod pcm;
 
 // 平台特定实现
 #[cfg(target_os = "windows")]

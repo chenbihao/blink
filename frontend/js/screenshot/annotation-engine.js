@@ -161,6 +161,10 @@ function releaseCanvas(c) {
 // ── 初始化和重置 ──────────────────────────────────────
 
 /** 绑定标注 canvas */
+let renderListener = null;
+/** 录制上传只订阅画布变化，不在静止桌面上持续编码。 */
+export function setRenderListener(listener) { renderListener = listener; }
+
 export function init(annotCanvas) {
     canvas = annotCanvas;
     ctx = annotCanvas.getContext('2d');
@@ -1406,6 +1410,7 @@ function redrawAll() {
         updateLoadingSnapshot();
         drawLoadingSpinner(ctx, overlayLayer);
     }
+    renderListener?.();
 }
 
 /**

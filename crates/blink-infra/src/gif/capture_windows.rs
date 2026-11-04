@@ -45,6 +45,7 @@ pub type SharedRegionPos = std::sync::Arc<std::sync::Mutex<(i32, i32)>>;
 pub struct GdiFrameSource {
     /// 共享区域位置（None = 固定区域，兼容测试/基准）。
     pos: Option<SharedRegionPos>,
+    annotation: Option<super::annotation::SharedAnnotation>,
     fixed_x: i32,
     fixed_y: i32,
     w: u32,
@@ -61,6 +62,11 @@ pub struct GdiFrameSource {
 impl GdiFrameSource {
     pub fn new(x: i32, y: i32, w: u32, h: u32, show_cursor: bool) -> Self {
         Self::with_shared_pos(x, y, w, h, show_cursor, None)
+    }
+
+    pub fn with_annotation(mut self, annotation: super::annotation::SharedAnnotation) -> Self {
+        self.annotation = Some(annotation);
+        self
     }
 
     pub fn with_fps(mut self, fps: u32) -> Self {
@@ -89,6 +95,7 @@ impl GdiFrameSource {
         }
         Self {
             pos,
+            annotation: None,
             fixed_x: x,
             fixed_y: y,
             w,
@@ -115,9 +122,11 @@ impl FrameSource for GdiFrameSource {
                     self.show_cursor,
                     self.pos.clone(),
                 );
+                let annotation = self.annotation.clone();
                 let factory = std::sync::Arc::new(move || {
                     let mut source = GdiFrameSource::new(x, y, w, h, cursor);
                     source.pos = pos.clone();
+                    source.annotation = annotation.clone();
                     Box::new(source) as Box<dyn FrameSource>
                 });
                 let (anchor, offset) = self.clock.unwrap_or((std::time::Instant::now(), 0));
@@ -136,6 +145,16 @@ impl FrameSource for GdiFrameSource {
         };
         let mut frame =
             crate::platform::screenshot::capture_region_continuous(x, y, self.w, self.h)?;
+        let annotation = self.annotation.as_ref().and_then(|state| {
+            state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .frame
+                .clone()
+        });
+        if let Some(annotation) = annotation {
+            annotation.blend_bgra(&mut frame, self.w, self.h);
+        }
         if self.show_cursor
             && blend_current_cursor(&mut frame, self.w, self.h, x, y, &mut self.cursor_cache)
         {

@@ -43,6 +43,9 @@ import {enterGifRecordMode} from './ss-gif-prep.js';
  * 预热静默划词上线后，上一轮会话更常带着划词高亮/词框退出，残留闪现明显。
  */
 export function cleanupCanvasVisuals() {
+    // 迟到的截图输出回调不得清空仍在录制的画布；实际窗口丢失由后端收尾。
+    if (ss._recordingPreventsCleanup?.()) return;
+    ss._resetRecordingUi?.();
     // 先关闭整个 session 的可见性，再逐层清理。即使后端立即 cloak/hide，
     // 下次 show 也会保持隐藏，直到新 session reset 完成。
     ss._resetQrPanel?.();
@@ -66,12 +69,6 @@ export function cleanupCanvasVisuals() {
     annot.clearOverlay();
     // 隐藏 UI 元素
     if (toolbar) toolbar.classList.add('hidden');
-    // 0.28.7：录制准备面随宿主一起收起——清掉宿主模式 class（双面架构下
-    // 准备面没有独立 hidden，防复用窗口以准备面形态重现；node 测试 mock 的
-    // document 可能只有 documentElement，按能力探测）
-    if (typeof document !== 'undefined' && typeof document.getElementById === 'function') {
-        (ss.toolbar || document.getElementById('toolbar'))?.classList.remove('toolbar-mode-gif-prep');
-    }
     if (sizeHint) sizeHint.classList.add('hidden');
     if (typeof ss._cleanupSessionVisuals === 'function') {
         try {

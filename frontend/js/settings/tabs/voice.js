@@ -112,7 +112,10 @@ export async function initVoiceTab() {
             deviceSelect.innerHTML = "";
             const defaultOpt = document.createElement("option");
             defaultOpt.value = "";
-            defaultOpt.textContent = t("voice.audio_device.default");
+            const systemDefault = devices.find(device => device.is_default);
+            defaultOpt.textContent = systemDefault?.name
+                ? t("voice.audio_device.default_named", {name: systemDefault.name})
+                : t("voice.audio_device.default");
             deviceSelect.appendChild(defaultOpt);
             for (const dev of devices) {
                 const opt = document.createElement("option");

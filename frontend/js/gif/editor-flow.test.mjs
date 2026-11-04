@@ -43,6 +43,7 @@ async function fixture() {
         createAudioPlayback:()=>({clear(){},pause(){},load(){},sync(){},dispose(){}}),
         createExportController:()=>({setSession(){},setSource(){},invalidate(){},dispose(){}}),
         createRecentList:()=>({bind(){},refresh(){}}),ensureSpriteLoaded(){},onLangChange(){},
+        bindEditorSelects:()=>()=>{},applyThemeFromConfig:async()=>{},
         applyI18nFromConfig:async()=>{},getCurrentWindow:()=>null,confirmDialog:async()=>true,
         invoke,listen:async()=>()=>{},normalizeError:e=>e,t:key=>key,EVENTS:{},
         fetch:async()=>({blob:async()=>({})}),createImageBitmap:async()=>({width:80,height:45,close(){}}),

@@ -251,10 +251,7 @@ fn run(
         if !(8_000..=192_000).contains(&rate)
             || channels == 0
             || channels > 8
-            || !matches!(
-                format,
-                cpal::SampleFormat::F32 | cpal::SampleFormat::I16 | cpal::SampleFormat::I32
-            )
+            || !super::pcm::supported(format)
         {
             return Err("声音设备采样格式不支持".into());
         }
@@ -279,6 +276,7 @@ fn run(
         let cb = shared.clone();
         let errors = shared.clone();
         let tx = tx.clone();
+        let mut diagnosed = false;
         let stream = d
             .build_input_stream_raw(
                 config.into(),
@@ -287,7 +285,6 @@ fn run(
                     let now = Instant::now();
                     let stamp = info.timestamp();
                     let latency = stamp.callback.duration_since(stamp.capture);
-                    let first = now.checked_sub(latency).unwrap_or(now);
                     let mut g = cb.lock().unwrap_or_else(|e| e.into_inner());
                     if !g.status.active || g.status.error.is_some() {
                         return;
@@ -295,29 +292,13 @@ fn run(
                     let Some(start) = g.start else {
                         return;
                     };
-                    let input: Vec<f32> = match format {
-                        cpal::SampleFormat::F32 => {
-                            data.as_slice::<f32>().unwrap_or_default().to_vec()
-                        }
-                        cpal::SampleFormat::I16 => data
-                            .as_slice::<i16>()
-                            .unwrap_or_default()
-                            .iter()
-                            .map(|v| *v as f32 / 32768.0)
-                            .collect(),
-                        cpal::SampleFormat::I32 => data
-                            .as_slice::<i32>()
-                            .unwrap_or_default()
-                            .iter()
-                            .map(|v| *v as f32 / 2147483648.0)
-                            .collect(),
-                        _ => return,
-                    };
+                    let input = super::pcm::to_f32(data, format);
                     let count = input.len() / channels as usize;
                     if count == 0 || count > rate as usize {
                         g.fail("声音回调超过缓冲预算");
                         return;
                     }
+                    let first = super::pcm::block_start(now, count, rate, latency);
                     let relative = if first >= start {
                         first.duration_since(start).as_secs_f64()
                     } else {
@@ -331,9 +312,23 @@ fn run(
                         rate,
                         begin,
                         g.offset_ms * 48,
-                        g.time_ms(now).min(MAX_AUDIO_MS) * 48,
+                        g.frame_end(now),
                         |ms| g.muted_at(source, ms),
                     );
+                    if !diagnosed {
+                        tracing::debug!(
+                            source,
+                            input_frames = count,
+                            raw_rms = levels(&input).0,
+                            latency_ms = latency.as_secs_f64() * 1000.0,
+                            begin,
+                            upper = g.frame_end(now),
+                            saved_samples = samples.len(),
+                            rms,
+                            "录屏音频首块时钟与能量"
+                        );
+                        diagnosed = true;
+                    }
                     g.meter_updated[source] = Some(now);
                     g.status.rms[source] = rms;
                     g.status.peak[source] = g.status.peak[source].max(peak);
@@ -358,8 +353,14 @@ fn run(
                 },
                 None,
             )
-            .map_err(|_| "无法打开声音设备，请检查权限或占用")?;
-        stream.play().map_err(|_| "无法启动声音设备")?;
+            .map_err(|error| {
+                tracing::error!(source, %error, rate, channels, ?format, "录屏声音设备打开失败");
+                format!("无法打开声音设备：{error}")
+            })?;
+        stream.play().map_err(|error| {
+            tracing::error!(source, %error, "录屏声音设备启动失败");
+            format!("无法启动声音设备：{error}")
+        })?;
         streams.push(stream);
     }
     let offset = {
@@ -488,3 +489,7 @@ fn check_privacy() -> Result<(), String> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "recording_tests.rs"]
+mod tests;

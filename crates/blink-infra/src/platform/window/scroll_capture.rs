@@ -113,6 +113,14 @@ pub(super) fn reset_capture_input(app: &tauri::AppHandle) {
     }
 }
 
+/// 调用方在主线程且校验所属录制会话后使用；show/hide 统一恢复捕获属性。
+pub fn exclude_recording_overlay(app: &tauri::AppHandle) -> Result<(), String> {
+    let win = app
+        .get_webview_window("chord-screenshot")
+        .ok_or("截图 overlay 窗口未找到")?;
+    set_affinity(&win, true)
+}
+
 fn set_affinity(win: &tauri::WebviewWindow, exclude: bool) -> Result<(), String> {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{

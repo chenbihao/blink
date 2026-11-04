@@ -154,18 +154,21 @@ Summon: `Alt+A` in the main window (empty input; can be promoted to a global hot
 
 ### GIF recording and editing
 
-Select a screenshot region, click **Record**, choose the frame rate and whether to show the cursor, then click **Start recording**.
+Select a screenshot region, click **Record**, choose the frame rate and audio source, then click **Start**. The cursor is recorded by default. With audio enabled, check the device meters before starting.
 
 | Operation | Entry / shortcut | Notes |
 |---|---|---|
-| Move the recording region | Drag the selection before recording, or its handle while recording | Position the region where you need it |
-| Pause / resume | Recording control bar | Paused time is excluded from the result |
-| Stop / cancel | Recording control bar | Stop opens the editor; cancel discards the recording |
+| Move the toolbar / region | Left dotted grip / hand grip | The dots move only the toolbar; the hand moves the recording region and toolbar together |
+| Audio source | Audio button | Choose silence, microphone, system audio, or both; expand to select devices and check each source's meter in the button |
+| Pause / resume | The same recording button | Paused time is excluded from the result |
+| Finish / discard | Recording toolbar | Finish keeps the material and opens the editor; discard requires confirmation. Before recording, Exit returns to the screenshot |
+| Draw live | Rightmost Draw button | Expand the drawing tools to the right; click again to collapse them and interact with the desktop |
 | Preview | `Space` to play / pause; `←` / `→` to step | Find the frames you want to edit |
 | Trim / delete frames | Set start / end; select frames and press `Delete` | `Shift+click` selects a range; `Ctrl+click` toggles individual frames |
 | Adjust pacing | Speed, frame duration, and loop controls | Hold key moments longer; toolbar buttons undo and redo edits |
-| Export | Top-right **Export** button | Choose GIF / MP4, size, quality, and where to save. MP4 is silent and plays once; loop settings apply to GIF only |
+| Export | Top-right **Export** button | Choose GIF / MP4, size, quality, and where to save. MP4 can include recorded audio; GIF has no audio. Loop settings apply to GIF only |
 | Install the media engine | Choose MP4, then **Manage media engine** | Install FFmpeg, return to the editor, and export again; your edits are preserved. You can also manage it under Settings → Managed engines → Media engine |
+| Restore editing | Recent recordings in the editor, or search for Recording Editor in the main window | Reopen retained material and saved edits |
 
 Tip: record a smaller region and choose a smaller export size for a lightweight walkthrough. Recording material is retained for 72 hours, so export important recordings promptly; exported files are unaffected by material cleanup.
 

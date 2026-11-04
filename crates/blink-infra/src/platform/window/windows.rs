@@ -2600,6 +2600,19 @@ pub fn is_overlay_record_active() -> bool {
     OVERLAY_RECORD_ACTIVE.load(Ordering::Relaxed)
 }
 
+/// 找回正在录制的宿主，保留几何、穿透与当前会话，不抢被录应用焦点。
+pub fn restore_recording_overlay(app: &AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+    let win = app
+        .get_webview_window("chord-screenshot")
+        .ok_or_else(|| "录制控制窗口不存在，请停止录制后重试".to_string())?;
+    if let Ok(hwnd) = win.hwnd() {
+        apply_cloak(HWND(hwnd.0 as _), false);
+        force_topmost(HWND(hwnd.0 as _));
+    }
+    win.show().map_err(|e| e.to_string())
+}
+
 /// 0.16.11：退出前 flush 所有便签窗口的未保存内容。
 ///
 /// 前端有 500ms 内容防抖和 300ms 几何防抖。退出时 eval flush JS，
@@ -3540,17 +3553,14 @@ fn unpin_screenshot_overlay_geometry() {
 
 /// 隐藏截图覆盖窗 + 清空 SESSION（释放位图内存）。
 pub fn hide_screenshot_overlay(app: &AppHandle) {
+    // 迟到的截图取消/失焦事件不能隐藏录制宿主；停止路径先显式退出录制模式。
+    if is_overlay_record_active() {
+        tracing::debug!("hide_screenshot_overlay: 保留活跃录制控制栏");
+        return;
+    }
     super::scroll_capture::reset_capture_input(app);
     cancel_pending_window_activation("chord-screenshot");
-    // 0.28.23：录制叠层模式的窗口属性（不可聚焦/鼠标穿透）在任何隐藏路径
-    // 都复位，下一轮截图会话不继承；标志本身由录制服务在 stop/cancel 清除，
-    // 此处兜底防止异常路径残留。
-    if OVERLAY_RECORD_ACTIVE.swap(false, Ordering::SeqCst)
-        && let Some(win) = app.get_webview_window("chord-screenshot")
-    {
-        let _ = win.set_ignore_cursor_events(false);
-        let _ = win.set_focusable(true);
-    }
+    // 录制标志与窗口输入属性只由录制服务退出时复位；迟到隐藏不能释放新会话。
     // 会话结束：解除 WM_DPICHANGED 钉扎（窗口 hide 后几何交还 tao 默认处理）
     unpin_screenshot_overlay_geometry();
     if let Some(win) = app.get_webview_window("chord-screenshot") {
@@ -3570,6 +3580,9 @@ pub fn hide_screenshot_overlay(app: &AppHandle) {
 
 /// 隐藏通用图片编辑窗口并释放用户图片载荷；不触碰截图 SESSION。
 pub fn hide_image_editor_window(app: &AppHandle) {
+    if is_overlay_record_active() {
+        return;
+    }
     super::scroll_capture::reset_capture_input(app);
     cancel_pending_window_activation("chord-screenshot");
     if let Some(win) = app.get_webview_window("chord-screenshot") {

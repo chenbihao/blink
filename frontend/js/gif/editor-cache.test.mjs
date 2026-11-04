@@ -10,7 +10,7 @@ const source = readFileSync(new URL('./editor.js', import.meta.url), 'utf8')
 function fixture(invoke, createImageBitmap) {
     const context = vm.createContext({
         document: {getElementById() { return {}; }},
-        ensureSpriteLoaded() {}, refreshLiveThumbs() {},
+        ensureSpriteLoaded() {}, refreshLiveThumbs() {}, bindEditorSelects: () => () => {}, applyThemeFromConfig: async () => {},
         createAudioPlayback: () => ({}), window: {addEventListener() {}},
         invoke, createImageBitmap,
         fetch: async () => ({blob: async () => ({})}), console,

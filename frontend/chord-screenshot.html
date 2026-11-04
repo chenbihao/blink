@@ -134,11 +134,8 @@
 <!-- 长截图采集边界：overlay 已从 BitBlt 排除，仅用于范围提示。 -->
 <div aria-hidden="true" class="scroll-capture-frame hidden" id="scroll-capture-frame"></div>
 
-<!-- 工具栏（0.11.7-a/b，0.11.8-a 分组重组 + 圆润化 + 拖动 handle）
-     0.28.7 重构：单一宿主双面——#toolbar 是唯一定位/拖动/跟随宿主，
-     录制准备态是宿主上的一个 class（toolbar-mode-gif-prep，见 CSS），
-     切面 = 隐藏标注工具组、显示 #gif-prep-bar（抓手保留）。 -->
-<div aria-label="截图工具栏" class="hidden" id="toolbar" role="toolbar">
+<!-- 截图与录制共用工具栏：只由 data-mode / data-drawing 投影显隐，不搬移控件。 -->
+<div aria-label="截图工具栏" class="hidden" id="toolbar" role="toolbar" data-mode="screenshot" data-drawing="false">
     <!-- 拖动 handle（左侧）：mousedown 拖动整条工具栏 -->
     <div class="toolbar-drag-handle" id="toolbar-drag" title="拖动工具栏">
         <span class="drag-dots"></span>
@@ -146,108 +143,39 @@
 
     <div class="toolbar-divider"></div>
 
-    <!-- 0.28.7：GIF 录制准备面（宿主的第二形态）——配置帧率/光标，选区可拖动
-         移动（复用选区 move 交互，不允许缩放），点「开始录制」才真正启动后端
-         流水线。显示/隐藏由宿主 class 控制，无独立定位。 -->
-    <div id="gif-prep-bar">
-        <label class="gif-prep-field" title="录制帧率">
-            <span>帧率</span>
-            <select id="gif-prep-fps" aria-label="录制帧率">
-                <option value="10">10 fps</option>
-                <option value="15" selected>15 fps</option>
-                <option value="24">24 fps</option>
-                <option value="30">30 fps</option>
-                <option value="60">60 fps</option>
-            </select>
-        </label>
-        <span class="gif-rec-frames" id="gif-prep-storage"></span>
-        <label class="gif-prep-field gif-prep-cursor" title="是否录制鼠标光标">
-            <input checked id="gif-prep-cursor" type="checkbox"/>
-            <span>光标</span>
-        </label>
-        <div class="toolbar-divider"></div>
-        <button class="tool-btn tool-btn-primary" id="gif-prep-start" title="开始录制（点击立即开始）">
-            <svg aria-hidden="true" class="icon">
-                <use href="#icon-video"/>
-            </svg>
-            <span>开始录制</span>
+    <!-- 录制只替换输出区；原标注工具始终留在 #toolbar 内。 -->
+    <div id="gif-recording-bar" class="toolbar-group recording-bar">
+        <button type="button" class="tool-btn" id="gif-rec-move" aria-label="拖动录制区域与工具栏"><svg aria-hidden="true" class="icon"><use href="#icon-hand-grab"/></svg></button>
+        <input type="hidden" id="gif-prep-fps" value="15"/>
+        <button type="button" class="tool-btn recording-select recording-fps-select" data-recording-select="gif-prep-fps" aria-label="录制帧率"><span class="recording-select-label">15 fps</span><svg aria-hidden="true" class="icon"><use href="#icon-chevron-down"/></svg></button>
+        <button type="button" class="tool-btn recording-sound" id="gif-audio-open" aria-haspopup="dialog" aria-expanded="false"><span id="gif-audio-label">无声</span><span class="gif-audio-meters" id="gif-audio-meters"><span class="audio-source audio-inactive" data-source="0"><span class="audio-level" aria-hidden="true"><i class="audio-level-segment" data-level="1"></i><i class="audio-level-segment" data-level="2"></i><i class="audio-level-segment" data-level="3"></i><i class="audio-level-segment" data-level="4"></i><i class="audio-level-segment" data-level="5"></i><i class="audio-level-segment" data-level="6"></i><i class="audio-level-segment" data-level="7"></i><i class="audio-level-segment" data-level="8"></i><i class="audio-level-segment" data-level="9"></i><i class="audio-level-segment" data-level="10"></i></span></span><span class="audio-source audio-inactive" data-source="1"><span class="audio-level" aria-hidden="true"><i class="audio-level-segment" data-level="1"></i><i class="audio-level-segment" data-level="2"></i><i class="audio-level-segment" data-level="3"></i><i class="audio-level-segment" data-level="4"></i><i class="audio-level-segment" data-level="5"></i><i class="audio-level-segment" data-level="6"></i><i class="audio-level-segment" data-level="7"></i><i class="audio-level-segment" data-level="8"></i><i class="audio-level-segment" data-level="9"></i><i class="audio-level-segment" data-level="10"></i></span></span></span><svg aria-hidden="true" class="icon"><use href="#icon-chevron-down"/></svg></button>
+        <button type="button" class="tool-btn recording-summary" id="gif-recording-status" aria-haspopup="dialog" aria-expanded="false">
+            <span class="recording-time-line"><span class="gif-rec-dot"></span><span class="gif-rec-time" id="gif-rec-time">00:00</span></span>
+            <span class="recording-storage" id="gif-rec-storage">—</span>
         </button>
-        <button class="tool-btn" id="gif-audio-open" title="声音模式与设备">声音</button>
-        <div class="gif-audio-meters" id="gif-prep-audio">
-            <span class="audio-source hidden" data-source="0"><span class="audio-level"><span class="audio-level-fill"></span><span class="audio-level-peak"></span></span><span class="audio-source-name"></span></span>
-            <span class="audio-source hidden" data-source="1"><span class="audio-level"><span class="audio-level-fill"></span><span class="audio-level-peak"></span></span><span class="audio-source-name"></span></span>
-        </div>
-        <button class="tool-btn" id="gif-prep-cancel" title="返回截图 (ESC)">
-            <svg aria-hidden="true" class="icon">
-                <use href="#icon-x"/>
-            </svg>
-        </button>
+        <button type="button" class="tool-btn recording-start" id="gif-record-toggle"><span class="recording-start-dot"></span><svg aria-hidden="true" class="icon hidden"><use href="#icon-pause"/></svg><svg aria-hidden="true" class="icon hidden"><use href="#icon-play"/></svg><span id="gif-record-toggle-label">开始</span></button>
+        <button type="button" class="tool-btn recording-stop" id="gif-rec-stop" aria-label="结束"><svg aria-hidden="true" class="icon"><use href="#icon-square"/></svg><span id="gif-rec-stop-label">结束</span></button>
+        <button type="button" class="tool-btn" id="gif-record-exit" aria-label="退出录制"><svg aria-hidden="true" class="icon"><use href="#icon-x"/></svg><span id="gif-record-exit-label">退出</span></button>
+        <span class="toolbar-divider"></span>
+        <button type="button" class="tool-btn" id="gif-rec-draw" aria-pressed="false" aria-expanded="false" aria-label="涂画"><svg aria-hidden="true" class="icon"><use href="#icon-pencil"/></svg></button>
     </div>
-
-    <!-- 0.28.23：录制面（宿主的第三形态）——录制中/已暂停共用。左侧共享标注
-         工具（依赖底图的效果由 CSS/逻辑禁用），此处只放录制控制与状态：
-         状态显示（REC/已暂停 · 有效时长 · 帧数）、涂画/操作桌面切换、移动区域、
-         暂停/继续、停止并编辑、受保护的取消（二次确认）。 -->
-    <div id="gif-rec-bar">
-        <span class="gif-rec-dot" id="gif-rec-dot"></span>
-        <span class="gif-rec-state" id="gif-rec-state">录制中</span>
-        <span class="gif-rec-time" id="gif-rec-time">0:00.0</span>
-        <span class="gif-rec-frames" id="gif-rec-frames">0 帧</span>
-        <span class="gif-rec-frames" id="gif-rec-storage"></span>
-        <div class="gif-audio-meters" id="gif-rec-audio">
-            <button class="tool-btn audio-source hidden" data-source="0" title="麦克风采集静音（静音期间的原声不会保存）"><span class="audio-level"><span class="audio-level-fill"></span><span class="audio-level-peak"></span></span><span class="audio-source-name"></span></button>
-            <button class="tool-btn audio-source hidden" data-source="1" title="系统声音采集静音（静音期间的原声不会保存）"><span class="audio-level"><span class="audio-level-fill"></span><span class="audio-level-peak"></span></span><span class="audio-source-name"></span></button>
-        </div>
-        <button class="tool-btn hidden" id="gif-audio-recover" title="设备异常：选择替代设备后手动继续">声音异常 · 设备</button>
-        <div class="toolbar-divider"></div>
-        <button class="tool-btn" id="gif-rec-mode" title="切换涂画 / 操作桌面模式">
-            <svg aria-hidden="true" class="icon"><use href="#icon-pencil"/></svg>
-            <svg aria-hidden="true" class="icon hidden"><use href="#icon-mouse-pointer-2"/></svg>
-            <span id="gif-rec-mode-label">涂画</span>
-        </button>
-        <button class="tool-btn" id="gif-rec-move" title="按住拖动录制区域（录制中移动会录入过程；先暂停可跳过）">
-            <svg aria-hidden="true" class="icon"><use href="#icon-hand-grab"/></svg>
-            <span>移动区域</span>
-        </button>
-        <div class="toolbar-divider"></div>
-        <button class="tool-btn" id="gif-rec-pause" title="暂停 / 继续录制">
-            <svg aria-hidden="true" class="icon"><use href="#icon-pause"/></svg>
-            <svg aria-hidden="true" class="icon hidden"><use href="#icon-play"/></svg>
-        </button>
-        <button class="tool-btn tool-btn-primary" id="gif-rec-stop" title="停止并打开录制编辑器">
-            <svg aria-hidden="true" class="icon"><use href="#icon-square"/></svg>
-            <span>停止</span>
-        </button>
-        <button class="tool-btn" id="gif-rec-cancel" title="取消并丢弃本次录制（需再次点击确认）">
-            <svg aria-hidden="true" class="icon"><use href="#icon-x"/></svg>
-        </button>
-    </div>
-
-    <section class="gif-audio-settings hidden" id="gif-audio-settings" aria-label="录制声音设置">
-        <label>声音模式<select id="gif-audio-mode"><option value="silent">不录声音（默认）</option><option value="microphone">麦克风</option><option value="system">系统声音</option><option value="both">麦克风 + 系统声音</option></select></label>
-        <label class="hidden" id="gif-audio-field-0">麦克风<select id="gif-audio-device-0"><option value="">系统默认输入设备</option></select></label>
-        <label class="hidden" id="gif-audio-field-1">系统声音<select id="gif-audio-device-1"><option value="">系统默认播放设备</option></select></label>
-        <p>采集静音期间不保存原声；编辑器静音可撤销。</p>
-        <p id="gif-audio-error" role="status"></p>
-        <button class="tool-btn" id="gif-audio-close">收起</button>
-    </section>
 
     <!-- 选取工具（0.11.10-a/k）：默认工具，负责选区重选、移动和缩放。
          有识别结果时，选区内文字由 #ocr-hit-canvas 优先承接拖选；边缘仍保留缩放热区。
          切到其它工具时把 #ocr-hit-canvas pointer-events 让渡给标注层。 -->
-    <button class="tool-btn tool-direct active" data-tool="select" id="select-main" title="选取（默认） Alt+`">
+    <button class="tool-btn tool-direct active" data-tool="select" id="select-main" data-toolbar-part="selection" title="选取（默认） Alt+`">
         <svg aria-hidden="true" class="icon">
             <use href="#icon-mouse-pointer-2"/>
         </svg>
         <span class="kbd-hint">`</span></button>
 
-    <div class="toolbar-divider"></div>
+    <div class="toolbar-divider" data-toolbar-part="selection"></div>
 
     <!-- 图形分组：矩形/椭圆
          0.15.8-fix：移除 caret，改为 hover 自动展开 dropdown
          按住 Shift 时约束长宽等比（矩形→正方形、椭圆→圆） -->
     <!-- 0.15.8-fix：移除 caret 按钮，改为 hover 自动展开 dropdown -->
-    <div class="dropdown-wrap">
+    <div class="dropdown-wrap" data-toolbar-part="drawing">
         <button class="tool-btn split-main" data-tool="rect" id="shape-main" title="图形 Alt+1">
             <span id="shape-main-icon"><svg aria-hidden="true" class="icon"><use href="#icon-square"/></svg></span>
             <span class="kbd-hint">1</span>
@@ -282,7 +210,7 @@
     <!-- 画笔分组：铅笔/箭头/荧光笔（正片叠底/半透明）
          0.15.0：箭头从一级默认降为下拉子项，画笔（pencil）作组默认
          0.15.8-fix：hover 自动展开 -->
-    <div class="dropdown-wrap">
+    <div class="dropdown-wrap" data-toolbar-part="drawing">
         <button class="tool-btn split-main" data-tool="pencil" id="stroke-main" title="画笔 Alt+2">
             <span id="stroke-main-icon"><svg aria-hidden="true" class="icon"><use href="#icon-pencil"/></svg></span>
             <span class="kbd-hint">2</span>
@@ -307,7 +235,7 @@
     <!-- 文字分组：文本/数字标号/水印
          0.15.11：二级菜单内容移至工具栏下方 sub-panel，hover dropdown 只保留工具选择
          0.15.8-fix：hover 自动展开 -->
-    <div class="dropdown-wrap">
+    <div class="dropdown-wrap" data-toolbar-part="drawing">
         <button class="tool-btn split-main" data-tool="text" id="text-main" title="文字 Alt+3">
             <span id="text-main-icon">A</span>
             <span class="kbd-hint">3</span>
@@ -326,7 +254,7 @@
 
     <!-- 马赛克分组：马赛克/高斯模糊（框选与画笔均使用像素块马赛克，覆盖形状不同）
          0.15.8-fix：hover 自动展开 -->
-    <div class="dropdown-wrap">
+    <div class="dropdown-wrap" data-toolbar-part="drawing">
         <button class="tool-btn split-main" data-tool="pixelate" id="blur-main" title="马赛克 Alt+4">
             <span id="blur-main-icon"><span aria-hidden="true" class="icon-mask icon-mask-mosaic"></span></span>
             <span class="kbd-hint">4</span>
@@ -352,7 +280,7 @@
     </div>
 
     <!-- 橡皮（0.15.1：转 dropdown，含模式切换器。0.15.8-fix：hover 自动展开） -->
-    <div class="dropdown-wrap">
+    <div class="dropdown-wrap" data-toolbar-part="drawing">
         <button class="tool-btn split-main" data-tool="eraser" id="eraser-main" title="橡皮 Alt+5">
             <svg aria-hidden="true" class="icon">
                 <use href="#icon-eraser"/>
@@ -366,11 +294,11 @@
         </div>
     </div>
 
-    <div class="toolbar-divider"></div>
+    <div class="toolbar-divider" data-toolbar-part="drawing"></div>
 
     <!-- 颜色下拉触发器（0.15.4：完整色盘 + 取色器）
          触发器圆点用 background 填色 -->
-    <div class="dropdown-wrap">
+    <div class="dropdown-wrap" data-toolbar-part="drawing">
         <button aria-controls="color-dropdown" aria-expanded="false" class="tool-btn dropdown-trigger"
                 id="color-trigger"
                 title="颜色">
@@ -478,7 +406,7 @@
 
     <!-- 笔画下拉触发器（粗细 5 档 + 实线/虚线样式）
          0.15.0：DOM 拆分，笔画类专用 -->
-    <div class="dropdown-wrap">
+    <div class="dropdown-wrap" data-toolbar-part="drawing">
         <button class="tool-btn dropdown-trigger" id="stroke-width-trigger" title="笔画粗细">
             <span id="stroke-width-trigger-icon"><span class="width-bar width-bar-medium"></span></span>
         </button>
@@ -509,7 +437,7 @@
 
     <!-- 画笔粗下拉触发器
          0.15.0：DOM 新增，画笔类专用。0.15.1 前与笔画共用 currentWidth -->
-    <div class="dropdown-wrap">
+    <div class="dropdown-wrap" data-toolbar-part="drawing">
         <button class="tool-btn dropdown-trigger" id="brush-size-trigger" title="画笔粗细">
             <span id="brush-size-trigger-icon"><span class="width-bar width-bar-medium"></span></span>
         </button>
@@ -531,10 +459,10 @@
         </div>
     </div>
 
-    <div class="toolbar-divider"></div>
+    <div class="toolbar-divider" data-toolbar-part="drawing"></div>
 
     <!-- 操作区（0.15.9：undo/redo 始终可见 + 重置按钮，三键一组） -->
-    <div class="toolbar-group undo-group" data-group="ops">
+    <div class="toolbar-group undo-group" data-group="ops" data-toolbar-part="drawing">
         <button class="tool-btn" disabled id="btn-undo" title="撤销 (Ctrl+Z)">
             <svg aria-hidden="true" class="icon">
                 <use href="#icon-undo-2"/>
@@ -552,10 +480,10 @@
             <span class="kbd-hint" data-modifier="ctrl">R</span></button>
     </div>
 
-    <div class="toolbar-divider"></div>
+    <div class="toolbar-divider" data-toolbar-part="output"></div>
 
     <!-- 输出区 -->
-    <div class="toolbar-group" data-group="output">
+    <div class="toolbar-group" data-group="output" data-toolbar-part="output">
         <button class="tool-btn" id="btn-ocr" title="识别图中文字">
             <svg aria-hidden="true" class="icon">
                 <use href="#icon-scan-text"/>
@@ -617,6 +545,7 @@
             </svg>
         </button>
     </div>
+
 </div>
 
 <div id="ss-action-menu" class="ss-action-menu" role="menu" hidden><hr><button id="ss-customize" role="menuitem">自定义工具栏…</button></div>
@@ -728,5 +657,23 @@
 </script>
 
 <script src="js/screenshot/index.js" type="module"></script>
+
+<section id="gif-recording-details" class="recording-panel recording-details hidden" role="dialog" aria-label="录制详情"><div class="recording-panel-title" data-recording-text="gif.rec.details">录制详情</div><dl id="gif-recording-details-values"></dl></section>
+<section id="gif-audio-settings" class="recording-panel gif-audio-settings hidden" role="dialog" aria-label="录制声音">
+    <div class="recording-panel-title" data-recording-text="gif.rec.sound">录制声音来源</div>
+    <input type="hidden" id="gif-audio-mode" value="silent"/>
+    <div class="recording-sources" role="group" aria-label="录制声音来源"><button type="button" class="recording-option" data-audio-mode="silent" aria-pressed="true" data-recording-text="gif.rec.silent">无声</button><button type="button" class="recording-option" data-audio-mode="microphone" aria-pressed="false" data-recording-text="gif.audio.microphone">麦克风</button><button type="button" class="recording-option" data-audio-mode="system" aria-pressed="false" data-recording-text="gif.audio.system">系统声音</button><button type="button" class="recording-option" data-audio-mode="both" aria-pressed="false" data-recording-text="gif.rec.bothShort">双声源</button></div>
+    <section id="gif-audio-field-0" class="hidden"><div class="recording-device-heading"><span class="recording-device-title" data-recording-text="gif.audio.microphone">麦克风</span><button type="button" class="recording-mute" data-audio-mute="0" aria-pressed="false"></button></div><input type="hidden" id="gif-audio-device-0"/><div id="gif-audio-devices-0" class="recording-device-list" role="group" aria-label="麦克风设备"></div><output class="recording-level-value" id="gif-audio-level-0"></output></section>
+    <section id="gif-audio-field-1" class="hidden"><div class="recording-device-heading"><span class="recording-device-title" data-recording-text="gif.audio.system">系统声音</span><button type="button" class="recording-mute" data-audio-mute="1" aria-pressed="false"></button></div><input type="hidden" id="gif-audio-device-1"/><div id="gif-audio-devices-1" class="recording-device-list" role="group" aria-label="系统声音设备"></div><output class="recording-level-value" id="gif-audio-level-1"></output></section>
+    <p id="gif-audio-device-note" data-recording-text="gif.rec.previewNote">准备时实时试音，开始录制后才保存声音。</p>
+    <p id="gif-audio-error" role="status"></p>
+    <button type="button" class="recording-option" id="gif-audio-close" data-recording-text="gif.rec.close">收起</button>
+</section>
+<section id="gif-discard-confirm" class="recording-panel recording-confirm hidden" role="dialog" aria-label="丢弃录制">
+    <p data-recording-text="gif.rec.confirm">丢弃本次录制？素材和声音将被删除。</p>
+    <div class="recording-confirm-actions"><button type="button" class="recording-option" id="gif-discard-keep" data-recording-text="gif.rec.keep">保留录制</button><button type="button" class="recording-option recording-danger" id="gif-discard-yes" data-recording-text="gif.rec.discard">丢弃本次录制</button></div>
+</section>
+<p id="gif-recording-error" class="recording-panel recording-error hidden" role="status"></p>
+
 </body>
 </html>

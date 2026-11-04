@@ -53,6 +53,7 @@ export function selectTool(tool) {
     if ((tool === 'spotlight' || tool === 'spotlight-multi') && tool !== annot.getTool()) {
         annot.clearSpotlights();
     }
+    ss.gifRecHooks?.onToolSelected?.(tool);
     annot.setTool(tool);
     canvas.setAttribute('data-tool', tool);
     if (ss.editorSession.canvasBacked) {
@@ -1118,17 +1119,21 @@ export function bindToolbar() {
     bindActionMenu();
 
     // 拖动 handle
-    const dragHandle = document.getElementById('toolbar-drag');
-    if (dragHandle) {
+    function bindDragHandle(dragHandle, moveRegion) {
+        if (!dragHandle) return;
         let dragging = false;
         let offsetX = 0, offsetY = 0;
+        let initialLeft = 0, initialTop = 0, recordingDrag = null;
         dragHandle.addEventListener('mousedown', (e) => {
             if (e.button !== 0) return;
             e.preventDefault();
             e.stopPropagation();
+            const rect = toolbar.getBoundingClientRect();
+            recordingDrag=moveRegion ? ss.gifRecHooks?.beginGripDrag?.() : null;
+            if(recordingDrag===false) return;
             dragging = true;
             toolbar.dataset.userMoved = 'true';
-            const rect = toolbar.getBoundingClientRect();
+            initialLeft=rect.left;initialTop=rect.top;
             offsetX = e.clientX - rect.left;
             offsetY = e.clientY - rect.top;
             document.body.style.cursor = 'grabbing';
@@ -1145,8 +1150,14 @@ export function bindToolbar() {
             let top = e.clientY - offsetY;
             left = Math.max(mon.x + MARGIN, Math.min(left, mon.x + mon.w - tw - MARGIN));
             top = Math.max(mon.y + MARGIN, Math.min(top, mon.y + mon.h - th - MARGIN));
+            if(recordingDrag) {
+                const delta=recordingDrag.move(left-initialLeft,top-initialTop);
+                if(!delta) return;
+                left=initialLeft+delta.dx;top=initialTop+delta.dy;
+            }
             toolbar.style.left = left + 'px';
             toolbar.style.top = top + 'px';
+            ss._reflowRecordingPanels?.();
             // 0.15.12：拖动工具栏时同步移动 sub-panel（相对 text-main 按钮位置）
             const subP = document.getElementById('sub-panel');
             if (subP && !subP.classList.contains('hidden')) {
@@ -1165,7 +1176,11 @@ export function bindToolbar() {
             if (dragging) {
                 dragging = false;
                 document.body.style.cursor = '';
+                void recordingDrag?.end();recordingDrag=null;
+                ss._syncRecordingToolbar?.();
             }
         });
     }
+    bindDragHandle(document.getElementById('toolbar-drag'), false);
+    bindDragHandle(document.getElementById('gif-rec-move'), true);
 }

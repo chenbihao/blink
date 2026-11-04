@@ -11,6 +11,7 @@
 //! **与域层分工**：`blink_domain::gif` 持有过载决策/预算/时间轴纯逻辑；
 //! 本模块是 Windows 采集、素材落盘与 GIF 编码的工程实现。
 
+pub mod annotation;
 pub mod audio;
 pub mod capture;
 mod capture_ahead;

@@ -2560,187 +2560,90 @@ html.eyedropper-picking * {
 #stroke-width-trigger-icon[data-stroke-style="dashed"] { border-bottom-style: dashed; }
 
 
-/* ── 0.28.7：GIF 录制准备面（#toolbar 的第二形态，单一宿主双面） ──────────
-   #toolbar 是唯一定位/拖动/跟随宿主：positionToolbar 的选区跟随、用户拖动
-   位置（data-user-moved）、屏内 clamp、uiScale 缩放、#toolbar-drag 抓手
-   全部作用于宿主——准备面自动继承，不存在第二条需要同步的定位链路。
-   切面 = 宿主加 toolbar-mode-gif-prep：隐藏标注工具组（抓手保留）、显示
-   本面。双栏并行在结构上不可能发生。 */
-#toolbar.toolbar-mode-gif-prep > *:not(#toolbar-drag):not(#gif-prep-bar):not(#gif-audio-settings) {
-    display: none;
-}
-
-#gif-prep-bar {
-    display: none;
-}
-
-#toolbar.toolbar-mode-gif-prep > #gif-prep-bar {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 0 5px 0 3px;
-    margin-left: 2px;
-}
-
-.gif-prep-field {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    font-size: 18px;
-    color: #d8d8de;
-    cursor: default;
-}
-
-#gif-prep-fps {
-    color-scheme: dark;
-    min-width: 88px;
-    padding: 4px 6px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-md);
-    background: var(--surface);
-    color: var(--text);
-    font: inherit;
-    cursor: pointer;
-}
-
-#gif-prep-fps option {
-    background: var(--bg-deep);
-    color: var(--text);
-}
-
-[data-theme="light"] #gif-prep-fps {
-    color-scheme: light;
-}
-
-#gif-prep-fps:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 1px;
-}
-
-.gif-prep-field input[type="checkbox"] {
-    accent-color: #4a9eff;
-    width: 15px;
-    height: 15px;
-}
-
-/* ── 0.28.23：录制叠层模式（#toolbar 的第三形态 + 桌面透出） ──────────────
-   录制中/已暂停共用 `toolbar-mode-gif-rec`：保留共享标注工具（抓手/颜色/
-   粗细/撤销组），隐藏依赖截图底图的效果（马赛克组、spotlight/放大镜、水印）
-   与输出去向（录制已开始，复制/保存等不再适用）；显示 #gif-rec-bar。
-   body.gif-recording 清空底图遮罩与选区层、body 背景透明——桌面经
-   DWM 透出，涂画层（#annot-canvas）合成进采集帧。 */
-/* 直接子元素白名单：抓手 / 录制面 / 标注工具组（dropdown-wrap，含颜色
-   与粗细）/ 撤销组；其余（选取、输出去向、分隔线）隐藏。依赖底图的
-   效果由下面的专项规则从工具组内剔除。 */
-#toolbar.toolbar-mode-gif-rec > *:not(#toolbar-drag):not(#gif-rec-bar):not(.dropdown-wrap):not(.undo-group):not(#gif-audio-settings) {
-    display: none;
-}
-
-/* 依赖实时底图的效果在录制叠层不可用（无截图底图像素）：整组隐藏 */
-#toolbar.toolbar-mode-gif-rec > .dropdown-wrap:has(#blur-main),
-#toolbar.toolbar-mode-gif-rec [data-tool="spotlight"],
-#toolbar.toolbar-mode-gif-rec [data-tool="spotlight-multi"],
-#toolbar.toolbar-mode-gif-rec [data-tool="magnifier"],
-#toolbar.toolbar-mode-gif-rec [data-tool="watermark"] {
-    display: none !important;
-}
-
-
-
-#gif-rec-bar {
-    display: none;
-}
-
-#toolbar.toolbar-mode-gif-rec > #gif-rec-bar {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 0 5px 0 3px;
-    margin-left: 2px;
-}
-
-.gif-rec-dot {
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    background: #ff4d4f;
-    box-shadow: 0 0 6px rgba(255, 77, 79, 0.8);
-}
-
-body.gif-rec-paused .gif-rec-dot {
-    background: #e6b450;
-    box-shadow: 0 0 6px rgba(230, 180, 80, 0.7);
-}
-
-.gif-rec-state {
-    font-size: 18px;
-    color: #d8d8de;
-}
-
-.gif-rec-time {
-    font-size: 18px;
-    color: var(--text, #e8e8ec);
-    font-variant-numeric: tabular-nums;
-    min-width: 58px;
-}
-
-.gif-rec-frames {
-    font-size: 16px;
-    color: #9a9aa4;
-    font-variant-numeric: tabular-nums;
-}
-
-#gif-rec-mode.warn {
-    outline: 1px solid rgba(230, 180, 80, 0.7);
-}
-
-#gif-rec-cancel.confirming {
-    color: #ff6b6d;
-    outline: 1px solid rgba(255, 107, 109, 0.8);
-}
-
-/* 录制叠层：桌面透出（同长截图 scroll-capturing 的透明化，但保留涂画层） */
-body.gif-recording,
-html.gif-recording,
-html.gif-recording body {
-    background: transparent;
-}
-
-body.gif-recording :is(#interaction-canvas, #preselection-mask, #live-selection, #ocr-hit-canvas, #stroke-cursor, #pixel-magnifier, #precision-hint, #sel-loading) {
-    visibility: hidden !important;
-}
-
-/* 录制范围框：区域外侧 3px 高亮边框（纯视觉指示，不在采集矩形内成边） */
-.gif-region-frame {
-    position: fixed;
-    border: 3px solid #4a9eff;
-    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
-    pointer-events: none;
-    z-index: 1;
-}
-
-/* 录制面按钮：图标与文字留呼吸感（标注面按钮多为纯图标，不在此全局加 gap） */
-#gif-prep-bar .tool-btn {
-    gap: 6px;
-}
-
-.gif-prep-cursor {
-    cursor: pointer;
-}
-
-/* 录制声音：独立竖向电平，工具栏内的设备面板沿用同一宿主。 */
-.gif-audio-meters { display: flex; align-items: center; gap: 8px; }
-.audio-source { display: flex; align-items: center; gap: 5px; font-size: var(--text-xs); }
-.audio-source.hidden, .gif-audio-settings.hidden { display: none; }
-.audio-source-name { max-width: 100px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.audio-level { position: relative; display: inline-block; width: 7px; height: 28px; overflow: hidden; border-radius: var(--radius-sm); background: var(--screenshot-hover-bg); }
-.audio-level-fill { position: absolute; bottom: 0; width: 100%; background: var(--accent); transition: height 120ms ease-out; }
-.audio-level-peak { position: absolute; width: 100%; height: 2px; background: var(--screenshot-text); }
-.audio-overload .audio-level-fill { background: var(--red); }
-.audio-inactive .audio-level { opacity: 0.45; }
-.gif-audio-settings { position: absolute; inset-inline-end: 0; bottom: calc(100% + 8px); width: min(360px, 90vw); padding: 12px; border: 1px solid var(--screenshot-border); border-radius: var(--radius-md); background: var(--screenshot-panel-bg); color: var(--screenshot-text); box-shadow: 0 4px 16px var(--screenshot-shadow); z-index: var(--z-dropdown); }
-.gif-audio-settings label { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; font-size: var(--text-sm); }
-.gif-audio-settings label.hidden { display: none; }
-.gif-audio-settings select { width: 230px; max-width: 70%; color: var(--screenshot-text); background: var(--screenshot-toolbar-bg); }
-.gif-audio-settings p { font-size: var(--text-xs); margin: 8px 0; }
-#gif-audio-error { color: var(--red); }
+/* 截图与录制只切换模式；标注 DOM、抓手及原生截图按钮样式始终共用。 */
+#gif-recording-bar { display: none; }
+#gif-rec-move { cursor: grab; }
+#gif-rec-move:active { cursor: grabbing; }
+#toolbar:not([data-mode="screenshot"]) #gif-recording-bar { display: flex; }
+#toolbar:not([data-mode="screenshot"]) > [data-toolbar-part="selection"],
+#toolbar:not([data-mode="screenshot"]) > [data-toolbar-part="output"],
+#toolbar:not([data-mode="screenshot"])[data-drawing="false"] > [data-toolbar-part="drawing"] { display: none; }
+#toolbar:not([data-mode="screenshot"]) > .dropdown-wrap:has(#blur-main),
+#toolbar:not([data-mode="screenshot"]) [data-tool="spotlight"],
+#toolbar:not([data-mode="screenshot"]) [data-tool="spotlight-multi"],
+#toolbar:not([data-mode="screenshot"]) [data-tool="magnifier"],
+#toolbar:not([data-mode="screenshot"]) [data-tool="watermark"] { display: none !important; }
+.recording-bar { align-items: center; gap: 2px; white-space: nowrap; }
+.recording-bar .tool-btn { font-size: 12px; color: var(--screenshot-text); }
+.recording-bar .tool-btn:disabled { opacity: 0.45; cursor: default; }
+.recording-bar .tool-btn[aria-expanded="true"] { background: var(--screenshot-hover-bg); }
+.recording-bar .tool-btn:focus-visible, .recording-option:focus-visible, .recording-mute:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+#toolbar .recording-summary { width: 100px; flex-direction: column; align-items: center; justify-content: center; gap: 0; padding: 0 4px; }
+.recording-time-line { display: flex; align-items: center; justify-content: center; gap: 6px; line-height: 14px; }
+.gif-rec-dot, .recording-start-dot { width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: var(--red); }
+#toolbar[data-mode="ready"] .gif-rec-dot { background: var(--screenshot-text); opacity: 0.5; }
+#toolbar[data-mode="paused"] .gif-rec-dot { background: var(--yellow); }
+.gif-rec-time { font-size: 12px; font-variant-numeric: tabular-nums; }
+.recording-storage { font-size: 10px; line-height: 13px; opacity: 0.75; font-variant-numeric: tabular-nums; }
+.recording-storage.warn, .recording-sound.warn { color: var(--yellow); opacity: 1; }
+#gif-record-toggle { min-width: 68px; gap: 5px; }
+#gif-rec-stop, #gif-record-exit { width: 64px; gap: 5px; }
+#toolbar[data-mode="ready"] .recording-start-dot { width: 10px; height: 10px; flex-basis: 10px; }
+#toolbar[data-mode="recording"] #gif-record-toggle .icon { color: var(--yellow); }
+#toolbar[data-mode="paused"] #gif-record-toggle .icon { color: var(--green); }
+#gif-rec-stop .icon { color: var(--red); }
+.recording-fps-select { width: 68px; gap: 4px; }
+.recording-sound { width: auto; min-width: 82px; max-width: 110px; gap: 5px; }
+.recording-select-label, #gif-audio-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.recording-select > .icon:last-child, .recording-sound > .icon:last-child { width: 12px; height: 12px; flex: 0 0 12px; }
+.recording-sound { justify-content: center; }
+.recording-panel { position: fixed; width: max-content; max-width: 360px; padding: 6px; border: 1px solid var(--screenshot-border); border-radius: var(--radius-lg); background: var(--screenshot-panel-bg); color: var(--screenshot-text); box-shadow: 0 6px 20px var(--screenshot-shadow); z-index: var(--z-dropdown); font-size: 12px; overflow: auto; }
+.recording-options { min-width: 112px; }
+.recording-option { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 28px; padding: 4px 10px; border: 0; border-radius: var(--radius-md); background: transparent; color: inherit; text-align: left; font: inherit; cursor: pointer; }
+.recording-option:hover:not(:disabled), .recording-mute:hover:not(:disabled) { background: var(--screenshot-hover-bg); }
+.recording-option[aria-selected="true"], .recording-option[aria-pressed="true"], .recording-mute[aria-pressed="true"] { color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.recording-option:disabled, .recording-mute:disabled { opacity: 0.5; cursor: default; }
+.recording-panel-title { padding: 4px 8px; font-weight: 500; }
+.recording-details { width: 300px; }
+.recording-details dl { display: grid; grid-template-columns: auto minmax(0,1fr); gap: 10px 16px; margin: 6px 10px; font-size: 12px; }
+.recording-details dt { opacity: 0.75; }
+.recording-details dd { margin: 0; text-align: right; overflow-wrap: anywhere; white-space: normal; font-variant-numeric: tabular-nums; }
+.recording-device-heading { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--screenshot-border); padding: 6px 8px; margin-bottom: 2px; }
+.recording-device-title { font-size: 12px; font-weight: 600; }
+.recording-mute { border: 0; border-radius: var(--radius-md); background: transparent; color: inherit; padding: 4px 8px; font: inherit; font-size: 12px; cursor: pointer; }
+.recording-device-list { max-height: 112px; overflow: auto; padding: 0 4px; }
+.recording-device-list .recording-option { width: max-content; min-width: 100%; white-space: nowrap; font-size: 12px; padding-left: 16px; position: relative; }
+.recording-device-list .recording-option[aria-pressed="true"]::before { content: ''; position: absolute; left: 6px; width: 3px; height: 14px; border-radius: var(--radius-sm); background: var(--accent); }
+.recording-panel::-webkit-scrollbar, .recording-device-list::-webkit-scrollbar { width: 6px; height: 6px; }
+.recording-panel::-webkit-scrollbar-track, .recording-device-list::-webkit-scrollbar-track { background: transparent; }
+.recording-panel::-webkit-scrollbar-thumb, .recording-device-list::-webkit-scrollbar-thumb { background: var(--screenshot-border); border-radius: var(--radius-sm); }
+.recording-panel::-webkit-scrollbar-thumb:hover, .recording-device-list::-webkit-scrollbar-thumb:hover { background: var(--screenshot-text); }
+.recording-level-value { display: block; padding: 4px 10px; opacity: 0.75; font-size: 11px; font-variant-numeric: tabular-nums; }
+.recording-sources { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 2px; padding: 3px; background: var(--screenshot-hover-bg); border-radius: var(--radius-lg); margin: 0 2px 6px; }
+.recording-sources .recording-option { justify-content: center; white-space: nowrap; }
+.gif-audio-settings { width: 480px; max-width: calc(100vw - 16px); padding: 6px; }
+.gif-audio-settings > section { margin: 6px 2px; border: 1px solid var(--screenshot-border); border-radius: var(--radius-lg); overflow: hidden; }
+#gif-audio-close { border-top: 1px solid var(--screenshot-border); justify-content: center; }
+.gif-audio-settings #gif-audio-error:empty { display: none; }
+.gif-audio-settings p, .recording-panel-note { padding: 4px 8px; font-size: 11px; line-height: 1.4; white-space: normal; }
+#gif-audio-error, .recording-danger, .recording-error { color: var(--red); }
+.recording-confirm { width: 280px; padding: 12px; }
+.recording-confirm p { line-height: 1.6; margin-bottom: 8px; }
+.recording-confirm-actions { display: flex; gap: 6px; }
+.recording-confirm-actions .recording-option { justify-content: center; }
+.recording-error { max-width: 360px; padding: 8px 12px; line-height: 1.5; }
+.gif-audio-meters { display: flex; align-items: center; gap: 4px; width: 18px; flex: 0 0 18px; }
+.audio-source { display: flex; width: 7px; flex: 0 0 7px; }
+.audio-disabled { visibility: hidden; }
+.audio-inactive { opacity: 0.45; }
+.audio-level { display: flex; flex-direction: column-reverse; gap: 1px; width: 7px; height: 24px; }
+.audio-level-segment { flex: 1; min-height: 1px; border-radius: 1px; background: var(--screenshot-hover-bg); }
+.audio-level-segment.lit { background: var(--green); }
+.audio-level-segment.lit:nth-child(n+7) { background: var(--warning); }
+.audio-level-segment.lit:nth-child(n+9) { background: var(--red); }
+.audio-level-segment.peak { opacity: 0.65; }
+.audio-overload { outline: 1px solid var(--red); outline-offset: 1px; }
+/* 范围框的外矩形由物理坐标生成，边框完整位于采集区域外。 */
+.gif-region-frame { position: fixed; border: solid var(--accent); pointer-events: none; z-index: 1; }
+body.gif-recording, html.gif-recording, html.gif-recording body { background: transparent; }
+body.gif-recording :is(#interaction-canvas, #preselection-mask, #live-selection, #ocr-hit-canvas, #stroke-cursor, #pixel-magnifier, #precision-hint, #sel-loading, #size-hint) { visibility: hidden !important; }

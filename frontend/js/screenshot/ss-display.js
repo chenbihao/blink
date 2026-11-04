@@ -168,47 +168,59 @@ export function findDisplayContainingRect(rect) {
  *  工具栏按选区右下角所在屏的 DPR 计算 UI scale，用 transform: scale 补偿
  *  跨屏 renderScale 差异，保证物理尺寸一致。
  *  `immediate`：跳过「-9999 移出 + rAF」测量流程同步定位——用于工具栏
- *  已可见且已布局的场景（宿主双面切换：面宽变化后按新宽度右对齐，避免
- *  准备面首次停在旧左边界、拖一次选区才归位）。 */
+ *  已可见且已布局的场景（宿主切面通过 keepAnchor 保留左侧抓手，避免宽度变化导致位移）。 */
 export function positionToolbar(rect, immediate = false) {
     const {toolbar} = ss;
     toolbar.classList.remove('hidden');
+    // 录制时工具显隐及选中工具都会触发重新定位，始终以左侧抓手为锚点。
+    const recording = toolbar.dataset.mode && toolbar.dataset.mode !== 'screenshot';
+    const keepAnchor = toolbar.dataset.keepAnchor === 'true' || recording;
+    delete toolbar.dataset.keepAnchor;
 
     // 按选区右下角所在屏计算 UI scale
     const meta = window.__blinkScreenMeta || {vx: 0, vy: 0};
-    const anchorX = rect.x + Math.max(0, rect.w - 1);
-    const anchorY = rect.y + Math.max(0, rect.h - 1);
+    const retained = (keepAnchor || toolbar.dataset.userMoved === 'true') && toolbar.style.left && toolbar.style.top;
+    const anchorX = retained ? parseFloat(toolbar.style.left) + 4 : rect.x + Math.max(0, rect.w - 1);
+    const anchorY = retained ? parseFloat(toolbar.style.top) + 4 : rect.y + Math.max(0, rect.h - 1);
     let uiScale = uiScaleAtCss(anchorX, anchorY, meta);
     toolbar.dataset.uiScale = String(uiScale);
     toolbar.style.transformOrigin = 'top left';
     toolbar.style.transform = `scale(${uiScale})`;
     const actionMonitor = findDisplayCssAt(anchorX, anchorY);
     uiScale *= ss._refreshActionLayout?.((actionMonitor.w - 16) / uiScale) ?? 1;
+    // offsetWidth 会四舍五入；分数 DPI 下按真实视觉矩形反算，避免右侧漏出半个像素。
+    const measured = toolbar.getBoundingClientRect?.();
+    const measuredScale = parseFloat(toolbar.dataset.uiScale) || 1;
+    const intrinsicWidth = measured?.width > 0 ? measured.width / measuredScale : toolbar.offsetWidth;
+    const intrinsicHeight = measured?.height > 0 ? measured.height / measuredScale : toolbar.offsetHeight;
+    uiScale *= Math.min(1, (actionMonitor.w - 16) / Math.max(1, intrinsicWidth * uiScale));
     toolbar.dataset.uiScale = String(uiScale);
     toolbar.style.transform = `scale(${uiScale})`;
 
     // 用户已手动拖动过：保留位置但重新 clamp 到当前屏
-    if (toolbar.dataset.userMoved === 'true' && toolbar.style.left && toolbar.style.top) {
-        const tw = toolbar.offsetWidth * uiScale;
-        const th = toolbar.offsetHeight * uiScale;
+    if ((toolbar.dataset.userMoved === 'true' || keepAnchor) && toolbar.style.left && toolbar.style.top) {
+        const tw = intrinsicWidth * uiScale;
+        const th = intrinsicHeight * uiScale;
         if (tw > 0 && th > 0) {
             const left = parseFloat(toolbar.style.left);
             const top = parseFloat(toolbar.style.top);
-            const mon = findDisplayCssAt(left + tw / 2, top + th / 2);
+            const mon = actionMonitor;
             const MARGIN = 8;
             const clampedLeft = Math.max(mon.x + MARGIN, Math.min(left, mon.x + mon.w - tw - MARGIN));
             const clampedTop = Math.max(mon.y + MARGIN, Math.min(top, mon.y + mon.h - th - MARGIN));
             if (clampedLeft !== left || clampedTop !== top) {
                 const floating = toolbar.classList.contains('toolbar-floating');
                 applyToolbarPos(clampedLeft, clampedTop, floating, uiScale);
+            } else {
+                ss._reflowRecordingPanels?.();
             }
         }
         return;
     }
 
     const place = () => {
-        const tw = toolbar.offsetWidth * uiScale;
-        const th = toolbar.offsetHeight * uiScale;
+        const tw = intrinsicWidth * uiScale;
+        const th = intrinsicHeight * uiScale;
         const MARGIN = 8;
 
         // 确定目标屏（选区右下角内侧点，默认语义工具栏靠选区右侧）
@@ -273,6 +285,7 @@ function applyToolbarPos(left, top, floating, uiScale = 1) {
             subP.style.top = (top + (floating ? 0 : visualH) + 4) + 'px';
         }
     }
+    ss._reflowRecordingPanels?.();
     console.debug('[screenshot] toolbar 定位', {
         left,
         top,

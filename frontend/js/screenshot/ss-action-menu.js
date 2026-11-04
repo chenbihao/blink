@@ -34,12 +34,12 @@ export function applyActionLayout(value) {
 export function refreshActionLayout(availableWidth = Infinity) {
     if (!group || !buttons) return 1;
     widthBudget = availableWidth;
+    if (ss.toolbar.dataset.mode && ss.toolbar.dataset.mode !== 'screenshot') {appliedLayoutKey=null;return 1;}
     const count = layout.toolbar.length;
     buttons.qr.disabled = ss.editorSession.source === 'long-screenshot';
     const qrTitle = buttons.qr.disabled ? t('ss.qr.unsupported') : t('ss.action.qr');
     if ((buttons.qr.getAttribute('data-tip') || buttons.qr.title) !== qrTitle) buttons.qr.title = qrTitle;
-    const layoutKey = JSON.stringify([layout, Math.floor(availableWidth), ss.toolbar.classList.contains('toolbar-mode-gif-prep'),
-        ss.toolbar.classList.contains('toolbar-mode-gif-rec'),
+    const layoutKey = JSON.stringify([layout, Math.floor(availableWidth), ss.toolbar.dataset.mode, ss.toolbar.dataset.drawing,
         ...[...Object.values(buttons), document.getElementById('btn-ocr-diag')].map(button => [button.hidden, button.classList.contains('hidden')])]);
     if (layoutKey === appliedLayoutKey) {
         ss._reflowActionPanels?.();

@@ -97,6 +97,14 @@ impl Gate {
                 .map(|s| now.saturating_duration_since(s).as_millis() as u64)
                 .unwrap_or(0)
     }
+    /// PCM 排他边界保留采样精度，避免逐块截断到毫秒形成周期性静音空洞。
+    pub fn frame_end(&self, now: Instant) -> u64 {
+        let elapsed = self.start
+            .map(|start| now.saturating_duration_since(start).as_nanos())
+            .unwrap_or(0);
+        (u128::from(self.offset_ms) * 48 + (elapsed * u128::from(RATE)).div_ceil(1_000_000_000))
+            .min(u128::from(MAX_AUDIO_MS) * 48) as u64
+    }
     pub fn muted_at(&self, source: usize, ms: u64) -> bool {
         self.mute_edges[source]
             .iter()
@@ -124,18 +132,8 @@ pub fn shared(options: AudioOptions) -> SharedAudio {
     }))
 }
 pub fn levels(samples: &[f32]) -> (f32, f32) {
-    if samples.is_empty() {
-        return (0.0, 0.0);
-    }
-    let (sum, peak) = samples.iter().fold((0.0f64, 0.0f32), |(sum, peak), &v| {
-        let v = if v.is_finite() {
-            v.clamp(-1.0, 1.0)
-        } else {
-            0.0
-        };
-        (sum + (v as f64).powi(2), peak.max(v.abs()))
-    });
-    ((sum / samples.len() as f64).sqrt() as f32, peak)
+    let level = crate::platform::audio::signal::measure(samples);
+    (level.rms as f32, level.peak)
 }
 /// 样本级时钟/隐私门控。只接受本轮有效区间内且已经发生的声音；排队前抹掉静音样本。
 pub fn canonical_samples(
@@ -453,6 +451,21 @@ mod tests {
         let (_, silent, level) = canonical_samples(&[1.0; 480], 1, RATE, 0, 0, 480, |_| true);
         assert!(silent.iter().all(|v| *v == 0));
         assert_eq!(level, (0.0, 0.0));
+    }
+    #[test]
+    fn callback_frame_boundary_keeps_submillisecond_samples() {
+        let state = shared(AudioOptions::default());
+        let mut gate = state.lock().unwrap();
+        let start = Instant::now();
+        gate.start = Some(start);
+        gate.offset_ms = 100;
+        let now = start + std::time::Duration::from_micros(200_751);
+        assert_eq!(gate.time_ms(now), 300);
+        assert_eq!(gate.frame_end(now), 14_437);
+        let begin = ((100.0 + 200.751 - 10.0) * 48.0_f64).round() as i64;
+        let (_, pcm, level) = canonical_samples(&[0.5; 480], 1, RATE, begin, 4800, gate.frame_end(now), |_| false);
+        assert_eq!(pcm.len(), 960, "the entire occurred 10ms packet must survive clock gating");
+        assert_eq!(level, (0.5, 0.5));
     }
     #[test]
     fn sample_clock_clips_before_resume_and_future_buffers() {

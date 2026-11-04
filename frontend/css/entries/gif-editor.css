@@ -19,6 +19,45 @@
 .audio-mix input[type="range"] { width: 90px; }
 .audio-mix.hidden, .audio-mix label.hidden { display: none; }
 
+/* 编辑器沿用应用主题 token，避免旧 fallback 让浅色主题仍落到暗色控件。 */
+:root {
+    --bg-base: var(--bg);
+    --bg-elevated: var(--bg-sidebar);
+    --text-primary: var(--text);
+    --text-secondary: var(--text-sub);
+    --text-muted: var(--text-dim);
+    --border-subtle: var(--surface-2);
+    color-scheme: dark;
+}
+[data-theme-shade="light"] { color-scheme: light; }
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-xs); min-height: 32px; }
+.btn.btn-icon { width: 32px; height: 32px; min-height: 32px; padding: 0; flex: 0 0 32px; }
+.btn.btn-icon .icon { width: 16px; height: 16px; }
+#btn-discard-recording { background: transparent; border-color: transparent; color: var(--text-sub); }
+#btn-discard-recording:hover:not(:disabled) { color: var(--red); background: var(--danger-hover-bg); }
+.audio-mix input[type="range"] { appearance: none; height: 4px; border: 0; border-radius: var(--radius-sm); background: var(--surface-2); }
+.audio-mix input[type="range"]::-webkit-slider-thumb { appearance: none; width: 12px; height: 12px; border-radius: 50%; background: var(--accent); }
+.audio-mix input[type="checkbox"] { appearance: none; display: grid; place-items: center; width: 14px; height: 14px; margin: 0; border: 1px solid var(--text-dim); border-radius: var(--radius-sm); background: var(--bg); }
+.audio-mix input[type="checkbox"]:checked { border-color: var(--accent); background: var(--accent); }
+.audio-mix input[type="checkbox"]:checked::after { content: ''; width: 7px; height: 4px; border-left: 2px solid var(--bg); border-bottom: 2px solid var(--bg); transform: rotate(-45deg); margin-top: -2px; }
+.editor-native-select { display: none !important; }
+.editor-select-trigger { display: inline-flex; align-items: center; justify-content: space-between; gap: var(--space-sm); min-width: 64px; min-height: 32px; max-width: 100%; padding: var(--space-xs) var(--space-sm); border: 1px solid var(--surface-2); border-radius: var(--radius-md); background: var(--bg); color: var(--text); font: inherit; cursor: pointer; }
+.editor-select-trigger span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.editor-select-trigger .icon { width: 12px; height: 12px; flex-shrink: 0; }
+.editor-select-trigger:hover:not(:disabled) { background: var(--surface); }
+.editor-select-trigger:disabled { opacity: 0.45; cursor: default; }
+.editor-select-menu { position: fixed; inset: auto; margin: 0; padding: var(--space-xs); overflow: auto; border: 1px solid var(--surface-2); border-radius: var(--radius-md); background: var(--bg-sidebar); color: var(--text); box-shadow: 0 6px 20px var(--shadow); font-size: 13px; }
+.editor-select-option { display: block; width: 100%; min-height: 32px; padding: var(--space-xs) var(--space-sm); border: 0; border-radius: var(--radius-sm); background: transparent; color: inherit; text-align: left; font: inherit; cursor: pointer; }
+.editor-select-option:hover:not(:disabled) { background: var(--surface); }
+.editor-select-option[aria-selected="true"] { color: var(--accent); background: var(--accent-bg); }
+.editor-select-option:disabled { opacity: 0.45; cursor: default; }
+.editor-select-trigger:focus-visible, .editor-select-option:focus-visible, .audio-mix input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+dialog .editor-select-trigger { width: 100%; }
+
+progress { appearance: none; border: 0; border-radius: var(--radius-sm); background: var(--surface); color: var(--accent); overflow: hidden; }
+progress::-webkit-progress-bar { background: var(--surface); }
+progress::-webkit-progress-value { background: var(--accent); border-radius: var(--radius-sm); }
+
 html, body {
     height: 100%;
     overflow: hidden;
@@ -634,7 +673,6 @@ body.seek-dragging * {
     padding: 4px 6px;
     font-size: 13px;
     font-variant-numeric: tabular-nums;
-    color-scheme: dark;
     appearance: textfield;
     -moz-appearance: textfield;
 }

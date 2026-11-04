@@ -607,34 +607,43 @@ impl SurfacePort for TauriDomainEnv {
         // 两条路径都持进程级截图事务锁，与 AI 净化截图（capture_with_cleanse）互斥。
         // hide 分支时序：record_fg_hwnd → hide_for_screenshot → wait_frame_after_hide
         // → begin_session → unhide_after_screenshot → show_screenshot_overlay
-        crate::infra::platform::screenshot::record_fg_hwnd();
-
         let app = self.app.clone();
-        let meta = tokio::task::spawn_blocking(
-            move || -> Result<crate::infra::platform::screenshot::ScreenCaptureMeta, String> {
+        tokio::task::spawn_blocking(
+            move || -> Result<(), String> {
+                let service = app.state::<std::sync::Arc<crate::app::gif_service::GifService>>();
+                let _session = service.lock_overlay_session();
+                if crate::app::gif_service::restore_active_overlay(&app)? {
+                    if hide_blink_main { crate::infra::platform::window::hide(&app, "recording control restored"); }
+                    return Ok(());
+                }
                 let _tx_lock = crate::app::capture_orchestrator::acquire_capture_tx_lock();
+                crate::infra::platform::screenshot::record_fg_hwnd();
 
                 if hide_blink_main {
                     crate::infra::platform::window::hide_for_screenshot(&app);
                     crate::infra::platform::window::wait_frame_after_hide(&app);
                 }
 
-                match crate::infra::platform::screenshot::begin_session() {
+                let meta = match crate::infra::platform::screenshot::begin_session() {
                     Ok(meta) => {
                         if hide_blink_main {
                             // 只解除 cloak；主窗保持 hidden（选区截图完成后主窗不弹出）
                             crate::infra::platform::window::unhide_after_screenshot(&app);
                         }
-                        Ok(meta)
+                        meta
                     }
                     Err(e) => {
                         // 截屏失败也要撤销 cloak
                         if hide_blink_main {
                             crate::infra::platform::window::unhide_after_screenshot(&app);
                         }
-                        Err(e)
+                        return Err(e);
                     }
-                }
+                };
+                crate::infra::platform::window::show_screenshot_overlay(&app, meta).map_err(|e| {
+                    crate::infra::platform::screenshot::end_session();
+                    e
+                })
             },
         )
         .await
@@ -643,14 +652,16 @@ impl SurfacePort for TauriDomainEnv {
         })?
         .map_err(|e| SurfaceError::CreateFailed { detail: e })?;
 
-        crate::infra::platform::window::show_screenshot_overlay(&self.app, meta).map_err(|e| {
-            crate::infra::platform::screenshot::end_session();
-            SurfaceError::CreateFailed { detail: e }
-        })?;
         Ok(())
     }
 
     fn start_image_editor(&self, source: EditorSourceRef) -> Result<(), SurfaceError> {
+        let service = self.app.state::<std::sync::Arc<crate::app::gif_service::GifService>>();
+        let _session = service.lock_overlay_session();
+        if crate::app::gif_service::restore_active_overlay(&self.app)
+            .map_err(|detail| SurfaceError::CreateFailed { detail })? {
+            return Err(SurfaceError::Unavailable { detail: "当前正在录制，已返回录制控制栏".into() });
+        }
         match source {
             EditorSourceRef::ClipboardImage(png_data) => {
                 let meta = crate::infra::platform::image_editor::begin_session(png_data)

@@ -189,38 +189,159 @@ pub async fn gif_start_recording(
 }
 
 #[tauri::command]
-pub fn gif_pause_recording(app: AppHandle) -> Result<(), CommandError> {
-    gif_service::command_recording(&app, CaptureCommand::Pause, false).map_err(err)
+pub fn gif_pause_recording(app: AppHandle, session_id: Option<String>) -> Result<(), CommandError> {
+    gif_service::command_recording(&app, CaptureCommand::Pause, false, session_id.as_deref())
+        .map_err(err)
 }
 
 #[tauri::command]
-pub fn gif_resume_recording(app: AppHandle) -> Result<(), CommandError> {
-    gif_service::command_recording(&app, CaptureCommand::Resume, false).map_err(err)
+pub fn gif_resume_recording(
+    app: AppHandle,
+    session_id: Option<String>,
+) -> Result<(), CommandError> {
+    gif_service::command_recording(&app, CaptureCommand::Resume, false, session_id.as_deref())
+        .map_err(err)
 }
 
 /// 停止并进入编辑器（素材保留）。
 #[tauri::command]
-pub fn gif_stop_recording(app: AppHandle) -> Result<(), CommandError> {
-    gif_service::command_recording(&app, CaptureCommand::Stop, false).map_err(err)
+pub fn gif_stop_recording(app: AppHandle, session_id: Option<String>) -> Result<(), CommandError> {
+    gif_service::command_recording(&app, CaptureCommand::Stop, false, session_id.as_deref())
+        .map_err(err)
 }
 
 /// 取消并丢弃素材。
 #[tauri::command]
-pub fn gif_cancel_recording(app: AppHandle) -> Result<(), CommandError> {
-    gif_service::command_recording(&app, CaptureCommand::Stop, true).map_err(err)
+pub fn gif_cancel_recording(
+    app: AppHandle,
+    session_id: Option<String>,
+) -> Result<(), CommandError> {
+    gif_service::command_recording(&app, CaptureCommand::Stop, true, session_id.as_deref())
+        .map_err(err)
 }
 
 /// 移动录制区域（拖动柄上报目标坐标；尺寸不变，采集位置热更新）。
 #[tauri::command]
-pub fn gif_move_recording_region(app: AppHandle, x: i32, y: i32) -> Result<(), CommandError> {
-    gif_service::move_recording_region(&app, x, y).map_err(err)
+pub fn gif_move_recording_region(
+    app: AppHandle,
+    x: i32,
+    y: i32,
+    session_id: Option<String>,
+) -> Result<(), CommandError> {
+    gif_service::move_recording_region(&app, x, y, session_id.as_deref()).map_err(err)
 }
 
 // ── overlay 录制叠层输入（0.28.23：统一浮栏由 chord-screenshot overlay 承担）──
 
+/// 原生控件整窗排除；标注通过有界二进制快照单独合成进采集帧。
 #[tauri::command]
-pub fn gif_overlay_ready(app: AppHandle, session_id: String) -> Result<(), CommandError> {
-    gif_service::overlay_ready(&app, &session_id).map_err(err)
+pub async fn gif_overlay_annotation(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    request: tauri::ipc::Request<'_>,
+) -> Result<(), CommandError> {
+    if window.label() != "chord-screenshot" {
+        return Err(CommandError::new(
+            "permission_denied",
+            "标注更新仅用于录制叠层",
+            false,
+        ));
+    }
+    let header = |name: &str| request.headers().get(name).and_then(|v| v.to_str().ok());
+    let session_id = header("x-recording-session")
+        .ok_or_else(|| CommandError::new("gif_session", "缺少录制会话", false))?
+        .to_owned();
+    let revision = header("x-annotation-revision")
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .ok_or_else(|| CommandError::new("gif_annotation", "标注版本无效", false))?;
+    let service = app.state::<Arc<GifService>>().inner().clone();
+    let (annotation, permit, width, height) = {
+        let recording = service.recording.lock().unwrap_or_else(|e| e.into_inner());
+        let r = recording
+            .as_ref()
+            .filter(|r| r.session_id == session_id)
+            .ok_or_else(|| err(GifServiceError::SessionNotFound(session_id.clone())))?;
+        let permit = r
+            .annotation_updates
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| CommandError::new("gif_annotation_busy", "标注更新进行中", true))?;
+        (r.annotation.clone(), permit, r.region_w, r.region_h)
+    };
+    let png = match request.body() {
+        tauri::ipc::InvokeBody::Raw(bytes) if bytes.len() <= infra_gif::annotation::MAX_BYTES => {
+            bytes.clone()
+        }
+        _ => {
+            return Err(CommandError::new(
+                "gif_annotation",
+                "标注必须使用有界二进制 PNG",
+                false,
+            ));
+        }
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let _permit = permit;
+        let frame = infra_gif::annotation::AnnotationFrame::decode(&png, width, height)
+            .map_err(|e| CommandError::new("gif_annotation", e, true))?;
+        let recording = service.recording.lock().unwrap_or_else(|e| e.into_inner());
+        if !recording
+            .as_ref()
+            .is_some_and(|r| r.session_id == session_id && Arc::ptr_eq(&r.annotation, &annotation))
+        {
+            return Err(CommandError::new(
+                "gif_stale_session",
+                "录制会话已结束",
+                false,
+            ));
+        }
+        let mut state = annotation.lock().unwrap_or_else(|e| e.into_inner());
+        if revision > state.revision {
+            state.revision = revision;
+            state.frame = Some(Arc::new(frame));
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| CommandError::new("gif_annotation", e.to_string(), true))?
+}
+
+#[tauri::command]
+pub async fn gif_overlay_ready(app: AppHandle, session_id: String) -> Result<(), CommandError> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        let result = (|| {
+            let service = handle.state::<Arc<GifService>>();
+            let recording = service.recording.lock().unwrap_or_else(|e| e.into_inner());
+            let r = recording
+                .as_ref()
+                .filter(|r| r.session_id == session_id)
+                .ok_or_else(|| CommandError::new("gif_stale_session", "录制会话已结束", false))?;
+            if r.annotation
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .revision
+                == 0
+            {
+                return Err(CommandError::new(
+                    "gif_annotation",
+                    "标注画布尚未就绪",
+                    true,
+                ));
+            }
+            #[cfg(target_os = "windows")]
+            blink_infra::platform::window::scroll_capture::exclude_recording_overlay(&handle)
+                .map_err(|e| CommandError::new("gif_capture_exclusion", e, true))?;
+            drop(recording);
+            gif_service::overlay_ready(&handle, &session_id).map_err(err)
+        })();
+        let _ = tx.send(result);
+    })
+    .map_err(|e| CommandError::new("gif_overlay", e.to_string(), true))?;
+    rx.await
+        .map_err(|e| CommandError::new("gif_overlay", e.to_string(), true))?
 }
 
 /// 上报 overlay 输入模式与命中矩形：`desktop=true` 操作桌面（穿透 + 命中
@@ -248,10 +369,14 @@ pub fn gif_overlay_focusable(app: AppHandle, focusable: bool) -> Result<(), Comm
 
 /// 控制条 ready 拉取当前状态。
 #[tauri::command]
-pub fn gif_recorder_state(app: AppHandle) -> serde_json::Value {
+pub fn gif_recorder_state(app: AppHandle, restore: Option<bool>) -> serde_json::Value {
     let service = app.state::<Arc<GifService>>();
     let payload = gif_service::snapshot_state_public(&service);
-    serde_json::to_value(payload).unwrap_or_default()
+    let mut value = serde_json::to_value(payload).unwrap_or_default();
+    if restore == Some(true) && value["sessionId"].is_string() {
+        value["overlayMeta"] = gif_service::overlay_restore_meta();
+    }
+    value
 }
 
 // ── 会话与编辑 ──────────────────────────────────────────────────────────────
@@ -289,44 +414,114 @@ pub fn gif_list_sessions() -> Result<Vec<GifSessionSummary>, CommandError> {
     Ok(out)
 }
 
-/// 丢弃会话素材（录制中会话拒绝——先停止/取消）。
+/// 显式删除；当前编辑会话需要单独授权，目录删除成功后才发布空会话。
 #[tauri::command]
-pub fn gif_discard_session(app: AppHandle, session_id: String) -> Result<(), CommandError> {
-    let _task = blink_infra::media::acquire_task_lease()
-        .map_err(|e| CommandError::new(e.code(), e.to_string(), true))?;
-    let service = app.state::<Arc<GifService>>();
-    {
-        let rec = service.recording.lock().unwrap_or_else(|e| e.into_inner());
-        if matches!(rec.as_ref(), Some(r) if r.session_id == session_id) {
-            return Err(err(GifServiceError::SessionNotFound(format!(
-                "{session_id}（录制进行中，请先停止/取消）"
-            ))));
-        }
+pub async fn gif_discard_session(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    session_id: String,
+    discard_current: Option<bool>,
+) -> Result<(), CommandError> {
+    if window.label() != "gif-editor" {
+        return Err(CommandError::new(
+            "permission_denied",
+            "此操作仅用于录制编辑器",
+            false,
+        ));
     }
-    let current = service
-        .editor_session
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    if current.as_deref() == Some(session_id.as_str()) {
+    let service = app.state::<Arc<GifService>>().inner().clone();
+    let handle = app.clone();
+    let id = session_id.clone();
+    let was_current = tauri::async_runtime::spawn_blocking(move || {
+        let _task = blink_infra::media::acquire_task_lease()
+            .map_err(|e| CommandError::new(e.code(), e.to_string(), true))?;
+        if discard_current.unwrap_or(false) {
+            crate::app::gif_draft::flush_draft(&handle, &id);
+        }
+        discard_session_at(
+            &service,
+            &GifService::root(),
+            &id,
+            discard_current.unwrap_or(false),
+        )
+    })
+    .await
+    .map_err(|e| CommandError::new("gif_discard", e.to_string(), true))??;
+    if was_current {
+        use tauri::Emitter;
+        let _ = app.emit_to(
+            "gif-editor",
+            blink_infra::event_names::EventNames::GIF_EDITOR_SESSION,
+            serde_json::json!({"sessionId": null, "discardedSessionId": session_id}),
+        );
+    }
+    Ok(())
+}
+
+fn discard_session_at(
+    service: &Arc<GifService>,
+    root: &std::path::Path,
+    session_id: &str,
+    discard_current: bool,
+) -> Result<bool, CommandError> {
+    if !infra_gif::spool::is_valid_session_id(session_id) {
+        return Err(CommandError::new("gif_session", "素材会话标识无效", false));
+    }
+    let recording = service.recording.lock().unwrap_or_else(|e| e.into_inner());
+    if recording
+        .as_ref()
+        .is_some_and(|r| r.session_id == session_id)
+    {
         return Err(CommandError::new(
             "gif_session_busy",
-            "当前编辑会话不能删除，请先切换",
+            "录制进行中，请先停止或丢弃",
             true,
         ));
     }
-    crate::app::gif_draft::release_if_saved(&service, &session_id);
-    infra_gif::spool::discard_session(&GifService::root(), &session_id)
-        .map_err(|e| CommandError::new("gif_session_busy", e.to_string(), true))?;
+    drop(recording);
+    let mut current = service
+        .editor_session
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let was_current = current.as_deref() == Some(session_id);
+    if was_current && !discard_current {
+        return Err(CommandError::new(
+            "gif_session_busy",
+            "当前编辑会话需要明确确认后删除",
+            true,
+        ));
+    }
+    if discard_current && !was_current {
+        return Err(CommandError::new(
+            "gif_stale_session",
+            "编辑会话已切换，请重新确认删除",
+            true,
+        ));
+    }
+    if crate::app::media_service::shared().has_active_job(session_id) {
+        return Err(CommandError::new(
+            "gif_export_busy",
+            "请先完成或取消当前导出，再删除录制",
+            true,
+        ));
+    }
+    crate::app::media_service::shared().cancel_estimate(session_id);
+    crate::app::gif_draft::release_if_saved(service, session_id);
+    infra_gif::spool::discard_session(root, session_id).map_err(|e| {
+        tracing::warn!(session_id, error = %e, "录制素材删除失败，保留当前会话供重试");
+        CommandError::new("gif_session_busy", e.to_string(), true)
+    })?;
     service
         .timelines
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .remove(&session_id);
-    // 内存草稿/身份数据一并清理（目录删除已带走草稿文件；防抖任务因
-    // 状态缺失自然失效，不复活已删会话）
-    crate::app::gif_draft::forget_session(&service, &session_id);
-    tracing::info!(session_id, "GIF 会话素材已丢弃");
-    Ok(())
+        .remove(session_id);
+    crate::app::gif_draft::forget_session(service, session_id);
+    if was_current {
+        *current = None;
+    }
+    tracing::info!(session_id, "录制素材与编辑进度已删除");
+    Ok(was_current)
 }
 
 /// 会话详情：元数据 + 时间轴视图 + 草稿恢复状态（0.28.23）。
@@ -748,6 +943,45 @@ pub fn gif_open_containing_folder(path: String) -> Result<(), CommandError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deleting_current_recording_requires_consent_and_preserves_current_on_lease_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let service = Arc::new(GifService::new());
+        let id = "delete-current";
+        let meta = infra_gif::SessionMeta {
+            spool_version: infra_gif::SPOOL_VERSION,
+            id: id.into(),
+            region: infra_gif::CaptureRegion {
+                x: 0,
+                y: 0,
+                w: 8,
+                h: 8,
+            },
+            fps: 10,
+            show_cursor: false,
+            created_at: 42,
+            state: "recording".into(),
+            ts_ms: vec![],
+            last_dur_ms: 100,
+            spool_bytes: 0,
+            stop_reason: None,
+        };
+        let mut writer = infra_gif::SpoolWriter::create(root.path(), meta).unwrap();
+        writer.append_frame(0, &[0; 256]).unwrap();
+        writer.finalize("user").unwrap();
+        *service.editor_session.lock().unwrap() = Some(id.into());
+        let reader = SpoolReader::open(root.path(), id).unwrap();
+        assert!(discard_session_at(&service, root.path(), id, false).is_err());
+        assert!(discard_session_at(&service, root.path(), id, true).is_err());
+        assert_eq!(service.editor_session.lock().unwrap().as_deref(), Some(id));
+        assert!(root.path().join("sessions").join(id).exists());
+        assert!(discard_session_at(&service, root.path(), "another", true).is_err());
+        drop(reader);
+        assert!(discard_session_at(&service, root.path(), id, true).unwrap());
+        assert!(service.editor_session.lock().unwrap().is_none());
+        assert!(!root.path().join("sessions").join(id).exists());
+    }
 
     #[test]
     fn history_material_opens_without_adopting_the_current_editor_session() {

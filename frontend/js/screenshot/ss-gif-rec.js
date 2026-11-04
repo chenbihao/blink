@@ -2,22 +2,26 @@
 //!
 //! 录制开始后 chord-screenshot overlay **不隐藏**，转为录制叠层：
 //! - 静态截图层清空、遮罩/选区层隐藏、body 透明——桌面经 DWM 透出；
-//! - 同一 `#toolbar` 宿主切到录制面（`toolbar-mode-gif-rec`），共享标注工具
+//! - 同一 `#toolbar` 由 recording-session.mode 投影，原位共享标注工具
 //!   （画笔/箭头/矩形/椭圆/文字/数字/高亮/橡皮 + 撤销/重做/清空）；
 //! - `#annot-canvas` 即实时涂画层：坐标相对录制区域（原选区），标注引擎
-//!   零改动复用；涂画内容经 DWM 合成进入 BitBlt 采集帧（半透明仅合成一次），
-//!   进行中的笔画每帧重放自然入帧；
+//!   零改动复用；窗口整体排除捕获，标注画布变化经有界二进制快照提交，
+//!   采集端在桌面帧上只合成标注一次，再叠加光标；
 //! - 「操作桌面」模式 = overlay 整窗鼠标穿透（后端 `gif_overlay_input`），
 //!   指针落在命中矩形（工具栏 + 打开的弹层）内时后端轮询临时取消穿透；
-//! - 「移动区域」按钮按住拖动 → `gif_move_recording_region`，涂画层与
-//!   范围框随区域移动（涂画坐标相对区域，天然跟随）。
 //!
 //! Esc 语义：录制中不退出（index.js 全局链在录制态短路）；取消走受保护的
 //! 二次确认按钮。
 
+import {t} from '../i18n/index.js';
+import {createAnnotationUploader} from './recording-annotation.js';
 import {ss} from './ss-state.js';
-import {cssPointToScreen, cssRectToBitmap, getRenderScale, screenRectToCss} from './ss-selection-geometry.js';
+import {recordingSession as state} from './recording-session.js';
+import {cssPointToScreen, cssRectToBitmap, getRenderScale, screenRectToCss, syncRenderScale} from './ss-selection-geometry.js';
+import {drawFinalSelection} from './ss-draw.js';
+import {updateLiveSelection} from './ss-live-selection.js';
 import {positionToolbar} from './ss-display.js';
+import {retainToolbarAnchor, closeRecordingPanel, openRecordingPanel, setRecordingUiListener, reflowRecordingPanels, showRecordingMessage, renderRecordingUi} from './ss-recording-ui.js';
 import {selectTool} from './ss-toolbar.js';
 import {invoke, listen, normalizeError} from '../shared/tauri.js';
 import {EVENTS} from '../shared/event-names.js';
@@ -26,12 +30,6 @@ import * as annot from './annotation-engine.js';
 import {formatTimecode} from '../gif/seek-bar.js';
 import {beginAudioRecording, endAudioRecording, applyAudioStatus, closeAudioSettings} from './ss-gif-audio.js';
 
-/** 宿主录制面 class（CSS 面切换规则）。 */
-const REC_MODE_CLASS = 'toolbar-mode-gif-rec';
-/** body 录制叠层 class（层透明化）。 */
-const BODY_REC_CLASS = 'gif-recording';
-/** 暂停态 class（状态点变色）。 */
-const PAUSED_CLASS = 'gif-rec-paused';
 /** 录制叠层不可用的已有标注类型（依赖截图底图像素）。 */
 const UNSUPPORTED_TYPES = new Set(['blur', 'pixelate', 'mosaic', 'magnifier', 'spotlight', 'spotlight-multi']);
 /** 录制叠层可用的绘制工具（进入录制面时当前工具不可用则切画笔）。 */
@@ -40,31 +38,10 @@ const REC_TOOLS = new Set(['pencil', 'arrow', 'rect', 'ellipse', 'highlight-mult
 const HIT_RECT_INTERVAL_MS = 250;
 /** 状态时长插值间隔（ms）。 */
 const TICK_INTERVAL_MS = 100;
-/** 取消确认按钮的回位时间（ms）。 */
-const CANCEL_ARM_MS = 3000;
-
-/** 模块状态（会话真源在后端；此为 UI 投影）。 */
-const state = {
-    active: false,
-    sessionId: null,
-    phase: 'recording',
-    elapsedBase: 0,
-    elapsedAt: 0,
-    frames: 0,
-    tickTimer: 0,
-    /** 录制区域（物理屏幕矩形；GIF_REGION_UPDATED 对账）。 */
-    regionPhys: null,
-    /** 虚拟屏边界（物理像素）。 */
-    vs: null,
-    desktopMode: false,
-    hitRectTimer: 0,
-    moveDrag: null,
-    cancelArmed: false,
-    cancelTimer: 0,
-    stopping: false,
-    textInputs: new Set(),
-    resumeAfterText: false,
-};
+let annotationUploader = null;
+let panelFocusTask = Promise.resolve();
+let lastStatusWarning = '';
+let regionDrag = null;
 
 function toolbarEl() {
     return ss.toolbar || document.getElementById('toolbar');
@@ -111,31 +88,33 @@ export function annotationsMigratable() {
  * 进入录制叠层模式（`gif_start_recording` 成功后由准备态调用）。
  * @param {{x:number, y:number, w:number, h:number}} regionPhys 录制区域（物理屏幕坐标）
  */
-export async function enterGifRecordOverlay(regionPhys, sessionId) {
-    await beginAudioRecording(sessionId);
+export async function enterGifRecordOverlay(regionPhys, sessionId, {restoring = false, audioOptions} = {}) {
     const toolbar = toolbarEl();
     if (!toolbar) throw new Error('录制工具栏未就绪');
-    state.active = true;
     state.sessionId = sessionId;
-    state.stopping = false;
+    state.setMode('starting');
+    const epoch = state.epoch;
+    await beginAudioRecording(sessionId, audioOptions);
+    if (!state.owns(epoch, sessionId)) return;
+    ss._loadGen++;
+    state.restoredControlsOnly = restoring;
+    state.snapshotRevision = 0;
+    state.storage = null;
+    state.targetFps = Number(el('gif-prep-fps')?.value) || 15;
+    state.actualFps = null;
     state.textInputs.clear();
     state.resumeAfterText = false;
-    state.desktopMode = false;
     state.regionPhys = {...regionPhys};
-    state.phase = 'recording';
     state.elapsedBase = 0;
     state.elapsedAt = performance.now();
     state.frames = 0;
-    state.moveDrag = null;
     resetCancel();
     const meta = window.__blinkScreenMeta || {};
-    state.vs = {vx: meta.vx, vy: meta.vy, vw: meta.w, vh: meta.h};
 
-    toolbar.classList.remove('toolbar-mode-gif-prep');
-    toolbar.classList.add(REC_MODE_CLASS);
-    document.body.classList.add(BODY_REC_CLASS);
-    document.documentElement.classList.add(BODY_REC_CLASS);
-    document.body.classList.remove(PAUSED_CLASS);
+    retainToolbarAnchor();
+    closeRecordingPanel();
+    toolbar.classList.remove('hidden');
+    toolbar.setAttribute('aria-label', t('gif.rec.recordingToolbar'));
 
     // 静态截图层清空（保留元素——它是指针事件承接面；位图清空即透明）。
     // OCR/翻译嵌图等 overlay 图层不属于涂画，随底图一起退出画面。
@@ -151,11 +130,6 @@ export async function enterGifRecordOverlay(regionPhys, sessionId) {
     // 当前工具不可用（select/底图效果）→ 切画笔（录制涂画的默认工具）
     if (!REC_TOOLS.has(annot.getTool())) selectTool('pencil');
 
-    // 工具栏若停在录制区域内（用户拖过）会入成品：清除用户位置，回到
-    // 默认跟随（选区下方 → 上方），避免工具栏被录进画面
-    if (toolbar.dataset.userMoved === 'true' && ss.selCss && rectsIntersect(toolbar.getBoundingClientRect(), ss.selCss)) {
-        delete toolbar.dataset.userMoved;
-    }
     positionToolbar({...ss.selCss}, true);
 
     syncRegionVisual();
@@ -165,56 +139,123 @@ export async function enterGifRecordOverlay(regionPhys, sessionId) {
 
     // 文字输入适配钩子（ss-toolbar showTextInput 消费）：输入框外置出录制
     // 区域 + 编辑期间申请 overlay 键盘焦点（不可聚焦不抢被录应用焦点）。
+    annotationUploader = annotCanvas && !restoring ? createAnnotationUploader({
+        canvas: annotCanvas, sessionId,
+        send: (bytes, options) => invoke('gif_overlay_annotation', bytes, options),
+        onError: error => {
+            if (!state.active || state.sessionId !== sessionId) return;
+            void invoke('gif_pause_recording', {sessionId: state.sessionId}).catch(() => {});
+            showRecordingMessage(`标注同步失败，录制已请求暂停：${normalizeError(error).message}`);
+        },
+    }) : null;
+    annot.setRenderListener?.(() => annotationUploader?.notify());
     ss.gifRecHooks = {
-        allowsTool: tool => REC_TOOLS.has(tool),
+        onDraw: () => annotationUploader?.notify(),
+        onPanelFocus: focusable => {
+            panelFocusTask = panelFocusTask.catch(() => {}).then(async () => {
+                if (!state.active || state.sessionId !== sessionId || state.stopping) return;
+                await invoke('gif_overlay_focusable', {focusable: focusable || state.textInputs.size > 0});
+            }).catch(error => {
+                if (state.active && state.sessionId === sessionId) showRecordingMessage(`焦点切换失败：${normalizeError(error).message}`);
+            });
+        },
+        ...drawingHooks(),
         adjustTextPlacement,
         onTextInputOpen: openRecordingTextInput,
     };
 
     // 默认「操作桌面」模式（§5.7.2：默认鼠标穿透，已有涂画继续显示）
-    setDesktopMode(true);
+    setDesktopMode(state.desktopMode);
     renderRecState();
     startTick();
     // 两次 rAF 之间完成一次透明叠层绘制，再通知采集线程 Start。
     await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     if (!state.active || state.sessionId !== sessionId) return;
-    await invoke('gif_overlay_ready', {sessionId});
+    // 重载恢复保留后端已有标注，不能用空画布覆盖仍在采集的快照。
+    if (!restoring) await annotationUploader?.flush();
+    if (!state.active || state.sessionId !== sessionId) return;
+    if (!restoring) await invoke('gif_overlay_ready', {sessionId});
     const snapshot = await invoke('gif_recorder_state');
+    if (restoring && snapshot?.sessionId !== sessionId) { endOverlaySession(); return; }
     if (state.active && state.sessionId === sessionId) applyRecorderState(snapshot || {});
+}
+
+let restoringOverlay = null;
+/** 同一后端会话可被重新接管；重复唤起只刷新状态，绝不重启采集或重置截图。 */
+export function restoreRecordingOverlay(notify = false) {
+    // 自己的启动调用尚未拿到 session id 时，不允许另一个恢复请求抢先接管它。
+    if(state.mode==='starting' && !state.active) return Promise.resolve(true);
+    if (restoringOverlay) return restoringOverlay;
+    restoringOverlay = (async () => {
+        const epoch = ss._loadGen;
+        const sessionAtRequest = state.sessionId;
+        const snapshot = await invoke('gif_recorder_state', {restore: true});
+        if (!snapshot?.sessionId || !snapshot.region) {
+            if (state.active && state.sessionId === sessionAtRequest && snapshot?.phase === 'idle') endOverlaySession();
+            return state.active;
+        }
+        if (state.active && state.sessionId !== snapshot.sessionId) return true;
+        if (!state.active && epoch !== ss._loadGen) return false;
+        if (!state.active || state.sessionId !== snapshot.sessionId) {
+            if (state.active) endOverlaySession();
+            const meta = snapshot.overlayMeta;
+            if (!meta || !(meta.w > 0 && meta.h > 0)) throw new Error('录制窗口几何不可用');
+            window.__blinkScreenMeta = meta;
+            const base = el('canvas');
+            base.width = meta.w; base.height = meta.h;
+            syncRenderScale(base, meta);
+            ss.selCss = screenRectToCss(snapshot.region, meta);
+            ss.sent = true; ss.isAnnotating = true;
+            ss._loadGen++;
+            const canvas = ss.annotCanvas || el('annot-canvas');
+            canvas.width = snapshot.region.w; canvas.height = snapshot.region.h;
+            const {scaleX, scaleY} = getRenderScale(meta);
+            canvas.style.width = `${canvas.width / scaleX}px`;
+            canvas.style.height = `${canvas.height / scaleY}px`;
+            canvas.classList.remove('hidden');
+            annot.reset(canvas.width, canvas.height, null);
+            document.documentElement.classList.remove('screenshot-session-inactive');
+            await enterGifRecordOverlay(snapshot.region, snapshot.sessionId, {restoring: snapshot.phase !== 'waiting', audioOptions:snapshot.audioOptions});
+        }
+        if (!state.active) return false;
+        if (state.sessionId === snapshot.sessionId) {
+            applyRecorderState(snapshot);
+            toolbarEl()?.classList.remove('hidden');
+            if (notify) showTransientHint(t('gif.rec.restored'), {duration: 2200});
+        }
+        return true;
+    })().finally(() => {restoringOverlay = null;});
+    return restoringOverlay;
+}
+
+function drawingHooks() {
+    return {
+        beginGripDrag: beginRecordingGripDrag,
+        allowsTool: tool => (!state.active && tool === 'select') || REC_TOOLS.has(tool),
+        onToolSelected: tool => { if (!state.busy && REC_TOOLS.has(tool) && !state.drawing) setDesktopMode(false, {select:false}); },
+    };
+}
+export function prepareRecordingTools() {
+    ss.gifRecHooks = drawingHooks();
+    setDesktopMode(true);
 }
 
 /** 录制会话结束（停止/取消由后端收场并隐藏 overlay）——仅复位 UI 投影。 */
 function endOverlaySession() {
+    regionDrag = null;
+    annotationUploader?.stop(); annotationUploader = null;
+    annot.setRenderListener?.(null);
+    clearInterval(state.tickTimer); clearInterval(state.hitRectTimer);
+    state.reset();
     endAudioRecording();
-    state.active = false;
-    state.sessionId = null;
-    state.stopping = false;
-    clearInterval(state.tickTimer);
-    state.tickTimer = 0;
-    clearInterval(state.hitRectTimer);
-    state.hitRectTimer = 0;
-    state.moveDrag = null;
-    resetCancel();
-    document.body.classList.remove(BODY_REC_CLASS, PAUSED_CLASS);
-    document.documentElement.classList.remove(BODY_REC_CLASS);
-    toolbarEl()?.classList.remove(REC_MODE_CLASS);
-    el('gif-region-frame')?.classList.add('hidden');
+    lastStatusWarning = '';
     delete ss.gifRecHooks;
-}
-
-function rectsIntersect(a, b) {
-    return a.x < b.x + b.w && a.x + a.width > b.x && a.y < b.y + b.h && a.y + a.height > b.y;
-}
-
-/** 纯函数：区域拖动的本地钳制（虚拟屏内；后端钳制回发为最终裁决）。 */
-export function clampRegionMove(origin, dx, dy, vs) {
-    let x = origin.x + dx;
-    let y = origin.y + dy;
-    if (vs && typeof vs.vx === 'number') {
-        x = Math.max(vs.vx, Math.min(x, vs.vx + vs.vw - origin.w));
-        y = Math.max(vs.vy, Math.min(y, vs.vy + vs.vh - origin.h));
-    }
-    return {x, y};
+    ss._closeToolDropdowns?.();
+    el('sub-panel')?.classList.add('hidden');
+    closeRecordingPanel(); showRecordingMessage('');
+    el('gif-region-frame')?.classList.add('hidden');
+    ss.sent = false;
+    renderRecordingUi();
 }
 
 // ── 状态显示（GIF_RECORDER_STATE 事件 + 时长插值） ───────────────────────
@@ -234,6 +275,8 @@ function bindListenersOnce() {
 
 function applyRecorderState(p) {
     if (p.sessionId !== state.sessionId) return;
+    if (p.revision && p.revision <= state.snapshotRevision) return;
+    if (p.revision) state.snapshotRevision = p.revision;
     if (p.phase === 'idle') {
         endOverlaySession();
         return;
@@ -242,16 +285,17 @@ function applyRecorderState(p) {
     // 下一轮截图会话 reset。
     if (p.phase === 'done') {
         // 后端已收场/即将隐藏 overlay；停止响应输入
-        state.stopping = true;
+        state.setMode('stopping');
         renderRecState();
         return;
     }
     if (p.phase === 'stopping' || state.stopping) {
-        state.stopping = true;
+        state.setMode('stopping');
         renderRecState();
         return;
     }
-    state.phase = p.phase;
+    state.setMode(['waiting', 'countdown'].includes(p.phase) ? 'starting' : p.phase);
+    state.audioError = p.audio?.error;
     applyAudioStatus(p.audio, state.sessionId);
     state.elapsedBase = p.elapsedMs ?? state.elapsedBase;
     state.elapsedAt = performance.now();
@@ -261,44 +305,17 @@ function applyRecorderState(p) {
 }
 
 function renderRecState() {
-    const stateEl = el('gif-rec-state');
-    const timeEl = el('gif-rec-time');
-    const framesEl = el('gif-rec-frames');
-    const pauseBtn = el('gif-rec-pause');
-    if (!stateEl) return;
-    if (state.stopping) {
-        stateEl.textContent = '正在收尾…';
-        document.body.classList.remove(PAUSED_CLASS);
-        setButtonsDisabled(true);
-        return;
-    }
-    setButtonsDisabled(false);
-    const paused = state.phase === 'paused';
-    document.body.classList.toggle(PAUSED_CLASS, paused);
-    stateEl.textContent = paused ? (state.storage?.pauseReason === 'low_space' ? '空间不足 · 已暂停' : state.storage?.pauseReason === 'space_unavailable' ? '空间查询失败 · 已暂停' : '已暂停（可继续或停止）') : '录制中';
-    if (timeEl) timeEl.textContent = formatTimecode(currentElapsedMs());
-    if (framesEl) {
-        framesEl.textContent = state.targetFps ? `${Number(state.actualFps || 0).toFixed(1)}/${state.targetFps} fps` : `${state.frames} 帧`;
-        framesEl.title = `实际 / 目标帧率 · 已采集 ${state.frames} 帧（包含合并的重复画面）`;
-    }
-    const storageEl=el('gif-rec-storage'), storage=state.storage;
-    if(storageEl && storage) {
-        const mib=n=>(n/1024/1024).toFixed(1);
-        storageEl.textContent=`${mib(storage.materialBytes)} MiB · ${storage.disk ? '余 '+(storage.disk.availableBytes/1024**3).toFixed(1)+' GiB':'空间未知'}${storage.warning && !storage.pauseReason ? ' · 空间偏低' : ''}`;
-        storageEl.title=`素材盘 ${storage.disk?.volume || '未知'}\n声音 ${mib(storage.audioBytes)} MiB\n${storage.bytesPerSecond ? mib(storage.bytesPerSecond)+' MiB/s':'增长速度尚未稳定'}\n预留 ${mib(storage.reserveBytes)} MiB`;
-    }
-    if (pauseBtn) {
-        const icons = pauseBtn.querySelectorAll('.icon');
-        if (icons.length === 2) {
-            icons[0].classList.toggle('hidden', paused);
-            icons[1].classList.toggle('hidden', !paused);
-        }
-        pauseBtn.title = paused ? '继续录制' : '暂停录制';
-    }
+    renderRecordingUi();
+    const time=el('gif-rec-time');
+    if(time) time.textContent=formatTimecode(currentElapsedMs()).replace(/\.\d+$/, '');
+    const label=t('gif.rec.' + (state.storage?.pauseReason === 'low_space' ? 'spaceLow' : state.storage?.pauseReason === 'space_unavailable' ? 'spaceQueryFailed' : 'paused'));
+    const warning=state.storage?.pauseReason ? t('gif.rec.resourcePaused',{reason:label}) : state.audioError || '';
+    if(warning || lastStatusWarning) showRecordingMessage(warning);
+    lastStatusWarning=warning;
 }
 
 function currentElapsedMs() {
-    if (state.phase !== 'recording') return state.elapsedBase;
+    if (state.mode !== 'recording') return state.elapsedBase;
     return state.elapsedBase + (performance.now() - state.elapsedAt);
 }
 
@@ -310,17 +327,10 @@ function startTick() {
             return;
         }
         const timeEl = el('gif-rec-time');
-        if (timeEl && state.phase === 'recording') {
-            timeEl.textContent = formatTimecode(currentElapsedMs());
+        if (timeEl && state.mode === 'recording') {
+            timeEl.textContent = formatTimecode(currentElapsedMs()).replace(/\.\d+$/, '');
         }
     }, TICK_INTERVAL_MS);
-}
-
-function setButtonsDisabled(disabled) {
-    for (const id of ['gif-rec-pause', 'gif-rec-stop', 'gif-rec-cancel', 'gif-rec-move', 'gif-rec-mode']) {
-        const btn = el(id);
-        if (btn) btn.disabled = disabled;
-    }
 }
 
 // ── 输入模式（涂画 / 操作桌面）与命中矩形 ────────────────────────────────
@@ -344,7 +354,7 @@ function collectHitRects() {
         ]);
     };
     push(toolbarEl());
-    push(el('gif-audio-settings'));
+    for (const panel of document.querySelectorAll('.recording-panel:not(.hidden)')) push(panel);
     // 打开的下拉（data-open="true"）与浮层
     for (const dom of document.querySelectorAll('#toolbar .dropdown[data-open="true"]')) push(dom);
     push(el('ss-action-menu'));
@@ -353,34 +363,24 @@ function collectHitRects() {
 }
 
 /** 切换输入模式并上报；操作桌面模式启动命中矩形周期上报。 */
-function setDesktopMode(desktop) {
-    state.desktopMode = desktop;
-    const modeBtn = el('gif-rec-mode');
-    const label = el('gif-rec-mode-label');
-    if (modeBtn) {
-        const icons = modeBtn.querySelectorAll('.icon');
-        if (icons.length === 2) {
-            icons[0].classList.toggle('hidden', desktop);
-            icons[1].classList.toggle('hidden', !desktop);
-        }
-        modeBtn.title = desktop ? '当前：操作桌面（鼠标穿透）——点击切到涂画' : '当前：涂画——点击切到操作桌面';
-    }
-    if (label) label.textContent = desktop ? '操作桌面' : '涂画';
-    invoke('gif_overlay_input', {desktop, rects: collectHitRects()}).catch(err => {
-        console.error('[screenshot] overlay 输入模式上报失败', err);
+function setDesktopMode(desktop, {select = true} = {}) {
+    if (!state.visible || state.stopping || (!desktop && state.restoredControlsOnly)) return;
+    retainToolbarAnchor();
+    state.drawing = !desktop;
+    ss._closeToolDropdowns?.();
+    el('sub-panel')?.classList.add('hidden');
+    renderRecordingUi();
+    if(select && (!state.active || (!desktop && !REC_TOOLS.has(annot.getTool())))) selectTool(desktop ? 'select' : 'pencil');
+    clearInterval(state.hitRectTimer); state.hitRectTimer=0;
+    if(!state.active) return;
+    const sessionId=state.sessionId,epoch=state.epoch;
+    invoke('gif_overlay_input',{desktop,rects:collectHitRects()}).catch(error=>{
+        if(state.owns(epoch,sessionId)) console.error('[recording] input mode failed',error);
     });
-    clearInterval(state.hitRectTimer);
-    state.hitRectTimer = 0;
-    if (desktop) {
-        state.hitRectTimer = setInterval(() => {
-            if (!state.active || !state.desktopMode) {
-                clearInterval(state.hitRectTimer);
-                state.hitRectTimer = 0;
-                return;
-            }
-            invoke('gif_overlay_hit_rects', {rects: collectHitRects()}).catch(() => {});
-        }, HIT_RECT_INTERVAL_MS);
-    }
+    if(desktop) state.hitRectTimer=setInterval(()=>{
+        if(!state.owns(epoch,sessionId)||!state.desktopMode) return;
+        invoke('gif_overlay_hit_rects',{rects:collectHitRects()}).catch(()=>{});
+    },HIT_RECT_INTERVAL_MS);
 }
 
 // ── 区域（范围框 + 移动 + 对账） ─────────────────────────────────────────
@@ -394,131 +394,170 @@ function syncRegionVisual() {
         annotCanvas.style.top = `${ss.selCss.y}px`;
     }
     if (frame && ss.selCss) {
-        frame.style.left = `${ss.selCss.x - 3}px`;
-        frame.style.top = `${ss.selCss.y - 3}px`;
-        frame.style.width = `${ss.selCss.w}px`;
-        frame.style.height = `${ss.selCss.h}px`;
+        const meta = window.__blinkScreenMeta || {};
+        const {scaleX, scaleY} = getRenderScale(meta);
+        const geometry = recordingFrameGeometry(state.regionPhys, meta, scaleX, scaleY);
+        Object.assign(frame.style, geometry);
     }
 }
 
 /** 后端对账（含拖动钳制结果与新录制会话初始区域）。 */
 function applyRegionUpdated(p) {
     if (p.sessionId !== state.sessionId) return;
+    if (regionDrag) return; // 拖动时以本地最新位置为准，队列排空后再对账。
     if (typeof p.x !== 'number' || typeof p.w !== 'number') return;
     state.regionPhys = {x: p.x, y: p.y, w: p.w, h: p.h};
-    state.vs = {vx: p.vx, vy: p.vy, vw: p.vw, vh: p.vh};
     const meta = window.__blinkScreenMeta || {vx: 0, vy: 0};
     ss.selCss = screenRectToCss({x: p.x, y: p.y, w: p.w, h: p.h}, meta);
     syncRegionVisual();
 }
 
-/** 「移动区域」按钮：按住拖动，尺寸固定；拖完保持拖动前录制/暂停状态。 */
-function bindMoveButton() {
-    const btn = el('gif-rec-move');
-    if (!btn) return;
-    btn.addEventListener('pointerdown', e => {
-        if (!state.active || state.stopping || e.button !== 0 || !state.regionPhys) return;
-        e.preventDefault();
-        btn.setPointerCapture(e.pointerId);
-        const {scaleX, scaleY} = getRenderScale(window.__blinkScreenMeta);
-        state.moveDrag = {
-            pointerId: e.pointerId,
-            startX: e.clientX,
-            startY: e.clientY,
-            scaleX, scaleY,
-            origin: {...state.regionPhys},
-        };
-    });
-    btn.addEventListener('pointermove', e => {
-        const drag = state.moveDrag;
-        if (!drag || e.pointerId !== drag.pointerId) return;
-        const {vx, vy, vw, vh} = state.vs || {};
-        const dx = Math.round((e.clientX - drag.startX) * drag.scaleX);
-        const dy = Math.round((e.clientY - drag.startY) * drag.scaleY);
-        const clamped = clampRegionMove(drag.origin, dx, dy,
-            typeof vx === 'number' ? {vx, vy, vw, vh} : null);
-        const nx = clamped.x;
-        const ny = clamped.y;
-        state.regionPhys = {x: nx, y: ny, w: drag.origin.w, h: drag.origin.h};
-        const meta = window.__blinkScreenMeta || {vx: 0, vy: 0};
-        ss.selCss = screenRectToCss(state.regionPhys, meta);
-        syncRegionVisual();
-        invoke('gif_move_recording_region', {x: nx, y: ny}).catch(() => {});
-    });
-    const end = e => {
-        const drag = state.moveDrag;
-        if (!drag || e.pointerId !== drag.pointerId) return;
-        btn.releasePointerCapture?.(e.pointerId);
-        state.moveDrag = null;
-        // 最后一次上报由后端钳制回发对账
+/** 同一位移同时作用于选区和工具栏，边缘钳制也只算一次。 */
+export function recordingDragDelta(region, dx, dy, viewport) {
+    return {dx:Math.max(-region.x,Math.min(dx,Math.max(0,viewport.w-region.w)-region.x)),
+        dy:Math.max(-region.y,Math.min(dy,Math.max(0,viewport.h-region.h)-region.y))};
+}
+
+function beginRecordingGripDrag() {
+    if(!state.visible || state.busy || !ss.selCss) return false;
+    const origin={...ss.selCss},epoch=state.epoch,sessionId=state.sessionId;
+    const meta=window.__blinkScreenMeta || {};
+    const current=()=>regionDrag===drag && state.owns(epoch,sessionId);
+    let pending=null,task=null;
+    const drain=()=>{
+        if(task) return task;
+        task=(async()=>{
+            while(pending && current()) {
+                const point=pending;pending=null;
+                await invoke('gif_move_recording_region',{...point,sessionId});
+            }
+        })().catch(error=>{if(current()) showRecordingMessage(normalizeError(error).message);})
+            .finally(()=>{task=null;});
+        return task;
     };
-    btn.addEventListener('pointerup', end);
-    btn.addEventListener('pointercancel', end);
+    const drag={
+        move(dx,dy) {
+            if(!current()) return null;
+            const delta=recordingDragDelta(origin,dx,dy,{w:window.innerWidth,h:window.innerHeight});
+            ss.selCss={...origin,x:origin.x+delta.dx,y:origin.y+delta.dy};
+            if(state.active) {
+                const point=cssPointToScreen(ss.selCss.x,ss.selCss.y,meta);
+                state.regionPhys={...state.regionPhys,...point};
+                pending=point;void drain();syncRegionVisual();
+            } else {
+                updateLiveSelection(ss.selCss);
+                if(ss.annotCanvas) {ss.annotCanvas.style.left=ss.selCss.x+'px';ss.annotCanvas.style.top=ss.selCss.y+'px';}
+            }
+            return delta;
+        },
+        async end() {
+            if(!current()) return;
+            if(state.active) {
+                await task;
+                if(!current()) return;
+                regionDrag=null;
+                setDesktopMode(state.desktopMode,{select:false});
+                const snapshot=await invoke('gif_recorder_state').catch(()=>null);
+                if(state.owns(epoch,sessionId) && !regionDrag && snapshot?.region) applyRegionUpdated({sessionId:snapshot.sessionId,...snapshot.region});
+            } else {
+                regionDrag=null;
+                const bmp=cssRectToBitmap(ss.selCss,meta),source=ss.screenshotOffscreen || ss.screenshot;
+                if(source) {
+                    try {
+                        const canvas=document.createElement('canvas');canvas.width=bmp.w;canvas.height=bmp.h;
+                        const ctx=canvas.getContext('2d');
+                        ctx.drawImage(source,bmp.x,bmp.y,bmp.w,bmp.h,0,0,bmp.w,bmp.h);
+                        annot.updateCropData(ctx.getImageData(0,0,bmp.w,bmp.h),bmp.w,bmp.h);
+                    } catch(error) {
+                        console.warn('[recording] moved selection crop failed',error);
+                        showRecordingMessage(normalizeError(error).message);
+                    }
+                }
+                drawFinalSelection();
+            }
+        },
+    };
+    regionDrag=drag;
+    closeRecordingPanel();ss._closeToolDropdowns?.();
+    if(!state.active) ss._invalidateSelectionContent?.({preservePresentation:true});
+    if(state.active) void invoke('gif_overlay_input',{desktop:false,rects:collectHitRects()}).catch(()=>{});
+    return drag;
 }
 
 // ── 停止 / 取消（受保护） / 暂停 ────────────────────────────────────────
 
 async function stopRecording() {
-    if (state.stopping) return;
-    state.stopping = true;
+    if (!state.active || state.stopping) return;
+    const epoch=state.epoch,sessionId=state.sessionId,previousMode=state.mode;
+    state.setMode('stopping');
     renderRecState();
     try {
-        await invoke('gif_stop_recording');
+        await invoke('gif_stop_recording', {sessionId});
     } catch (err) {
+        if(!state.owns(epoch,sessionId)) return;
+        state.setMode(previousMode);
         console.error('[screenshot] 停止录制失败', err);
         showTransientHint(`停止失败：${normalizeError(err).message}`, {isError: true, duration: 3000});
-        state.stopping = false;
         renderRecState();
     }
 }
 
-/** 取消并丢弃：受保护的二次确认（首击点亮按钮，3 秒内再击确认）。 */
+/** 丢弃必须经过明确确认；关闭面板不会结束录制。 */
 function resetCancel() {
-    clearTimeout(state.cancelTimer);
-    state.cancelTimer = 0;
     state.cancelArmed = false;
-    el('gif-rec-cancel')?.classList.remove('confirming');
-    el('gif-rec-cancel')?.setAttribute('title', '取消并丢弃本次录制（需再次点击确认）');
 }
-
 function cancelRecording() {
     if (state.stopping) return;
-    const btn = el('gif-rec-cancel');
-    if (!state.cancelArmed) {
-        state.cancelArmed = true;
-        btn?.classList.add('confirming');
-        btn?.setAttribute('title', '再次点击确认丢弃本次录制');
-        clearTimeout(state.cancelTimer);
-        state.cancelTimer = setTimeout(() => {
-            state.cancelArmed = false;
-            btn?.classList.remove('confirming');
-            btn?.setAttribute('title', '取消并丢弃本次录制（需再次点击确认）');
-        }, CANCEL_ARM_MS);
-        return;
-    }
-    clearTimeout(state.cancelTimer);
-    state.cancelArmed = false;
-    btn?.classList.remove('confirming');
-    state.stopping = true;
+    const panel = el('gif-discard-confirm'), anchor = el('gif-record-exit');
+    if (!panel || !anchor) return;
+    state.cancelArmed = openRecordingPanel(panel, anchor, resetCancel);
+    if (state.cancelArmed) el('gif-discard-keep')?.focus({preventScroll: true});
+}
+async function confirmDiscard() {
+    if (!state.active || state.stopping || !state.cancelArmed) return;
+    const epoch=state.epoch,sessionId=state.sessionId,previousMode=state.mode;
+    closeRecordingPanel();
+    state.setMode('stopping');
     renderRecState();
-    invoke('gif_cancel_recording').catch(err => {
-        console.error('[screenshot] 取消录制失败', err);
-        state.stopping = false;
+    try { await invoke('gif_cancel_recording', {sessionId}); }
+    catch (error) {
+        if(!state.owns(epoch,sessionId)) return;
+        state.setMode(previousMode);
+        console.error('[screenshot] 取消录制失败', error);
         renderRecState();
-    });
+        showRecordingMessage(`丢弃失败：${normalizeError(error).message}`);
+    }
+}
+
+/** 物理像素外扩后再换算，border-box 的四条边都完整位于采集矩形外。 */
+export function recordingFrameGeometry(region, meta = {}, scaleX = 1, scaleY = 1) {
+    const display = meta.physicalDisplays?.find(d => region.x >= d.x && region.x < d.x + d.w && region.y >= d.y && region.y < d.y + d.h);
+    const border = Math.max(1, Math.round((display?.dpi || 96) / 96));
+    return {
+        left: `${(region.x - (meta.vx || 0) - border) / scaleX}px`,
+        top: `${(region.y - (meta.vy || 0) - border) / scaleY}px`,
+        width: `${(region.w + border * 2) / scaleX}px`,
+        height: `${(region.h + border * 2) / scaleY}px`,
+        borderLeftWidth: `${border / scaleX}px`, borderRightWidth: `${border / scaleX}px`,
+        borderTopWidth: `${border / scaleY}px`, borderBottomWidth: `${border / scaleY}px`,
+    };
 }
 
 async function togglePause() {
     if (state.stopping) return;
-    if (state.phase === 'paused') {
-        await closeAudioSettings();
-        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const sessionId = state.sessionId, paused = state.mode === 'paused';
+    try {
+        if (paused) {
+            await closeAudioSettings();
+            await annotationUploader?.flush();
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        }
+        if (!state.active || state.sessionId !== sessionId || state.stopping) return;
+        await invoke(paused ? 'gif_resume_recording' : 'gif_pause_recording', {sessionId});
+    } catch (error) {
+        console.error('[screenshot] 暂停/继续失败', error);
+        if (state.active && state.sessionId === sessionId) showRecordingMessage(`操作失败：${normalizeError(error).message}`);
     }
-    const cmd = state.phase === 'paused' ? 'gif_resume_recording' : 'gif_pause_recording';
-    invoke(cmd).catch(err => {
-        console.error('[screenshot] 暂停/继续失败', err);
-        showTransientHint(`操作失败：${normalizeError(err).message}`, {isError: true, duration: 3000});
-    });
 }
 
 // ── 文字输入适配（输入框外置出录制区域 + 焦点申请） ─────────────────────
@@ -568,7 +607,8 @@ async function openRecordingTextInput(pos, size) {
         state.resumeAfterText = false;
         if (snapshot?.sessionId === sessionId && snapshot.phase === 'paused'
             && !snapshot.audio?.error && !snapshot.storage?.pauseReason) {
-            await invoke('gif_resume_recording');
+            await annotationUploader?.flush();
+            if (current()) await invoke('gif_resume_recording', {sessionId});
         }
     };
     try {
@@ -577,7 +617,7 @@ async function openRecordingTextInput(pos, size) {
             let snapshot = await invoke('gif_recorder_state');
             if (snapshot?.sessionId !== sessionId || !current()) throw new Error('录制会话已切换');
             if (snapshot.phase === 'recording') {
-                await invoke('gif_pause_recording');
+                await invoke('gif_pause_recording', {sessionId: state.sessionId});
                 const deadline = performance.now() + 3000;
                 do {
                     snapshot = await invoke('gif_recorder_state');
@@ -604,19 +644,28 @@ async function openRecordingTextInput(pos, size) {
 /** 绑定录制面按钮（index.js 初始化调用一次）。 */
 export function bindGifRecBar() {
     void bindListenersOnce();
-    bindMoveButton();
-    el('gif-rec-mode')?.addEventListener('click', () => {
-        if (!state.active || state.stopping) return;
-        setDesktopMode(!state.desktopMode);
+    el('gif-rec-draw')?.addEventListener('click',()=>{
+        if(state.visible && !state.busy) setDesktopMode(state.drawing);
     });
-    el('gif-rec-pause')?.addEventListener('click', togglePause);
+    el('gif-discard-yes')?.addEventListener('click', confirmDiscard);
+    el('gif-discard-keep')?.addEventListener('click', () => closeRecordingPanel({focus: true}));
+    setRecordingUiListener(() => {
+        if (state.active && state.desktopMode) invoke('gif_overlay_hit_rects', {rects: collectHitRects()}).catch(() => {});
+    });
+    if (typeof MutationObserver === 'function') {
+        const observer = new MutationObserver(() => { if (state.active) reflowRecordingPanels(); });
+        for (const node of [...document.querySelectorAll('#toolbar .dropdown'), el('sub-panel')]) {
+            if (node) observer.observe(node, {attributes: true, attributeFilter: ['data-open', 'class']});
+        }
+    }
+    el('gif-record-toggle')?.addEventListener('click',()=>{if(state.active&&!state.busy) void togglePause();});
     el('gif-rec-stop')?.addEventListener('click', stopRecording);
-    el('gif-rec-cancel')?.addEventListener('click', cancelRecording);
+    el('gif-record-exit')?.addEventListener('click',()=>{if(state.active&&!state.busy) cancelRecording();});
     // Esc 由 index.js 的分层链先处理输入框/弹层，再在录制态消费。
 }
 
 /** 会话外部收场兜底（overlay 被 hide_screenshot_overlay 隐藏后调用）。 */
 export function handleOverlayHidden() {
-    endAudioRecording();
-    if (state.active) endOverlaySession();
+    // 准备态与录制态共用同一清理路径，工具从未离开宿主，不再需要 DOM 归还。
+    endOverlaySession();
 }

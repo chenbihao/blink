@@ -543,6 +543,12 @@ fn begin_and_show(
     source_label: Option<&str>,
     log_ctx: &str,
 ) -> Result<(), MediaError> {
+    let service = app.state::<std::sync::Arc<crate::app::gif_service::GifService>>();
+    let _session = service.lock_overlay_session();
+    if crate::app::gif_service::restore_active_overlay(app)
+        .map_err(|e| MediaError::new("recording_overlay", e, true))? {
+        return Err(MediaError::new("recording_overlay", "当前正在录制，已返回录制控制栏", true));
+    }
     let png_len = png_data.len();
     let meta = crate::infra::platform::image_editor::begin_session(png_data).map_err(|e| {
         tracing::warn!(log_ctx, error = %e, "begin_session 失败");

@@ -60,6 +60,12 @@ fn main() {
     };
 
     tauri::Builder::default()
+        .on_window_event(|window, event| {
+            if window.label() == "chord-screenshot"
+                && matches!(event, tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed) {
+                app::gif_service::stop_lost_overlay(window.app_handle(), None);
+            }
+        })
         .on_page_load(|window, payload| match payload.event() {
             tauri::webview::PageLoadEvent::Started => {
                 infra::platform::window::mark_window_page_loading(window.label());
@@ -2236,6 +2242,7 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
         app::commands::gif_recorder_state,
         app::commands::gif_overlay_input,
         app::commands::gif_overlay_ready,
+        app::commands::gif_overlay_annotation,
         app::commands::gif_overlay_hit_rects,
         app::commands::gif_overlay_focusable,
         app::commands::gif_list_sessions,
