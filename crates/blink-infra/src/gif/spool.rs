@@ -391,10 +391,10 @@ impl SpoolReader {
             audio_recovered: false,
             segmented: None,
         };
-        let total: u64 = reader.durations().iter().map(|v| *v as u64).sum();
-        let (end, recovered) = super::audio::recovery_end(&reader.dir, total)?;
+        let source_end = reader.source_end_ms();
+        let (end, recovered) = super::audio::recovery_end(&reader.dir, source_end)?;
         reader.audio_recovered = recovered;
-        if end < total {
+        if end < source_end {
             reader.index.retain(|e| e.t < end);
             reader.meta.ts_ms = reader.index.iter().map(|e| e.t).collect();
             reader.meta.last_dur_ms = reader
@@ -437,7 +437,17 @@ impl SpoolReader {
                 maintenance::usage_lock(&self.dir, false)?,
             )?);
         }
-        Ok(super::timing::Timings::memory(self.durations()))
+        Ok(super::timing::Timings::memory(self.durations()).with_start_ms(self.source_start_ms()))
+    }
+    fn source_start_ms(&self) -> u64 {
+        self.segmented.as_ref().map_or_else(
+            || self.index.first().map_or(0, |e| e.t),
+            |index| index.start_ms(),
+        )
+    }
+    /// PCM uses the absolute capture clock, including time before the first image.
+    pub fn source_end_ms(&self) -> u64 {
+        self.source_start_ms().saturating_add(self.total_ms())
     }
     pub fn total_ms(&self) -> u64 {
         if let Some(index) = &self.segmented {
@@ -745,6 +755,14 @@ pub fn discard_session(root: &Path, id: &str) -> Result<(), SpoolError> {
         return Err(SpoolError::InvalidSession("会话标识无效".into()));
     }
     let dir = session_dir(root, id);
+    // Explicit/bulk deletion observes the same no-link boundary as TTL cleanup.
+    if !maintenance::ordinary_directory(&fs::symlink_metadata(root.join("sessions"))?)
+        || !maintenance::ordinary_directory(&fs::symlink_metadata(&dir)?)
+    {
+        return Err(SpoolError::InvalidSession(
+            "素材目录不能是链接或重解析点".into(),
+        ));
+    }
     let _lease = maintenance::usage_lock(&dir, true)?;
     fs::remove_dir_all(dir)?;
     Ok(())
@@ -804,6 +822,56 @@ mod tests {
             *b = (idx as u8).wrapping_add(i as u8);
         }
         v
+    }
+
+    #[test]
+    fn nonzero_capture_origin_keeps_pcm_tail_and_common_prefix_for_both_spool_versions() {
+        for version in [1, 2] {
+            let root = tempfile::tempdir().unwrap();
+            let mut m = meta(8, 8);
+            m.spool_version = version;
+            let id = m.id.clone();
+            let dir = session_dir(root.path(), &id);
+            let mut writer = SpoolWriter::create(root.path(), m).unwrap();
+            let mut audio = super::super::audio::AudioManifest {
+                version: 1,
+                enabled: [true, false],
+                committed_ms: 450,
+                complete: true,
+                ..Default::default()
+            };
+            super::super::audio::write_manifest(&dir, &audio).unwrap();
+            File::create(super::super::audio::track_path(&dir, 0))
+                .unwrap()
+                .set_len(450 * 192)
+                .unwrap();
+            writer.append_frame(150, &frame(1, 8, 8)).unwrap();
+            writer.append_frame(250, &frame(2, 8, 8)).unwrap();
+            writer.finalize_at("user", 450).unwrap();
+            let reader = SpoolReader::open(root.path(), &id).unwrap();
+            let timing = reader.timings().unwrap();
+            assert_eq!(timing.start_ms(), 150);
+            assert_eq!((timing.at(0), timing.at(1)), (100, 200));
+            assert_eq!(reader.total_ms(), 300);
+            assert_eq!(reader.source_end_ms(), 450);
+            assert!(!reader.audio_recovered);
+            let (_, _, _, total) = super::super::audio::read_wav_range(
+                &dir,
+                0,
+                reader.source_end_ms(),
+                Some("bytes=0-43"),
+            )
+            .unwrap();
+            assert_eq!(total, 450 * 192 + 44);
+            drop((timing, reader));
+            audio.committed_ms = 400;
+            super::super::audio::write_manifest(&dir, &audio).unwrap();
+            let recovered = SpoolReader::open(root.path(), &id).unwrap();
+            assert!(recovered.audio_recovered);
+            assert_eq!(recovered.total_ms(), 250);
+            assert_eq!(recovered.source_end_ms(), 400);
+            assert_eq!(recovered.timings().unwrap().at(1), 150);
+        }
     }
 
     #[test]

@@ -12,8 +12,10 @@ function harness() {
     const toolbar = {classList: {contains: c => classes.has(c), remove: c => classes.delete(c)}};
     nodes.set('gif-prep-fps', {value: '15'});
     nodes.set('btn-gif', {focus() { this.focused = true; }});
-    const ss = {toolbar, selCss: {x: 0, y: 0, w: 100, h: 100}, sent: false};
+    nodes.set('gif-recording-recent', {addEventListener: (k, fn) => handlers.set('recent:' + k, fn)});
+    const ss = {toolbar, selCss: {x: 0, y: 0, w: 100, h: 100}, sent: false, _loadGen: 1};
     const context = vm.createContext({ss,state,renderRecordingUi() {},handleOverlayHidden(){state.reset();}, window: {addEventListener: (k, fn) => handlers.set(k, fn)},
+        console:{error() {}}, t:key=>key, normalizeError:error=>error, showTransientHint() {},
         leaveRecordingPreparation() {}, commitRecordingSelection() {}, drawStaticBase() {}, drawFinalSelection() {}, restorePreparationAnnotations() {}, waitForRecordingPreparation:async()=>{}, document: {body: {classList: {contains: () => false}}, getElementById: id => nodes.get(id),
             querySelectorAll: () => []}, positionToolbar() {}, bindAudioControls() {}, bindRecordingControls() {}, retainToolbarAnchor() {}, closeRecordingPanel() {}, showRecordingMessage() {}, stopAudioMonitor: async () => {}});
     const source = readFileSync(new URL('./ss-gif-prep.js', import.meta.url), 'utf8')
@@ -36,6 +38,63 @@ test('capture Escape returns from recording prep with focused controls, retainin
     assert.ok(h.ss.selCss);
     assert.equal(prevented && stopped, true);
     assert.deepEqual(restored,['base','selection']);
+});
+
+const flush = () => new Promise(setImmediate);
+function deferred() {
+    let resolve, reject;
+    const promise = new Promise((yes, no) => {resolve = yes; reject = no;});
+    return {promise, resolve, reject};
+}
+
+test('recent recordings waits for native preparation release and screenshot hiding, opening only once', async () => {
+    const h = harness(), closing = deferred(), hiding = deferred(), calls = [];
+    h.context.handleOverlayHidden = () => {h.state.reset(); return closing.promise;};
+    h.ss._doCancel = () => {calls.push('hide'); return hiding.promise;};
+    h.context.invoke = async command => calls.push(command);
+    const opening = h.context.openRecentRecordings();
+    await h.context.openRecentRecordings();
+    await flush();
+    assert.deepEqual(calls, []);
+    closing.resolve(); await flush();
+    assert.deepEqual(calls, ['hide']);
+    hiding.resolve(true); await opening;
+    assert.deepEqual(calls, ['hide', 'gif_open_editor_home']);
+});
+
+test('a replacement screenshot or preparation invalidates the pending recent entry before cancel', async () => {
+    for (const replace of [h => h.ss._loadGen++, h => h.state.reset('ready')]) {
+        const h = harness(), closing = deferred();
+        h.context.handleOverlayHidden = () => {h.state.reset(); return closing.promise;};
+        h.ss._doCancel = () => assert.fail('must not hide a replacement session');
+        h.context.invoke = () => assert.fail('stale navigation must not open the editor');
+        const opening = h.context.openRecentRecordings();
+        replace(h); closing.resolve(); await opening;
+    }
+});
+
+test('a screenshot replaced while hiding prevents late editor activation', async () => {
+    const h = harness(), hiding = deferred();
+    h.ss._doCancel = () => hiding.promise;
+    h.context.invoke = () => assert.fail('late activation must not steal focus');
+    const opening = h.context.openRecentRecordings();
+    await flush(); h.ss._loadGen++; hiding.resolve(true); await opening;
+});
+
+test('a failed preparation release or failed screenshot hide does not proceed to the editor', async () => {
+    const h = harness(), closing = deferred(), hints = [];
+    h.context.handleOverlayHidden = () => {h.state.reset(); return closing.promise;};
+    h.context.showTransientHint = text => hints.push(text);
+    h.ss._doCancel = () => assert.fail('lease release failed');
+    h.context.invoke = () => assert.fail('must not open with an active overlay');
+    const opening = h.context.openRecentRecordings();
+    closing.reject(new Error('release failed')); await opening;
+    assert.equal(hints.length, 1);
+
+    h.state.reset('ready');
+    h.context.handleOverlayHidden = () => {h.state.reset();};
+    h.ss._doCancel = async () => false;
+    await h.context.openRecentRecordings();
 });
 
 test('Escape during recording startup leaves its lifecycle in control', () => {

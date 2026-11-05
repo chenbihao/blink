@@ -14,7 +14,7 @@ function node() {
 }
 function fixture() {
     const state=createRecordingSession(),nodes=new Map();
-    for(const id of ['gif-record-toggle','gif-record-toggle-label','gif-rec-stop','gif-rec-stop-label','gif-record-exit','gif-record-exit-label','gif-rec-discard','gif-rec-draw','gif-audio-open','gif-prep-fps','gif-recording-status','gif-rec-time'])nodes.set(id,node());
+    for(const id of ['gif-record-toggle','gif-record-toggle-label','gif-rec-stop','gif-rec-stop-label','gif-record-exit','gif-record-exit-label','gif-rec-discard','gif-rec-draw','gif-audio-open','gif-prep-fps','gif-recording-status','gif-rec-time','gif-recording-recent'])nodes.set(id,node());
     const toolbar=node();toolbar.dataset={mode:'screenshot',drawing:'false'};
     const context=vm.createContext({state,ss:{toolbar},document:{getElementById:id=>nodes.get(id),body:node(),documentElement:node()},
         t:(key,params={})=>Object.entries(params).reduce((s,[k,v])=>s.replaceAll('{'+k+'}',v),zh[key]||key)});
@@ -69,4 +69,16 @@ test('time-only details retain available space in the hover title, including unk
     assert.equal(f.nodes.has('gif-rec-storage'),false);
     f.state.storage={materialBytes:500*1024**2};f.render();
     assert.ok(f.nodes.get('gif-recording-status').title.includes('空间未知'));
+});
+
+test('recent recordings entry is enabled only while preparing, with matching hints',()=>{
+    const f=fixture();
+    f.state.reset('ready');f.render();
+    assert.equal(f.nodes.get('gif-recording-recent').disabled,false);
+    assert.equal(f.nodes.get('gif-recording-recent').title,'查看历史录制：恢复编辑或删除，不开始新录制');
+    f.state.sessionId='one';f.state.setMode('recording');f.render();
+    assert.equal(f.nodes.get('gif-recording-recent').disabled,true);
+    assert.equal(f.nodes.get('gif-recording-recent').title,'录制中不可用，请先完成或退出录制');
+    f.state.reset();f.render();
+    assert.equal(f.nodes.get('gif-recording-recent').disabled,true);
 });

@@ -348,6 +348,10 @@ pub enum GifServiceError {
     UnsupportedPlatform,
     #[error("素材读写失败: {0}")]
     Spool(String),
+    #[error("当前录制正在导出，请先完成或取消导出再切换")]
+    ExportBusy,
+    #[error("录制编辑器窗口打开失败: {0}")]
+    EditorWindow(String),
 }
 
 impl From<blink_infra::gif::SpoolError> for GifServiceError {
@@ -1112,23 +1116,34 @@ pub fn open_editor_entry(app: &AppHandle) {
             // 窗口丢失但会话仍在：走 open_editor 重建窗口
             open_editor(app, &session_id);
         }
-        None => open_editor_home(app),
+        None => {
+            if let Err(error) = open_editor_home(app) {
+                tracing::error!(%error, "录制编辑器首页打开失败");
+            }
+        }
     }
 }
 
 /// 编辑器首页（无会话）：复用窗口 + 发空会话事件（前端显示最近录制）。
-pub fn open_editor_home(app: &AppHandle) {
+pub fn open_editor_home(app: &AppHandle) -> GifResult<()> {
     use blink_infra::platform::window::get_or_create_window;
+    let opening = std::time::Instant::now();
     {
         let service = app.state::<Arc<GifService>>();
         let mut current = service
             .editor_session
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        if let Some(previous) = current.as_deref() {
+            if crate::app::media_service::shared().has_active_job(previous) {
+                tracing::info!(session_id = previous, "最近录制入口拒绝：编辑会话导出中");
+                return Err(GifServiceError::ExportBusy);
+            }
+        }
         if let Some(previous) = current.take() {
             crate::app::gif_draft::flush_draft(app, &previous);
             crate::app::gif_draft::release_if_saved(&service, &previous);
-            crate::app::media_service::shared().cancel(Some(&previous), None);
+            crate::app::media_service::shared().cancel_estimate(&previous);
         }
     }
     let built = get_or_create_window(app, EDITOR_LABEL, || {
@@ -1144,15 +1159,27 @@ pub fn open_editor_home(app: &AppHandle) {
             if created {
                 bind_editor_lifecycle(app, &win);
             }
-            let _ = win.show();
-            let _ = win.set_focus();
+            win.show()
+                .map_err(|e| GifServiceError::EditorWindow(e.to_string()))?;
+            if let Err(error) = win.set_focus() {
+                tracing::warn!(%error, "录制编辑器首页聚焦失败");
+            }
             let _ = app.emit_to(
                 EDITOR_LABEL,
                 EventNames::GIF_EDITOR_SESSION,
                 serde_json::json!({ "sessionId": null }),
             );
+            tracing::debug!(
+                created,
+                elapsed_ms = opening.elapsed().as_millis(),
+                "录制编辑器首页已打开"
+            );
+            Ok(())
         }
-        Err(e) => tracing::error!(error = %e, "GIF 编辑器窗口打开失败"),
+        Err(error) => {
+            tracing::error!(%error, "录制编辑器首页建窗失败");
+            Err(GifServiceError::EditorWindow(error.to_string()))
+        }
     }
 }
 

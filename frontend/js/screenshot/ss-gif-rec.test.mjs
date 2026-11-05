@@ -12,6 +12,31 @@ import {createRecordingSession} from './recording-session.js';
 globalThis.window = globalThis.window || {devicePixelRatio: 1, __blinkScreenMeta: {vx: 0, vy: 0}};
 const {placeTextOutsideRegion, unsupportedKindsOf, recordingFrameGeometry, recordingDragDelta} = await import('./ss-gif-rec.js');
 
+test('overlay cleanup resets the UI immediately but resolves only when its native lease is released', async () => {
+    const state = createRecordingSession(); state.reset('ready');
+    let release;
+    const calls = [];
+    const context = vm.createContext({createPreparationLease, state, ss: {}, window: {},
+        document: {getElementById: () => null}, annot: {setRenderListener() {}},
+        clearInterval() {}, endAudioRecording() {}, closeRecordingPanel() {}, showRecordingMessage() {}, renderRecordingUi() {},
+        invoke: async (_command, args) => {
+            calls.push(args);
+            return args.active ? 17 : new Promise(resolve => {release = resolve;});
+        },
+    });
+    const source = readFileSync(new URL('./ss-gif-rec.js', import.meta.url), 'utf8').replace(/^import .*;\r?$/gm, '').replace(/export /g, '');
+    vm.runInContext(`${source}\nglobalThis.prep = preparation;`, context);
+    await context.prep.open();
+    let closed = false;
+    const closing = context.handleOverlayHidden().then(() => {closed = true;});
+    assert.equal(state.mode, 'screenshot');
+    await new Promise(setImmediate);
+    assert.equal(closed, false);
+    assert.deepEqual({...calls.at(-1)}, {active: false, preparationId: 17});
+    release(); await closing;
+    assert.equal(closed, true);
+});
+
 test('discard stays behind explicit confirmation and finish only stops and keeps the recording',async()=>{
     const state=createRecordingSession();state.sessionId='one';state.setMode('recording');
     const stop={}, confirm={}, keep={focus(){this.focused=true;}}, calls=[];let anchor;
@@ -52,6 +77,14 @@ test('entering preparation clears only the displayed still image and opens deskt
     assert.equal(calls[0].command,'gif_overlay_prepare');
     assert.ok(calls.some(c=>c.command==='gif_overlay_input'&&c.args.desktop&&c.args.preparationId===17));
     assert.ok(!calls.some(c=>c.command==='gif_start_recording'));
+    assert.equal(typeof ss.gifRecHooks.onTextInputOpen, 'function');
+    const releaseText = await ss.gifRecHooks.onTextInputOpen();
+    assert.equal(calls.at(-1).command, 'gif_overlay_focusable');
+    assert.equal(calls.at(-1).args.preparationId, 17);
+    assert.equal(calls.at(-1).args.focusable, true);
+    await releaseText();
+    assert.equal(calls.at(-1).args.focusable, false);
+    assert.equal(state.textInputs.size, 0);
     const resized={x:110,y:120,w:700,h:400};
     context.changePreparationSelection(resized,false);
     assert.deepEqual({...state.regionPhys},{...resized});
@@ -63,6 +96,41 @@ test('entering preparation clears only the displayed still image and opens deskt
     context.changePreparationSelection({x:0,y:0,w:900,h:600},true);
     assert.deepEqual({...state.regionPhys},{...resized},'开始录制后不能再提交准备态尺寸');
     assert.ok(styles.width,'实时范围框仍可见');
+});
+
+test('preparation text focus waits for its lease and cannot focus or release a reused overlay', async () => {
+    for (const replace of [false, true]) {
+        const state = createRecordingSession(); state.reset('ready');
+        const calls = []; let resolveLease;
+        const context = vm.createContext({createPreparationLease, state,
+            ss: {}, invoke: async (command, args) => {
+                calls.push({command, args});
+                if (command === 'gif_overlay_prepare') return new Promise(resolve => {resolveLease = resolve;});
+            },
+        });
+        const source = readFileSync(new URL('./ss-gif-rec.js', import.meta.url), 'utf8')
+            .replace(/^import .*;\r?$/gm, '').replace(/export /g, '');
+        vm.runInContext(`${source}\nglobalThis.prep = preparation;`, context);
+        const lease = context.prep.open();
+        const opening = context.openPreparationTextInput();
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(calls.length, 1);
+        if (replace) state.reset('ready');
+        resolveLease(17); await lease;
+        if (replace) {
+            await assert.rejects(opening, /录制准备已结束/);
+            assert.equal(calls.length, 1);
+        } else {
+            const release = await opening;
+            assert.equal(calls.at(-1).args.preparationId, 17);
+            assert.equal(calls.at(-1).args.focusable, true);
+            state.reset('ready');
+            const count = calls.length;
+            await release();
+            assert.equal(calls.length, count);
+        }
+        assert.equal(state.textInputs.size, 0);
+    }
 });
 
 test('the shared grip applies one clamped delta to capture area and toolbar',()=>{

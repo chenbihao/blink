@@ -139,9 +139,15 @@ async fn estimate_impl(
                 .any(|(i, on)| *on && !snapshot.mix[i].muted && snapshot.mix[i].gain > 0.0)
         });
     let audio_extra = if has_audio {
-        audio.as_ref().map_or(0, |a| {
-            a.committed_ms.saturating_mul(gif_io::audio::BYTES_PER_MS)
-        })
+        snapshot
+            .audio
+            .iter()
+            .fold(0u64, |total, span| {
+                total
+                    .saturating_add(span.sound_ms)
+                    .saturating_add(span.silence_ms)
+            })
+            .saturating_mul(gif_io::audio::BYTES_PER_MS)
     } else {
         0
     };

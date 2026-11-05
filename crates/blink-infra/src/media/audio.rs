@@ -1,10 +1,11 @@
-//! 类型化音频导出：源轨有界混合，连续编辑区间生成滤镜，保持音调并精确对齐输出时长。
+//! 音频导出：分块剪辑/混音 PCM，再统一保音调变速；滤镜图大小与编辑区间数无关。
 use super::{MediaError, process::TempOutput};
-use crate::gif::audio::{self, BYTES_PER_MS, RATE};
+use crate::gif::audio::{self, BYTES_PER_MS};
 use std::{
     fs::File,
-    io::{Read, Write},
-    path::PathBuf,
+    io::{Read, Seek, SeekFrom, Write},
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -41,23 +42,12 @@ pub(crate) fn prepare(
         .gain
         .iter()
         .any(|v| !v.is_finite() || !(0.0..=2.0).contains(v))
-        || input.spans.len() > 16384
-        || input.spans.is_empty()
     {
-        return Err(MediaError::InvalidPlan("音画区间或混音设置无效"));
+        return Err(MediaError::InvalidPlan("混音设置无效"));
     }
-    let end = manifest.committed_ms;
-    if end > audio::MAX_AUDIO_MS {
-        return Err(MediaError::Budget("声音素材时长"));
-    }
-    let available = crate::platform::disk_space::query(&input.dir)?;
-    if available.available_bytes
-        < end
-            .saturating_mul(BYTES_PER_MS)
-            .saturating_add(crate::gif::space::MIN_RESERVE)
-    {
-        return Err(MediaError::Budget("声音处理中间文件所需空间不足"));
-    }
+    let (before_ms, edited_ms) = edit_clock(&input.spans, manifest.committed_ms, output_ms, fps)?;
+    let bytes = before_ms * BYTES_PER_MS;
+    ensure_space(&input.dir, bytes)?;
     let wave = TempOutput::create(&input.dir.join("audio-mix.wav"))?;
     let graph = TempOutput::create(&input.dir.join("audio-filter.txt"))?;
     let mut files: [Option<File>; 2] = [None, None];
@@ -70,110 +60,149 @@ pub(crate) fn prepare(
         return Ok(None);
     }
     let mut out = File::create(&wave.0)?;
-    out.write_all(&audio::wav_header_long(end * BYTES_PER_MS))?;
-    let mut left = end * BYTES_PER_MS;
+    out.write_all(&audio::wav_header_long(bytes))?;
     let mut buffers = [vec![0u8; 16384], vec![0u8; 16384]];
-    while left > 0 {
-        if cancel.is_cancelled() {
-            return Err(MediaError::Cancelled);
+    let mut mixed = vec![0u8; 16384];
+    let mut remaining = bytes;
+    let mut space_at = Instant::now();
+    for span in &input.spans {
+        // Cut only the requested original interval; extended holds append silence,
+        // never repeat speech. Seeking also preserves the nonzero capture origin.
+        for file in files.iter_mut().flatten() {
+            file.seek(SeekFrom::Start(span.source_ms * BYTES_PER_MS))?;
         }
-        let n = left.min(16384) as usize;
-        for i in 0..2 {
-            buffers[i][..n].fill(0);
-            if let Some(file) = &mut files[i] {
-                file.read_exact(&mut buffers[i][..n])?;
+        for (ms, sound) in [(span.sound_ms, true), (span.silence_ms, false)] {
+            let mut left = ms * BYTES_PER_MS;
+            while left > 0 {
+                if cancel.is_cancelled() {
+                    return Err(MediaError::Cancelled);
+                }
+                if space_at.elapsed() >= Duration::from_millis(250) {
+                    ensure_space(&input.dir, remaining)?;
+                    space_at = Instant::now();
+                }
+                let n = left.min(mixed.len() as u64) as usize;
+                mixed[..n].fill(0);
+                if sound {
+                    for i in 0..2 {
+                        buffers[i][..n].fill(0);
+                        if let Some(file) = &mut files[i] {
+                            file.read_exact(&mut buffers[i][..n])?;
+                        }
+                    }
+                    for pos in (0..n).step_by(2) {
+                        let value = (0..2)
+                            .map(|i| {
+                                i16::from_le_bytes([buffers[i][pos], buffers[i][pos + 1]]) as f32
+                                    * input.gain[i]
+                            })
+                            .sum::<f32>();
+                        let sample = (audio::soft_limit(value / 32768.0) * 32768.0).round() as i16;
+                        mixed[pos..pos + 2].copy_from_slice(&sample.to_le_bytes());
+                    }
+                }
+                out.write_all(&mixed[..n])?;
+                left -= n as u64;
+                remaining -= n as u64;
             }
         }
-        let mut mixed = Vec::with_capacity(n);
-        for pos in (0..n).step_by(2) {
-            let v = (0..2)
-                .map(|i| {
-                    i16::from_le_bytes([buffers[i][pos], buffers[i][pos + 1]]) as f32
-                        * input.gain[i]
-                })
-                .sum::<f32>();
-            mixed.extend(((audio::soft_limit(v / 32768.0) * 32768.0).round() as i16).to_le_bytes());
-        }
-        out.write_all(&mixed)?;
-        left -= n as u64;
     }
     out.flush()?;
-    std::fs::write(&graph.0, filter_graph(&input.spans, end, output_ms, fps)?)?;
+    std::fs::write(&graph.0, tempo_graph(before_ms, edited_ms, output_ms))?;
+    tracing::debug!(
+        spans = input.spans.len(),
+        before_ms,
+        edited_ms,
+        "录制声音已分块剪辑与混音"
+    );
     Ok(Some(PreparedAudio { wave, graph }))
 }
-pub(crate) fn filter_graph(
+fn ensure_space(dir: &Path, remaining: u64) -> Result<(), MediaError> {
+    if crate::platform::disk_space::query(dir)?.available_bytes
+        < remaining.saturating_add(crate::gif::space::MIN_RESERVE)
+    {
+        return Err(MediaError::Budget("声音处理中间文件所需空间不足"));
+    }
+    Ok(())
+}
+
+// Validate the entire plan before creating a temporary file. Only arithmetic and
+// source boundaries are limited; a long edited recording has no segment-count cap.
+fn edit_clock(
+    spans: &[Span],
+    source_end: u64,
+    output_ms: u64,
+    fps: u32,
+) -> Result<(u64, u64), MediaError> {
+    if spans.is_empty()
+        || output_ms == 0
+        || output_ms > audio::MAX_AUDIO_MS
+        || source_end > audio::MAX_AUDIO_MS
+        || ![10, 15, 24, 30, 60].contains(&fps)
+    {
+        return Err(MediaError::InvalidPlan("音频区间或帧率无效"));
+    }
+    let (mut before, mut edited) = (0u64, 0u64);
+    for span in spans {
+        if span.output_ms == 0
+            || span.sound_ms == 0
+            || span
+                .source_ms
+                .checked_add(span.sound_ms)
+                .is_none_or(|end| end > source_end)
+        {
+            return Err(MediaError::InvalidPlan("音频原始区间越界"));
+        }
+        let duration = span
+            .sound_ms
+            .checked_add(span.silence_ms)
+            .ok_or(MediaError::InvalidPlan("音频区间溢出"))?;
+        if !(0.20..=5.0).contains(&(duration as f64 / span.output_ms as f64)) {
+            return Err(MediaError::InvalidPlan("声音变速超限"));
+        }
+        before = before
+            .checked_add(duration)
+            .filter(|v| *v <= audio::MAX_AUDIO_MS)
+            .ok_or(MediaError::InvalidPlan("音频区间溢出"))?;
+        edited = edited
+            .checked_add(span.output_ms)
+            .filter(|v| *v <= audio::MAX_AUDIO_MS)
+            .ok_or(MediaError::InvalidPlan("音频时长溢出"))?;
+    }
+    // The sampled video rounds its tail up; append only that same tail silence.
+    let expected_ms = (edited * fps as u64).div_ceil(1000) * 1000;
+    if output_ms != expected_ms.div_ceil(fps as u64) {
+        return Err(MediaError::InvalidPlan("音视频有效时长不一致"));
+    }
+    Ok((before, edited))
+}
+fn tempo_graph(before_ms: u64, edited_ms: u64, output_ms: u64) -> String {
+    let mut graph = String::from("[1:a]asetpts=N/SR/TB");
+    let mut speed = before_ms as f64 / edited_ms as f64;
+    while speed < 0.5 {
+        graph.push_str(",atempo=0.5");
+        speed *= 2.0;
+    }
+    while speed > 2.0 {
+        graph.push_str(",atempo=2");
+        speed /= 2.0;
+    }
+    graph.push_str(&format!(
+        ",atempo={speed:.9},apad=whole_len={},atrim=end_sample={},asetpts=N/SR/TB[recorded_audio]",
+        output_ms * 48,
+        output_ms * 48
+    ));
+    graph
+}
+#[cfg(test)]
+fn filter_graph(
     spans: &[Span],
     source_end: u64,
     output_ms: u64,
     fps: u32,
 ) -> Result<String, MediaError> {
-    if spans.is_empty()
-        || spans.len() > 16384
-        || output_ms == 0
-        || ![10, 15, 24, 30, 60].contains(&fps)
-    {
-        return Err(MediaError::InvalidPlan("音频区间预算"));
-    }
-    let mut graph = format!("[1:a]asplit={}", spans.len());
-    for i in 0..spans.len() {
-        graph.push_str(&format!("[s{i}]"));
-    }
-    graph.push(';');
-    let mut total = 0;
-    for (i, s) in spans.iter().enumerate() {
-        if s.output_ms == 0
-            || s.sound_ms == 0
-            || s.source_ms
-                .checked_add(s.sound_ms)
-                .is_none_or(|end| end > source_end)
-        {
-            return Err(MediaError::InvalidPlan("音频原始区间越界"));
-        }
-        let before = s
-            .sound_ms
-            .checked_add(s.silence_ms)
-            .ok_or(MediaError::InvalidPlan("音频区间溢出"))?;
-        let mut speed = before as f64 / s.output_ms as f64;
-        if !(0.20..=5.0).contains(&speed) {
-            return Err(MediaError::InvalidPlan("声音变速超限"));
-        }
-        graph.push_str(&format!("[s{i}]atrim=start_sample={}:end_sample={},asetpts=N/SR/TB,apad=whole_len={},atrim=end_sample={}", s.source_ms * 48, (s.source_ms + s.sound_ms) * 48, before * 48, before * 48));
-        while speed < 0.5 {
-            graph.push_str(",atempo=0.5");
-            speed *= 2.0;
-        }
-        while speed > 2.0 {
-            graph.push_str(",atempo=2");
-            speed /= 2.0;
-        }
-        graph.push_str(&format!(
-            ",atempo={speed:.9},apad=whole_len={},atrim=end_sample={},asetpts=N/SR/TB[a{i}];",
-            s.output_ms * 48,
-            s.output_ms * 48
-        ));
-        total += s.output_ms;
-    }
-    // 视频按实际输出帧率向上补齐；声音仅补同一段尾部静音，不改变语速。
-    let expected_ms = total
-        .checked_mul(fps as u64)
-        .ok_or(MediaError::InvalidPlan("音频时长溢出"))?
-        .div_ceil(1000)
-        .checked_mul(1000)
-        .ok_or(MediaError::InvalidPlan("音频时长溢出"))?
-        .div_ceil(fps as u64);
-    if output_ms != expected_ms {
-        return Err(MediaError::InvalidPlan("音视频有效时长不一致"));
-    }
-    for i in 0..spans.len() {
-        graph.push_str(&format!("[a{i}]"));
-    }
-    graph.push_str(&format!(
-        "concat=n={}:v=0:a=1,apad=whole_len={},atrim=end_sample={},asetpts=N/SR/TB[recorded_audio]",
-        spans.len(),
-        output_ms * RATE as u64 / 1000,
-        output_ms * 48
-    ));
-    Ok(graph)
+    let (before, edited) = edit_clock(spans, source_end, output_ms, fps)?;
+    Ok(tempo_graph(before, edited, output_ms))
 }
 #[cfg(test)]
 mod tests {
@@ -306,10 +335,10 @@ mod tests {
             30,
         )
         .unwrap();
-        assert!(graph.contains("start_sample=4800:end_sample=7200"));
-        assert!(graph.contains("apad=whole_len=9600"));
+        assert!(graph.contains("apad=whole_len=4800"));
         assert!(graph.contains("atempo=2.000000000"));
         assert!(!graph.contains("aloop"));
+        assert!(!graph.contains("asplit"));
     }
     #[test]
     fn graph_rejects_missing_audio_and_mismatched_duration() {
@@ -321,6 +350,88 @@ mod tests {
         };
         assert!(filter_graph(&[s.clone()], 50, 100, 30).is_err());
         assert!(filter_graph(&[s], 200, 200, 30).is_err());
+    }
+    #[test]
+    fn many_short_holds_are_streamed_with_exact_cuts_silence_and_constant_filter_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let count = 20_000u64;
+        let source_ms = count * 2 + 150;
+        audio::write_manifest(
+            dir.path(),
+            &audio::AudioManifest {
+                version: 1,
+                enabled: [true, false],
+                committed_ms: source_ms,
+                complete: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // The first 150ms and every deleted millisecond must never enter output.
+        let original: Vec<u8> = (0..source_ms)
+            .flat_map(|ms| {
+                let sample = if ms >= 150 && (ms - 150) % 2 == 0 {
+                    1000i16
+                } else {
+                    9000i16
+                };
+                sample.to_le_bytes().repeat(96)
+            })
+            .collect();
+        let path = audio::track_path(dir.path(), 0);
+        std::fs::write(&path, &original).unwrap();
+        let spans: Vec<_> = (0..count)
+            .map(|i| Span {
+                source_ms: 150 + i * 2,
+                sound_ms: 1,
+                silence_ms: 1,
+                output_ms: 2,
+            })
+            .collect();
+        let graph = filter_graph(&spans, source_ms, count * 2, 30).unwrap();
+        assert!(graph.len() < 256);
+        assert!(!graph.contains("asplit") && !graph.contains("concat"));
+        let result = prepare(
+            AudioInput {
+                dir: dir.path().into(),
+                spans,
+                gain: [1.0, 0.0],
+            },
+            count * 2,
+            30,
+            &CancellationToken::new(),
+        )
+        .unwrap()
+        .unwrap();
+        let wave = std::fs::read(&result.wave.0).unwrap();
+        assert_eq!(wave.len() as u64, 44 + count * 2 * BYTES_PER_MS);
+        for (ms, samples) in wave[44..].chunks_exact(BYTES_PER_MS as usize).enumerate() {
+            let expected = if ms % 2 == 0 { 1000i16 } else { 0 };
+            assert!(
+                samples
+                    .chunks_exact(2)
+                    .all(|s| i16::from_le_bytes([s[0], s[1]]) == expected)
+            );
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn extended_holds_validate_temp_space_arithmetic_before_writing() {
+        let span = Span {
+            source_ms: 0,
+            sound_ms: 1,
+            silence_ms: audio::MAX_AUDIO_MS,
+            output_ms: audio::MAX_AUDIO_MS,
+        };
+        assert!(edit_clock(&[span], 1, audio::MAX_AUDIO_MS, 30).is_err());
+        let span = Span {
+            source_ms: 0,
+            sound_ms: 1,
+            silence_ms: 3,
+            output_ms: 2,
+        };
+        assert_eq!(edit_clock(&[span], 1, 34, 30).unwrap(), (4, 2));
     }
     #[test]
     fn source_mix_is_exact_and_cancelled_or_missing_audio_preserves_sources() {

@@ -24,6 +24,9 @@ use crate::app::gif_draft::DraftRestore;
 use crate::app::gif_service::{self, GifService, GifServiceError};
 
 fn err(e: GifServiceError) -> CommandError {
+    if matches!(e, GifServiceError::ExportBusy) {
+        return CommandError::new("gif_export_busy", e.to_string(), true);
+    }
     CommandError::new("gif_error", e.to_string(), false)
 }
 
@@ -887,6 +890,123 @@ pub async fn gif_recent_sessions(
     .map_err(|e| CommandError::new("gif_session", format!("摘要任务失败: {e}"), true))
 }
 
+#[derive(Default, Serialize)]
+pub struct GifClearHistoryResult {
+    deleted: u64,
+    retained: u64,
+}
+
+/// 只清历史临时素材；当前会话及持使用租约的录制/导出始终保留。
+#[tauri::command]
+pub async fn gif_clear_history(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    preserve_session_id: Option<String>,
+) -> Result<GifClearHistoryResult, CommandError> {
+    if window.label() != "gif-editor" {
+        return Err(CommandError::new(
+            "permission_denied",
+            "此操作仅用于录制编辑器",
+            false,
+        ));
+    }
+    let service = app.state::<Arc<GifService>>().inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        clear_history_at(
+            &service,
+            &GifService::root(),
+            preserve_session_id.as_deref(),
+        )
+    })
+    .await
+    .map_err(|_| CommandError::new("gif_clear_history", "历史草稿清理任务失败", true))?
+}
+
+fn clear_history_at(
+    service: &Arc<GifService>,
+    root: &std::path::Path,
+    preserve_session_id: Option<&str>,
+) -> Result<GifClearHistoryResult, CommandError> {
+    if preserve_session_id.is_some_and(|id| !infra_gif::spool::is_valid_session_id(id)) {
+        return Err(CommandError::new("gif_session", "保留会话标识无效", false));
+    }
+    let recording = service
+        .recording
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|r| r.session_id.clone());
+    let current = service
+        .editor_session
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let media = crate::app::media_service::shared();
+    let exporting = media
+        .snapshot(None, None)
+        .filter(|job| media.has_active_job(&job.session_id))
+        .map(|job| job.session_id);
+    let protected: Vec<_> = [
+        recording,
+        current,
+        exporting,
+        preserve_session_id.map(str::to_owned),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let entries = match std::fs::read_dir(root.join("sessions")) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(GifClearHistoryResult::default());
+        }
+        Err(error) => return Err(io_err(error)),
+    };
+    // Freeze candidates before deleting, so newly created sessions are not added
+    // to a running clear. Per-session guards recheck current ownership at deletion.
+    let mut ids = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(io_err)?;
+        let Some(id) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if infra_gif::spool::is_valid_session_id(&id) && entry.path().join("session.json").is_file()
+        {
+            ids.push(id);
+        }
+    }
+    Ok(clear_history_candidates(service, root, ids, &protected))
+}
+
+fn clear_history_candidates(
+    service: &Arc<GifService>,
+    root: &std::path::Path,
+    ids: Vec<String>,
+    protected: &[String],
+) -> GifClearHistoryResult {
+    let mut result = GifClearHistoryResult::default();
+    for id in ids {
+        // Keep both the original active sessions and any session adopted since
+        // the snapshot; closing/switching the editor cannot turn either into trash.
+        if protected.contains(&id) {
+            result.retained += 1;
+            continue;
+        }
+        // No global media-task lease: unrelated exports continue. Their source
+        // readers, active writers and unsaved edits retain their own usage lease.
+        match discard_session_at(service, root, &id, false) {
+            Ok(_) => result.deleted += 1,
+            Err(_) => result.retained += 1,
+        }
+    }
+    tracing::info!(
+        deleted = result.deleted,
+        retained = result.retained,
+        "录制历史草稿清理完成"
+    );
+    result
+}
+
 /// 会话缩略图（首帧等比缩放 PNG base64；列表可见项按需取，不预载素材）。
 #[tauri::command]
 pub async fn gif_session_thumbnail(
@@ -967,9 +1087,24 @@ pub async fn gif_open_session(app: AppHandle, session_id: String) -> Result<(), 
 
 /// 统一功能目录入口：有编辑会话原地激活，无会话进入「最近录制」首页。
 #[tauri::command]
-pub fn gif_open_editor_entry(app: AppHandle) -> Result<(), CommandError> {
-    gif_service::open_editor_entry(&app);
-    Ok(())
+pub async fn gif_open_editor_entry(app: AppHandle) -> Result<(), CommandError> {
+    // WebView2 首建需要主循环继续调度，不能在同步命令的主线程等待 build。
+    tauri::async_runtime::spawn_blocking(move || gif_service::open_editor_entry(&app))
+        .await
+        .map_err(|e| CommandError::new("gif_editor", format!("打开录制编辑器任务失败: {e}"), true))
+}
+
+/// 录制详情面板「最近录制」入口（0.28.25）：总是进入编辑器「最近录制」首页。
+///
+/// 当前编辑会话有在途导出时拒绝（与 `gif_open_session` 一致，不静默取消），
+/// 前端捕获 `gif_export_busy` 后提示。
+#[tauri::command]
+pub async fn gif_open_editor_home(app: AppHandle) -> Result<(), CommandError> {
+    run_overlay_command(move || {
+        tracing::info!("从录制详情面板打开最近录制首页");
+        gif_service::open_editor_home(&app)
+    })
+    .await
 }
 
 /// 在资源管理器中定位导出文件（explorer /select）。
@@ -1001,6 +1136,91 @@ pub fn gif_open_containing_folder(path: String) -> Result<(), CommandError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gif_clear_history_deletes_all_pages_and_preserves_current_and_leased_material() {
+        let root = tempfile::tempdir().unwrap();
+        let service = Arc::new(GifService::new());
+        let create = |id: &str| {
+            let meta = infra_gif::SessionMeta {
+                spool_version: infra_gif::SPOOL_VERSION,
+                id: id.into(),
+                region: infra_gif::CaptureRegion {
+                    x: 0,
+                    y: 0,
+                    w: 8,
+                    h: 8,
+                },
+                fps: 10,
+                show_cursor: false,
+                created_at: 42,
+                state: "recording".into(),
+                ts_ms: vec![],
+                last_dur_ms: 100,
+                spool_bytes: 0,
+                stop_reason: None,
+            };
+            let mut writer = infra_gif::SpoolWriter::create(root.path(), meta).unwrap();
+            writer.append_frame(0, &[1; 256]).unwrap();
+            writer
+        };
+        for i in 0..26 {
+            create(&format!("history-{i}")).finalize("user").unwrap();
+        }
+        for id in ["current", "exporting"] {
+            create(id).finalize("user").unwrap();
+        }
+        *service.editor_session.lock().unwrap() = Some("current".into());
+        let exporting = SpoolReader::open(root.path(), "exporting").unwrap();
+        let recording = create("recording");
+        let exported_file = root.path().join("keep.mp4");
+        std::fs::write(&exported_file, b"user export").unwrap();
+        std::fs::create_dir(root.path().join("sessions/partial")).unwrap();
+        let result = clear_history_at(&service, root.path(), None).unwrap();
+        assert_eq!((result.deleted, result.retained), (26, 3));
+        for id in ["current", "exporting", "recording", "partial"] {
+            assert!(root.path().join("sessions").join(id).exists(), "{id}");
+        }
+        assert_eq!(std::fs::read(&exported_file).unwrap(), b"user export");
+        assert_eq!(exporting.read_frame(0).unwrap(), vec![1; 256]);
+        assert_eq!(
+            service.editor_session.lock().unwrap().as_deref(),
+            Some("current")
+        );
+        drop(exporting);
+        recording.finalize("user").unwrap();
+        let retry = clear_history_at(&service, root.path(), Some("exporting")).unwrap();
+        assert_eq!((retry.deleted, retry.retained), (1, 2));
+    }
+
+    #[test]
+    fn gif_clear_history_distinguishes_missing_storage_from_enumeration_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let service = Arc::new(GifService::new());
+        let empty = clear_history_at(&service, root.path(), None).unwrap();
+        assert_eq!((empty.deleted, empty.retained), (0, 0));
+        std::fs::write(root.path().join("sessions"), b"not a directory").unwrap();
+        assert!(clear_history_at(&service, root.path(), None).is_err());
+    }
+
+    #[test]
+    fn gif_clear_history_keeps_the_original_editor_after_it_switches_or_closes() {
+        let root = tempfile::tempdir().unwrap();
+        let service = Arc::new(GifService::new());
+        for current in [None, Some("replacement".to_string())] {
+            *service.editor_session.lock().unwrap() = current;
+            // These names were current/recording/exporting at clear-start. No
+            // filesystem lookup/deletion may happen after their live state changes.
+            let protected = vec![
+                "original".to_string(),
+                "recording".to_string(),
+                "exporting".to_string(),
+            ];
+            let result =
+                clear_history_candidates(&service, root.path(), protected.clone(), &protected);
+            assert_eq!((result.deleted, result.retained), (0, 3));
+        }
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn gif_overlay_lock_wait_keeps_dispatcher_responsive() {

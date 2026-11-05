@@ -539,10 +539,11 @@ export async function composeTranslatedPinPng({rawPng, overlay, width, height}) 
     return new Uint8Array(await outBlob.arrayBuffer());
 }
 
+/** 返回原生取消的完成结果，跨窗口交接必须等待 true；普通 ESC 可忽略返回值。 */
 export function doCancel() {
     if (ss.cancelInProgress) {
         console.warn('[screenshot] doCancel: cancelInProgress still true, ignoring');
-        return;
+        return Promise.resolve(false);
     }
     // 先失效会话内的 OCR/翻译回调，避免 hide 后旧结果再写回图层。
     ss.selectionRevision++;
@@ -578,13 +579,13 @@ export function doCancel() {
     // 曾把 source 翻写成 screenshot，导致取消走截图分支、绕过 restore_demoted_pin。
     if (cancelIsImageEditorSession(source, document.body.classList.contains('image-editor-mode'))) {
         cleanupCanvasVisuals();
-        imageEditorCancel().catch((e) => console.error('[image-editor] cancel 失败', e));
+        return imageEditorCancel().then(() => true, e => {console.error('[image-editor] cancel 失败', e); return false;});
     } else if (ss.isAnnotating) {
         cleanupCanvasVisuals();
-        screenshotCancel().catch((e) => console.error('[screenshot] screenshotCancel 失败', e));
+        return screenshotCancel().then(() => true, e => {console.error('[screenshot] screenshotCancel 失败', e); return false;});
     } else {
         cleanupCanvasVisuals();
-        hideScreenshotOverlay().catch((e) => console.error('[screenshot] hideScreenshotOverlay 失败', e));
+        return hideScreenshotOverlay().then(() => true, e => {console.error('[screenshot] hideScreenshotOverlay 失败', e); return false;});
     }
 }
 

@@ -6,6 +6,8 @@ export class TimelinePages {
         this.reset(null, 0);
     }
     reset(sessionId, revision, keepFrames = false) {
+        for (const waiter of this.waiting?.values() || []) waiter.resolve(null);
+        this.waiting = new Map();
         const retain = keepFrames && sessionId === this.sessionId;
         this.generation = (this.generation || 0) + 1;
         this.sessionId = sessionId;
@@ -20,15 +22,21 @@ export class TimelinePages {
         }
         this.pending = new Map();
     }
-    async query(key, request, cache) {
+    async query(key, request, cache, wait = false) {
         if (cache.has(key)) return cache.get(key);
         if (this.pending.has(key)) return this.pending.get(key);
         const generation = this.generation;
-        if (this.pending.size >= 4) return null;
         if (this.inflight.size >= 4) {
-            await Promise.race([...this.inflight].map(p => p.catch(() => null)));
-            if (generation !== this.generation) return null;
-            return this.query(key, request, cache);
+            if (!wait) return null;
+            // Each cache retains only its latest waiting target. Rapid scrolling
+            // replaces obsolete work without dropping the final visible page.
+            const previous = this.waiting.get(cache);
+            if (previous?.key === key) return previous.promise;
+            previous?.resolve(null);
+            const waiter = {key, request, cache};
+            waiter.promise = new Promise((resolve, reject) => Object.assign(waiter, {resolve, reject}));
+            this.waiting.set(cache, waiter);
+            return waiter.promise;
         }
         const task = this.invoke('gif_timeline_window', {
                 sessionId: this.sessionId,
@@ -43,10 +51,18 @@ export class TimelinePages {
             }).finally(() => {
                 this.inflight.delete(task);
                 if (generation === this.generation) this.pending.delete(key);
+                this.drain();
             });
         this.pending.set(key, task);
         this.inflight.add(task);
         return task;
+    }
+    drain() {
+        while (this.inflight.size < 4 && this.waiting.size) {
+            const [cache, waiter] = this.waiting.entries().next().value;
+            this.waiting.delete(cache);
+            this.query(waiter.key, waiter.request, cache, true).then(waiter.resolve, waiter.reject);
+        }
     }
     cached(request) {
         for (const page of this.playPages.values()) {
@@ -57,33 +73,28 @@ export class TimelinePages {
         }
         return null;
     }
-    async locate(request) {
+    async locate(request, wait = true) {
         const cached = this.cached(request);
         if (cached) return cached;
         const key = `play:${JSON.stringify(request)}`;
-        const page = await this.query(key, request, this.playPages);
+        const page = await this.query(key, request, this.playPages, wait);
         return page?.frames[0] || null;
     }
     async sources(offset) {
         const first = Math.floor(Math.max(0, offset) / 256) * 256;
         return (await this.query(`source:${first}`, {
             sourceOffset: first
-        }, this.sourcePages))?.frames || [];
+        }, this.sourcePages, true))?.frames || [];
     }
     async selection(ranges) {
-        const generation = this.generation;
-        while (this.pending.size >= 4) {
-            await Promise.race([...this.pending.values()].map(p => p.catch(() => null)));
-            if (generation !== this.generation) return null;
-        }
-        return this.query(`selection:${JSON.stringify(ranges)}`, {selection: ranges}, this.selectionPages);
+        return this.query(`selection:${JSON.stringify(ranges)}`, {selection: ranges}, this.selectionPages, true);
     }
     async ahead(first, count) {
         count = Math.max(0, Math.min(32, count));
         const generation = this.generation, frames = [];
         let next = first;
         while (frames.length < count) {
-            if (!await this.locate({play: next}) || generation !== this.generation) break;
+            if (!await this.locate({play: next}, false) || generation !== this.generation) break;
             const available = new Map();
             for (const page of this.playPages.values()) for (const frame of page.frames)
                 if (frame.playIdx >= next && frame.playIdx < first + count) available.set(frame.playIdx, frame);

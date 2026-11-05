@@ -256,7 +256,8 @@ function drawingHooks() {
 }
 export function prepareRecordingTools() {
     const epoch = state.epoch;
-    ss.gifRecHooks = {...drawingHooks(), onPanelFocus: installPanelFocus(epoch, null)};
+    ss.gifRecHooks = {...drawingHooks(), onPanelFocus: installPanelFocus(epoch, null),
+        onTextInputOpen: openPreparationTextInput};
     const base = el('canvas');
     if (base) base.getContext('2d').clearRect(0, 0, base.width, base.height);
     const canvas = ss.annotCanvas || el('annot-canvas');
@@ -289,7 +290,8 @@ export function restorePreparationAnnotations() {
 /** 录制会话结束（停止/取消由后端收场并隐藏 overlay）——仅复位 UI 投影。 */
 function endOverlaySession() {
     preparationSelection?.cancel();
-    void preparation.close().catch(error => console.error('[recording] preparation cleanup failed', error));
+    const closing = preparation.close();
+    void closing.catch(error => console.error('[recording] preparation cleanup failed', error));
     regionDrag = null;
     annotationUploader?.stop(); annotationUploader = null;
     annot.setRenderListener?.(null);
@@ -304,6 +306,7 @@ function endOverlaySession() {
     el('gif-region-frame')?.classList.add('hidden');
     ss.sent = false;
     renderRecordingUi();
+    return closing;
 }
 
 // ── 状态显示（GIF_RECORDER_STATE 事件 + 时长插值） ───────────────────────
@@ -655,6 +658,37 @@ function adjustTextPlacement(cssPos, size) {
     return placeTextOutsideRegion(cssPos, ss.selCss, {w: window.innerWidth, h: window.innerHeight}, size);
 }
 
+/** 准备态文字也需原生焦点，且迟到申请只能归还自己的准备租约。 */
+async function openPreparationTextInput() {
+    const epoch = state.epoch, token = {};
+    const current = () => state.owns(epoch, null) && state.preparing;
+    state.textInputs.add(token);
+    let preparationId;
+    const focus = focusable => {
+        const task = panelFocusTask.catch(() => {}).then(async () => {
+            if (!current()) return;
+            await invoke('gif_overlay_focusable', {preparationId,
+                focusable: focusable || state.textInputs.size > 0});
+        });
+        panelFocusTask = task;
+        return task;
+    };
+    const release = async () => {
+        if (!current() || !state.textInputs.delete(token) || state.textInputs.size) return;
+        if (preparationId != null) await focus(false);
+    };
+    try {
+        preparationId = await waitForRecordingPreparation();
+        if (!current() || preparationId == null) throw new Error('录制准备已结束');
+        await focus(true);
+        if (!current()) throw new Error('录制准备已结束');
+        return release;
+    } catch (error) {
+        await release().catch(() => {});
+        throw error;
+    }
+}
+
 /** 返回所属输入框的收尾函数：只恢复由本次文字编辑主动暂停的同一会话。 */
 async function openRecordingTextInput(pos, size) {
     const sessionId = state.sessionId;
@@ -747,5 +781,5 @@ export function bindGifRecBar() {
 /** 会话外部收场兜底（overlay 被 hide_screenshot_overlay 隐藏后调用）。 */
 export function handleOverlayHidden() {
     // 准备态与录制态共用同一清理路径，工具从未离开宿主，不再需要 DOM 归还。
-    endOverlaySession();
+    return endOverlaySession();
 }

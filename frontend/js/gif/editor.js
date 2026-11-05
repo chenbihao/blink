@@ -468,7 +468,7 @@ function renderPreview() {
 }
 async function locate(request, select = false, inFrame = 0) {
     const serial = ++querySerial,
-        epoch = state.epoch;
+        epoch = state.epoch, revision = state.view?.revision;
     try {
         const frame = await pages.locate(request);
         if (!frame || serial !== querySerial || epoch !== state.epoch) return;
@@ -484,9 +484,9 @@ async function locate(request, select = false, inFrame = 0) {
         prefetchAhead();
         return frame;
     } catch (error) {
-        if (epoch === state.epoch) {
+        if (epoch === state.epoch && serial === querySerial && revision === state.view?.revision) {
             // 编辑提交与旧版本分页请求可能交错；新 revision 会随编辑结果发布。
-            if (state.editing && error.kind === 'gif_revision') return;
+            if (state.editing && normalizeError(error).code === 'gif_revision') return;
             setPlaying(false);
             showHint(normalizeError(error).message);
         }
@@ -1079,6 +1079,7 @@ function showRecentView() {
 const recentList = createRecentList({
     invoke,
     t,
+    errorText: error => normalizeError(error).message,
     confirm: message => confirmDialog(message),
     onOpened: () => {
         // 会话切换由后端 open_editor 发事件驱动 loadSession；此处只切视图

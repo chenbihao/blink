@@ -4,6 +4,70 @@ import {
     TimelinePages
 } from './timeline-pages.js';
 
+test('saturated source queries retain the final viewport with four active requests and one waiter', async () => {
+    const requests = [];
+    const pages = new TimelinePages((_command, args) => new Promise(resolve => {
+        requests.push({args, resolve});
+    }));
+    pages.reset('one', 1);
+    const active = [0, 256, 512, 768].map(offset => pages.sources(offset));
+    const obsolete = pages.sources(1024);
+    const latest = pages.sources(1280);
+    assert.deepEqual(await obsolete, []);
+    assert.equal(requests.length, 4);
+    assert.equal(pages.waiting.size, 1);
+    requests[0].resolve({revision: 1, frames: [{srcIdx: 0}]});
+    await active[0];
+    assert.equal(requests.length, 5);
+    assert.equal(requests[4].args.sourceOffset, 1280);
+    assert.equal(pages.inflight.size, 4);
+    requests[4].resolve({revision: 1, frames: [{srcIdx: 1280}]});
+    assert.equal((await latest)[0].srcIdx, 1280);
+    for (let i = 1; i < 4; i++) requests[i].resolve({revision: 1, frames: []});
+    await Promise.all(active);
+    assert.equal(pages.waiting.size, 0);
+});
+
+test('reset cancels waiting source/selection targets without sending old-session requests', async () => {
+    const requests = [];
+    const pages = new TimelinePages((_command, args) => new Promise(resolve => requests.push({args, resolve})));
+    pages.reset('old', 1);
+    const active = [0, 256, 512, 768].map(offset => pages.sources(offset));
+    const waiting = pages.sources(1024), selection = pages.selection([[1, 1]]);
+    pages.reset('new', 2);
+    assert.deepEqual(await waiting, []);
+    assert.equal(await selection, null);
+    const latest = pages.sources(2048);
+    requests[0].resolve({revision: 1, frames: []});
+    await active[0];
+    assert.equal(requests[4].args.sessionId, 'new');
+    assert.equal(requests[4].args.revision, 2);
+    requests[4].resolve({revision: 2, frames: [{srcIdx: 2048}]});
+    assert.equal((await latest)[0].srcIdx, 2048);
+    for (let i = 1; i < 4; i++) requests[i].resolve({revision: 1, frames: []});
+    await Promise.all(active);
+    assert.equal(requests.length, 5);
+});
+
+test('the first frame of a new session waits for old requests; speculative prefetch cannot replace it', async () => {
+    const requests = [];
+    const pages = new TimelinePages((_command, args) => new Promise(resolve => requests.push({args, resolve})));
+    pages.reset('old', 1);
+    const active = [0, 256, 512, 768].map(offset => pages.sources(offset));
+    pages.reset('new', 2);
+    const first = pages.locate({play: 0});
+    assert.deepEqual(await pages.ahead(1, 16), []);
+    assert.equal(pages.waiting.size, 1);
+    requests[0].resolve({revision: 1, frames: []});
+    await active[0];
+    assert.equal(requests[4].args.sessionId, 'new');
+    assert.equal(requests[4].args.play, 0);
+    requests[4].resolve({revision: 2, frames: [{srcIdx: 0, playIdx: 0}]});
+    assert.equal((await first).srcIdx, 0);
+    for (let i = 1; i < 4; i++) requests[i].resolve({revision: 1, frames: []});
+    await Promise.all(active);
+});
+
 test('mix-only revisions retain valid frames and selections while old pending results are ignored',async()=>{
     let resolve;
     const pages=new TimelinePages(async (_command,request)=>{

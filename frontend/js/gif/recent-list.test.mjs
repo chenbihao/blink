@@ -81,7 +81,7 @@ class FakeElement {
     }
 }
 
-function fixture({summaries = [], onOpenResult, respond} = {}) {
+function fixture({summaries = [], onOpenResult, respond, confirm = async () => true} = {}) {
     const calls = [];
     const dom = {
         pane: new FakeElement('section'),
@@ -90,6 +90,8 @@ function fixture({summaries = [], onOpenResult, respond} = {}) {
         loading: new FakeElement('div'),
         back: new FakeElement('button'),
         refresh: new FakeElement('button'),
+        clear: new FakeElement('button'),
+        status: new FakeElement('p'),
     };
     const original = globalThis.document;
     const byId = {
@@ -99,6 +101,8 @@ function fixture({summaries = [], onOpenResult, respond} = {}) {
         'recent-loading': dom.loading,
         'btn-back-edit': dom.back,
         'btn-recent-refresh': dom.refresh,
+        'btn-recent-clear': dom.clear,
+        'recent-status': dom.status,
     };
     globalThis.document = {
         getElementById: id => byId[id] ?? null,
@@ -124,7 +128,7 @@ function fixture({summaries = [], onOpenResult, respond} = {}) {
             return null;
         },
         t: (key, params) => (params ? `${key}:${JSON.stringify(params)}` : key),
-        confirm: async () => true,
+        confirm,
         onOpened: () => {
             current = summaries[0]?.id ?? null;
         },
@@ -134,6 +138,83 @@ function fixture({summaries = [], onOpenResult, respond} = {}) {
         setCurrent(v) { current = v; }};
     void original;
 }
+
+test('clear covers all history through one backend action, then reloads the retained current session', async () => {
+    const confirms = []; let cleared = false;
+    const f = fixture({confirm: async text => {confirms.push(text); return true;}, respond: cmd => {
+        if (cmd === 'gif_recent_sessions') return {items: cleared ? [{id: 'current'}] : [{id: 'current'}, {id: 'history'}], total: cleared ? 1 : 27, limit: 20};
+        if (cmd === 'gif_clear_history') {cleared = true; return {deleted: 26, retained: 1};}
+        return null;
+    }});
+    f.setCurrent('current'); f.list.bind(); await f.list.refresh();
+    assert.equal(f.dom.clear.disabled, false);
+    await f.dom.clear.click();
+    assert.deepEqual(confirms, ['gif.recent.clearConfirm']);
+    assert.equal(f.calls.filter(c => c.cmd === 'gif_clear_history').length, 1);
+    assert.equal(f.calls.find(c => c.cmd === 'gif_clear_history').args.preserveSessionId, 'current');
+    assert.equal(f.calls.some(c => c.cmd === 'gif_discard_session' || c.cmd === 'gif_export_cancel'), false);
+    assert.deepEqual(f.dom.list.children.map(e => e.dataset.id), ['current']);
+    assert.equal(f.current, 'current');
+    assert.equal(f.dom.clear.disabled, true);
+    assert.match(f.dom.status.textContent, /clearRetained.*26.*1/);
+    assert.equal(f.dom.status.classList.contains('hidden'), false);
+    assert.equal(f.dom.refresh.disabled, false);
+});
+
+test('clear cancellation and empty/current-only lists never invoke deletion', async () => {
+    for (const currentOnly of [false, true]) {
+        const f = fixture({summaries: [{id: 'one'}], confirm: async () => false});
+        if (currentOnly) f.setCurrent('one');
+        f.list.bind(); await f.list.refresh(); await f.dom.clear.click();
+        assert.equal(f.calls.some(c => c.cmd === 'gif_clear_history'), false);
+        assert.equal(f.dom.clear.disabled, currentOnly);
+    }
+    const empty = fixture(); empty.list.bind(); await empty.list.refresh();
+    assert.equal(empty.dom.clear.disabled, true);
+    await empty.dom.clear.click();
+    assert.equal(empty.calls.some(c => c.cmd === 'gif_clear_history'), false);
+});
+
+test('a session switch during confirmation still preserves the originally displayed editor session', async () => {
+    let f;
+    f = fixture({summaries: [{id: 'original'}, {id: 'replacement'}],
+        confirm: async () => {f.setCurrent('replacement'); return true;},
+        respond: cmd => cmd === 'gif_recent_sessions' ? {items: [{id: 'original'}, {id: 'replacement'}], total: 2} :
+            cmd === 'gif_clear_history' ? {deleted: 0, retained: 2} : null,
+    });
+    f.setCurrent('original'); f.list.bind(); await f.list.refresh();
+    await f.dom.clear.click();
+    assert.equal(f.calls.find(c => c.cmd === 'gif_clear_history').args.preserveSessionId, 'original');
+    assert.equal(f.current, 'replacement');
+});
+
+test('clear waits for its visible thumbnail leases, blocks repeat actions and reports failure without losing rows', async () => {
+    const reads = []; let rejectClear;
+    const f = fixture({respond: cmd => {
+        if (cmd === 'gif_recent_sessions') return {items: ['one', 'two', 'three'].map(id => ({id})), total: 3, limit: 20};
+        if (cmd === 'gif_session_thumbnail') return new Promise(resolve => reads.push(resolve));
+        if (cmd === 'gif_clear_history') return new Promise((_resolve, reject) => {rejectClear = reject;});
+    }});
+    f.list.bind(); await f.list.refresh();
+    const clear = f.dom.clear.click();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.dom.clear.disabled, true);
+    assert.equal(f.dom.refresh.disabled, true);
+    assert.equal(f.dom.back.disabled, true);
+    assert.equal(f.calls.some(c => c.cmd === 'gif_clear_history'), false);
+    assert.equal(reads.length, 2);
+    for (const resolve of reads) resolve(null);
+    await new Promise(resolve => setImmediate(resolve));
+    await f.dom.clear.click();
+    await f.dom.list.children[0].children[2].children[0].click();
+    assert.equal(f.calls.filter(c => c.cmd === 'gif_clear_history').length, 1);
+    assert.equal(f.calls.some(c => c.cmd === 'gif_open_session'), false);
+    rejectClear({message: '磁盘暂不可用'}); await clear;
+    assert.equal(f.dom.list.children.length, 3);
+    assert.match(f.dom.status.textContent, /clearFailed.*磁盘暂不可用/);
+    assert.equal(f.dom.status.classList.contains('recent-status-error'), true);
+    assert.equal(f.dom.clear.disabled, false);
+});
 
 test('refresh 拉取摘要并渲染条目（含缩略图请求与徽章）', async () => {
     const {list, dom, calls} = fixture({

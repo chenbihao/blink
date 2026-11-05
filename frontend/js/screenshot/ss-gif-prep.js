@@ -47,13 +47,33 @@ export function enterGifRecordMode() {
 export function exitGifRecordMode() {
     if (!state.preparing) return;
     retainToolbarAnchor();
-    handleOverlayHidden();
+    const closing = handleOverlayHidden();
     drawStaticBase();drawFinalSelection();
     restorePreparationAnnotations();
     ss.sent=false;
     ss.toolbar?.classList.remove('hidden');
     if(ss.selCss) positionToolbar({...ss.selCss},true);
     document.getElementById('btn-gif')?.focus({preventScroll:true});
+    return closing;
+}
+
+/** 原生准备租约归还后才能隐藏截图；截图确实收起后再打开编辑器。 */
+async function openRecentRecordings() {
+    if (!state.preparing || state.busy || ss.cancelInProgress) return;
+    const generation = ss._loadGen;
+    const closing = exitGifRecordMode();
+    const epoch = state.epoch;
+    const current = () => ss._loadGen === generation && state.epoch === epoch && !state.visible;
+    try {
+        await closing;
+        if (!current()) return;
+        if (!await ss._doCancel?.()) return;
+        if (!current()) return;
+        await invoke('gif_open_editor_home');
+    } catch (error) {
+        console.error('[recording] 打开最近录制失败', error);
+        if (current()) showTransientHint(t('gif.rec.recentFailed', {message:normalizeError(error).message}), {isError:true,duration:3000});
+    }
 }
 
 export async function startGifRecordingFromPrep() {
@@ -101,5 +121,6 @@ export function bindGifPrepBar() {
     },true);
     document.getElementById('gif-record-toggle')?.addEventListener('click',()=>{if(state.preparing) void startGifRecordingFromPrep();});
     document.getElementById('gif-record-exit')?.addEventListener('click',()=>{if(state.preparing) exitGifRecordMode();});
+    document.getElementById('gif-recording-recent')?.addEventListener('click',()=>{void openRecentRecordings();});
     renderRecordingUi();
 }

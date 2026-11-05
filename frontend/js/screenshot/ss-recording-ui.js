@@ -79,6 +79,14 @@ export function renderRecordingUi() {
     }
     if ($('gif-audio-open')) $('gif-audio-open').disabled = state.busy || !state.preparing;
     if ($('gif-audio-menu')) $('gif-audio-menu').disabled = state.busy;
+    const recent = $('gif-recording-recent');
+    if (recent) {
+        // 进入最近录制会退出整个截图面，采集进行中不得切走。
+        const busy = state.busy || !state.preparing;
+        recent.disabled = busy;
+        recent.title = t(busy ? 'gif.rec.recentBusy' : 'gif.rec.recentEntryTitle');
+        recent.setAttribute('aria-label', recent.title);
+    }
     const fps = $('gif-prep-fps');
     if (fps) { fps.disabled = !state.preparing; if(state.active) fps.value=String(state.targetFps); syncRecordingSelect('gif-prep-fps'); }
     if (!state.active && $('gif-rec-time')) $('gif-rec-time').textContent='00:00';

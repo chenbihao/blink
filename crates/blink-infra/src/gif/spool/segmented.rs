@@ -262,6 +262,9 @@ impl Index {
     pub fn total_ms(&self) -> u64 {
         self.end.saturating_sub(self.first)
     }
+    pub fn start_ms(&self) -> u64 {
+        self.first
+    }
     fn entry(&self, n: u32) -> Result<Entry, SpoolError> {
         if n >= self.count {
             return Err(SpoolError::FrameOutOfRange(n, self.count));

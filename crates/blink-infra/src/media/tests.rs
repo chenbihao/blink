@@ -383,6 +383,87 @@ async fn real_mp4_audio_tail_at_each_frame_rate() {
 
 /// 发行包显式注入，真实进程全链路在隔离目录；.20 复用此入口扩展资源样例。
 #[tokio::test]
+#[ignore = "需要 BLINK_FFMPEG_TEST_ARCHIVE；验证超 16384 区间、首帧偏移与统一变速的真实 MP4"]
+async fn real_mp4_streamed_holds_and_capture_origin() {
+    let temp = tempfile::tempdir().unwrap();
+    let _runtime = crate::managed_runtime::ffmpeg::test_archive_lease(temp.path()).await;
+    let task = acquire_task_lease_at(&temp.path().join("task.lock")).unwrap();
+    let dir = temp.path().join("audio");
+    std::fs::create_dir(&dir).unwrap();
+    let count = 20_000u64;
+    let end = 150 + count * 2;
+    crate::gif::audio::write_manifest(
+        &dir,
+        &crate::gif::audio::AudioManifest {
+            version: 1,
+            enabled: [true, false],
+            committed_ms: end,
+            complete: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let samples: Vec<u8> = (0..end * 48)
+        .flat_map(|i| {
+            let v = ((i as f64 * 440.0 * std::f64::consts::TAU / 48000.0).sin() * 8000.0) as i16;
+            [v.to_le_bytes(), v.to_le_bytes()].concat()
+        })
+        .collect();
+    std::fs::write(crate::gif::audio::track_path(&dir, 0), &samples).unwrap();
+    let spans = (0..count)
+        .map(|i| AudioSpan {
+            source_ms: 150 + i * 2,
+            sound_ms: 1,
+            silence_ms: 1,
+            output_ms: 1,
+        })
+        .collect();
+    let result = export_mp4(
+        &task,
+        crate::managed_runtime::ffmpeg::test_lease_at(temp.path()),
+        Synthetic {
+            width: 64,
+            height: 64,
+            frames: 1,
+        },
+        VideoPlan {
+            width: 64,
+            height: 64,
+            frames: frames(&[count as u32]).into(),
+        },
+        VideoOptions {
+            fps: 10,
+            audio: Some(AudioInput {
+                dir: dir.clone(),
+                spans,
+                gain: [1.0, 0.0],
+            }),
+            ..Default::default()
+        },
+        temp.path().join("streamed.mp4"),
+        tokio_util::sync::CancellationToken::new(),
+        Arc::new(|_| {}),
+    )
+    .await
+    .unwrap();
+    assert!(result.has_audio);
+    assert_eq!(result.duration_ms, count);
+    assert_eq!(result.written_frames, 200);
+    assert_eq!(
+        std::fs::read(crate::gif::audio::track_path(&dir, 0)).unwrap(),
+        samples
+    );
+    assert!(
+        !std::fs::read_dir(&dir).unwrap().any(|e| e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains("tmp"))
+    );
+}
+
+/// 发行包显式注入，真实进程全链路在隔离目录；.20 复用此入口扩展资源样例。
+#[tokio::test]
 #[ignore = "需要 BLINK_FFMPEG_TEST_ARCHIVE 指向锁定发行包，显式运行"]
 async fn real_mp4_pipeline_smoke() {
     let temp = tempfile::tempdir().unwrap();

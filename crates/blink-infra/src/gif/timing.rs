@@ -5,6 +5,7 @@ use std::{fs::File, sync::Mutex};
 /// page their validated fixed-width index through the OS, without a full frame table.
 pub struct Timings {
     data: Data,
+    start_ms: u64,
 }
 enum Data {
     Memory(Vec<u32>),
@@ -24,7 +25,16 @@ impl Timings {
     pub fn memory(durations: Vec<u32>) -> Self {
         Self {
             data: Data::Memory(durations),
+            start_ms: 0,
         }
+    }
+    pub fn with_start_ms(mut self, start_ms: u64) -> Self {
+        self.start_ms = start_ms;
+        self
+    }
+    /// Original capture-clock origin; edited output still begins at zero.
+    pub fn start_ms(&self) -> u64 {
+        self.start_ms
     }
     pub(super) fn mapped(file: File, count: u32, last: u32, usage: File) -> std::io::Result<Self> {
         if count == 0 {
@@ -33,7 +43,8 @@ impl Timings {
         if file.metadata()?.len() < count as u64 * 32 {
             return Err(std::io::Error::other("索引尾部缺失"));
         }
-        let pages = IndexPages::new(file, count)?;
+        let mut pages = IndexPages::new(file, count)?;
+        let start_ms = pages.stamp(0)?;
         Ok(Self {
             data: Data::Mapped {
                 pages: Mutex::new(pages),
@@ -41,6 +52,7 @@ impl Timings {
                 last,
                 _usage: usage,
             },
+            start_ms,
         })
     }
     pub fn len(&self) -> usize {

@@ -2260,9 +2260,11 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
         app::commands::gif_storage_status,
         // 0.28.23：最近录制列表 / 会话缩略图 / 打开切换 / 编辑器入口 / 播放位置草稿
         app::commands::gif_recent_sessions,
+        app::commands::gif_clear_history,
         app::commands::gif_session_thumbnail,
         app::commands::gif_open_session,
         app::commands::gif_open_editor_entry,
+        app::commands::gif_open_editor_home,
         app::commands::gif_set_play_position,
         app::commands::gif_begin_export,
         app::commands::gif_export_status,

@@ -52,13 +52,16 @@ export function itemBadges(s) {
  * @param {() => string|null} deps.currentSessionId 当前编辑会话（不可删除/标记）
  */
 export function createRecentList(deps) {
-    const {invoke, t, confirm, onOpened, currentSessionId} = deps;
+    const {invoke, t, confirm, onOpened, currentSessionId, errorText = e => e?.message || String(e)} = deps;
     let items = [];
     let total = 0;
     let loading = false;
     let loadVersion = 0;
     let nextOffset = 0;
+    let acting = false, clearing = false;
+    let itemControls = [];
     const thumbnails = new Map();
+    const thumbnailTasks = new Set();
     let thumbnailActive = 0;
     const thumbnailQueue = [];
     const observer = typeof IntersectionObserver === 'undefined' ? null : new IntersectionObserver(entries => {
@@ -71,7 +74,7 @@ export function createRecentList(deps) {
     });
 
     function pumpThumbnails() {
-        while (thumbnailActive < 2 && thumbnailQueue.length) {
+        while (!clearing && thumbnailActive < 2 && thumbnailQueue.length) {
             const img = thumbnailQueue.shift();
             if (!img.isConnected) continue;
             const id = img.dataset.sessionId;
@@ -83,12 +86,14 @@ export function createRecentList(deps) {
                 // 只保留近期缓存；离屏项不触发解码，在途任务也至多两个。
                 if (thumbnails.size > 100) thumbnails.delete(thumbnails.keys().next().value);
             }
-            task.then(r => {
+            const running = task.then(r => {
                 if (img.isConnected && r?.pngBase64) img.src = `data:image/png;base64,${r.pngBase64}`;
             }).catch(() => thumbnails.delete(id)).finally(() => {
                 thumbnailActive--;
+                thumbnailTasks.delete(running);
                 pumpThumbnails();
             });
+            thumbnailTasks.add(running);
         }
     }
 
@@ -99,12 +104,33 @@ export function createRecentList(deps) {
         loading: document.getElementById('recent-loading'),
         back: document.getElementById('btn-back-edit'),
         refresh: document.getElementById('btn-recent-refresh'),
+        clear: document.getElementById('btn-recent-clear'),
+        status: document.getElementById('recent-status'),
     };
 
-    async function load(reset) {
+    function syncControls() {
+        if (els.refresh) els.refresh.disabled = acting || loading;
+        if (els.back) els.back.disabled = acting;
+        if (els.clear) els.clear.disabled = acting || loading || !total ||
+            (total === 1 && items[0]?.id === currentSessionId());
+        for (const {id, open, remove} of itemControls) {
+            open.disabled = acting;
+            remove.disabled = acting || currentSessionId() === id;
+        }
+    }
+    function message(text, error = false) {
+        if (!els.status) return;
+        els.status.textContent = text;
+        els.status.classList.toggle('hidden', !text);
+        els.status.classList.toggle('recent-status-error', error);
+    }
+
+    async function load(reset, afterClear = false) {
+        if (clearing && !afterClear) return false;
         if (loading && !reset) return;
         const version = ++loadVersion;
         loading = true;
+        syncControls();
         els.loading?.classList.remove('hidden');
         try {
             const offset = reset ? 0 : nextOffset;
@@ -122,12 +148,15 @@ export function createRecentList(deps) {
             total = res?.total ?? items.length;
             nextOffset = offset + (res?.limit ?? PAGE_SIZE);
             render();
+            return true;
         } catch (err) {
             console.error('[gif-editor] 最近录制加载失败', err);
+            return false;
         } finally {
             if (version === loadVersion) {
                 loading = false;
                 els.loading?.classList.add('hidden');
+                syncControls();
             }
         }
     }
@@ -138,11 +167,13 @@ export function createRecentList(deps) {
         list.textContent = '';
         observer?.disconnect();
         thumbnailQueue.length = 0;
+        itemControls = [];
         els.empty?.classList.toggle('hidden', items.length > 0);
         for (const s of items) list.appendChild(buildItem(s));
         pumpThumbnails();
         const back = els.back;
         if (back) back.classList.toggle('hidden', currentSessionId() == null);
+        syncControls();
     }
 
     function buildItem(s) {
@@ -200,6 +231,7 @@ export function createRecentList(deps) {
         btnDelete.disabled = current;
         btnDelete.title = current ? t('gif.recent.current') : '';
         btnDelete.addEventListener('click', () => deleteSession(s));
+        itemControls.push({id: s.id, open: btnOpen, remove: btnDelete});
         actions.appendChild(btnOpen);
         actions.appendChild(btnDelete);
 
@@ -211,44 +243,79 @@ export function createRecentList(deps) {
 
     /** 打开会话：当前会话在途导出时先确认并显式取消，不静默取消。 */
     async function openSession(s) {
-        if (currentSessionId() && currentSessionId() !== s.id) {
-            try {
-                const job = await invoke('gif_export_status', {sessionId: currentSessionId(), jobId: null});
-                if (job && !['done', 'cancelled', 'failed'].includes(job.stage)) {
-                    const okToCancel = await confirm(t('gif.recent.exportBusyMsg'));
-                    if (!okToCancel) return;
-                    await invoke('gif_export_cancel', {sessionId: currentSessionId()});
-                }
-            } catch {
-                // 状态查询失败不阻断切换（后端 gif_open_session 仍有 busy 保护）
-            }
-        }
+        if (acting) return;
+        acting = true; syncControls();
         try {
-            await invoke('gif_open_session', {sessionId: s.id});
-            onOpened();
-        } catch (err) {
-            console.error('[gif-editor] 打开录制失败', err);
-            // gif_export_busy：提示用户先在导出面板完成/取消，不自动重试
-            if (err?.code === 'gif_export_busy') {
-                void confirm(t('gif.recent.exportBusyRetry'));
+            if (currentSessionId() && currentSessionId() !== s.id) {
+                try {
+                    const job = await invoke('gif_export_status', {sessionId: currentSessionId(), jobId: null});
+                    if (job && !['done', 'cancelled', 'failed'].includes(job.stage)) {
+                        const okToCancel = await confirm(t('gif.recent.exportBusyMsg'));
+                        if (!okToCancel) return;
+                        await invoke('gif_export_cancel', {sessionId: currentSessionId()});
+                    }
+                } catch {
+                    // 状态查询失败不阻断切换（后端 gif_open_session 仍有 busy 保护）
+                }
             }
-        }
+            try {
+                await invoke('gif_open_session', {sessionId: s.id});
+                onOpened();
+            } catch (err) {
+                console.error('[gif-editor] 打开录制失败', err);
+                // gif_export_busy：提示用户先在导出面板完成/取消，不自动重试
+                if (err?.code === 'gif_export_busy') {
+                    void confirm(t('gif.recent.exportBusyRetry'));
+                }
+            }
+        } finally { acting = false; syncControls(); }
     }
 
     async function deleteSession(s) {
-        const ok = await confirm(t('gif.recent.deleteConfirm'));
-        if (!ok) return;
+        if (acting || currentSessionId() === s.id) return;
+        acting = true; syncControls();
         try {
-            await invoke('gif_discard_session', {sessionId: s.id});
-        } catch (err) {
-            console.error('[gif-editor] 删除录制失败', err);
-            return;
+            const ok = await confirm(t('gif.recent.deleteConfirm'));
+            if (!ok) return;
+            try {
+                await invoke('gif_discard_session', {sessionId: s.id});
+            } catch (err) {
+                console.error('[gif-editor] 删除录制失败', err);
+                return;
+            }
+            items = items.filter(i => i.id !== s.id);
+            total = Math.max(0, total - 1);
+            nextOffset = Math.max(0, nextOffset - 1);
+            thumbnails.delete(s.id);
+            render();
+        } finally { acting = false; syncControls(); }
+    }
+
+    async function clearHistory() {
+        if (acting || loading || !total || (total === 1 && items[0]?.id === currentSessionId())) return;
+        const preserveSessionId = currentSessionId();
+        acting = clearing = true; syncControls();
+        try {
+            if (!await confirm(t('gif.recent.clearConfirm'))) return;
+            message(t('gif.recent.clearing'));
+            // Let the two visible-thumbnail reads release their leases before
+            // deletion; no additional preview work starts during the clear.
+            observer?.disconnect(); thumbnailQueue.length = 0;
+            await Promise.allSettled([...thumbnailTasks]);
+            const result = await invoke('gif_clear_history', {preserveSessionId});
+            thumbnails.clear(); items = []; total = nextOffset = 0;
+            render();
+            const refreshed = await load(true, true);
+            const text = t(result.retained ? 'gif.recent.clearRetained' : 'gif.recent.cleared', result);
+            message(text + (refreshed ? '' : ' ' + t('gif.recent.refreshFailed')), !refreshed);
+        } catch (error) {
+            message(t('gif.recent.clearFailed', {message: errorText(error)}), true);
+            // Restore visible thumbnail observation if the clear failed.
+            render();
+        } finally {
+            acting = clearing = false;
+            syncControls(); pumpThumbnails();
         }
-        items = items.filter(i => i.id !== s.id);
-        total = Math.max(0, total - 1);
-        nextOffset = Math.max(0, nextOffset - 1);
-        thumbnails.delete(s.id);
-        render();
     }
 
     function bind() {
@@ -260,6 +327,7 @@ export function createRecentList(deps) {
             }
         });
         els.refresh?.addEventListener('click', () => void load(true));
+        els.clear?.addEventListener('click', clearHistory);
     }
 
     return {

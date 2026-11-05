@@ -173,6 +173,37 @@ test('gain dragging and mute edits keep preview clock and apply gain before comm
     assert.equal(f.state.previewMix,null);
 });
 
+test('expected revision conflicts during live edits keep playback, but current real failures pause it', async () => {
+    const f = await fixture();
+    f.setPlaying(true); await flush();
+    const clock = f.state.playClockAt;
+    f.state.editing = true;
+    f.pages.locate = async () => { throw {code: 'gif_revision', message: '时间轴已变化'}; };
+    await f.locate({play: 90000});
+    assert.equal(f.state.playing, true);
+    assert.equal(f.state.playClockAt, clock);
+    assert.ok(!f.audioCalls.includes('pause'));
+    f.state.editing = false;
+    f.pages.locate = async () => { throw {code: 'gif_io', message: '素材读取失败'}; };
+    await f.locate({play: 90000});
+    assert.equal(f.state.playing, false);
+});
+
+test('late metadata failures cannot pause playback after a newer seek or revision', async () => {
+    for (const newerRevision of [false, true]) {
+        const f = await fixture(); f.setPlaying(true); await flush();
+        const original = f.pages.locate.bind(f.pages);
+        let reject;
+        f.pages.locate = () => new Promise((_resolve, no) => {reject = no;});
+        const stale = f.locate({play: 90000});
+        if (newerRevision) await f.edit({type: 'set_audio', source: 0, gain: 0.5, muted: false});
+        else { f.pages.locate = original; await f.locate({play: 2}); }
+        reject({code: 'gif_revision', message: '旧请求已失效'});
+        await stale;
+        assert.equal(f.state.playing, true);
+    }
+});
+
 test('preview sound can be turned off and back on during playback without suspending transport',async()=>{
     const f=await fixture();f.setPlaying(true);await flush();
     const clock=f.state.playClockAt, toggle=f.get('preview-audio-enabled').handlers.change;

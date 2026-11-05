@@ -162,12 +162,21 @@
             <p class="recent-note" data-i18n="gif.recent.note">临时素材保留 72 小时；关闭窗口不删除素材，编辑进度自动保存。</p>
         </div>
         <div class="recent-actions">
-            <button class="btn hidden" data-i18n="gif.recent.back" id="btn-back-edit" type="button">返回编辑</button>
-            <button class="btn btn-icon" data-i18n-title="gif.recent.refresh" id="btn-recent-refresh" title="刷新" type="button">
+            <button class="btn hidden" id="btn-back-edit" type="button">
+                <svg aria-hidden="true" class="icon"><use href="#icon-arrow-left"/></svg>
+                <span data-i18n="gif.recent.back">返回编辑</span>
+            </button>
+            <button class="btn" id="btn-recent-refresh" type="button">
                 <svg aria-hidden="true" class="icon"><use href="#icon-refresh-cw"/></svg>
+                <span data-i18n="gif.recent.refresh">刷新</span>
+            </button>
+            <button class="btn btn-danger" id="btn-recent-clear" type="button" disabled>
+                <svg aria-hidden="true" class="icon"><use href="#icon-trash-2"/></svg>
+                <span data-i18n="gif.recent.clear">清空历史草稿</span>
             </button>
         </div>
     </header>
+    <p class="recent-status hidden" id="recent-status" role="status" aria-live="polite"></p>
     <div class="recent-list" id="recent-list"></div>
     <div class="recent-empty hidden" id="recent-empty">
         <p data-i18n="gif.recent.empty">还没有录制。在截图中框选区域后点击「录制」，停止后会自动进入编辑器。</p>

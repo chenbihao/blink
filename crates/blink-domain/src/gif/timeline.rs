@@ -637,7 +637,7 @@ impl Timeline {
     fn view_index(&self) -> &Arc<ViewIndex> {
         self.index.get_or_init(|| {
             let mut out = ViewIndex::default();
-            let mut source_ms = 0u64;
+            let mut source_ms = self.origin_durs.start_ms();
             let mut unscaled_ms = 0u64;
             for i in 0..self.frame_count {
                 if i >= self.core.trim_start
@@ -776,7 +776,7 @@ impl Timeline {
 
     pub fn audio_spans(&self) -> Vec<AudioSpan> {
         let frames = self.frame_views();
-        let mut source_at = 0u64;
+        let mut source_at = self.origin_durs.start_ms();
         let mut cursor = 0usize;
         let mut out: Vec<AudioSpan> = Vec::new();
         for f in frames {
@@ -1143,6 +1143,53 @@ mod tests {
 
     fn tl() -> Timeline {
         Timeline::from_durations(vec![100, 100, 100, 100, 100])
+    }
+
+    #[test]
+    fn capture_origin_is_retained_through_pages_trim_hold_speed_and_export() {
+        let timings = blink_infra::gif::timing::Timings::memory(vec![100; 300]).with_start_ms(150);
+        let mut timeline = Timeline::from_timings(timings);
+        assert_eq!(
+            timeline.window(None, Some(12900), None)["frames"][0]["sourceMs"],
+            13050
+        );
+        assert_eq!(timeline.audio_spans()[0].source_ms, 150);
+        assert_eq!(timeline.audio_spans()[0].sound_ms, 30000);
+        timeline
+            .apply(&EditCommand::TrimStart { frame: 129 })
+            .unwrap();
+        timeline
+            .apply(&EditCommand::DeleteFrame { frame: 130 })
+            .unwrap();
+        timeline
+            .apply(&EditCommand::SetHold {
+                frame: 129,
+                ms: 200,
+            })
+            .unwrap();
+        timeline
+            .apply(&EditCommand::SetSpeed { factor: 2.0 })
+            .unwrap();
+        let first = &timeline.window(Some(0), None, None)["frames"][0];
+        assert_eq!(first["startMs"], 0);
+        assert_eq!(first["sourceMs"], 13050);
+        assert_eq!(first["durMs"], 100);
+        let snapshot = timeline.export_snapshot(64, 64);
+        assert_eq!(
+            snapshot.audio[0],
+            AudioSpan {
+                source_ms: 13050,
+                sound_ms: 100,
+                silence_ms: 100,
+                output_ms: 100,
+                speed: 2.0
+            }
+        );
+        assert_eq!(snapshot.audio[1].source_ms, 13250);
+        assert_eq!(
+            snapshot.audio.last().unwrap().source_ms + snapshot.audio.last().unwrap().sound_ms,
+            30150
+        );
     }
 
     #[test]

@@ -91,12 +91,15 @@ body {
 
 .recent-header {
     display: flex;
+    flex-wrap: wrap;
     align-items: flex-start;
     justify-content: space-between;
     gap: 12px;
     padding: 14px 18px 10px;
     border-bottom: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
 }
+
+.recent-title { flex: 1 1 260px; min-width: 0; }
 
 .recent-title h2 {
     margin: 0 0 4px;
@@ -112,9 +115,26 @@ body {
 
 .recent-actions {
     display: flex;
-    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-sm);
+    margin-left: auto;
     flex-shrink: 0;
 }
+
+.recent-actions .btn {
+    min-width: 96px;
+    height: 32px;
+    padding: 0 var(--space-md);
+    font-family: inherit;
+    font-size: var(--text-sm);
+    line-height: 16px;
+    white-space: nowrap;
+}
+.recent-actions .icon { width: 16px; height: 16px; flex-shrink: 0; }
+.recent-actions .btn:disabled { opacity: 0.45; cursor: default; }
+.recent-status { margin: 0; padding: var(--space-sm) 18px; color: var(--text-sub); font-size: var(--text-sm); }
+.recent-status.recent-status-error { color: var(--red); }
 
 .recent-list {
     flex: 1;

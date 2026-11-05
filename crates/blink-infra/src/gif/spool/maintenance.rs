@@ -131,7 +131,7 @@ mod tests {
     }
 }
 
-fn ordinary_directory(meta: &fs::Metadata) -> bool {
+pub(super) fn ordinary_directory(meta: &fs::Metadata) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
