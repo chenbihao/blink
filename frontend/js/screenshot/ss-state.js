@@ -136,6 +136,15 @@ export const ss = {
     _lineSnapshot: null,          // HTMLCanvasElement | null 已提交内容快照
     _lineSnapshotVer: -1,         // 快照对应的引擎 commitVersion
 
+    // ── 0.28.26 补充：线段工具按压态（点两下/拖拽成段，index.js 指针分支用）──
+    _linePressPt: null,           // {x,y} | null 本按下点（图片物理像素）；null = 无进行中按压
+    _linePressSetAnchor: false,   // 本次按下是否新设了锚点（区分第一击/第二击）
+
+    // ── 0.28.26 补充：荧光笔正片叠底实时预览分层（ss-draw.js 构建/合成/释放）──
+    // 拖画预览与成品共用"按色满 alpha 单层 → 一次性 alpha 贴回"合成语义，
+    // 实时笔迹与已提交同色高亮重叠不加深；null = 非该工具拖画态。
+    _hlLivePreview: null,         // {base, layers, order, live, merged, liveColor} | null
+
     // ── 0.15.10：取色器活跃标志（eyedropper 模式时显示像素放大镜）──
     eyedropperActive: false,
     // 放大镜异步物理坐标采样代际守卫，防止旧 GetCursorPos 结果回流
@@ -238,6 +247,17 @@ export const TOOL_CAPS = {
         widthMul: 1,
         hasCursor: true,
         minDrag: 0,
+        supportMode: false,
+        modeGroup: null
+    },
+    // 0.28.26 补充：线段工具——点两下/拖拽成段，交互走 index.js 的连线锚点路径
+    // （不走 startDraw 拖画机制），caps 只为 widthCat（线宽/虚线控件）与兜底。
+    line: {
+        points: 'box',
+        widthCat: 'stroke',
+        widthMul: 1,
+        hasCursor: false,
+        minDrag: 3,
         supportMode: false,
         modeGroup: null
     },

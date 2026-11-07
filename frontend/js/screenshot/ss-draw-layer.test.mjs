@@ -166,3 +166,88 @@ test('0.23.15：ss-draw 不再暴露按帧调用的选区绘制入口', () => {
     assert.equal(typeof drawMod.drawFinalSelection, 'function', '保留单次提交入口');
     assert.equal(typeof drawMod.drawDimmed, 'function', '保留整屏暗罩入口');
 });
+
+// ── 荧光笔正片叠底实时预览同层合并（0.28.26 补充）─────────────────────────
+
+/** 记录型 2D 上下文（annotation-line-arrow.test.mjs 同款 + globalAlpha 追踪）。 */
+function makeRecordingCtx() {
+    const calls = [];
+    const ctx = {calls, _alpha: 1, canvas: null};
+    Object.defineProperty(ctx, 'globalAlpha', {
+        get: () => ctx._alpha,
+        set: (v) => {
+            ctx._alpha = v;
+            calls.push(['globalAlpha', v]);
+        },
+    });
+    for (const m of ['save', 'restore', 'beginPath', 'closePath', 'stroke', 'fill', 'clearRect', 'drawImage', 'fillRect', 'strokeRect']) {
+        ctx[m] = (...args) => calls.push([m, ...args]);
+    }
+    ctx.moveTo = (x, y) => calls.push(['moveTo', x, y]);
+    ctx.lineTo = (x, y) => calls.push(['lineTo', x, y]);
+    ctx.arc = (x, y, r) => calls.push(['arc', x, y, r]);
+    ctx.setLineDash = (d) => calls.push(['setLineDash', d]);
+    ctx.fillText = () => calls.push(['fillText']);
+    ctx.measureText = () => ({width: 10});
+    return ctx;
+}
+
+/** 可设尺寸的假 canvas：每个实例独立 recording ctx。 */
+function makeFakeCanvas(w, h) {
+    const ctx = makeRecordingCtx();
+    return {width: w, height: h, getContext: () => ctx, _ctx: ctx};
+}
+
+test('荧光笔正片叠底预览：拆「底图+按色层」，实时笔迹并入同色层统一 0.55 合成', () => {
+    // begin/composite 经引擎 renderCommandsTo/acquireCanvas 需要 document.createElement
+    globalThis.document = {createElement: () => makeFakeCanvas(0, 0)};
+
+    const canvas = makeFakeCanvas(100, 60);
+    annot.init(canvas);
+    annot.reset(100, 60, null);
+    annot.setTool('highlight-multiply');
+    annot.setColor('#ff0000');
+    annot.startDraw(0, 0);
+    annot.moveDraw(30, 0);
+    annot.endDraw(30, 0);
+    annot.setColor('#ffd700');
+    annot.startDraw(0, 10);
+    annot.moveDraw(20, 10);
+    annot.endDraw(20, 10);
+    assert.equal(annot.getCommands().length, 2, '前置：两笔已提交（红/黄各一）');
+
+    ss.annotCanvas = makeFakeCanvas(100, 60);
+    ss.annotCtx = makeRecordingCtx();
+    ss._hlLivePreview = null;
+
+    assert.equal(drawMod.beginHighlightLivePreview(), true, '分层构建成功');
+    const hl = ss._hlLivePreview;
+    assert.ok(hl, '预览分层已挂到 ss');
+    assert.deepEqual(hl.order, ['#ff0000', '#ffd700'], '已提交高亮按色分组且按出现顺序');
+    assert.ok(hl.layers.get('#ff0000')._ctx.calls.some((c) => c[0] === 'stroke'), '红层收已提交红笔');
+    assert.equal(
+        hl.base._ctx.calls.filter((c) => c[0] === 'drawImage').length, 0,
+        '底图不含 brush 模式高亮层（避免预览双重合成）',
+    );
+
+    // 模拟进行中红笔（引擎 currentPoints）
+    annot.setColor('#ff0000');
+    annot.startDraw(10, 20);
+    annot.moveDraw(50, 20);
+
+    const comp = ss.annotCtx;
+    assert.equal(drawMod.compositeHighlightLivePreview(), true, '合成接管本帧');
+    assert.ok(comp.calls.some((c) => c[0] === 'clearRect'), '合成前清画布');
+    // 两个颜色层各一次 0.55 drawImage（红=merged 含实时笔迹；黄=已提交层）
+    const alphaHits = comp.calls.filter((c) => c[0] === 'globalAlpha' && c[1] === 0.55);
+    assert.equal(alphaHits.length, 2, '各色层一次性 0.55 贴回（同色重叠不加深）');
+    assert.equal(comp.calls.filter((c) => c[0] === 'drawImage').length, 3, '底图 1 次 + 色层 2 次');
+    assert.ok(hl.live._ctx.calls.some((c) => c[0] === 'stroke'), '实时笔迹画进 live 层（满 alpha）');
+    assert.ok(hl.merged._ctx.calls.some((c) => c[0] === 'drawImage'), 'live 并入同色 merged 层');
+    assert.equal(annot.getCommands().length, 2, '预览不写撤销栈');
+
+    drawMod.endHighlightLivePreview();
+    assert.equal(ss._hlLivePreview, null, '释放分层');
+    annot.setTool('pencil');
+    annot.reset(100, 60, null);
+});

@@ -1,6 +1,6 @@
 {
   "lucideVersion": "1.25.0",
-  "generatedAt": "2026-11-01T07:57:26Z",
+  "generatedAt": "2026-11-07T13:35:51Z",
   "icons": [
     "aperture",
     "app-window",
@@ -87,6 +87,7 @@
     "server",
     "settings",
     "shield",
+    "slash",
     "sparkles",
     "spotlight",
     "spray-can",

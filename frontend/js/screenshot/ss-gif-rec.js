@@ -35,7 +35,7 @@ import {bindRecordingSelection} from './recording-selection.js';
 /** 录制叠层不可用的已有标注类型（依赖截图底图像素）。 */
 const UNSUPPORTED_TYPES = new Set(['blur', 'pixelate', 'mosaic', 'magnifier', 'spotlight', 'spotlight-multi']);
 /** 录制叠层可用的绘制工具（进入录制面时当前工具不可用则切画笔）。 */
-const REC_TOOLS = new Set(['pencil', 'arrow', 'rect', 'ellipse', 'highlight-multiply', 'highlight-translucent', 'text', 'number', 'eraser']);
+const REC_TOOLS = new Set(['pencil', 'line', 'arrow', 'rect', 'ellipse', 'highlight-multiply', 'highlight-translucent', 'text', 'number', 'eraser']);
 /** 命中矩形周期上报间隔（ms）。 */
 const HIT_RECT_INTERVAL_MS = 250;
 /** 状态时长插值间隔（ms）。 */

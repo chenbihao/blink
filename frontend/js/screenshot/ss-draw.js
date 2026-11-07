@@ -206,6 +206,125 @@ function drawContinuousBrushPreview(c, points, width, color) {
     c.stroke();
 }
 
+// ── 0.28.26 补充：荧光笔正片叠底实时预览的同层合并 ─────────────────────────
+//
+// 已提交渲染（引擎 renderCommandsTo）把 highlight-multiply 按颜色合成"满 alpha
+// 单层 → 一次性 0.55 贴回"，同色多笔重叠不加深；而拖画预览此前直接在画布上以
+// 0.55 stroke，与快照里已提交的同色高亮叠出双重加深，落笔 redrawAll 后才"跳变"
+// 回合并效果。本组函数在笔画开始时把已提交内容拆成「去高亮底图 + 按色满 alpha
+// 层」，实时笔迹满 alpha 并入同色层后统一按色 0.55 合成——预览与成品同一合成
+// 语义。仅 brush 模式接管；box 模式与 translucent 的"多笔加深"语义不变。
+
+/** 满 alpha 画一条 polyline（分层内共用；重叠累积同色不加深）。 */
+function strokeHighlightLayer(c, pts, color, lineW) {
+    c.strokeStyle = color;
+    c.lineWidth = lineW;
+    c.lineCap = 'round';
+    c.lineJoin = 'round';
+    c.beginPath();
+    c.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < pts.length; i++) {
+        c.lineTo(pts[i].x, pts[i].y);
+    }
+    c.stroke();
+}
+
+/**
+ * 笔画开始时构建荧光笔正片叠底预览分层（index.js pointerdown 快照后调用）。
+ * 产出：base=去 brush 模式高亮的已提交内容渲染；layers/order=已提交高亮按色
+ * 满 alpha 层及出现顺序；live=实时笔迹层；merged=同色合并层（预置已提交同色）。
+ * 失败（无画布/构建异常）返回 false，预览回退旧路径。
+ */
+export function beginHighlightLivePreview() {
+    const {annotCanvas} = ss;
+    if (!annotCanvas || annotCanvas.width === 0) return false;
+    try {
+        const cmds = annot.getCommands();
+        const liveColor = annot.getColor();
+        const w = annotCanvas.width;
+        const h = annotCanvas.height;
+        // 底图排除 brush 模式正片叠底（box 模式高亮照常渲染，语义不变）
+        const base = document.createElement('canvas');
+        base.width = w;
+        base.height = h;
+        annot.renderCommandsTo(
+            cmds.filter((c) => !(c.type === 'highlight-multiply' && c.mode !== 'box')),
+            base.getContext('2d'), w, h,
+        );
+        // 已提交高亮按色拆满 alpha 层（与引擎 renderHighlightMultiplyLayer 同分组）
+        const layers = new Map();
+        const order = [];
+        for (const cmd of cmds) {
+            if (cmd.type !== 'highlight-multiply' || cmd.mode === 'box'
+                || !cmd.points || cmd.points.length < 2) continue;
+            const color = cmd.color || liveColor;
+            let layer = layers.get(color);
+            if (!layer) {
+                layer = document.createElement('canvas');
+                layer.width = w;
+                layer.height = h;
+                layers.set(color, layer);
+                order.push(color);
+            }
+            strokeHighlightLayer(
+                layer.getContext('2d'), cmd.points, color,
+                brushDiameter(cmd.type, cmd.width || annot.getWidthForTool('highlight-multiply')),
+            );
+        }
+        const live = document.createElement('canvas');
+        live.width = w;
+        live.height = h;
+        const merged = document.createElement('canvas');
+        merged.width = w;
+        merged.height = h;
+        const committedLive = layers.get(liveColor);
+        if (committedLive) merged.getContext('2d').drawImage(committedLive, 0, 0);
+        if (!order.includes(liveColor)) order.push(liveColor);
+        ss._hlLivePreview = {base, layers, order, live, merged, liveColor};
+        return true;
+    } catch (e) {
+        console.warn('[screenshot] highlight live preview layers unavailable, fallback', e);
+        ss._hlLivePreview = null;
+        return false;
+    }
+}
+
+/**
+ * 每帧荧光笔正片叠底预览合成：实时笔迹满 alpha 并入同色层，
+ * 底图 + 各色层按出现顺序以 0.55 贴回 annotCtx。返回 false 表示未接管。
+ */
+export function compositeHighlightLivePreview() {
+    const hl = ss._hlLivePreview;
+    const {annotCtx, annotCanvas} = ss;
+    if (!hl || !annotCtx || !annotCanvas || annotCanvas.width === 0) return false;
+    const pts = annot.getCurrentPoints();
+    if (pts.length >= 2) {
+        const liveCtx = hl.live.getContext('2d');
+        liveCtx.clearRect(0, 0, hl.live.width, hl.live.height);
+        strokeHighlightLayer(
+            liveCtx, pts, hl.liveColor,
+            brushDiameter('highlight-multiply', annot.getWidthForTool('highlight-multiply')),
+        );
+        // 并入同色合并层（满 alpha 叠加同色不加深）
+        hl.merged.getContext('2d').drawImage(hl.live, 0, 0);
+    }
+    annotCtx.clearRect(0, 0, annotCanvas.width, annotCanvas.height);
+    annotCtx.drawImage(hl.base, 0, 0);
+    for (const color of hl.order) {
+        const layer = color === hl.liveColor ? hl.merged : hl.layers.get(color);
+        annotCtx.save();
+        annotCtx.globalAlpha = 0.55;
+        annotCtx.drawImage(layer, 0, 0);
+        annotCtx.restore();
+    }
+    return true;
+}
+
+/** 笔画结束/中断时释放预览分层（与 _committedSnapshot 同生命周期）。 */
+export function endHighlightLivePreview() {
+    ss._hlLivePreview = null;
+}
+
 /** 标注实时预览：重绘已提交的 + 当前绘制中的预览
  *  0.15.10：用 _committedSnapshot 快速恢复已提交内容，避免每帧全量重放。 */
 export function redrawAnnotPreview() {
@@ -298,6 +417,9 @@ export function redrawAnnotPreview() {
             }
             const pts = annot.getCurrentPoints();
             if (pts.length >= 2) {
+                // 0.28.26 补充：正片叠底走同层合并合成（重叠不加深，与成品一致）；
+                // 分层未构建/构建失败时回退旧的直接 0.55 预览。
+                if (tool === 'highlight-multiply' && compositeHighlightLivePreview()) break;
                 const w = annot.getWidthForTool(tool);
                 const alpha = tool === 'highlight-multiply' ? 0.55 : 0.30;
                 annotCtx.strokeStyle = annot.withAlpha(annot.getColor(), alpha);

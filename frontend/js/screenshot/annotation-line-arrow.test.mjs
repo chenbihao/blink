@@ -13,7 +13,7 @@ globalThis.document = {
     createElement: () => ({width: 0, height: 0, getContext: () => makeCtx()}),
 };
 
-const {ss} = await import('./ss-state.js');
+const {ss, TOOL_CAPS} = await import('./ss-state.js');
 const annot = await import('./annotation-engine.js');
 const draw = await import('./ss-draw.js');
 
@@ -194,4 +194,72 @@ test('setLineShiftHeld：松开结束连线链及预览（锚点一并清理）'
     assert.equal(annot.getLineAnchor(), null, '松开 Shift 结束当前连续连线，锚点不保留');
     assert.equal(annot.commitLineSegment({x: 2, y: 2}), null, '松开后不隔空续上旧链');
     annot.clearLineState();
+});
+
+// ── 线段工具（0.28.26 补充）─────────────────────────────────
+
+test('线段工具 caps：走 stroke 宽度/虚线配置，无笔画光标圈', () => {
+    assert.equal(TOOL_CAPS.line.points, 'box');
+    assert.equal(TOOL_CAPS.line.widthCat, 'stroke', '线宽/虚线控件按 stroke 类生效');
+    assert.equal(TOOL_CAPS.line.hasCursor, false);
+    assert.equal(TOOL_CAPS.line.supportMode, false);
+    assert.equal(TOOL_CAPS.line.modeGroup, null);
+});
+
+test('线段工具：isLinePending 真值表（锚点 + line 工具无需 Shift）', () => {
+    annot.clearLineState();
+    annot.setTool('pencil');
+    annot.setLineAnchor({x: 1, y: 1});
+    assert.equal(annot.isLinePending(), false, '画笔无 Shift 不算待定（维持 Shift 连线语义）');
+    annot.setLineShiftHeld(true);
+    assert.equal(annot.isLinePending(), true, '画笔 Shift 按住即待定');
+    annot.setLineShiftHeld(false);          // 松开 Shift 清锚点（既有语义）
+    annot.setLineAnchor({x: 1, y: 1});      // 重新设锚，模拟线段工具普通点击设起点
+    annot.setTool('line');
+    assert.equal(annot.isLinePending(), true, '线段工具有锚点即待定，无需修饰键');
+    annot.clearLineState();
+    assert.equal(annot.isLinePending(), false, '无锚点不算待定');
+    annot.setTool('pencil');
+});
+
+test('线段工具：点两下提交两点 pencil 段，渲染/导出零改动', () => {
+    const ctx = makeCtx();
+    const canvas = {width: 100, height: 100, getContext: () => ctx};
+    annot.init(canvas);
+    annot.reset(100, 100, null);
+    annot.setTool('line');
+    annot.setColor('#00ff00');
+    annot.setStrokeWidth(3);
+
+    // 第一击设起点（index.js pointerdown 语义）后即待定
+    annot.setLineAnchor({x: 8, y: 8});
+    assert.equal(annot.isLinePending(), true);
+    const seg = annot.commitLineSegment({x: 60, y: 20});
+    assert.ok(seg, '第二击提交一段');
+    assert.equal(seg.type, 'pencil', '复用 pencil 类型：两点即直线段');
+    assert.deepEqual(seg.points, [{x: 8, y: 8}, {x: 60, y: 20}]);
+    assert.equal(seg.color, '#00ff00');
+    assert.equal(seg.width, 3);
+
+    // index.js 非 Shift 提交后清锚点（普通模式各段独立，下一击重新设起点）
+    annot.setLineAnchor(null);
+    assert.equal(annot.getLineAnchor(), null);
+    assert.equal(annot.isLinePending(), false);
+    assert.equal(annot.undo(), true, '提交段独立可撤销');
+    annot.setTool('pencil');
+});
+
+test('setLineShiftHeld：未持有时不误清线段工具待定锚点（补充回归）', () => {
+    annot.clearLineState();
+    annot.setTool('line');
+    annot.setLineAnchor({x: 3, y: 4});
+    assert.equal(annot.setLineShiftHeld(false), false, '未持有时返回 changed=false');
+    assert.deepEqual(annot.getLineAnchor(), {x: 3, y: 4}, '无关的 Shift 起落不吃掉待定锚点');
+    assert.equal(annot.isLinePending(), true, '待定状态不受影响');
+    // Shift 真实起落（keydown→keyup）仍结束链条
+    annot.setLineShiftHeld(true);
+    assert.equal(annot.setLineShiftHeld(false), true);
+    assert.equal(annot.getLineAnchor(), null, '真实松开 Shift 清锚点');
+    annot.clearLineState();
+    annot.setTool('pencil');
 });

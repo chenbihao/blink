@@ -21,7 +21,7 @@ import {enterScrollCapture} from './scroll/index.js';
 import {doPanelToggle, doTranslateAndPin, doTranslateSelection} from './ss-ocr.js';
 import {doOcrDiagnostics} from './ss-ocr-diagnostics.js';
 import * as annot from './annotation-engine.js';
-import {initColorPicker, syncFromAnnot} from './ss-color-picker.js';
+import {cyclePresetColor, initColorPicker, syncFromAnnot} from './ss-color-picker.js';
 import {clearReadingSelection} from './ss-reading.js';
 import {placeColorPanel} from './ss-panel-resize.js';
 import {getRenderScale} from './ss-selection-geometry.js';
@@ -35,8 +35,9 @@ export function updateUndoRedoButtons() {
 
 /** 工具栏与键盘共用，保持撤销栈、按钮状态和画布一致。 */
 export function runAnnotationOperation(operation) {
-    // 0.28.26：撤销/重做/清空同时结束 Shift 连线（锚点重新校验，已提交段保留）
-    const hadLinePreview = annot.isLinePreviewActive();
+    // 0.28.26：撤销/重做/清空同时结束连线（锚点重新校验，已提交段保留）；
+    // isLinePending 覆盖画笔 Shift 连线与线段工具的普通待定段。
+    const hadLinePreview = annot.isLinePending();
     annot.clearLineState();
     if (operation === 'undo') annot.undo();
     else if (operation === 'redo') annot.redo();
@@ -51,8 +52,9 @@ export function selectTool(tool) {
     // 录制态快捷键也走此入口，不能绕过工具栏的禁用范围。
     if (ss.gifRecHooks?.allowsTool && !ss.gifRecHooks.allowsTool(tool)) return;
     const {canvas, hitCanvas} = ss;
-    // 0.28.26：切换工具清理 Shift 连线锚点与预览，不跨工具连接
-    const hadLinePreview = annot.isLinePreviewActive();
+    // 0.28.26：切换工具清理连线锚点与预览，不跨工具连接；
+    // isLinePending 兼有线段工具普通待定段（无 Shift 时 isLinePreviewActive 为假）。
+    const hadLinePreview = annot.isLinePending();
     if (hadLinePreview || annot.getLineAnchor()) {
         annot.clearLineState();
         if (hadLinePreview) redrawAnnotFull();
@@ -169,7 +171,7 @@ export const TOOL_GROUPS = {
     select: 'direct',
     rect: 'shape', ellipse: 'shape',
     spotlight: 'shape', 'spotlight-multi': 'shape', magnifier: 'shape',
-    pencil: 'stroke', arrow: 'stroke',
+    pencil: 'stroke', line: 'stroke', arrow: 'stroke',
     'highlight-multiply': 'stroke', 'highlight-translucent': 'stroke',
     text: 'text', watermark: 'text',
     number: 'text',
@@ -696,6 +698,17 @@ export function bindToolbar() {
         if (isColor) {
             bindColorPanelDrag(dd);
             const trigger = wrap.querySelector('#color-trigger');
+            // 0.28.26 补充：颜色触发器滚轮循环预设色——与面板内预设色网格同一
+            // 逻辑（cyclePresetColor），当前色为预设色时沿色相环步进，触发器圆点
+            // 即时反馈。0.15.10 各滚轮控件（工具组/粗细/色相/格式）同交互范式，
+            // 颜色此前必须开面板悬停色块才能滚，是唯一缺口。
+            if (trigger) {
+                trigger.addEventListener('wheel', (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    cyclePresetColor(e);
+                }, {passive: false});
+            }
             // 0.23.19：悬浮展开色盘（与其他工具组下拉一致的交互）。
             // 打开有 250ms 延迟防路过误触；关闭留 400ms 缓冲（spec §5.3），
             // 面板是 wrap 的绝对定位子元素，指针移入面板仍在 wrap 命中范围内，

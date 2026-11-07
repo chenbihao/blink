@@ -107,6 +107,7 @@ ICON_LIST = [
     "ticket-slash",     # 荧光笔（0.11.8-c）——斜线穿越条状代表笔画
     "move-up-right",    # 箭头（0.11.8-d）——替代 emoji ➘
     "pencil",           # 铅笔（0.11.8-d）——替代 emoji ✎
+    "slash",            # 线段（0.28.26 补充）——斜线段语义，独立于画笔的直线工具
     "square",           # 矩形（0.11.8-e）——替代 emoji ▭
     "circle",           # 椭圆（0.11.8-f）——替代 ellipse（后者线条太细，不匹配 stroke=2）
     "undo-2",           # 撤销（0.11.8-f）——替代 ↶

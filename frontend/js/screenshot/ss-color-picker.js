@@ -682,18 +682,13 @@ export function initColorPicker() {
         }, {passive: false});
     }
 
-    // 色彩预设滚轮切换
+    // 色彩预设滚轮切换（逻辑抽为 cyclePresetColor，工具栏颜色触发器共用）
     const presetsContainer = dropdown ? dropdown.querySelector('.color-presets') : null;
     if (presetsContainer) {
         presetsContainer.addEventListener('wheel', (e) => {
             e.preventDefault();
             e.stopPropagation();
-            const swatches = Array.from(presetsContainer.querySelectorAll('.color-swatch'));
-            if (swatches.length < 2) return;
-            let curIdx = swatches.findIndex((s) => s.classList.contains('active'));
-            if (curIdx < 0) curIdx = 0;
-            const newIdx = Math.max(0, Math.min(swatches.length - 1, curIdx + (e.deltaY > 0 ? 1 : -1)));
-            if (newIdx !== curIdx) swatches[newIdx].click();
+            cyclePresetColor(e);
         }, {passive: false});
     }
 
@@ -706,6 +701,28 @@ export function initColorPicker() {
 
 // 导出转换工具函数（供 0.15.6 配色提取复用）
 export {hsvToRgb, rgbToHsv, rgbToHex, hexToRgb, rgbToHsl, hslToRgb};
+
+/**
+ * 0.28.26 补充：滚轮循环预设色（面板预设色网格与工具栏颜色触发器共用）。
+ * 当前色为预设色时从该色步进（沿色相环排序，两端到头停住）；当前色不是预设色
+ * （取色器/色盘自定义）时任意方向先落入色相环首格，后续滚动正常步进。
+ * deltaY>0 = 下一格。调用方负责 preventDefault/stopPropagation。
+ * 返回是否发生切换。
+ */
+export function cyclePresetColor(e) {
+    if (!dropdown) return false;
+    const swatches = Array.from(dropdown.querySelectorAll('.color-swatch'));
+    if (swatches.length < 2) return false;
+    const curIdx = swatches.findIndex((s) => s.classList.contains('active'));
+    if (curIdx < 0) {
+        swatches[0].click();
+        return true;
+    }
+    const newIdx = Math.max(0, Math.min(swatches.length - 1, curIdx + (e.deltaY > 0 ? 1 : -1)));
+    if (newIdx === curIdx) return false;
+    swatches[newIdx].click();
+    return true;
+}
 
 // P1-3：导出共享色彩格式 getter/setter，配色区复用顶部 .color-format 的格式状态
 export function getColorFormat() {

@@ -1137,10 +1137,10 @@ body.image-editor-mode #canvas.long-image-editing {
     opacity: 0.62;
 }
 
-/* 预设色阵列 */
+/* 预设色阵列（9 格单行：色相环 7 色 + 白黑，色块约 26px） */
 .color-presets {
     display: grid;
-    grid-template-columns: repeat(6, 1fr);
+    grid-template-columns: repeat(9, 1fr);
     gap: 4px;
     margin-bottom: 2px;
 }

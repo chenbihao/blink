@@ -182,15 +182,26 @@ export function getLineAnchor() {
 }
 
 /** 标记 Shift 按住/松开。松开 = 结束当前连续连线及预览（锚点一并清理，
- *  再按 Shift 时由普通点击/上一笔终点/首击重新设起点）。 */
+ *  再按 Shift 时由普通点击/上一笔终点/首击重新设起点）。
+ *  0.28.26 补充：仅在状态真正变化时清理——之前未按住 Shift 时不得误清锚点
+ *  （线段工具普通待定锚点不依赖 Shift，无关的 Shift 起落不能吃掉它）。 */
 export function setLineShiftHeld(held) {
     const changed = lineShiftHeld !== !!held;
+    if (!changed) return false;
     lineShiftHeld = !!held;
     if (!lineShiftHeld) {
         linePreviewEnd = null;
         lineAnchor = null;
     }
     return changed;
+}
+
+/** 0.28.26 补充：连线是否有待定段（锚点存在且当前上下文连线激活）。
+ *  画笔仅在 Shift 按住时算待定；线段工具锚点常驻待定（点两下成段，无需修饰键）。
+ *  Esc/切工具/撤销重做/清空/指针取消等「先结束连线再走原行为」的清理路径
+ *  用它判断，替代仅覆盖 Shift 场景的 isLinePreviewActive。 */
+export function isLinePending() {
+    return !!lineAnchor && (lineShiftHeld || currentTool === 'line');
 }
 
 /** 更新预览终点（Shift 按住期间鼠标最新位置）。 */
@@ -227,8 +238,10 @@ export function getCommitVersion() {
 }
 
 /**
- * 提交一段 Shift 连线（锚点→终点）为独立可撤销的 pencil 命令，锚点更新为终点。
- * 复用当前笔画颜色/宽度/虚线样式；零长点不产生空历史（仅锚点更新）。
+ * 提交一段连线（锚点→终点）为独立可撤销的 pencil 命令，锚点更新为终点。
+ * 0.28.26：画笔 Shift 连线与线段工具（点两下/拖拽，见 index.js line 分支）共用；
+ * 两点 pencil 命令按直线段渲染，虚线样式同画笔。
+ * 零长点不产生空历史（仅锚点更新）。
  * 返回提交的命令，未提交（无锚点/零长）返回 null。
  */
 export function commitLineSegment(p) {

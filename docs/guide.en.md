@@ -138,10 +138,11 @@ Summon: `Alt+A` in the main window (empty input; can be promoted to a global hot
 |---|---|---|
 | Shortcut badges | **Hold `Alt` / `Ctrl`** | `Alt` shows tool-switching badges; `Ctrl` shows Z/Y/R badges for undo / redo / reset |
 | Cycle within group | Repeat `Alt+1`~`Alt+5` | Cycles tools within the group and briefly expands the dropdown to show the current item |
-| Wheel tunes everything | Wheel over a tool group button / thickness step / intensity·font-size slider / hue·opacity bar / preset swatches / color format | Switches tools, adjusts thickness, steps sliders, tunes color, switches formats respectively |
+| Wheel tunes everything | Wheel over a tool group button / thickness step / intensity·font-size slider / hue·opacity bar / preset swatches or the color dot / color format | Switches tools, adjusts thickness, steps sliders, tunes color, switches formats respectively; when the current color is a preset, the wheel steps through the hue ring |
 | Brush size on the canvas | Select a brush tool, then scroll inside the region | Scroll up for thicker strokes, down for thinner; the cursor shows the brush width |
 | Square constraint | Hold `Shift` while selecting / drawing rectangles or ellipses | Ratio constraint, applied live on press and release |
-| Continuous lines | Pencil tool: click to drop an anchor, hold `Shift` to preview, click to commit | Clicks chain into a polyline, each segment undoes on its own; release `Shift` or press `Esc` to end the line |
+| Line segment | Stroke-group dropdown → "Line": click to set the start (preview follows the cursor), click again to commit; or drag from press to release | Each segment undoes on its own; `Esc` cancels the pending segment first; hold `Shift` and keep clicking to chain a polyline |
+| Continuous lines (pencil) | Pencil tool: click to drop an anchor, hold `Shift` to preview, click to commit | Clicks chain into a polyline, each segment undoes on its own; release `Shift` or press `Esc` to end the line |
 | Double-click full-screen copy | Double-click the dim overlay without a selection | Copies the whole screen |
 | Right-click has three meanings | No selection = cancel / annotating = copy region / selecting text = text menu | One right-click, three semantics |
 | Silent text layer | OCR runs in the background right after you select | Drag-select text, then press `Ctrl+C` to copy; right-click can copy all text. Double-click still confirms copying the screenshot. Recognition does not open the panel automatically; click "Extract text" when needed |

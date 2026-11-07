@@ -245,6 +245,9 @@
             <button class="dropdown-item active" data-tool="pencil"><span class="item-icon"><svg aria-hidden="true"
                                                                                                  class="icon"><use
                     href="#icon-pencil"/></svg></span><span class="item-label">铅笔</span></button>
+            <button class="dropdown-item" data-tool="line"><span class="item-icon"><svg aria-hidden="true"
+                                                                                        class="icon"><use
+                    href="#icon-slash"/></svg></span><span class="item-label">线段</span></button>
             <button class="dropdown-item" data-tool="arrow"><span class="item-icon"><svg aria-hidden="true"
                                                                                          class="icon"><use
                     href="#icon-move-up-right"/></svg></span><span class="item-label">箭头</span></button>
@@ -335,16 +338,22 @@
                 <span class="color-panel-title">颜色与配色</span>
                 <span class="color-panel-drag-hint">拖动</span>
             </div>
-            <!-- 预设色阵列 -->
+            <!-- 预设色阵列（色相环排序：橙补红黄之间、青补绿蓝之间、紫补蓝→红绕回段） -->
             <div class="color-presets">
                 <button class="color-swatch active" data-color="#ff0000" style="background-color:#ff0000"
                         title="红色"></button>
+                <button class="color-swatch" data-color="#ff8c00" style="background-color:#ff8c00"
+                        title="橙色"></button>
                 <button class="color-swatch" data-color="#ffd700" style="background-color:#ffd700"
                         title="黄色"></button>
                 <button class="color-swatch" data-color="#00cc00" style="background-color:#00cc00"
                         title="绿色"></button>
+                <button class="color-swatch" data-color="#00ccff" style="background-color:#00ccff"
+                        title="青色"></button>
                 <button class="color-swatch" data-color="#0088ff" style="background-color:#0088ff"
                         title="蓝色"></button>
+                <button class="color-swatch" data-color="#aa33ff" style="background-color:#aa33ff"
+                        title="紫色"></button>
                 <button class="color-swatch" data-color="#ffffff" style="background-color:#ffffff"
                         title="白色"></button>
                 <button class="color-swatch" data-color="#000000" style="background-color:#000000"

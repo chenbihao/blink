@@ -60,9 +60,11 @@ import {
     syncRenderScale
 } from "./ss-selection-geometry.js";
 import {
+    beginHighlightLivePreview,
     clearLinePreview,
     drawDimmed,
     drawFinalSelection,
+    endHighlightLivePreview,
     redrawAnnotFull,
     redrawAnnotLinePreview,
     redrawAnnotPreview,
@@ -548,6 +550,7 @@ function resetState() {
     resetLiveSelection();
     // 0.15.10：清除快照
     ss._committedSnapshot = null;
+    endHighlightLivePreview();
     ss.isDragging = false;
     ss.isAnnotDragging = false;
     ss.isAnnotating = false;
@@ -1366,6 +1369,7 @@ function exitAnnotationMode() {
     resetLiveSelection();
     // 0.15.10：清除快照
     ss._committedSnapshot = null;
+    endHighlightLivePreview();
     const {canvas, annotCanvas, toolbar, sizeHint} = ss;
     ss.isAnnotating = false;
     ss.selCss = null;
@@ -1600,8 +1604,26 @@ canvas.addEventListener('pointerdown', (e) => {
         // 0.28.26：铅笔 Shift 点击——提交一段连线（有锚点）或只设起点（无锚点），
         // 不进入自由拖画；单独设点不写入不可见的空命令。
         // 临时平移/取色/文本输入保持原入口优先级，不受连线接管。
-        if (tool === 'pencil' && point.shiftKey && !ss._imagePan && !ss.eyedropperActive) {
-            if (annot.commitLineSegment(annotPt)) updateUndoRedoButtons();
+        // 0.28.26 补充：线段工具同语义接入 Shift 链；门禁由 `!ss._imagePan` 放宽为
+        // `!ss._imagePan?.dragging`——画布型图片编辑器 _imagePan 全程存在（仅临时
+        // 平移时 dragging 为真），原门禁使编辑器内 Shift 连线永远走不到。
+        if ((tool === 'pencil' || tool === 'line') && point.shiftKey
+            && !ss._imagePan?.dragging && !ss.eyedropperActive) {
+            // 无锚点首击只设起点（"第一次 Shift 点击只设起点"）
+            if (!annot.commitLineSegment(annotPt) && !annot.getLineAnchor()) {
+                annot.setLineAnchor(annotPt);
+            }
+            return;
+        }
+        // 0.28.26 补充：线段工具普通按下——点两下成段 / 按下拖到松开成段。
+        // 不走 startDraw 拖画机制：预览统一由锚点路径呈现（mousemove 持续更新），
+        // pointerup 按位移区分点击/拖拽后经 commitLineSegment 提交。
+        // 无锚点时按下点即新段起点；已有待定锚点不重设——第二击提交 锚点→点击点，
+        // 拖拽所见即所得提交 锚点→松开点。
+        if (tool === 'line' && !ss._imagePan?.dragging && !ss.eyedropperActive) {
+            ss._linePressSetAnchor = !annot.getLineAnchor();
+            if (ss._linePressSetAnchor) annot.setLineAnchor(annotPt);
+            ss._linePressPt = annotPt;
             return;
         }
         ss.annotStartX = annotPt.x;
@@ -1619,6 +1641,12 @@ canvas.addEventListener('pointerdown', (e) => {
             ss._committedSnapshot = snap;
         } catch (e) {
             ss._committedSnapshot = null;
+        }
+        // 0.28.26 补充：荧光笔正片叠底（brush 模式）拆预览分层——实时笔迹并入
+        // 同色满 alpha 层统一 0.55 合成，与成品"同色重叠不加深"语义一致。
+        // 构建失败由 begin 返回 false，预览回退旧的直接 0.55 路径。
+        if (tool === 'highlight-multiply' && annot.getToolMode('highlight-multiply') !== 'box') {
+            beginHighlightLivePreview();
         }
         return;
     }
@@ -1771,11 +1799,13 @@ canvas.addEventListener('pointermove', (e) => {
 
     updateStrokeCursor(e.clientX, e.clientY);
 
-    // 0.28.26：Shift 连线预览（铅笔工具、非拖拽态）——锚点到鼠标的任意角度直线。
-    // 预览 rAF 节流与拖动预览共用 _annotRaf，两者互斥（isAnnotDragging 分流）。
-    if (ss.isAnnotating && ss.selCss && annot.getTool() === 'pencil'
+    // 0.28.26：连线预览（铅笔 Shift 连线 / 线段工具待定段，非拖拽态）——
+    // 锚点到鼠标的任意角度直线。预览 rAF 节流与拖动预览共用 _annotRaf，
+    // 两者互斥（isAnnotDragging 分流）。线段工具有锚点即预览，无需修饰键。
+    const linePreviewTool = annot.getTool();
+    if (ss.isAnnotating && ss.selCss && (linePreviewTool === 'pencil' || linePreviewTool === 'line')
         && !ss.isAnnotDragging && !ss.eyedropperActive && !ss._imagePan?.dragging) {
-        if (point.shiftKey && annot.getLineAnchor()) {
+        if (annot.getLineAnchor() && (linePreviewTool === 'line' || point.shiftKey)) {
             annot.setLinePreviewEnd(annotationPoint(point));
             if (!ss._annotRaf) {
                 ss._annotRaf = requestAnimationFrame(() => {
@@ -1912,6 +1942,8 @@ canvas.addEventListener('pointerup', (e) => {
         }
         // 0.15.10：清除快照
         ss._committedSnapshot = null;
+        // 0.28.26 补充：释放荧光笔预览分层（落笔后 redrawAll 走成品合成）
+        endHighlightLivePreview();
         const annotPt = annotationPoint(point);
         ss.annotCurrentX = annotPt.x;
         ss.annotCurrentY = annotPt.y;
@@ -1959,6 +1991,32 @@ canvas.addEventListener('pointerup', (e) => {
         }
         redrawAnnotFull();
         updateUndoRedoButtons();
+        releasePointer(canvas, e);
+        return;
+    }
+
+    // 0.28.26 补充：线段工具收笔——按位移区分点击与拖拽，经 commitLineSegment 提交。
+    // Shift 链的按下在 pointerdown 已提交并 return（无 _linePressPt），此处直接放行。
+    // 第一击（本按下所设起点、未拖动）：保留锚点，预览继续跟随等待终点。
+    // 第二击（锚点先于本按下存在、未拖动）：提交 锚点→点击点。
+    // 拖拽（≥2px）：所见即所得提交 锚点→松开点（本按下新设锚时即按下→松开）。
+    // 非 Shift 提交后清锚点结束本段（零长段无命令同样放弃）；Shift 按住保留锚点续连。
+    if (ss.isAnnotating && annot.getTool() === 'line') {
+        if (!ss._linePressPt) {
+            releasePointer(canvas, e);
+            return;
+        }
+        const lineUpPt = annotationPoint(point);
+        const moved = Math.hypot(lineUpPt.x - ss._linePressPt.x, lineUpPt.y - ss._linePressPt.y);
+        let committed = null;
+        if (!ss._linePressSetAnchor || moved >= 2) {
+            committed = annot.commitLineSegment(lineUpPt);
+            if (!point.shiftKey) annot.setLineAnchor(null);
+        }
+        ss._linePressPt = null;
+        ss._linePressSetAnchor = false;
+        if (committed) updateUndoRedoButtons();
+        redrawAnnotFull();
         releasePointer(canvas, e);
         return;
     }
@@ -2071,11 +2129,16 @@ canvas.addEventListener('pointercancel', (e) => {
     // 指针被系统或浏览器回收（触屏手势介入、窗口被抢占等）：按取消处理，
     // 不把半程结果变成最终选区
     ss._predragStart = null; // 0.25.14 A1：capture 随 cancel 释放，缓存作废
-    // 0.28.26：指针取消同时清理连线锚点与预览（已提交段保留）
-    if (annot.isLinePreviewActive()) {
+    // 0.28.26：指针取消同时清理连线锚点与预览（已提交段保留）；
+    // isLinePending 兼有线段工具普通待定段（无 Shift 也算待定）。
+    if (annot.isLinePending()) {
         annot.clearLineState();
         clearLinePreview();
     }
+    ss._linePressPt = null;
+    ss._linePressSetAnchor = false;
+    // 0.28.26 补充：指针取消释放荧光笔预览分层（半程笔画不提交）
+    endHighlightLivePreview();
     if (!hasActiveDragInteraction(ss)) return;
     console.debug('[screenshot] pointercancel → abort selection interaction');
     abortSelectionInteraction(e);
@@ -2374,8 +2437,8 @@ document.addEventListener('keydown', (e) => {
     }
 
     if (e.key === 'Escape') {
-        // 0.28.26：有连线预览时先结束预览（含锚点），再遵循原退出行为
-        if (ss.isAnnotating && annot.isLinePreviewActive()) {
+        // 0.28.26：有连线预览/待定段时先结束（含锚点），再遵循原退出行为
+        if (ss.isAnnotating && annot.isLinePending()) {
             e.preventDefault();
             annot.clearLineState();
             clearLinePreview();
@@ -2454,8 +2517,8 @@ window.addEventListener('keydown', (e) => {
     if (!document.body.classList.contains('image-editor-mode')) return;
     if (document.getElementById('screenshot-layout-editor') || qrPanelVisible() || ss._actionMenuVisible?.()) return;
     if (imageEditorEscExempt(e)) return;
-    // 0.28.26：编辑器内连线预览优先结束，不整体取消编辑会话
-    if (annot.isLinePreviewActive()) {
+    // 0.28.26：编辑器内连线预览/待定段优先结束，不整体取消编辑会话
+    if (annot.isLinePending()) {
         e.preventDefault();
         e.stopPropagation();
         annot.clearLineState();
@@ -2475,12 +2538,14 @@ window.addEventListener('keydown', (e) => {
 // 0.11.8-e：矩形/椭圆拖动期间按/松 Shift 实时更新预览
 window.addEventListener('keydown', refreshShapePreviewOnShift);
 
-// 0.28.26：铅笔 Shift 连线——按下激活连线模式（预览随首个指针移动出现），
+// 0.28.26：Shift 连线——按下激活连线模式（预览随首个指针移动出现），
 // 松开结束当前连续连线及预览（锚点一并清理，不跨 Shift 会话连接）。
+// 0.28.26 补充：线段工具同门禁接入（Shift 链共用；keyup 结束链条语义一致）。
 window.addEventListener('keydown', (e) => {
     if (e.key !== 'Shift' || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
     if (!ss.isAnnotating || !ss.selCss || ss.isAnnotDragging) return;
-    if (annot.getTool() !== 'pencil') return;
+    const shiftTool = annot.getTool();
+    if (shiftTool !== 'pencil' && shiftTool !== 'line') return;
     const tgt = e.target;
     if (tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable)) return;
     annot.setLineShiftHeld(true);
@@ -2488,6 +2553,8 @@ window.addEventListener('keydown', (e) => {
 window.addEventListener('keyup', (e) => {
     if (e.key !== 'Shift') return;
     if (ss.isAnnotDragging) return;
+    // 线段工具按压中（无 isAnnotDragging 标志）不清理，交给 pointerup 按位移提交
+    if (ss._linePressPt) return;
     if (annot.setLineShiftHeld(false)) {
         clearLinePreview();
     }
