@@ -387,38 +387,70 @@ async fn install_inner(
     Ok(())
 }
 
-/// 取消等待 future：token 为 None 时永不完成（select 分支保持 pending）。
-async fn wait_cancel(cancel_token: Option<&tokio_util::sync::CancellationToken>) {
-    match cancel_token {
-        Some(ct) => ct.cancelled().await,
-        None => std::future::pending::<()>().await,
-    }
-}
-
 /// 下载发行版 zip 并校验 SHA-256（主链 + mirrors 候选；voidtools 无镜像时
 /// 候选即主链）。镜像内容与锁定 hash 不一致时拒绝——换源不放宽供应链约束。
+/// 0.28.27：候选规划带镜像优先偏好与身份；每候选连接/停滞/上限经共享下载内核。
 async fn download_archive(
     entry: &RuntimeLockEntry,
     dest: &Path,
     cancel_token: Option<&tokio_util::sync::CancellationToken>,
     reporter: &dyn InstallReporter,
 ) -> Result<(), ManagedRuntimeError> {
-    let candidates = crate::utils::mirrors::download_candidates(&entry.url);
+    download_entries(std::slice::from_ref(entry), dest, cancel_token, reporter).await
+}
+
+/// 0.28.27：多锁定条目的统一候选下载——各条目候选合并去重后按「国内镜像优先」
+/// 偏好统一排序（如 FFmpeg：Gyan 与官方 GitHub 为官方组、加速代理为镜像组）。
+/// 官方锁定源摘要异常显式失败（同摘要多官方源互为校验，异常不值得继续）；
+/// 镜像/代理摘要异常可继续下一候选。
+async fn download_entries(
+    entries: &[RuntimeLockEntry],
+    dest: &Path,
+    cancel_token: Option<&tokio_util::sync::CancellationToken>,
+    reporter: &dyn InstallReporter,
+) -> Result<(), ManagedRuntimeError> {
+    // 候选规划（0.28.28 修复）：逐条目展开身份化候选去重后，对**合并后的总列表**
+    // 统一按「国内镜像优先」重排——逐条目各自排序不会跨条目生效，镜像优先时
+    // Gyan 主源必须排在 GitHub 条目的加速代理之后。任务开始时固定偏好快照，
+    // 切换只影响新任务。
+    let urls: Vec<&str> = entries.iter().map(|e| e.url.as_str()).collect();
+    let candidates = crate::utils::mirrors::combine_candidates_with_preference(
+        &urls,
+        crate::utils::mirrors::prefer_cn_mirror(),
+    );
+    tracing::debug!(
+        resource = %entries.first().map(|e| e.url.as_str()).unwrap_or(""),
+        candidates = candidates.len(),
+        mirror_first = crate::utils::mirrors::prefer_cn_mirror(),
+        "托管运行时下载候选规划"
+    );
+
+    // 官方主源集合：锁定条目自身的 URL（摘要异常显式失败的对象）
+    let official_primaries: std::collections::HashSet<&str> =
+        entries.iter().map(|e| e.url.as_str()).collect();
+    let lock = entries.first();
     let mut last_err: Option<ManagedRuntimeError> = None;
     for (idx, candidate) in candidates.iter().enumerate() {
+        let Some(entry) = lock else { break };
         let has_next = idx + 1 < candidates.len();
-        match download_once(entry, candidate, dest, cancel_token, reporter).await {
+        let is_official_primary = official_primaries.contains(candidate.url.as_str());
+        match download_once(entry, &candidate.url, dest, cancel_token, reporter).await {
             Ok(()) => return Ok(()),
             Err(e) => {
                 if matches!(e, ManagedRuntimeError::Cancelled) {
                     return Err(e);
                 }
-                if matches!(e, ManagedRuntimeError::ChecksumMismatch { .. })
-                    && candidate.as_str() == entry.url
-                {
+                // 官方锁定源摘要异常显式失败；镜像/代理异常可继续下一候选
+                if matches!(e, ManagedRuntimeError::ChecksumMismatch { .. }) && is_official_primary {
                     return Err(e);
                 }
-                tracing::warn!(url = candidate.as_str(), error = %e, has_next, "托管运行时下载失败");
+                tracing::warn!(
+                    url = %crate::utils::download::sanitize_url_for_log(&candidate.url),
+                    kind = ?candidate.kind,
+                    error = %e,
+                    has_next,
+                    "托管运行时下载失败"
+                );
                 if has_next {
                     reporter.on_log(
                         "warn",
@@ -434,10 +466,12 @@ async fn download_archive(
         }
     }
     Err(last_err
-        .unwrap_or_else(|| ManagedRuntimeError::Download(format!("无可用下载源 ({})", entry.url))))
+        .unwrap_or_else(|| ManagedRuntimeError::Download(format!("无可用下载源 ({})", entries.first().map(|e| e.url.as_str()).unwrap_or("")))))
 }
 
 /// 单候选源下载 + 全量 SHA-256 校验（流式 hash，覆盖写 staging 独占文件）。
+/// 0.28.27：传输统一走共享下载内核（请求超时 + 响应体停滞判定 + 锁定大小上限 +
+/// 取消），失败即清理暂存文件。
 async fn download_once(
     entry: &RuntimeLockEntry,
     url: &str,
@@ -445,90 +479,69 @@ async fn download_once(
     cancel_token: Option<&tokio_util::sync::CancellationToken>,
     reporter: &dyn InstallReporter,
 ) -> Result<(), ManagedRuntimeError> {
-    use futures::StreamExt;
-    use tokio::io::AsyncWriteExt;
-
     if let Some(ct) = cancel_token
         && ct.is_cancelled()
     {
         return Err(ManagedRuntimeError::Cancelled);
     }
 
-    // 0.27.4：经 net 工厂（Download 类别，代理策略生效）；总超时按请求注入
+    // 0.27.4：经 net 工厂（Download 类别，代理策略生效）
     let client = crate::net::client(crate::net::RequestCategory::Download);
-
-    let response = tokio::select! {
-        r = client.get(url).timeout(std::time::Duration::from_secs(600)).send() => {
-            r.map_err(|e| ManagedRuntimeError::Download(format!("下载失败: {e}")))?
-        }
-        _ = wait_cancel(cancel_token) => {
-            return Err(ManagedRuntimeError::Cancelled);
-        }
+    let progress_total = Some(entry.size_bytes);
+    let mut hasher = Sha256::new();
+    let limits = crate::utils::download::StreamLimits {
+        request_timeout: std::time::Duration::from_secs(600),
+        stall_timeout: std::time::Duration::from_secs(30),
+        max_bytes: Some(entry.size_bytes),
+    };
+    let mut on_progress = |written: u64, total: Option<u64>| {
+        // 进度节流交给 reporter；这里只在流自然推进时转发
+        let _ = total;
+        reporter.on_progress(written, progress_total);
     };
 
-    if !response.status().is_success() {
-        return Err(ManagedRuntimeError::Download(format!(
-            "HTTP {}",
-            response.status()
-        )));
-    }
+    let outcome = crate::utils::download::stream_to_file(
+        &client,
+        url,
+        dest,
+        &limits,
+        cancel_token,
+        &mut on_progress,
+        |chunk| hasher.update(chunk),
+    )
+    .await;
 
-    if response
-        .content_length()
-        .is_some_and(|n| n > entry.size_bytes)
-    {
-        return Err(ManagedRuntimeError::Download("下载超过锁定大小".into()));
-    }
-    let progress_total = response.content_length().or(Some(entry.size_bytes));
-    let mut hasher = Sha256::new();
-    let mut stream = response.bytes_stream();
-    let mut written: u64 = 0;
-
-    let mut file = tokio::fs::File::create(dest).await?;
-    loop {
-        tokio::select! {
-            chunk = tokio::time::timeout(std::time::Duration::from_secs(30), stream.next()) => {
-                let chunk = chunk.map_err(|_| ManagedRuntimeError::Download("下载响应体连续 30 秒无进度".into()))?;
-                match chunk {
-                    Some(Ok(bytes)) => {
-                        if bytes.len() as u64 > entry.size_bytes.saturating_sub(written) {
-                            return Err(ManagedRuntimeError::Download("下载超过锁定大小".into()));
-                        }
-                        hasher.update(&bytes);
-                        file.write_all(&bytes).await?;
-                        written += bytes.len() as u64;
-                        reporter.on_progress(written, progress_total);
-                    }
-                    Some(Err(e)) => {
-                        let _ = tokio::fs::remove_file(dest).await;
-                        return Err(ManagedRuntimeError::Download(format!(
-                            "下载流读取失败: {e}"
-                        )));
-                    }
-                    None => break,
-                }
-            }
-            _ = wait_cancel(cancel_token) => {
+    match outcome {
+        Ok(out) => {
+            let written = out.bytes;
+            if written != entry.size_bytes {
                 let _ = tokio::fs::remove_file(dest).await;
-                return Err(ManagedRuntimeError::Cancelled);
+                return Err(ManagedRuntimeError::Download("下载大小与锁定值不符".into()));
             }
+            let actual = format!("{:x}", hasher.finalize());
+            if actual != entry.sha256.to_lowercase() {
+                let _ = tokio::fs::remove_file(dest).await;
+                return Err(ManagedRuntimeError::ChecksumMismatch {
+                    expected: entry.sha256.clone(),
+                    actual,
+                });
+            }
+            tracing::debug!(
+                url = %crate::utils::download::sanitize_url_for_log(url),
+                bytes = written,
+                speed = %crate::utils::download::format_speed(written, out.elapsed),
+                "托管运行时 zip 下载完成且 hash 匹配"
+            );
+            Ok(())
+        }
+        Err(crate::utils::download::AttemptError::Cancelled) => Err(ManagedRuntimeError::Cancelled),
+        Err(crate::utils::download::AttemptError::Local { reason }) => {
+            Err(ManagedRuntimeError::Download(reason))
+        }
+        Err(crate::utils::download::AttemptError::Retryable { reason }) => {
+            Err(ManagedRuntimeError::Download(reason))
         }
     }
-    file.flush().await?;
-    if written != entry.size_bytes {
-        return Err(ManagedRuntimeError::Download("下载大小与锁定值不符".into()));
-    }
-
-    let actual = format!("{:x}", hasher.finalize());
-    if actual != entry.sha256.to_lowercase() {
-        let _ = tokio::fs::remove_file(dest).await;
-        return Err(ManagedRuntimeError::ChecksumMismatch {
-            expected: entry.sha256.clone(),
-            actual,
-        });
-    }
-    tracing::debug!(url, bytes = written, "托管运行时 zip 下载完成且 hash 匹配");
-    Ok(())
 }
 
 /// 解压 zip 全部 entry 到 `dest`（zip slip 防护：拒绝绝对路径 / 盘符 / `..` 段）。

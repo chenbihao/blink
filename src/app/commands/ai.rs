@@ -550,7 +550,13 @@ pub async fn chat_prompt(
                 EventNames::CHAT_STREAM,
                 &event,
             );
-            if is_done {
+            // 0.28.28：终态后不立即退出——继续等 agent task 的 Ready（请求槽已
+            // 释放，可续发边界）并转发给前端；abort/异常路径由发送端 drop 兜底
+            //（recv 返回 None 自然结束，最终 flush 语义不变）。
+            if matches!(
+                event.chunk,
+                crate::domain::ai::agent_provider::ChatStreamChunk::Ready
+            ) {
                 break;
             }
         }

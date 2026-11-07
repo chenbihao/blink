@@ -110,3 +110,26 @@
     width: 12px;
     height: 12px;
 }
+
+/* ── 0.28.28：组合提问行（结合划词问 AI · 已选 N 字）行内原文预览 ─────────
+   预览占据行内剩余宽度，过长由 JS 中段省略；无剩余空间时不显示。
+   材料展开在 AI 会话气泡处（可撑开窗口），建议条不提供展开。 */
+.suggestion-row.suggestion-askai-combined {
+    display: flex;
+    align-items: center;
+}
+
+/* 标签固定宽（基础 .suggestion-text 的 flex:1 会吃掉整行，预览必须挤为 0） */
+.suggestion-row.suggestion-askai-combined .suggestion-text {
+    flex: 0 0 auto;
+}
+
+.suggestion-preview-inline {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    opacity: 0.55;
+    font-size: 0.85em;
+    padding-left: var(--space-sm);
+}

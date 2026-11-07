@@ -40,6 +40,7 @@ import {layoutOverlayText, OVERLAY_FONT_FAMILY} from './overlay-text-layout.js';
 
 /** 当前工具类型 */
 let currentTool = 'rect';
+
 /** 当前颜色 */
 let currentColor = '#ff0000';
 /** 0.15.1：分类配置 store（替代单一 currentWidth）
@@ -158,6 +159,159 @@ function releaseCanvas(c) {
     }
 }
 
+// ── 0.28.26：Shift 连续直线状态（铅笔工具，图片坐标系物理像素）──────────
+// 锚点/预览终点都保存在图片（物理像素）坐标，CSS↔位图换算沿用调用方现有
+// annotationPoint 链路；图片平移/缩放和混合 DPI 下预览与点击落点一致。
+/** 当前连线锚点（{x,y} | null）。来自普通点击、上一笔结束位置或已提交段终点。 */
+let lineAnchor = null;
+/** Shift 是否按住（连线模式激活中）。松开即结束当前连续连线及预览。 */
+let lineShiftHeld = false;
+/** 最新预览终点（{x,y} | null）——Shift 按住期间跟随鼠标。 */
+let linePreviewEnd = null;
+/** 已提交内容版本号——redrawAll/reset 每次递增，供预览快照失效判断。 */
+let commitVersion = 0;
+
+/** 设置连线锚点（null 清除）。坐标为图片物理像素。 */
+export function setLineAnchor(p) {
+    lineAnchor = p ? {x: p.x, y: p.y} : null;
+}
+
+/** 读取当前连线锚点（只读副本）。 */
+export function getLineAnchor() {
+    return lineAnchor ? {...lineAnchor} : null;
+}
+
+/** 标记 Shift 按住/松开。松开 = 结束当前连续连线及预览（锚点一并清理，
+ *  再按 Shift 时由普通点击/上一笔终点/首击重新设起点）。 */
+export function setLineShiftHeld(held) {
+    const changed = lineShiftHeld !== !!held;
+    lineShiftHeld = !!held;
+    if (!lineShiftHeld) {
+        linePreviewEnd = null;
+        lineAnchor = null;
+    }
+    return changed;
+}
+
+/** 更新预览终点（Shift 按住期间鼠标最新位置）。 */
+export function setLinePreviewEnd(p) {
+    linePreviewEnd = p ? {x: p.x, y: p.y} : null;
+}
+
+/** 读取最新预览终点（只读副本）。 */
+export function getLinePreviewEnd() {
+    return linePreviewEnd ? {...linePreviewEnd} : null;
+}
+
+/** 连线预览是否处于激活态（Shift 按住且有锚点，可能正在显示预览线）。 */
+export function isLinePreviewActive() {
+    return lineShiftHeld && !!lineAnchor;
+}
+
+/** 清理连线状态（工具切换/撤销/重做/清空/会话切换/指针取消时调）。
+ *  已提交段保留；锚点不跨会话或跨操作连接。 */
+export function clearLineState() {
+    lineAnchor = null;
+    lineShiftHeld = false;
+    linePreviewEnd = null;
+}
+
+/** 0.28.26：丢弃进行中的笔画点列（铅笔点击设锚点路径，不提交命令）。 */
+export function discardActiveStroke() {
+    currentPoints = [];
+}
+
+/** 读取已提交内容版本号（预览快照失效判断用）。 */
+export function getCommitVersion() {
+    return commitVersion;
+}
+
+/**
+ * 提交一段 Shift 连线（锚点→终点）为独立可撤销的 pencil 命令，锚点更新为终点。
+ * 复用当前笔画颜色/宽度/虚线样式；零长点不产生空历史（仅锚点更新）。
+ * 返回提交的命令，未提交（无锚点/零长）返回 null。
+ */
+export function commitLineSegment(p) {
+    if (!lineAnchor) return null;
+    const end = {x: p.x, y: p.y};
+    const dx = end.x - lineAnchor.x;
+    const dy = end.y - lineAnchor.y;
+    const prevAnchor = {...lineAnchor};
+    lineAnchor = end;
+    if (Math.hypot(dx, dy) < 0.5) return null;  // 零长点不写入不可见的空命令
+    const cmd = {
+        type: 'pencil',
+        points: [prevAnchor, end],
+        color: currentColor,
+        width: config.stroke.width,
+        fill: false,
+        style: config.stroke.style,
+    };
+    commands = commands.slice(0, undoIndex + 1);
+    commands.push(cmd);
+    undoIndex = commands.length - 1;
+    redrawAll();
+    return cmd;
+}
+
+/**
+ * 0.28.26：箭头几何与绘制（预览与最终命令共用的唯一实现）。
+ *
+ * 实心三角头部替代旧"两翼独立粗线拼接"——独立子路径的端帽无法连续成尖角，
+ * 仅设置 lineJoin 不能跨子路径连接，粗线箭头尖端会出现凹口。
+ * - 头部长度随线宽变化，并按箭头总长度限幅（不越过起点反向）
+ * - 箭杆止于头部底边附近并少量重叠（同色满 alpha 无接缝）；虚线只作用于箭杆，头部实心
+ * - 零长退化：实心圆点；极短箭头整体退化为头部
+ *
+ * @param {CanvasRenderingContext2D} c 目标上下文
+ * @param {{x:number,y:number}} p1 起点（尾）
+ * @param {{x:number,y:number}} p2 终点（尖）
+ * @param {{color:string, width:number, dashed?:boolean}} opts 颜色/线宽/虚线
+ */
+export function drawArrowShape(c, p1, p2, opts) {
+    const width = (opts && opts.width > 0) ? opts.width : 4;
+    const color = (opts && opts.color) || currentColor;
+    const dx = p2.x - p1.x;
+    const dy = p2.y - p1.y;
+    const len = Math.hypot(dx, dy);
+    c.save();
+    c.strokeStyle = color;
+    c.fillStyle = color;
+    c.lineWidth = width;
+    c.lineCap = 'round';
+    c.lineJoin = 'round';
+    if (len < 0.75) {
+        // 零长退化：实心圆点（半径跟随线宽），有明确可见结果
+        c.beginPath();
+        c.arc(p1.x, p1.y, Math.max(width / 2, 1), 0, Math.PI * 2);
+        c.fill();
+        c.restore();
+        return;
+    }
+    const angle = Math.atan2(dy, dx);
+    // 头部长度：随线宽变化（与旧版 6×width 比例一致），按总长限幅
+    const headLen = Math.min(width * 6, len);
+    const halfAngle = 0.4;
+    // 箭杆止于头部底边附近并少量重叠（重叠 1/4 头长）；极短箭头无箭杆
+    const shaftLen = len - headLen * 0.75;
+    if (shaftLen > 0) {
+        if (opts && opts.dashed) c.setLineDash([8, 4]);
+        c.beginPath();
+        c.moveTo(p1.x, p1.y);
+        c.lineTo(p1.x + Math.cos(angle) * shaftLen, p1.y + Math.sin(angle) * shaftLen);
+        c.stroke();
+        c.setLineDash([]);
+    }
+    // 实心三角头部（单个闭合子路径，无端帽接缝）
+    c.beginPath();
+    c.moveTo(p2.x, p2.y);
+    c.lineTo(p2.x - headLen * Math.cos(angle - halfAngle), p2.y - headLen * Math.sin(angle - halfAngle));
+    c.lineTo(p2.x - headLen * Math.cos(angle + halfAngle), p2.y - headLen * Math.sin(angle + halfAngle));
+    c.closePath();
+    c.fill();
+    c.restore();
+}
+
 // ── 初始化和重置 ──────────────────────────────────────
 
 /** 绑定标注 canvas */
@@ -175,6 +329,8 @@ export function reset(cropW, cropH, cropImageDataRef, sourceCanvas = null) {
     commands = [];
     undoIndex = -1;
     currentPoints = [];
+    clearLineState();  // 0.28.26：锚点不跨会话连接
+    commitVersion++;
     cropImageData = cropImageDataRef;
     if (ownsCropSourceCanvas && cropSourceCanvas) {
         cropSourceCanvas.width = 0;
@@ -490,25 +646,14 @@ export function executeCommand(cmd, targetCtx) {
             }
             break;
         case 'arrow':
+            // 0.28.26：几何与绘制统一走 drawArrowShape（实心三角头部），
+            // 与 ss-draw 预览、图片编辑/导出、录制涂画共用同一形状。
             if (cmd.points.length >= 2) {
-                const [p1, p2] = cmd.points;
-                const angle = Math.atan2(p2.y - p1.y, p2.x - p1.x);
-                const headLen = 12 * (cmd.width || getWidthForTool(cmd.type)) / 2;
-                c.strokeStyle = cmd.color || currentColor;
-                c.lineWidth = cmd.width || getWidthForTool(cmd.type);
-                if (cmd.style === 'dashed' || (cmd.style === undefined && config.stroke.style === 'dashed')) c.setLineDash([8, 4]);
-                c.beginPath();
-                c.moveTo(p1.x, p1.y);
-                c.lineTo(p2.x, p2.y);
-                c.stroke();
-                c.setLineDash([]);
-                // 箭头头部
-                c.beginPath();
-                c.moveTo(p2.x, p2.y);
-                c.lineTo(p2.x - headLen * Math.cos(angle - 0.4), p2.y - headLen * Math.sin(angle - 0.4));
-                c.moveTo(p2.x, p2.y);
-                c.lineTo(p2.x - headLen * Math.cos(angle + 0.4), p2.y - headLen * Math.sin(angle + 0.4));
-                c.stroke();
+                drawArrowShape(c, cmd.points[0], cmd.points[1], {
+                    color: cmd.color || currentColor,
+                    width: cmd.width || getWidthForTool(cmd.type),
+                    dashed: cmd.style === 'dashed' || (cmd.style === undefined && config.stroke.style === 'dashed'),
+                });
             }
             break;
         case 'pencil':
@@ -972,6 +1117,7 @@ export function clearAll() {
     overlayLayer = null;
     currentPoints = [];
     pendingTextCmd = null;
+    clearLineState();  // 0.28.26：清空标注同时结束连线
     _loadingSnapshot = null;
     _skipLoadingSpinner = false;
     redrawAll();
@@ -1400,6 +1546,7 @@ export function canRedo() {
  */
 function redrawAll() {
     if (!ctx || !canvas) return;
+    commitVersion++;  // 0.28.26：已提交内容变化，预览快照失效
     // H2 优化：loading 期间跳过 spinner 绘制，先渲染快照（含文字/标注），再画 spinner
     const isLoading = overlayLayer && overlayLayer.loading && overlayLayer.mode === 'translated';
     if (isLoading) _skipLoadingSpinner = true;

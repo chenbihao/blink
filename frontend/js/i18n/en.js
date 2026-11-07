@@ -326,6 +326,8 @@ export const en = {
     // ── General tab ──
     "general.auto_start.label": "Launch at startup",
     "general.auto_start.hint": "Start automatically on boot",
+    "general.prefer_cn_mirror.label": "Prefer CN mirrors for downloads",
+    "general.prefer_cn_mirror.hint": "Try mirrors first for managed downloads (runtimes/models/plugin packages/app updates), fall back to official sources on failure; order only, verification unchanged",
     "general.language.label": "Language",
     "general.language.hint": "UI language, applies immediately",
     "general.theme.label": "Theme",
@@ -1050,6 +1052,10 @@ export const en = {
     "voice.overlay.error": "Dictation failed. Return to the editor and try again",
     "ai.lede": "Manage AI providers, models, and the main-window AI hint. Keys are stored in Windows Credential Manager; SQLite only keeps a reference.",
     "ai.followup_placeholder": "Ask follow-up…",
+    "ai.config.load_failed": "Failed to load AI config, current content kept: {error}",
+    "ai.pending_hint": "Sends after the current answer finishes (Enter to confirm)",
+    "ai.material.expander": "Selected {count} chars · quoted material",
+    "ai.material.expander_long": "Selected {count} chars · quoted material (long, may exceed context budget)",
     // ── Main window AI mode (0.17.6) ──
     "ai.confirm_title": "Confirmation Required",
     "ai.confirm_reject": "Reject",
@@ -1763,6 +1769,8 @@ export const en = {
 
     // ── Smart Tab suggestion system (0.24) ──
     "suggestionbar.ask_ai": "Ask AI",
+    "suggestionbar.ask_ai_combined": "Ask AI with selection · {count} chars",
+    "suggestionbar.ask_ai_input_only": "Ask AI with input only",
     "suggestionbar.ask_ai_with": "Ask AI \"{text}\"",
     "suggestionbar.completion_to": "Complete → {target}",
     // Open-target kinds (0.24.8): display carries the target (URL/path)

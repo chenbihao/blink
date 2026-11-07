@@ -318,16 +318,37 @@ impl SuggestionCoordinator {
         } else {
             query_pool.first().cloned()
         };
+        // 0.28.28：AskAi 组合对——primary 为携带划词材料的组合提问时，secondary
+        // 优先取同 Kind 的「仅用输入」变体（成对占槽：同 Kind 不互相去重、
+        // 不被无关辅助建议替换，且不受 secondary_min_rank 拦截——对是确定成对
+        // 产出的，门槛只会拆散它）。
+        let paired_secondary = primary.as_ref().filter(|p| {
+            p.kind == SuggestionKind::AskAi && p.action.ai_selection_material().is_some()
+        })
+        .and_then(|p| {
+            query_pool
+                .iter()
+                .chain(awareness_pool.iter())
+                .find(|s| {
+                    s.kind == SuggestionKind::AskAi
+                        && s.id != p.id
+                        && s.action.ai_selection_material().is_none()
+                })
+                .cloned()
+        });
+        let is_paired_secondary = paired_secondary.is_some();
         // secondary：层序中与 primary Kind 互异的次位（primary 轮空时即层序首位）
-        let secondary = query_pool
-            .iter()
-            .chain(awareness_pool.iter())
-            .find(|s| primary.as_ref().map_or(true, |p| p.kind != s.kind))
-            .cloned();
+        let secondary = paired_secondary.or_else(|| {
+            query_pool
+                .iter()
+                .chain(awareness_pool.iter())
+                .find(|s| primary.as_ref().map_or(true, |p| p.kind != s.kind))
+                .cloned()
+        });
 
         let mut output = CoordinateOutput::default();
         output.primary = primary;
-        // secondary 双闸（0.24.5 §5.6）：展示开关 + rank 门槛
+        // secondary 双闸（0.24.5 §5.6）：展示开关 + rank 门槛（组合对豁免门槛）
         if let Some(second) = secondary {
             if !input.config.secondary_enabled {
                 tracing::debug!(
@@ -335,7 +356,7 @@ impl SuggestionCoordinator {
                     reason = %FilterReason::SecondaryDisabled,
                     "secondary 槽被设置页关闭"
                 );
-            } else if second.rank_score >= input.config.secondary_min_rank {
+            } else if is_paired_secondary || second.rank_score >= input.config.secondary_min_rank {
                 output.secondary = Some(second);
             }
         }
@@ -423,6 +444,7 @@ fn ai_trigger_suggestion(arg: &str) -> Suggestion {
         kind: SuggestionKind::AskAi,
         action: SuggestionAction::EnterAiMode {
             prompt: arg.to_string(),
+            selection: None,
         },
         rank_score: 1.0,
         display: "按 Tab 问 AI".to_string(),
@@ -761,6 +783,68 @@ mod tests {
         assert!(out2.secondary.is_none());
     }
 
+    /// 0.28.28：AskAi 组合对——primary 携带划词材料时 secondary 成对取「仅输入」
+    /// 变体（同 Kind 不互相去重、不被无关辅助建议替换、不受 secondary_min_rank 拦截）。
+    #[test]
+    fn combined_askai_pairs_with_input_only_variant() {
+        fn make_askai(id: &str, rank: f64, selection: Option<&str>) -> Suggestion {
+            Suggestion {
+                action: SuggestionAction::EnterAiMode {
+                    prompt: "问题".to_string(),
+                    selection: selection.map(|s| s.to_string()),
+                },
+                ..make_sug(id, SuggestionKind::AskAi, rank, None)
+            }
+        }
+        let mut coordinator = SuggestionCoordinator::new();
+        coordinator.register(Arc::new(MockProducer::new(
+            SuggestionSource::Ai,
+            vec![
+                make_askai("ai-combined", 0.81, Some("划词材料")),
+                // 0.55 < 默认 secondary_min_rank 0.60：成对豁免门槛的验证点
+                make_askai("ai-fallback", 0.55, None),
+                // 无关辅助建议：rank 低于组合候选；若配对失效，generic 规则会拿它当 secondary
+                make_sug("translate-query", SuggestionKind::Translate, 0.70, None),
+            ],
+        )));
+        let s = snap();
+        let mut i = input("这是个问题", &s);
+        i.availability.ai_available = true;
+        let (out, _) = coordinator.coordinate(&i, &mut fresh_fatigue());
+        let p = out.primary.expect("组合候选应为 primary");
+        assert_eq!(p.id, "ai-combined", "组合候选 rank 0.81 高于仅输入变体");
+        assert!(p.action.ai_selection_material().is_some());
+        let sec = out.secondary.expect("成对辅助建议应占 secondary");
+        assert_eq!(sec.id, "ai-fallback", "同 Kind「仅输入」变体成对占槽，不被 translate 替换");
+        assert!(sec.action.ai_selection_material().is_none());
+    }
+
+    /// 0.28.28：primary 非组合 AskAi 时配对规则不生效，generic 互异 Kind 规则照旧。
+    #[test]
+    fn plain_askai_keeps_generic_secondary_rule() {
+        let mut coordinator = SuggestionCoordinator::new();
+        coordinator.register(Arc::new(MockProducer::new(
+            SuggestionSource::Ai,
+            vec![make_sug("ai-query", SuggestionKind::AskAi, 0.80, None)],
+        )));
+        coordinator.register(Arc::new(MockProducer::new(
+            SuggestionSource::Context,
+            vec![make_sug(
+                "translate-selection",
+                SuggestionKind::Translate,
+                0.92,
+                Some(SuggestionOrigin::Selection),
+            )],
+        )));
+        let s = snap();
+        let mut i = input("这是个问题", &s);
+        i.availability.ai_available = true;
+        let (out, _) = coordinator.coordinate(&i, &mut fresh_fatigue());
+        assert_eq!(out.primary.unwrap().id, "ai-query");
+        // 非 AskAi primary：配对规则不生效，generic 互异 Kind 规则照旧选 translate
+        assert_eq!(out.secondary.expect("generic 规则正常选次位").id, "translate-selection");
+    }
+
     /// eligibility RouteHit：确定路由下 query 派生 Translate/AskAi 排除，Completion 豁免。
     #[test]
     fn routed_suppresses_query_derived_but_not_completion() {
@@ -846,7 +930,7 @@ mod tests {
         let p = out.primary.unwrap();
         assert_eq!(p.id, "ai-trigger");
         assert_eq!(p.kind, SuggestionKind::AskAi);
-        assert!(matches!(p.action, SuggestionAction::EnterAiMode { prompt } if prompt == "hello"));
+        assert!(matches!(p.action, SuggestionAction::EnterAiMode { prompt, .. } if prompt == "hello"));
         assert!(out.secondary.is_none());
     }
 

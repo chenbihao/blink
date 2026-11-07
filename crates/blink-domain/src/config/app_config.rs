@@ -183,11 +183,20 @@ pub struct ChordTogglesUpdate {
     pub chord_hint_visible: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// network 分片更新载荷（0.27.4 建立）。
+///
+/// 0.28.27 改为**字段补丁**语义：`None` = 保持现值（通用页镜像开关与代理表单
+/// 互不覆盖——各自只发送自己负责的字段）。空串仍归一为"该协议直连"。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GlobalProxyUpdate {
-    pub http: String,
-    pub https: String,
+    #[serde(default)]
+    pub http: Option<String>,
+    #[serde(default)]
+    pub https: Option<String>,
+    /// 优先使用国内镜像下载（None = 保持现值）。
+    #[serde(default)]
+    pub prefer_cn_mirror: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

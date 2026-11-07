@@ -52,19 +52,13 @@ async fn prepare(
 ) -> Result<(), Error> {
     reporter.on_stage("downloading");
     let archive = staging.join(format!("archive.{}", lock.archive_format.extension()));
-    let download = async {
-        match super::super::download_archive(&lock.runtime, &archive, Some(cancel), reporter).await
-        {
-            Ok(()) => Ok(()),
-            Err(error @ (Error::Cancelled | Error::ChecksumMismatch { .. })) => Err(error),
-            Err(_) => {
-                reporter.on_log("info", "主下载源不可用，尝试同摘要的官方 GitHub 发行源");
-                let mut fallback = lock.runtime.clone();
-                fallback.url = lock.fallback_url.clone();
-                super::super::download_archive(&fallback, &archive, Some(cancel), reporter).await
-            }
-        }
-    };
+    // 0.28.27：Gyan 与官方 GitHub 主源、加速代理合并为统一候选列表，
+    // 按「国内镜像优先」偏好一次排序（关闭 = Gyan → 官方 GitHub → 代理；
+    // 开启 = 代理 → Gyan → 官方 GitHub）。同摘要同大小校验对全部候选生效。
+    let mut fallback = lock.runtime.clone();
+    fallback.url = lock.fallback_url.clone();
+    let entries = [lock.runtime.clone(), fallback];
+    let download = super::super::download_entries(&entries, &archive, Some(cancel), reporter);
     tokio::time::timeout(std::time::Duration::from_secs(900), download)
         .await
         .map_err(|_| Error::Download("媒体运行时下载超过总时限".into()))??;

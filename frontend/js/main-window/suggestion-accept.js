@@ -70,8 +70,10 @@ export function acceptSuggestion(suggestion, slot, revision, hooks = {}) {
     reportSuggestionAdoption(suggestion.id, slot, revision).catch(() => {});
 
     if (action.enterAiMode) {
-        // AskAi：不改输入框，直接进主窗口 AI 模式（ChatService ephemeral 对话）
-        aiMode.enterAiMode(action.enterAiMode.prompt);
+        // AskAi：不改输入框，直接进主窗口 AI 模式（ChatService ephemeral 对话）。
+        // 0.28.28：selection 为可选划词引用材料（组合提问）——预览与发送使用
+        // 同一份材料，问题与材料在模型输入边界组合。
+        aiMode.enterAiMode(action.enterAiMode.prompt, action.enterAiMode.selection || null);
         return true;
     }
 

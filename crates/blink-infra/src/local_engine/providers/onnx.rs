@@ -130,7 +130,12 @@ async fn download_and_verify(
                 if matches!(&e, RuntimeError::ChecksumMismatch { .. }) && candidate.as_str() == url {
                     return Err(e);
                 }
-                tracing::warn!(url = candidate.as_str(), error = %e, has_next, "下载失败");
+                tracing::warn!(
+                    url = %crate::utils::download::sanitize_url_for_log(candidate),
+                    error = %e,
+                    has_next,
+                    "下载失败"
+                );
                 if let Some(s) = sink {
                     s.on_log(
                         "warn",
@@ -162,6 +167,7 @@ async fn download_and_verify(
 /// 下载完成后校验 hash；为 `None` 时跳过校验（调用方自行负责后续校验）。
 /// `expected_size` 用于进度总量（Content-Length 缺失时的 fallback），
 /// 不做下载后的大小断言——大小校验由调用方按 asset-lock 执行。
+/// 0.28.27：传输统一走共享下载内核（请求超时 + 响应体停滞判定 + 取消）。
 async fn download_and_verify_once(
     url: &str,
     expected_sha256: Option<&str>,
@@ -170,9 +176,11 @@ async fn download_and_verify_once(
     cancel_token: Option<&tokio_util::sync::CancellationToken>,
     sink: Option<&dyn InstallSink>,
 ) -> Result<u64, RuntimeError> {
-    use tokio::io::AsyncWriteExt;
-
-    tracing::info!(url = url, dest = %dest.display(), "开始下载");
+    tracing::info!(
+        url = %crate::utils::download::sanitize_url_for_log(url),
+        dest = %dest.display(),
+        "开始下载"
+    );
 
     if let Some(s) = sink {
         s.on_log("info", &format!("正在下载: {url}"));
@@ -187,34 +195,8 @@ async fn download_and_verify_once(
         });
     }
 
-    // 0.27.4：经 net 工厂（Download 类别，代理策略生效）；总超时按请求注入
+    // 0.27.4：经 net 工厂（Download 类别，代理策略生效）
     let client = crate::net::client(crate::net::RequestCategory::Download);
-
-    let response = tokio::select! {
-        r = client.get(url).timeout(std::time::Duration::from_secs(300)).send() => {
-            r.map_err(|e| RuntimeError::InstallFailed {
-                message: format!("下载失败: {e}"),
-            })?
-        }
-        _ = async {
-            if let Some(ct) = cancel_token {
-                ct.cancelled().await;
-            }
-        } => {
-            return Err(RuntimeError::OperationCancelled {
-                message: format!("下载被取消: {url}"),
-            });
-        }
-    };
-
-    if !response.status().is_success() {
-        return Err(RuntimeError::InstallFailed {
-            message: format!("下载失败: HTTP {}", response.status()),
-        });
-    }
-
-    // bytes_stream 会消费 response，先取出 Content-Length 供进度展示
-    let content_length = response.content_length();
 
     // 创建临时文件（同目录，下载完成后 rename）
     let tmp_name = format!(
@@ -226,53 +208,46 @@ async fn download_and_verify_once(
         std::fs::create_dir_all(p)?;
     }
 
-    let mut file = tokio::fs::File::create(&tmp_path)
-        .await
-        .map_err(RuntimeError::Io)?;
-
     let mut hasher = Sha256::new();
-    let mut stream = response.bytes_stream();
-    use futures::StreamExt;
-    let mut total_written: u64 = 0;
     // 进度总量：Content-Length 优先，缺失时 fallback 到调用方给的已知大小
-    let progress_total = content_length.or(expected_size);
+    let progress_total = expected_size;
+    let limits = crate::utils::download::StreamLimits {
+        request_timeout: std::time::Duration::from_secs(300),
+        stall_timeout: std::time::Duration::from_secs(30),
+        max_bytes: None,  // 大小校验由调用方按 asset-lock 执行
+    };
 
-    loop {
-        tokio::select! {
-            chunk = stream.next() => {
-                match chunk {
-                    Some(Ok(bytes)) => {
-                        hasher.update(&bytes);
-                        file.write_all(&bytes).await.map_err(RuntimeError::Io)?;
-                        total_written += bytes.len() as u64;
-                        if let Some(s) = sink {
-                            s.on_progress(total_written, progress_total);
-                        }
-                    }
-                    Some(Err(e)) => {
-                        let _ = tokio::fs::remove_file(&tmp_path).await;
-                        return Err(RuntimeError::InstallFailed {
-                            message: format!("下载流读取失败: {e}"),
-                        });
-                    }
-                    None => break,
-                }
+    let outcome = crate::utils::download::stream_to_file(
+        &client,
+        url,
+        &tmp_path,
+        &limits,
+        cancel_token,
+        |written, _total| {
+            if let Some(s) = sink {
+                s.on_progress(written, progress_total);
             }
-            _ = async {
-                if let Some(ct) = cancel_token {
-                    ct.cancelled().await;
-                }
-            } => {
-                let _ = tokio::fs::remove_file(&tmp_path).await;
-                return Err(RuntimeError::OperationCancelled {
-                    message: format!("下载被取消: {url}"),
-                });
-            }
+        },
+        |chunk| hasher.update(chunk),
+    )
+    .await;
+
+    let total_written = match outcome {
+        Ok(out) => out.bytes,
+        Err(crate::utils::download::AttemptError::Cancelled) => {
+            return Err(RuntimeError::OperationCancelled {
+                message: format!("下载被取消: {url}"),
+            });
         }
-    }
-
-    file.flush().await.map_err(RuntimeError::Io)?;
-    drop(file);
+        Err(crate::utils::download::AttemptError::Local { reason }) => {
+            return Err(RuntimeError::Io(std::io::Error::other(reason)));
+        }
+        Err(crate::utils::download::AttemptError::Retryable { reason }) => {
+            return Err(RuntimeError::InstallFailed {
+                message: format!("下载失败: {reason}"),
+            });
+        }
+    };
 
     // 校验 hash（若调用方提供了期望值）
     if let Some(expected) = expected_sha256 {
@@ -292,7 +267,7 @@ async fn download_and_verify_once(
         .map_err(RuntimeError::Io)?;
 
     tracing::info!(
-        url = url,
+        url = %crate::utils::download::sanitize_url_for_log(url),
         dest = %dest.display(),
         size = total_written,
         "下载完成，hash 校验通过"

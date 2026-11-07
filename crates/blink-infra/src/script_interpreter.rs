@@ -374,14 +374,6 @@ async fn install_inner(
     Ok(())
 }
 
-/// 取消等待 future：token 为 None 时永不完成（select 分支保持 pending）。
-async fn wait_cancel(cancel_token: Option<&tokio_util::sync::CancellationToken>) {
-    match cancel_token {
-        Some(ct) => ct.cancelled().await,
-        None => std::future::pending::<()>().await,
-    }
-}
-
 /// 下载发行版 zip 并校验 SHA-256（单主链 + mirrors 候选）。
 async fn download_archive(
     entry: &InterpreterLockEntry,
@@ -405,7 +397,12 @@ async fn download_archive(
                 {
                     return Err(e);
                 }
-                tracing::warn!(url = candidate.as_str(), error = %e, has_next, "解释器下载失败");
+                tracing::warn!(
+                    url = %crate::utils::download::sanitize_url_for_log(candidate),
+                    error = %e,
+                    has_next,
+                    "解释器下载失败"
+                );
                 if has_next {
                     reporter.on_log(
                         "warn",
@@ -424,6 +421,8 @@ async fn download_archive(
 /// 单候选源下载 + 全量 SHA-256 校验。
 ///
 /// 镜像内容与锁定 hash 不一致时拒绝——换源不放宽供应链约束。
+/// 0.28.27：传输统一走共享下载内核（请求超时 + 响应体停滞判定 + 取消），
+/// 补齐"只有请求头等待有界、响应体可能无限等待"的缺口。
 async fn download_once(
     entry: &InterpreterLockEntry,
     url: &str,
@@ -431,79 +430,71 @@ async fn download_once(
     cancel_token: Option<&tokio_util::sync::CancellationToken>,
     reporter: &dyn InstallReporter,
 ) -> Result<(), ScriptInterpreterError> {
-    use futures::StreamExt;
-    use tokio::io::AsyncWriteExt;
-
     if let Some(ct) = cancel_token
         && ct.is_cancelled()
     {
         return Err(ScriptInterpreterError::Cancelled);
     }
 
-    // 0.27.4：经 net 工厂（Download 类别，代理策略生效）；总超时按请求注入
+    // 0.27.4：经 net 工厂（Download 类别，代理策略生效）
     let client = crate::net::client(crate::net::RequestCategory::Download);
-
-    let response = tokio::select! {
-        r = client.get(url).timeout(std::time::Duration::from_secs(600)).send() => {
-            r.map_err(|e| ScriptInterpreterError::Download(format!("下载失败: {e}")))?
-        }
-        // cancel_token 为 None 时永不完成，select 退化为纯下载等待。
-        _ = wait_cancel(cancel_token) => {
-            return Err(ScriptInterpreterError::Cancelled);
-        }
+    let progress_total = Some(entry.size_bytes);
+    let mut hasher = Sha256::new();
+    let limits = crate::utils::download::StreamLimits {
+        request_timeout: std::time::Duration::from_secs(600),
+        stall_timeout: std::time::Duration::from_secs(30),
+        max_bytes: None,  // Python/Node 锁定值按最终大小校验
+    };
+    let mut on_progress = |written: u64, total: Option<u64>| {
+        let _ = total;
+        reporter.on_progress(written, progress_total);
     };
 
-    if !response.status().is_success() {
-        return Err(ScriptInterpreterError::Download(format!(
-            "HTTP {}",
-            response.status()
-        )));
-    }
+    let outcome = crate::utils::download::stream_to_file(
+        &client,
+        url,
+        dest,
+        &limits,
+        cancel_token,
+        &mut on_progress,
+        |chunk| hasher.update(chunk),
+    )
+    .await;
 
-    let progress_total = response.content_length().or(Some(entry.size_bytes));
-    let mut hasher = Sha256::new();
-    let mut stream = response.bytes_stream();
-    let mut written: u64 = 0;
-
-    // 覆盖写（staging 内独占文件，无需 tmp+rename）。
-    let mut file = tokio::fs::File::create(dest).await?;
-    loop {
-        tokio::select! {
-            chunk = stream.next() => {
-                match chunk {
-                    Some(Ok(bytes)) => {
-                        hasher.update(&bytes);
-                        file.write_all(&bytes).await?;
-                        written += bytes.len() as u64;
-                        reporter.on_progress(written, progress_total);
-                    }
-                    Some(Err(e)) => {
-                        let _ = tokio::fs::remove_file(dest).await;
-                        return Err(ScriptInterpreterError::Download(format!(
-                            "下载流读取失败: {e}"
-                        )));
-                    }
-                    None => break,
-                }
-            }
-            _ = wait_cancel(cancel_token) => {
+    match outcome {
+        Ok(out) => {
+            if out.bytes != entry.size_bytes {
                 let _ = tokio::fs::remove_file(dest).await;
-                return Err(ScriptInterpreterError::Cancelled);
+                return Err(ScriptInterpreterError::Download(
+                    "下载大小与锁定值不符".into(),
+                ));
             }
+            let actual = format!("{:x}", hasher.finalize());
+            if actual != entry.sha256.to_lowercase() {
+                let _ = tokio::fs::remove_file(dest).await;
+                return Err(ScriptInterpreterError::ChecksumMismatch {
+                    expected: entry.sha256.clone(),
+                    actual,
+                });
+            }
+            tracing::debug!(
+                url = %crate::utils::download::sanitize_url_for_log(url),
+                bytes = out.bytes,
+                speed = %crate::utils::download::format_speed(out.bytes, out.elapsed),
+                "解释器 zip 下载完成且 hash 匹配"
+            );
+            Ok(())
+        }
+        Err(crate::utils::download::AttemptError::Cancelled) => {
+            Err(ScriptInterpreterError::Cancelled)
+        }
+        Err(crate::utils::download::AttemptError::Local { reason }) => {
+            Err(ScriptInterpreterError::Download(reason))
+        }
+        Err(crate::utils::download::AttemptError::Retryable { reason }) => {
+            Err(ScriptInterpreterError::Download(reason))
         }
     }
-    file.flush().await?;
-
-    let actual = format!("{:x}", hasher.finalize());
-    if actual != entry.sha256.to_lowercase() {
-        let _ = tokio::fs::remove_file(dest).await;
-        return Err(ScriptInterpreterError::ChecksumMismatch {
-            expected: entry.sha256.clone(),
-            actual,
-        });
-    }
-    tracing::debug!(url, bytes = written, "解释器 zip 下载完成且 hash 匹配");
-    Ok(())
 }
 
 /// 解压 zip 全部 entry 到 `dest`（zip slip 防护：拒绝绝对路径 / 盘符 / `..` 段）。

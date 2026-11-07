@@ -58,14 +58,14 @@ assert.match(settingsHtml, /id="ai-tier-ultra-light"/);
 // 对话窗口命名模型（LLM 自动命名用，默认超轻档）
 assert.match(settingsHtml, /id="ai-chat-title-model-mode"/);
 assert.match(settingsHtml, /id="ai-chat-title-custom-model"/);
-assert.match(coreSource, /cfg\.chat_config\.title_model/);
+assert.match(coreSource, /cfg\(\)\.chat_config\.title_model/);
 // 模型与档位卡片 + 档位降级 banner 从供应商页移入 AI 对话设置
 assert.match(settingsHtml, /data-i18n="ai\.tiers\.card"/);
 assert.match(settingsHtml, /id="ai-tier-banner"/);
 assert.doesNotMatch(settingsHtml, /data-i18n="ai\.tiers\.section"/);
 assert.doesNotMatch(settingsHtml, /data-i18n="ai\.filter\.section"/);
-assert.match(coreSource, /cfg\.chat_config\.agent_mode = e\.target\.value/);
-assert.match(coreSource, /cfg\.chat_config\.main_window_model/);
+assert.match(coreSource, /cfg\(\)\.chat_config\.agent_mode = e\.target\.value/);
+assert.match(coreSource, /cfg\(\)\.chat_config\.main_window_model/);
 assert.doesNotMatch(coreSource, /allow_intent_routing/);
 assert.doesNotMatch(coreSource, /ctxWindow\s*\*\s*0\.6/);
 assert.doesNotMatch(coreSource, /≈.*轮/);

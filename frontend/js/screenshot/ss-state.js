@@ -132,6 +132,10 @@ export const ss = {
     // 不再每帧调 redrawAnnotFull() 重放全部命令。
     _committedSnapshot: null,     // HTMLCanvasElement | null
 
+    // ── 0.28.26：Shift 连续直线预览快照（与引擎 commitVersion 比对失效）──
+    _lineSnapshot: null,          // HTMLCanvasElement | null 已提交内容快照
+    _lineSnapshotVer: -1,         // 快照对应的引擎 commitVersion
+
     // ── 0.15.10：取色器活跃标志（eyedropper 模式时显示像素放大镜）──
     eyedropperActive: false,
     // 放大镜异步物理坐标采样代际守卫，防止旧 GetCursorPos 结果回流

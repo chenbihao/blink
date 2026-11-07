@@ -35,12 +35,15 @@ export function updateUndoRedoButtons() {
 
 /** 工具栏与键盘共用，保持撤销栈、按钮状态和画布一致。 */
 export function runAnnotationOperation(operation) {
+    // 0.28.26：撤销/重做/清空同时结束 Shift 连线（锚点重新校验，已提交段保留）
+    const hadLinePreview = annot.isLinePreviewActive();
+    annot.clearLineState();
     if (operation === 'undo') annot.undo();
     else if (operation === 'redo') annot.redo();
     else if (operation === 'reset') annot.clearAll();
     else return;
     updateUndoRedoButtons();
-    if (operation === 'reset') redrawAnnotFull();
+    if (hadLinePreview || operation === 'reset') redrawAnnotFull();
 }
 
 /** 工具切换统一入口 */
@@ -48,6 +51,12 @@ export function selectTool(tool) {
     // 录制态快捷键也走此入口，不能绕过工具栏的禁用范围。
     if (ss.gifRecHooks?.allowsTool && !ss.gifRecHooks.allowsTool(tool)) return;
     const {canvas, hitCanvas} = ss;
+    // 0.28.26：切换工具清理 Shift 连线锚点与预览，不跨工具连接
+    const hadLinePreview = annot.isLinePreviewActive();
+    if (hadLinePreview || annot.getLineAnchor()) {
+        annot.clearLineState();
+        if (hadLinePreview) redrawAnnotFull();
+    }
     // 0.15.14：聚光灯/多次聚光灯切换时清理旧命令
     // 单次↔多次切换时，旧工具的聚光灯命令不应残留
     if ((tool === 'spotlight' || tool === 'spotlight-multi') && tool !== annot.getTool()) {

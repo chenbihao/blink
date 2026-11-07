@@ -721,48 +721,114 @@ pub async fn install_update(app: tauri::AppHandle) -> Result<serde_json::Value, 
         }
     };
     let target_version = update.version.clone();
+    let version_for_task = target_version.clone();
     tracing::info!(version = %target_version, "install_update: 开始下载更新");
 
-    let version_for_task = target_version.clone();
+    // 0.28.27：安装包接入镜像候选——描述文件（latest.json）端点候选链之外，
+    // 安装包本体 URL 也按「国内镜像优先」偏好展开（GitHub release 资产 → 官方
+    // 主站 + 加速代理）。字节经共享下载内核累积后交 `update.install(bytes)`
+    // 走插件原生验签（minisign 公钥在 tauri.conf.json）——镜像只换传输源，
+    // 不放宽签名校验。磁盘暂存文件仅作传输中转，安装读取内存字节。
+    let package_url = update.download_url.as_str().to_string();
+    let package_candidates = crate::infra::utils::mirrors::download_candidates(&package_url);
+    tracing::debug!(
+        version = %target_version,
+        package = %crate::infra::utils::download::sanitize_url_for_log(&package_url),
+        candidates = package_candidates.len(),
+        mirror_first = crate::infra::utils::mirrors::prefer_cn_mirror(),
+    );
+
     let app_for_task = app.clone();
     tauri::async_runtime::spawn(async move {
         // 共享进度快照：下载闭包写入，下载完成闭包与错误路径读取。
-        // Cell/Mutex 保证闭包仍满足 Send（跨 await 持有）。
         let progress = std::sync::Arc::new(std::sync::Mutex::new((0u64, None::<u64>)));
-        let last_emit = std::cell::Cell::new(None::<std::time::Instant>);
 
+        let client = crate::infra::net::client(crate::infra::net::RequestCategory::Update);
+        let limits = crate::infra::utils::download::StreamLimits {
+            request_timeout: std::time::Duration::from_secs(600),
+            stall_timeout: std::time::Duration::from_secs(60),
+            max_bytes: Some(crate::infra::utils::download::UPDATE_PACKAGE_MAX_BYTES),
+        };
         let prog_chunk = progress.clone();
         let app_chunk = app_for_task.clone();
-        let prog_finish = progress.clone();
-        let app_for_finish = app_for_task.clone();
-        let result = update
-            .download_and_install(
-                move |chunk, total| {
+        let tmp_path = updater_tmp_path();
+        let mut bytes: Option<Vec<u8>> = None;
+        let mut last_err: Option<String> = None;
+        for candidate in &package_candidates {
+            // 换源后进度从 0 重新计数（内核回调累计字节）
+            let mut last_emit: Option<std::time::Instant> = None;
+            let hash = std::sync::Mutex::new(Vec::<u8>::new());
+            let result = crate::infra::utils::download::stream_to_file(
+                &client,
+                candidate,
+                std::path::Path::new(&tmp_path),
+                &limits,
+                None,
+                |chunk, total| {
                     let mut p = prog_chunk.lock().unwrap();
-                    // 插件回调给 usize，内部统一 u64 计数
-                    p.0 = p.0.saturating_add(chunk as u64);
+                    p.0 = chunk;
                     p.1 = total;
                     drop(p);
                     // 节流：≥200ms 才发一条，避免 IPC 事件洪泛
                     let now = std::time::Instant::now();
                     if last_emit
-                        .get()
-                        .is_none_or(|t| now.duration_since(t) >= std::time::Duration::from_millis(200))
+                        .map_or(true, |t| now.duration_since(t) >= std::time::Duration::from_millis(200))
                     {
-                        last_emit.set(Some(now));
+                        last_emit = Some(now);
                         let p = prog_chunk.lock().unwrap();
                         emit_update_progress(&app_chunk, "downloading", p.0, p.1, None);
                     }
                 },
-                move || {
-                    // 下载完成 → 安装器即将启动、进程即将退出；发 installing 终态
-                    let (downloaded, total) = *prog_finish.lock().unwrap();
-                    emit_update_progress(&app_for_finish, "installing", downloaded, total, None);
-                },
+                |chunk: &[u8]| hash.lock().unwrap().extend_from_slice(chunk),
             )
             .await;
+            match result {
+                Ok(outcome) => {
+                    bytes = Some(hash.into_inner().unwrap());
+                    tracing::info!(
+                        url = %crate::infra::utils::download::sanitize_url_for_log(candidate),
+                        bytes = outcome.bytes,
+                        speed = %crate::infra::utils::download::format_speed(outcome.bytes, outcome.elapsed),
+                        "更新安装包下载完成（待验签安装）"
+                    );
+                    break;
+                }
+                Err(crate::infra::utils::download::AttemptError::Local { reason }) => {
+                    last_err = Some(reason);
+                    break;  // 本地错误不换源
+                }
+                Err(crate::infra::utils::download::AttemptError::Retryable { reason }) => {
+                    tracing::warn!(
+                        url = %crate::infra::utils::download::sanitize_url_for_log(candidate),
+                        error = %reason,
+                        "更新安装包下载失败"
+                    );
+                    last_err = Some(reason);
+                }
+                Err(crate::infra::utils::download::AttemptError::Cancelled) => {
+                    last_err = Some("已取消".into());
+                    break;
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&tmp_path);
 
-        match result {
+        if bytes.is_none() {
+            let message = last_err.unwrap_or_else(|| "无可用下载源".into());
+            tracing::warn!(version = %version_for_task, error = %message, "install_update: 安装包下载失败");
+            let (downloaded, total) = *progress.lock().unwrap();
+            emit_update_progress(&app_for_task, "failed", downloaded, total, Some(&message));
+            UPDATE_INSTALL_IN_PROGRESS.store(false, Ordering::Release);
+            return;
+        }
+
+        // 验签 + 安装（插件原生 install：minisign 验签失败即拒绝安装）
+        let prog_finish = progress.clone();
+        let app_for_finish = app_for_task.clone();
+        let (downloaded, total) = *prog_finish.lock().unwrap();
+        emit_update_progress(&app_for_finish, "installing", downloaded, total, None);
+        let install_result = update.install(bytes.unwrap());
+        match install_result {
             Ok(()) => {
                 // Windows 上安装阶段进程会被 exit(0)，正常不应到达这里；
                 // 防御性复位，避免标志位卡死
@@ -788,6 +854,15 @@ pub async fn install_update(app: tauri::AppHandle) -> Result<serde_json::Value, 
     });
 
     Ok(serde_json::json!({ "status": "started", "version": target_version }))
+}
+
+/// 更新安装包下载暂存路径（共享内核按文件落盘；字节同时累积在内存供验签安装，
+/// 该临时文件仅作传输中转，安装读取内存字节，不信任磁盘暂存）。
+fn updater_tmp_path() -> String {
+    std::env::temp_dir()
+        .join(format!("blink-updater-{}.exe", std::process::id()))
+        .display()
+        .to_string()
 }
 
 /// 打开当天日志文件（资源管理器中定位；文件不存在则打开文件夹）。

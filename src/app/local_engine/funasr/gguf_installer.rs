@@ -29,6 +29,8 @@ use super::gguf::find_gguf_spec;
 
 /// 单文件下载超时（GGUF 可达数百 MB，慢速网络需要长窗口）。
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(3600);
+/// 0.28.27：响应体无新数据的停滞判定（大模型分块间隔正常远小于该值）。
+const BODY_STALL_TIMEOUT: Duration = Duration::from_secs(60);
 /// 进度日志间隔（按已下载字节）。
 const PROGRESS_LOG_STEP_BYTES: u64 = 32 * 1024 * 1024;
 
@@ -103,13 +105,23 @@ async fn download_file(
     for (idx, url) in candidates.iter().enumerate() {
         (cb.on_log)(&format!("下载 {file_name}（{url}）"));
 
-        let mut response = tokio::select! {
+        // 0.28.27：请求阶段失败（连接/DNS/TLS/超时）按候选换源重试——
+        // 此前经 `?` 提前返回，第一个源连不上就整体失败，绕过 hf-mirror 等后续镜像。
+        let response = tokio::select! {
             r = client.get(url).timeout(DOWNLOAD_TIMEOUT).send() => r,
             _ = cancel_token.cancelled() => return Err(ModelDownloadError::Cancelled),
+        };
+        if let Err(e) = response {
+            last_err = Some(ModelDownloadError::Network {
+                message: format!("请求失败: {e}"),
+            });
+            if idx + 1 < candidates.len() {
+                (cb.on_log)(&format!("{file_name} 从该源请求失败，切换下载源重试"));
+                continue;
+            }
+            return Err(last_err.unwrap());
         }
-        .map_err(|e| ModelDownloadError::Network {
-            message: format!("请求失败: {e}"),
-        })?;
+        let mut response = response.unwrap();
 
         if !response.status().is_success() {
             last_err = Some(ModelDownloadError::Network {
@@ -145,13 +157,36 @@ async fn download_file(
         let mut downloaded: u64 = 0;
         let mut next_progress = PROGRESS_LOG_STEP_BYTES;
         let mut download_interrupted: Option<ModelDownloadError> = None;
+        // 0.28.28：速度诊断 5s 节流（窗口速度），取消记录已下载量——手动取消
+        // 慢速源时日志能回答"下到哪、多快、哪个源"。
+        let attempt_started = std::time::Instant::now();
+        let mut last_speed_log = std::time::Instant::now();
+        let mut last_speed_log_bytes: u64 = 0;
 
         loop {
+            // 0.28.27：响应体 60s 无新数据判停滞，换下一候选（此前响应体阶段
+            // 可能无限等待；大模型分块间隔正常远小于该值）。
             let chunk = tokio::select! {
-                c = response.chunk() => c,
+                c = tokio::time::timeout(BODY_STALL_TIMEOUT, response.chunk()) => c,
                 _ = cancel_token.cancelled() => {
                     let _ = std::fs::remove_file(&tmp_path);
+                    tracing::info!(
+                        url = %blink_infra::utils::download::sanitize_url_for_log(url),
+                        downloaded,
+                        elapsed = ?attempt_started.elapsed(),
+                        "GGUF 模型下载已被取消"
+                    );
                     return Err(ModelDownloadError::Cancelled);
+                }
+            };
+            let chunk = match chunk {
+                Ok(c) => c,
+                Err(_) => {
+                    let _ = std::fs::remove_file(&tmp_path);
+                    download_interrupted = Some(ModelDownloadError::Network {
+                        message: format!("响应体 {}s 无进度（停滞）", BODY_STALL_TIMEOUT.as_secs()),
+                    });
+                    break;
                 }
             };
             match chunk {
@@ -176,6 +211,18 @@ async fn download_file(
                     if downloaded >= next_progress {
                         (cb.on_log)(&format_progress_log(file_name, downloaded, total_size));
                         next_progress += PROGRESS_LOG_STEP_BYTES;
+                    }
+                    if last_speed_log.elapsed() >= std::time::Duration::from_secs(5) {
+                        let window = downloaded.saturating_sub(last_speed_log_bytes);
+                        tracing::debug!(
+                            url = %blink_infra::utils::download::sanitize_url_for_log(url),
+                            downloaded,
+                            total = total_size,
+                            speed = %blink_infra::utils::download::format_speed(window, last_speed_log.elapsed()),
+                            "GGUF 模型下载进行中"
+                        );
+                        last_speed_log = std::time::Instant::now();
+                        last_speed_log_bytes = downloaded;
                     }
                 }
                 Ok(None) => break,

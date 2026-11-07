@@ -310,35 +310,70 @@ impl ResourceTransport for HttpResourceTransport {
                 let mut hasher = sha2::Sha256::new();
                 let mut written: u64 = 0;
                 let mut failure: Option<FetchFailure> = None;
+                // 0.28.27：响应体 60s 无新数据判停滞（补齐"请求头有界、响应体
+                // 可能无限等待"缺口），按网络失败换下一候选。
+                const BODY_STALL_SECS: u64 = 60;
+                // 0.28.28：速度诊断 5s 节流（与其他下载入口口径一致）
+                let attempt_started = std::time::Instant::now();
+                let mut last_speed_log = std::time::Instant::now();
+                let mut last_speed_log_bytes: u64 = 0;
                 loop {
-                    match stream.next().await {
-                        Some(Ok(bytes)) => {
-                            written += bytes.len() as u64;
-                            if written > declared_bytes {
-                                failure = Some(FetchFailure {
-                                    code: "over_limit",
-                                    message: format!("下载内容超过锁定大小（>{declared_bytes}）"),
-                                });
-                                break;
-                            }
-                            hasher.update(&bytes);
-                            if file.write_all(&bytes).await.is_err() {
-                                failure = Some(FetchFailure {
-                                    code: "io",
-                                    message: "写入失败（磁盘空间不足？）".into(),
-                                });
-                                break;
-                            }
-                            progress(written);
-                        }
-                        Some(Err(e)) => {
+                    let next = tokio::time::timeout(
+                        Duration::from_secs(BODY_STALL_SECS),
+                        stream.next(),
+                    )
+                    .await;
+                    match next {
+                        Err(_) => {
                             failure = Some(FetchFailure {
-                                code: "network_failed",
-                                message: format!("下载流中断: {e}"),
+                                code: "timeout",
+                                message: format!("响应体 {BODY_STALL_SECS}s 无进度（停滞）"),
                             });
                             break;
                         }
-                        None => break,
+                        Ok(chunk) => match chunk {
+                            Some(Ok(bytes)) => {
+                                written += bytes.len() as u64;
+                                if written > declared_bytes {
+                                    failure = Some(FetchFailure {
+                                        code: "over_limit",
+                                        message: format!("下载内容超过锁定大小（>{declared_bytes}）"),
+                                    });
+                                    break;
+                                }
+                                hasher.update(&bytes);
+                                if file.write_all(&bytes).await.is_err() {
+                                    failure = Some(FetchFailure {
+                                        code: "io",
+                                        message: "写入失败（磁盘空间不足？）".into(),
+                                    });
+                                    break;
+                                }
+                                progress(written);
+                                if last_speed_log.elapsed() >= std::time::Duration::from_secs(5) {
+                                    let window = written.saturating_sub(last_speed_log_bytes);
+                                    tracing::debug!(
+                                        url = %blink_infra::utils::download::sanitize_url_for_log(url),
+                                        downloaded = written,
+                                        speed = %blink_infra::utils::download::format_speed(
+                                            window,
+                                            last_speed_log.elapsed(),
+                                        ),
+                                        "词典资源下载进行中"
+                                    );
+                                    last_speed_log = std::time::Instant::now();
+                                    last_speed_log_bytes = written;
+                                }
+                            }
+                            Some(Err(e)) => {
+                                failure = Some(FetchFailure {
+                                    code: "network_failed",
+                                    message: format!("下载流中断: {e}"),
+                                });
+                                break;
+                            }
+                            None => break,
+                        },
                     }
                 }
                 let _ = file.flush().await;

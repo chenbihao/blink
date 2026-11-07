@@ -110,7 +110,15 @@ pub enum SuggestionAction {
     /// 翻译即 query 变为"翻译 xxx"后命中确定路由）。
     RouteQuery { query: String },
     /// 前端直进主窗口 AI 模式（0.17.6 起 ChatService ephemeral 对话）。
-    EnterAiMode { prompt: String },
+    ///
+    /// 0.28.28：`selection` 为可选引用材料（本次唤起的有效划词快照）——
+    /// 问题与材料分开承载，前端在模型输入边界组合（材料作为引用正文随消息
+    /// 进会话历史，不提升为系统指令）；None = 纯提问。
+    EnterAiMode {
+        prompt: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        selection: Option<String>,
+    },
     /// 调用 Capability 执行（0.24.8，打开类建议）。`args` 为目标 Capability
     /// schema 接收的最终 JSON object（如 `{"url":"https://…"}`），由 producer
     /// 构造——与 BuiltinEngine `ParamSource::extract` 的参数形状约定一致。
@@ -131,6 +139,19 @@ pub enum SuggestionAction {
     /// 授权凭据，签发侧二次核验。
     #[serde(rename_all = "camelCase")]
     SendToChat { paths: Vec<String> },
+}
+
+impl SuggestionAction {
+    /// 0.28.28：EnterAiMode 携带的划词引用材料（组合提问候选识别用）。
+    pub fn ai_selection_material(&self) -> Option<&str> {
+        match self {
+            Self::EnterAiMode {
+                selection: Some(sel),
+                ..
+            } => Some(sel.as_str()),
+            _ => None,
+        }
+    }
 }
 
 /// Context 类 Suggestion 的取值来源（0.8.3 §4.9 UX 加强）——
@@ -355,6 +376,7 @@ mod tests {
                 SuggestionKind::AskAi,
                 SuggestionAction::EnterAiMode {
                     prompt: "hello".to_string(),
+                    selection: None,
                 },
             )),
             secondary: None,

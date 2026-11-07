@@ -68,6 +68,16 @@
                 </label>
             </div>
             <div class="setting-row">
+                <!-- 0.28.27：镜像优先偏好（本机 network 分片，不随 WebDAV 同步） -->
+                <label class="setting-label" data-i18n="general.prefer_cn_mirror.label">优先使用国内镜像下载<span class="field-hint-icon"
+                                                                                                data-i18n-title="general.prefer_cn_mirror.hint">ⓘ</span></label>
+                <label class="checkbox">
+                    <input id="prefer-cn-mirror" type="checkbox"/>
+                    <span class="checkmark"></span>
+                </label>
+            </div>
+            <p class="panel-hint hidden" id="prefer-cn-mirror-status"></p>
+            <div class="setting-row">
                 <label class="setting-label" data-i18n="general.language.label">语言<span class="field-hint-icon"
                                                                                           data-i18n-title="general.language.hint">ⓘ</span></label>
                 <select id="language">

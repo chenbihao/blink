@@ -73,6 +73,7 @@ impl SuggestionProducer for AiProducer {
             kind: SuggestionKind::AskAi,
             action: SuggestionAction::EnterAiMode {
                 prompt: text.to_string(),
+                selection: None,
             },
             rank_score: rank,
             // AskAi 行文案由前端按 kind 经 i18n 覆盖（suggestion-bar rowText），
@@ -87,6 +88,11 @@ impl SuggestionProducer for AiProducer {
 
         let mut out = Vec::new();
         let q = query.trim();
+        // 0.28.28：本次唤起的有效划词快照（组合提问候选的材料）
+        let selection_text = snapshot
+            .find_text(AwarenessSource::Selection)
+            .map(|v| v.text.clone())
+            .filter(|t| !t.trim().is_empty());
         if !q.is_empty() {
             // AskAi 候选过 should_invoke_ai 总门禁（enabled + 结构性筛子）；
             // 分类用 classify_query（不含总开关——翻译候选不被 AI 开关连坐）。
@@ -100,10 +106,36 @@ impl SuggestionProducer for AiProducer {
                     }
                     NaturalTextClass::Unclassified => {}
                 }
+                // 0.28.28：有输入且有有效划词 → 组合提问候选（Tab 主建议）：
+                // 输入问题 + 划词快照成对与「仅用输入」变体占槽（Coordinator 配对）。
+                // 材料分类沿用选区候选口径；与输入相同内容不重复组合；
+                // origin=None（query 池，路由命中时被 3d 规则排除——确定性意图优先）。
+                if let Some(sel) = &selection_text
+                    && sel.trim() != q
+                    && matches!(
+                        gating::classify_awareness_text(sel, &target),
+                        NaturalTextClass::TargetNatural | NaturalTextClass::ForeignNatural
+                    )
+                {
+                    let combined = Suggestion {
+                        id: "ai-combined".to_string(),
+                        kind: SuggestionKind::AskAi,
+                        action: SuggestionAction::EnterAiMode {
+                            prompt: q.to_string(),
+                            selection: Some(sel.to_string()),
+                        },
+                        rank_score: 0.81,
+                        display: "按 Tab 问 AI".to_string(),
+                        prefix_len: 0,
+                        origin: None,
+                        fingerprint: text_fingerprint(&format!("{q}\u{1}{sel}")),
+                        source: SuggestionSource::Ai,
+                        ranking_hint: None,
+                    };
+                    out.push(combined);
+                }
             }
-        }
-
-        if let Some(view) = snapshot.find_text(AwarenessSource::Selection) {
+        } else if let Some(view) = snapshot.find_text(AwarenessSource::Selection) {
             match gating::classify_awareness_text(view.text, &target) {
                 NaturalTextClass::TargetNatural => {
                     out.push(make(
@@ -213,7 +245,7 @@ mod tests {
         assert!((sug.rank_score - 0.62).abs() < 1e-9);
         assert!(sug.origin.is_none());
         assert!(
-            matches!(&sug.action, crate::intent::SuggestionAction::EnterAiMode { prompt }
+            matches!(&sug.action, crate::intent::SuggestionAction::EnterAiMode { prompt, .. }
             if prompt == "hello world foo bar")
         );
     }
@@ -279,12 +311,42 @@ mod tests {
     }
 
     #[test]
-    fn query_and_selection_both_classified() {
-        // query 英文 + 选区中文：ai-foreign(query 0.62) 与 ai-selection(0.72) 并存，
-        // Kind 去重与排序由 Coordinator 承担（producer 不去重）
+    fn query_and_selection_yield_combined_pair() {
+        // 0.28.28：query 英文 + 选区中文 → 组合候选（ai-combined，携带划词材料）
+        // 与「仅输入」变体（ai-foreign）成对产出；纯划词候选（ai-selection）不再
+        // 并存——成对占槽由 Coordinator 承担，producer 只负责成对产出。
         let producer = producer_with_ai(true);
         let sugs = producer.produce("hello world foo", &snap_with_selection("帮我看看这段话"));
-        assert!(sugs.iter().any(|s| s.id == "ai-foreign"));
+        let combined = sugs
+            .iter()
+            .find(|s| s.id == "ai-combined")
+            .expect("query+selection 应产出组合候选");
+        assert!((combined.rank_score - 0.81).abs() < 1e-9);
+        assert!(matches!(
+            &combined.action,
+            SuggestionAction::EnterAiMode { prompt, selection: Some(sel) }
+            if prompt == "hello world foo" && sel == "帮我看看这段话"
+        ));
+        assert!(combined.origin.is_none());
+        assert!(sugs.iter().any(|s| s.id == "ai-foreign"), "仅输入变体成对产出");
+        assert!(!sugs.iter().any(|s| s.id == "ai-selection"), "组合场景不重复产纯划词候选");
+    }
+
+    #[test]
+    fn combined_skipped_when_selection_equals_query() {
+        // 划词与输入内容相同 → 不组合（材料重复无意义），仅常规 query 候选
+        let producer = producer_with_ai(true);
+        let sugs = producer.produce("帮我看看这段话", &snap_with_selection("帮我看看这段话"));
+        assert!(!sugs.iter().any(|s| s.id == "ai-combined"));
+        assert!(sugs.iter().any(|s| s.id == "ai-query"));
+    }
+
+    #[test]
+    fn selection_only_still_yields_ai_selection() {
+        // 0.28.28 回归：空 query 时纯划词候选语义不变
+        let producer = producer_with_ai(true);
+        let sugs = producer.produce("", &snap_with_selection("帮我看看这段话"));
         assert!(sugs.iter().any(|s| s.id == "ai-selection"));
+        assert!(!sugs.iter().any(|s| s.id == "ai-combined"), "无输入不产组合候选");
     }
 }

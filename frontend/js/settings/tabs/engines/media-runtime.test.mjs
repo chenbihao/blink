@@ -20,6 +20,7 @@ function node(id) {
 globalThis.document = {
     hidden: false, getElementById: node, querySelector: () => ({}),
     addEventListener(name, handler) { listeners.set(name, handler); },
+    documentElement: {dataset: {}},
 };
 globalThis.window = {__TAURI__: {
     core: {invoke: async (command, args) => {
@@ -83,4 +84,35 @@ test('card restores a backend operation, isolates Everything notifications, and 
     listeners.get('visibilitychange')();
     await flush();
     assert.equal(node('media-runtime-error').hidden, true, '成功重查应清除瞬态查询错误');
+});
+
+test('0.28.27：测试可用性仅在调试模式显示，安装/修复入口不受影响', async () => {
+    const docEl = document.documentElement;
+    docEl.dataset.developerMode = '';
+    backend = {...backend, revision: 10, runtime: {...backend.runtime, state: 'ready'}, operation: null};
+    listeners.get('visibilitychange')();
+    await flush();
+    assert.equal(node('media-runtime-action').textContent, '测试可用性');
+    assert.equal(node('media-runtime-action').hidden, true, '普通模式隐藏测试动作');
+    assert.equal(node('media-runtime-repair').hidden, false, 'ready 态手动修复入口保留');
+    assert.equal(node('media-runtime-uninstall').hidden, false, 'ready 态卸载入口保留');
+    docEl.dataset.developerMode = 'true';
+    listeners.get('visibilitychange')();
+    await flush();
+    assert.equal(node('media-runtime-action').hidden, false, '调试模式开启后显示测试动作');
+    docEl.dataset.developerMode = '';
+    listeners.get('visibilitychange')();
+    await flush();
+    assert.equal(node('media-runtime-action').hidden, true, '退出调试模式立即隐藏');
+    // 安装/修复主按钮不受门禁影响
+    backend = {...backend, revision: 11, runtime: {...backend.runtime, state: 'corrupt'}};
+    listeners.get('visibilitychange')();
+    await flush();
+    assert.equal(node('media-runtime-action').textContent, '修复 / 更新');
+    assert.equal(node('media-runtime-action').hidden, false, '修复动作不因门禁隐藏');
+    backend = {...backend, revision: 12, runtime: {...backend.runtime, state: 'missing'}};
+    listeners.get('visibilitychange')();
+    await flush();
+    assert.equal(node('media-runtime-action').textContent, '安装');
+    assert.equal(node('media-runtime-action').hidden, false, '安装动作不因门禁隐藏');
 });

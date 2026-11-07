@@ -461,10 +461,28 @@ async fn set_config_value(
         // 完全显式直连（忽略环境变量/系统代理）；保存前校验，无效配置不落库
         // 也不切运行时快照。
         "network" | "global_proxy" => {
+            // 0.28.27：字段补丁语义——http/https/prefer_cn_mirror 缺省字段保持
+            // 现值。通用页镜像开关与网络页代理表单各写各的字段，互不覆盖
+            //（"通用开关和代理设置互不覆盖"的等价并发检查）。保存前按合并结果
+            // 校验，无效配置不落库也不切运行时快照。
             let v: crate::app::config::GlobalProxyUpdate =
                 serde_json::from_value(value).map_err(|e| e.to_string())?;
-            let cfg = crate::app::config::NetworkConfig::from_raw(&v.http, &v.https)
+            let current = crate::app::config::ConfigStore::get_checked::<
+                crate::app::config::NetworkConfig,
+            >(pool)
+            .await
+            .unwrap_or_default();
+            let eff_http = v.http.unwrap_or_else(|| current.http.clone().unwrap_or_default());
+            let eff_https = v
+                .https
+                .unwrap_or_else(|| current.https.clone().unwrap_or_default());
+            let policy = crate::infra::net::NetPolicy::from_raw(&eff_http, &eff_https)
                 .map_err(|e| format!("network_invalid: {e}"))?;
+            let cfg = crate::app::config::NetworkConfig {
+                http: policy.http.clone(),
+                https: policy.https.clone(),
+                prefer_cn_mirror: v.prefer_cn_mirror.unwrap_or(current.prefer_cn_mirror),
+            };
             crate::app::config::ConfigStore::set(pool, &cfg).await?;
 
             // 1. net 工厂换快照：generation +1、分类 client 作废（新请求生效，
@@ -474,6 +492,8 @@ async fn set_config_value(
                 tracing::error!(%e, "网络快照切换失败（配置已落库，运行时保持旧快照）");
                 return Err(format!("network_invalid: {e}"));
             }
+            // 1b. 镜像优先偏好快照（只影响新下载任务的候选规划）。
+            crate::infra::utils::mirrors::set_prefer_cn_mirror(cfg.prefer_cn_mirror);
 
             // 2. AI 两层缓存失效：provider fingerprint 含 network generation，
             //    reload 强制重建 provider；Agent 缓存随 config-changed 失效。
@@ -519,7 +539,8 @@ async fn set_config_value(
             tracing::info!(
                 has_http = cfg.http.is_some(),
                 has_https = cfg.https.is_some(),
-                "网络代理配置已更新"
+                prefer_cn_mirror = cfg.prefer_cn_mirror,
+                "网络下载配置已更新"
             );
         }
         // ── 快捷超链（0.26.12 WebEngine）─────────────────────────────────

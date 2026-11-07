@@ -8,7 +8,7 @@
 //!
 //! 依赖所有子模块：state / tier / provider / model-edit / skill
 
-import {aiState, defaultAIConfig, saveAIConfig} from "./state.js";
+import {aiState, defaultAIConfig, saveAIConfig, snapshotLoadedAIConfig} from "./state.js";
 import {renderAITierBanner, renderAITierSelects, renderMainWindowModelSelect, renderTitleModelSelect} from "./tier.js";
 import {
     closeAIProviderModal,
@@ -23,7 +23,8 @@ import {
 import {bindAIModelEditModalEvents} from "./model-edit.js";
 import {initSkillImportHandlers, loadSkillList, showSkillImportPanel} from "./skill.js";
 import {clampAIHardTimeoutMs, effectiveAIHardTimeoutMs, memoryExpertVisibility,} from "./semantics.js";
-import {confirmDialog, invoke} from "../../../shared/tauri.js";
+import {confirmDialog, invoke, listen} from "../../../shared/tauri.js";
+import {EVENTS} from "../../../shared/event-names.js";
 import {onLangChange, t} from "../../../i18n/index.js";
 
 // 0.17.8: AI 权限记忆配置的默认值
@@ -36,11 +37,47 @@ let permissionConfig = {...defaultPermissionConfig};
  */
 export function initAITab() {
     loadAIConfig();
+    // 0.28.28：订阅 ai_config 配置广播（WebDAV 同步/其他窗口写入）→ 重读
+    // 最新供应商/模型/档位与密钥状态；初始化与可重复刷新分离，事件处理
+    // 读取当前配置（getter），不再依赖初始化时捕获的旧对象。
+    listen(EVENTS.CONFIG_CHANGED, (event) => {
+        if (event?.payload?.key === "ai_config") {
+            void reloadAIConfig();
+        }
+    }).catch((error) => console.warn("[ai-tab] 配置广播监听不可用:", error));
+    // 窗口重新激活时重读（同步在别的窗口完成、本页停留的场景）
+    window.addEventListener("focus", () => {
+        if (aiState.currentAIConfig) void reloadAIConfig();
+    });
     onLangChange(() => {
         // 0.21.19: 语言切换时也需重算摘要提示文案
         const memCfg = aiState.currentAIConfig?.chat_config?.memory_config;
         updateMemoryBehaviorHint(memCfg?.summary_enabled === true);
     });
+}
+
+// 0.28.28：重读串行化 + 单飞——广播风暴/焦点抖动只触发一次实际重读；
+// 读到中途有新请求则作废旧结果（旧结果不得覆盖新状态）。
+let reloadRunning = null;
+let reloadQueued = false;
+
+export function reloadAIConfig() {
+    if (reloadRunning) {
+        reloadQueued = true;
+        return reloadRunning;
+    }
+    reloadRunning = (async () => {
+        try {
+            await loadAIConfig();
+        } finally {
+            reloadRunning = null;
+            if (reloadQueued) {
+                reloadQueued = false;
+                void reloadAIConfig();
+            }
+        }
+    })();
+    return reloadRunning;
 }
 
 /**
@@ -49,12 +86,27 @@ export function initAITab() {
 async function loadAIConfig() {
     try {
         const cfg = await invoke("get_config_section", {key: "app.ai"});
-        aiState.currentAIConfig = cfg && typeof cfg === "object" ? cfg : defaultAIConfig();
+        if (cfg && typeof cfg === "object") {
+            aiState.currentAIConfig = cfg;
+        } else if (!aiState.currentAIConfig) {
+            // 仅在没有任何可用配置时退回默认（重读失败不得用空配置覆盖现状）
+            aiState.currentAIConfig = defaultAIConfig();
+        }
     } catch (e) {
+        // 0.28.28：读取失败保留现有内容（不写空配置），可恢复错误可见
         console.error("get_config_section app.ai failed:", e);
-        aiState.currentAIConfig = defaultAIConfig();
+        showLoadError(e);
+        if (!aiState.currentAIConfig) {
+            aiState.currentAIConfig = defaultAIConfig();
+        }
+        if (document.getElementById("ai-providers")) {
+            applyAIConfigToUI();
+            bindAIEvents();
+        }
+        return;
     }
     normalizeAIConfig(aiState.currentAIConfig);
+    snapshotLoadedAIConfig(aiState.currentAIConfig);
     // 密钥存在性 + 掩码提示并行查询
     aiState.hasSecretMap = new Map();
     aiState.secretHintMap = new Map();
@@ -199,6 +251,20 @@ async function loadSystemPromptInfo() {
 
 // ── UI helpers ──────────────────────────────────────────────
 
+/** 0.28.28：AI 配置读取失败的可恢复错误展示（保留现有内容，不写空配置）。 */
+function showLoadError(error) {
+    const host = document.getElementById("ai-providers");
+    if (!host) return;
+    let notice = document.getElementById("ai-config-load-error");
+    if (!notice) {
+        notice = document.createElement("p");
+        notice.id = "ai-config-load-error";
+        notice.className = "panel-hint";
+        host.prepend(notice);
+    }
+    notice.textContent = t("ai.config.load_failed", {error: String(error?.message ?? error ?? "")});
+}
+
 /**
  * 0.21.19: 根据摘要开关翻转记忆策略区域的提示文案。
  * 摘要开启时强调"LLM 生成摘要"，关闭时恢复默认"裁剪归档"描述。
@@ -262,66 +328,68 @@ function bindAIEvents() {
     root.dataset.eventsBound = "1";
 
     const $ = (id) => document.getElementById(id);
-    const cfg = aiState.currentAIConfig;
+    // 0.28.28：事件处理读取当前配置（getter）——重读替换对象后，旧捕获引用
+    // 会把同步结果整份覆盖回去，这是"同步后供应商列表未出现/被覆盖"的根因之一。
+    const cfg = () => aiState.currentAIConfig || {};
 
     $("ai-enabled")?.addEventListener("change", (e) => {
-        cfg.enabled = e.target.checked;
+        cfg().enabled = e.target.checked;
         renderAITierBanner();
         saveAIConfig();
     });
     $("ai-min-query-len")?.addEventListener("change", (e) => {
         const v = parseInt(e.target.value, 10);
-        cfg.min_query_len = isNaN(v) ? 4 : Math.max(1, Math.min(20, v));
-        e.target.value = cfg.min_query_len;
+        cfg().min_query_len = isNaN(v) ? 4 : Math.max(1, Math.min(20, v));
+        e.target.value = cfg().min_query_len;
         saveAIConfig();
     });
     document.querySelectorAll('input[name="ai-agent-mode"]').forEach((input) => input.addEventListener("change", (e) => {
         if (!e.target.checked) return;
-        cfg.chat_config = cfg.chat_config || {};
-        cfg.chat_config.agent_mode = e.target.value;
+        cfg().chat_config = cfg().chat_config || {};
+        cfg().chat_config.agent_mode = e.target.value;
         saveAIConfig();
     }));
     $("ai-main-window-model-mode")?.addEventListener("change", (e) => {
-        cfg.chat_config = cfg.chat_config || {};
+        cfg().chat_config = cfg().chat_config || {};
         if (e.target.value === "custom") {
             const custom = $("ai-main-window-custom-model");
-            cfg.chat_config.main_window_model = custom?.value || "light";
+            cfg().chat_config.main_window_model = custom?.value || "light";
         } else {
-            cfg.chat_config.main_window_model = e.target.value;
+            cfg().chat_config.main_window_model = e.target.value;
         }
         renderMainWindowModelSelect();
         saveAIConfig();
     });
     $("ai-main-window-custom-model")?.addEventListener("change", (e) => {
-        cfg.chat_config = cfg.chat_config || {};
-        cfg.chat_config.main_window_model = e.target.value || "light";
+        cfg().chat_config = cfg().chat_config || {};
+        cfg().chat_config.main_window_model = e.target.value || "light";
         saveAIConfig();
     });
     $("ai-chat-title-model-mode")?.addEventListener("change", (e) => {
-        cfg.chat_config = cfg.chat_config || {};
+        cfg().chat_config = cfg().chat_config || {};
         if (e.target.value === "custom") {
             const custom = $("ai-chat-title-custom-model");
-            cfg.chat_config.title_model = custom?.value || "ultra_light";
+            cfg().chat_config.title_model = custom?.value || "ultra_light";
         } else {
-            cfg.chat_config.title_model = e.target.value;
+            cfg().chat_config.title_model = e.target.value;
         }
         renderTitleModelSelect();
         saveAIConfig();
     });
     $("ai-chat-title-custom-model")?.addEventListener("change", (e) => {
-        cfg.chat_config = cfg.chat_config || {};
-        cfg.chat_config.title_model = e.target.value || "ultra_light";
+        cfg().chat_config = cfg().chat_config || {};
+        cfg().chat_config.title_model = e.target.value || "ultra_light";
         saveAIConfig();
     });
     $("ai-chat-auto-title")?.addEventListener("change", (e) => {
         cfg.chat_config = cfg.chat_config || {auto_title: false};
-        cfg.chat_config.auto_title = e.target.checked;
+        cfg().chat_config.auto_title = e.target.checked;
         saveAIConfig();
     });
     $("ai-memory-mode")?.addEventListener("change", (e) => {
-        cfg.chat_config = cfg.chat_config || {};
+        cfg().chat_config = cfg().chat_config || {};
         cfg.chat_config.memory_config = cfg.chat_config.memory_config || {};
-        cfg.chat_config.memory_config.mode = e.target.value;
+        cfg().chat_config.memory_config.mode = e.target.value;
         updateMemoryConfigVisibility(
             e.target.value,
             cfg.chat_config.memory_config.recall_enabled !== false,
@@ -330,9 +398,9 @@ function bindAIEvents() {
     });
     $("ai-memory-window-size")?.addEventListener("change", (e) => {
         const v = parseInt(e.target.value, 10);
-        cfg.chat_config = cfg.chat_config || {};
+        cfg().chat_config = cfg().chat_config || {};
         cfg.chat_config.memory_config = cfg.chat_config.memory_config || {};
-        cfg.chat_config.memory_config.window_size = isNaN(v) ? 20 : Math.max(5, Math.min(100, v));
+        cfg().chat_config.memory_config.window_size = isNaN(v) ? 20 : Math.max(5, Math.min(100, v));
         e.target.value = cfg.chat_config.memory_config.window_size;
         saveAIConfig();
     });
@@ -340,24 +408,24 @@ function bindAIEvents() {
         const v = parseInt(e.target.value, 10);
         const clamped = isNaN(v) ? 80 : Math.max(50, Math.min(95, v));
         e.target.value = clamped;
-        cfg.chat_config = cfg.chat_config || {};
+        cfg().chat_config = cfg().chat_config || {};
         cfg.chat_config.memory_config = cfg.chat_config.memory_config || {};
-        cfg.chat_config.memory_config.trigger_ratio = clamped / 100;
+        cfg().chat_config.memory_config.trigger_ratio = clamped / 100;
         saveAIConfig();
     });
     $("ai-memory-compress-ratio")?.addEventListener("change", (e) => {
         const v = parseInt(e.target.value, 10);
         const clamped = isNaN(v) ? 70 : Math.max(30, Math.min(90, v));
         e.target.value = clamped;
-        cfg.chat_config = cfg.chat_config || {};
+        cfg().chat_config = cfg().chat_config || {};
         cfg.chat_config.memory_config = cfg.chat_config.memory_config || {};
-        cfg.chat_config.memory_config.compress_ratio = clamped / 100;
+        cfg().chat_config.memory_config.compress_ratio = clamped / 100;
         saveAIConfig();
     });
     $("ai-skill-enabled")?.addEventListener("change", async (e) => {
-        cfg.chat_config = cfg.chat_config || {};
-        cfg.chat_config.skill_config = cfg.chat_config.skill_config || {};
-        cfg.chat_config.skill_config.enabled = e.target.checked;
+        cfg().chat_config = cfg().chat_config || {};
+        cfg().chat_config.skill_config = cfg().chat_config.skill_config || {};
+        cfg().chat_config.skill_config.enabled = e.target.checked;
         try {
             await saveAIConfig();
             await loadSkillList();
@@ -416,37 +484,37 @@ function bindAIEvents() {
         }
     });
     $("ai-memory-recall-enabled")?.addEventListener("change", (e) => {
-        cfg.chat_config = cfg.chat_config || {};
+        cfg().chat_config = cfg().chat_config || {};
         cfg.chat_config.memory_config = cfg.chat_config.memory_config || {};
-        cfg.chat_config.memory_config.recall_enabled = e.target.checked;
+        cfg().chat_config.memory_config.recall_enabled = e.target.checked;
         updateMemoryConfigVisibility(cfg.chat_config.memory_config.mode || "token_aware", e.target.checked);
         saveAIConfig();
     });
     // 0.21.19: LLM 摘要压缩开关
     $("ai-memory-summary-enabled")?.addEventListener("change", (e) => {
-        cfg.chat_config = cfg.chat_config || {};
+        cfg().chat_config = cfg().chat_config || {};
         cfg.chat_config.memory_config = cfg.chat_config.memory_config || {};
-        cfg.chat_config.memory_config.summary_enabled = e.target.checked;
+        cfg().chat_config.memory_config.summary_enabled = e.target.checked;
         updateMemoryBehaviorHint(e.target.checked);
         saveAIConfig();
     });
     // 0.21.20: 召回范围
     $("ai-memory-recall-scope")?.addEventListener("change", (e) => {
-        cfg.chat_config = cfg.chat_config || {};
+        cfg().chat_config = cfg().chat_config || {};
         cfg.chat_config.memory_config = cfg.chat_config.memory_config || {};
-        cfg.chat_config.memory_config.recall_scope = e.target.value;
+        cfg().chat_config.memory_config.recall_scope = e.target.value;
         saveAIConfig();
     });
     $("ai-memory-recall-top-k")?.addEventListener("change", (e) => {
         const v = parseInt(e.target.value, 10);
-        cfg.chat_config = cfg.chat_config || {};
+        cfg().chat_config = cfg().chat_config || {};
         cfg.chat_config.memory_config = cfg.chat_config.memory_config || {};
-        cfg.chat_config.memory_config.recall_top_k = isNaN(v) ? 3 : Math.max(1, Math.min(10, v));
+        cfg().chat_config.memory_config.recall_top_k = isNaN(v) ? 3 : Math.max(1, Math.min(10, v));
         e.target.value = cfg.chat_config.memory_config.recall_top_k;
         saveAIConfig();
     });
     $("ai-timeout-ms")?.addEventListener("change", (e) => {
-        cfg.slo_hard_timeout_ms = clampAIHardTimeoutMs(e.target.value);
+        cfg().slo_hard_timeout_ms = clampAIHardTimeoutMs(e.target.value);
         e.target.value = effectiveAIHardTimeoutMs(cfg.slo_hard_timeout_ms);
         saveAIConfig();
     });
@@ -455,12 +523,12 @@ function bindAIEvents() {
         $(`ai-tier-${tier.replace('_', '-')}`)?.addEventListener("change", (e) => {
             const val = e.target.value;
             if (!val) {
-                cfg[`tier_${tier}`] = null;
+                cfg()[`tier_${tier}`] = null;
             } else {
                 const sep = val.indexOf("::");
                 const providerId = val.slice(0, sep);
                 const modelId = val.slice(sep + 2);
-                cfg[`tier_${tier}`] = {provider_id: providerId, model_id: modelId};
+                cfg()[`tier_${tier}`] = {provider_id: providerId, model_id: modelId};
             }
             // 重建选项以刷新各档位"未指派"内的降级提示
             renderAITierSelects();
@@ -590,7 +658,7 @@ function bindAIEvents() {
     });
 
     $("ai-toast-enable")?.addEventListener("click", () => {
-        cfg.enabled = true;
+        cfg().enabled = true;
         $("ai-enabled").checked = true;
         hideAIEnableToast();
         renderAITierBanner();

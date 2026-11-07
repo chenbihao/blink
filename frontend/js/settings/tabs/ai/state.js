@@ -74,14 +74,79 @@ export function defaultAIConfig() {
     };
 }
 
-/** 保存 AI 配置到后端 */
-export async function saveAIConfig() {
-    try {
-        await saveConfig("ai_config", aiState.currentAIConfig);
-    } catch (e) {
-        console.error("save ai_config failed:", e);
-        throw e;
+// ── 0.28.28：陈旧整份保存防护（字段补丁合并）─────────────────────────────
+//
+// 同步/WebDAV/其他窗口可能在本页两次保存之间写入 app.ai。整份上传旧对象会
+// 覆盖刚同步的供应商。保存前：diff 本地对象与最近一次加载快照 → 只把本页
+// 实际改过的顶层字段合并到后端最新值上（字段补丁），未触碰的字段取后端权威值；
+// 保存成功后本页状态收敛为已保存载荷（后续编辑以此为基线 diff）。
+// 保存经 promise 链串行化，避免并发保存互相读到中间态。
+let lastLoadedRaw = null;
+let saveChain = Promise.resolve();
+
+/** 记录最近一次加载的配置快照（loadAIConfig 成功后调）。 */
+export function snapshotLoadedAIConfig(cfg) {
+    lastLoadedRaw = cfg;
+}
+
+function topLevelChangedKeys(local, baseline) {
+    const changed = new Set();
+    if (!baseline) {
+        // 无基线（首载失败等）：退化为整份保存（与旧行为一致）
+        return null;
     }
+    const keys = new Set([...Object.keys(local || {}), ...Object.keys(baseline)]);
+    for (const key of keys) {
+        if (JSON.stringify(local?.[key]) !== JSON.stringify(baseline[key])) {
+            changed.add(key);
+        }
+    }
+    return changed;
+}
+
+/**
+ * 保存 AI 配置到后端。
+ * 0.28.28：先取后端最新值，把本页有改动的顶层字段合并上去再保存——
+ * 本页未触碰的字段（如刚同步进来的供应商）不会被旧对象覆盖；
+ * 本地无任何改动时保存最新值（幂等）。
+ * 读取失败保留现有内容并抛错（不降级为默认空配置继续保存）。
+ */
+export async function saveAIConfig() {
+    const run = saveChain.then(doSaveAIConfig);
+    // 队列不因单次失败断裂
+    saveChain = run.catch(() => {});
+    return run;
+}
+
+async function doSaveAIConfig() {
+    const local = aiState.currentAIConfig;
+    if (!local || typeof local !== "object") {
+        throw new Error("AI 配置未加载，已取消保存（避免空配置覆盖）");
+    }
+    let payload = local;
+    try {
+        const latest = await invoke("get_config_section", {key: "app.ai"});
+        if (latest && typeof latest === "object") {
+            const changed = topLevelChangedKeys(local, lastLoadedRaw);
+            if (changed === null) {
+                payload = {...latest, ...local};
+            } else if (changed.size > 0) {
+                payload = JSON.parse(JSON.stringify(latest));
+                for (const key of changed) {
+                    payload[key] = local[key];
+                }
+            } else {
+                payload = latest;  // 本页无改动：保存最新值（幂等，不覆盖）
+            }
+        }
+    } catch (e) {
+        // 后端预读失败：保留本地内容继续保存（与旧行为一致），记录可诊断日志
+        console.warn("saveAIConfig: 预读最新配置失败，按本地对象保存", e);
+    }
+    await saveConfig("ai_config", payload);
+    // 收敛：本页状态与基线 = 已保存载荷（后续编辑以此为 diff 基线）
+    aiState.currentAIConfig = payload;
+    snapshotLoadedAIConfig(payload);
 }
 
 // ── HTML 转义 helpers ──────────────────────────────────────

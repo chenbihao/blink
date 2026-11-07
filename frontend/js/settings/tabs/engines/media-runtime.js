@@ -27,7 +27,12 @@ function render() {
     const action = mediaRuntimeAction(snapshot);
     el('action').textContent = t(`engine.media.action.${action || 'install'}`);
     el('action').disabled = busy || !action;
-    el('action').hidden = state === 'pending_remove';
+    // 0.28.27：「测试可用性」（diagnose）仅随设置页既有调试模式显示——只隐藏
+    // 测试动作本身，安装/修复主按钮不受影响（ready 态侧栏「修复」按钮恒在，
+    // 普通模式不丢失手动修复入口）。状态轮询只读，不因显隐启动自检。
+    const diagnoseHidden = action === 'diagnose'
+        && document.documentElement?.dataset?.developerMode !== 'true';
+    el('action').hidden = state === 'pending_remove' || diagnoseHidden;
     el('repair').hidden = !runtime || state !== 'ready';
     el('repair').disabled = busy;
     el('uninstall').hidden = !runtime || state === 'missing';
@@ -105,6 +110,17 @@ export function initMediaRuntime() {
         if (event.payload?.kind === 'ffmpeg') void refresh();
     }).catch(error => { console.error('[media-runtime] 状态监听失败，保留轮询', normalizeError(error)); });
     onLangChange(render);
+    // 0.28.27：调试模式切换（data-developer-mode 变化）时重渲染，测试动作
+    // 显隐即时生效，普通模式下不重新显示。
+    if (typeof MutationObserver === 'function' && document.documentElement) {
+        try {
+            new MutationObserver(render).observe(document.documentElement, {
+                attributes: true, attributeFilter: ['data-developer-mode'],
+            });
+        } catch (error) {
+            console.warn('[media-runtime] 调试模式观察失败，显隐以刷新时点为准', error);
+        }
+    }
     setInterval(() => {
         if (!document.hidden && document.querySelector('#managed-engines.active')) void refresh();
     }, 3000);

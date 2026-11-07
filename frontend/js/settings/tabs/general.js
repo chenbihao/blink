@@ -6,7 +6,8 @@
 import {applyTheme} from "../../shared/theme.js";
 import {applyI18n, setLang, t} from "../../i18n/index.js";
 import {buildChordTogglesPayload, saveConfig} from "../../shared/config-keys.js";
-import {commandErrorText} from "../../shared/tauri.js";
+import {commandErrorText, invoke, listen} from "../../shared/tauri.js";
+import {EVENTS} from "../../shared/event-names.js";
 import {withConfigActivity} from "../../shared/config-sync.js";
 import {createWheelModeWriter} from "./list-navigation.js";
 import {getCurrentConfig} from "../shared/state.js";
@@ -21,6 +22,50 @@ const wheelModeWriter = createWheelModeWriter({
     },
 });
 
+// ── 0.28.27：优先使用国内镜像下载（network 分片本机偏好，默认关闭）────────
+// 只发送自己负责的字段（{preferCnMirror}，后端字段补丁），与网络页代理表单
+// 互不覆盖；失败回滚控件并显示错误；订阅 network 广播保持多端一致。
+let mirrorPreferenceValue = false;
+
+async function applyMirrorPreference(checked) {
+    const checkbox = document.getElementById("prefer-cn-mirror");
+    const statusEl = document.getElementById("prefer-cn-mirror-status");
+    if (!checkbox || checkbox.disabled) return;
+    checkbox.disabled = true;
+    try {
+        await withConfigActivity("network", () =>
+            invoke("set_config", {key: "network", value: {preferCnMirror: checked}}));
+        mirrorPreferenceValue = checked;
+        if (statusEl) {
+            statusEl.textContent = "";
+            statusEl.classList.add("hidden");
+        }
+    } catch (err) {
+        checkbox.checked = mirrorPreferenceValue;
+        if (statusEl) {
+            statusEl.textContent = commandErrorText(err, t("config.save_failed"));
+            statusEl.classList.remove("hidden");
+        }
+        console.error("set prefer_cn_mirror failed:", err);
+    } finally {
+        checkbox.disabled = false;
+    }
+}
+
+/** 读取 network 分片并回填镜像开关（初始化与 network 广播共用）。 */
+async function refreshMirrorPreference() {
+    const checkbox = document.getElementById("prefer-cn-mirror");
+    if (!checkbox || checkbox.disabled) return;
+    try {
+        const network = await invoke("get_config_section", {key: "network"});
+        mirrorPreferenceValue = network?.preferCnMirror === true;
+        checkbox.checked = mirrorPreferenceValue;
+    } catch (err) {
+        // 读取失败保留现有内容，不打断页面（后端缺失 = 默认关闭）
+        console.warn("load network config failed:", err);
+    }
+}
+
 /**
  * 初始化通用设置 Tab
  * @param {Object} cfg - 初始配置
@@ -28,6 +73,21 @@ const wheelModeWriter = createWheelModeWriter({
 export function initGeneralTab(cfg) {
     // 配置回填到表单（0.9.5 拆分时丢失的 applyConfigToUI 链路，0.9.5.1 补回）
     applyGeneralConfig(cfg);
+
+    // 0.28.27：镜像优先开关（初始化读取 + network 广播同步；写入走字段补丁）
+    const mirrorCheckbox = document.getElementById("prefer-cn-mirror");
+    if (mirrorCheckbox && !mirrorCheckbox.dataset.bound) {
+        mirrorCheckbox.dataset.bound = "1";
+        mirrorCheckbox.addEventListener("change", (e) => {
+            void applyMirrorPreference(e.target.checked);
+        });
+        listen(EVENTS.CONFIG_CHANGED, (event) => {
+            if (event?.payload?.key === "network") {
+                void refreshMirrorPreference();
+            }
+        }).catch((error) => console.warn("mirror preference listener unavailable:", error));
+        void refreshMirrorPreference();
+    }
 
     // 自动启动
     const autoStartCheckbox = document.getElementById("auto-start");

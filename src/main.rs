@@ -770,6 +770,8 @@ fn setup_app(app: &mut tauri::App<tauri::Wry>) -> Result<(), Box<dyn std::error:
     if let Err(e) = infra::net::global().set_policy(network_config.to_policy()) {
         tracing::warn!(%e, "网络策略快照注入失败，运行时按显式直连");
     }
+    // 0.28.27：镜像优先偏好快照（本机 network 分片，不随 WebDAV 同步）
+    infra::utils::mirrors::set_prefer_cn_mirror(network_config.prefer_cn_mirror);
 
     // pools 交给 Tauri 管理(command 层用 app.state::<DbPools>() 取)
     app.manage(pools.clone());

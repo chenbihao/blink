@@ -638,3 +638,73 @@ body.voice-active #ai-query {
     margin: var(--space-xs) 0;
     padding-left: 1.5em;
 }
+
+/* ── 0.28.28：待发消息条（生成中暂存一条，完成后自动发送）──────────────── */
+#ai-pending-bar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-xs);
+    padding: var(--space-xs) var(--space-md);
+    margin: var(--space-xs) var(--space-md) 0;
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-md);
+    background: var(--surface);
+}
+
+#ai-pending-bar.hidden {
+    display: none;
+}
+
+#ai-pending-input {
+    flex: 1;
+    min-width: 0;
+}
+
+/* 待发条内提示：占位文案由 i18n 注入（placeholder），弱化视觉 */
+#ai-pending-input::placeholder {
+    opacity: 0.6;
+}
+
+.ai-pending-cancel {
+    flex-shrink: 0;
+    border: none;
+    background: transparent;
+    color: var(--text);
+    cursor: pointer;
+    opacity: 0.65;
+    padding: 0 var(--space-xs);
+    line-height: 1;
+}
+
+.ai-pending-cancel:hover {
+    opacity: 1;
+}
+
+/* ── 0.28.28：用户气泡引用材料展开区 ──────────────────────────────────── */
+.ai-user-material {
+    margin-top: var(--space-xs);
+}
+
+.ai-user-material summary {
+    cursor: pointer;
+    opacity: 0.65;
+    font-size: 0.85em;
+    user-select: none;
+}
+
+.ai-user-material--long summary {
+    color: var(--accent);
+    opacity: 0.9;
+}
+
+.ai-user-material-body {
+    margin: var(--space-xs) 0 0;
+    padding: var(--space-sm);
+    max-height: 40vh;
+    overflow: auto;
+    background: var(--surface);
+    border-radius: var(--radius-sm);
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 0.9em;
+}

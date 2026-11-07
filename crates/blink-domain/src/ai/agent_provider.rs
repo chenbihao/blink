@@ -148,6 +148,12 @@ pub enum ChatStreamChunk {
     MaxTurnsReached { max_turns: usize },
     /// 流错误。
     Error { message: String },
+    /// 0.28.28：请求槽已释放（可续发边界）。
+    ///
+    /// 终态（Done/Error/MaxTurnsReached）之后由 agent task 在 `clear_if` 成功时
+    /// 发送——前端据此区分「完成事件已到」与「后端槽位可续发」，自动发送待发
+    /// 追问不再依赖固定延时。不是流内容，仅协议信号；落库/历史路径忽略。
+    Ready,
 }
 
 /// 本轮 user 消息的图片 part（0.27.10 Vision 输入）。

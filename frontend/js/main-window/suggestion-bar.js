@@ -162,6 +162,11 @@ function buildRow(sug, slot) {
     // 0.26.20：更新提示行带显式关闭（×）入口——button 不能嵌 button，
     // 该 kind 用 div 行承载（其余 kind 维持 button 不变）。
     if (sug.kind === "updateAvailable") return buildUpdateRow(sug, slot);
+    // 0.28.28：组合提问行（结合划词问 AI · 已选 N 字）带可展开原文预览，
+    // div 行承载（button 不能嵌展开控件）。
+    if (sug.kind === "askAi" && sug.action?.enterAiMode?.selection) {
+        return buildAskAiCombinedRow(sug, slot);
+    }
     const row = document.createElement("button");
     row.type = "button";
     row.className = `suggestion-row slot-${slot}`;
@@ -254,6 +259,75 @@ function buildUpdateRow(sug, slot) {
     return row;
 }
 
+/**
+ * 组合提问行（0.28.28）：div 行承载。文案「结合划词问 AI · 已选 N 字」，
+ * 行内有剩余空间时显示划词原文预览（过长在中段省略）；不提供行内展开——
+ * 材料展开在 AI 会话气泡处（可撑开窗口），预览与发送使用同一份材料。
+ * 点击行 = 采纳（Tab 同义）。
+ * @param {object} sug Suggestion wire 对象（enterAiMode.selection 携带划词材料）
+ * @param {"primary"|"secondary"} slot
+ */
+function buildAskAiCombinedRow(sug, slot) {
+    const row = document.createElement("div");
+    row.className = `suggestion-row suggestion-askai-combined slot-${slot}`;
+    row.setAttribute("role", "button");
+    row.setAttribute("tabindex", "-1");
+    row.addEventListener("mousedown", (e) => e.preventDefault());
+    row.addEventListener("click", () => accept(slot));
+
+    const icon = document.createElement("span");
+    icon.className = "suggestion-icon";
+    icon.innerHTML = iconHTML("sparkles");
+    row.appendChild(icon);
+
+    const text = document.createElement("span");
+    text.className = "suggestion-text";
+    const selection = sug.action.enterAiMode.selection || "";
+    text.textContent = t("suggestionbar.ask_ai_combined", {count: selection.length});
+    row.appendChild(text);
+
+    // 行内预览：占据剩余宽度，过长在中段省略（无空间时不显示）
+    const preview = document.createElement("span");
+    preview.className = "suggestion-preview-inline";
+    row.appendChild(preview);
+
+    const keyEl = slot === "primary"
+        ? renderKey(autosuggestConfig.getTabKey())
+        : renderCombo("Shift+Tab");
+    keyEl.classList.add("suggestion-key");
+    row.appendChild(keyEl);
+
+    // 布局完成后按剩余宽度做中段省略（2~3 次收敛，避免字体度量依赖）
+    requestAnimationFrame(() => {
+        const avail = preview.clientWidth;
+        if (avail <= 0 || !selection) {
+            preview.textContent = "";
+            return;
+        }
+        let budget = selection.length;
+        for (let i = 0; i < 4; i++) {
+            preview.textContent = middleEllipsis(selection, budget);
+            if (preview.scrollWidth <= avail) break;
+            const next = Math.floor(budget * (avail / Math.max(preview.scrollWidth, 1)) * 0.95);
+            if (next >= budget) break;
+            budget = next;
+            if (budget <= 1) {
+                preview.textContent = "";
+                break;
+            }
+        }
+    });
+    return row;
+}
+
+/** 中段省略：保头尾、中间以 … 代替（尾部略长于头部，锚点信息通常在两侧）。 */
+function middleEllipsis(text, maxChars) {
+    if (maxChars <= 0 || text.length <= maxChars) return text;
+    const head = Math.ceil((maxChars - 1) / 2);
+    const tail = maxChars - 1 - head;
+    return text.slice(0, head) + "…" + (tail > 0 ? text.slice(-tail) : "");
+}
+
 /** 独占交互模式判定：三类模式各自投影 body class / #ai-mode hidden（无循环依赖）。 */
 function exclusiveModeActive() {
     if (document.body.classList.contains("clipboard-mode-active")) return true;
@@ -280,6 +354,11 @@ const OPEN_TARGET_PREVIEW_MAX = 40;
 function rowText(sug) {
     if (sug.kind === "askAi") {
         const prompt = sug.action?.enterAiMode?.prompt || "";
+        // 0.28.28：组合对的「仅用输入」变体（primary 为组合行时）显示专用文案
+        if (!sug.action?.enterAiMode?.selection
+            && primary?.action?.enterAiMode?.selection) {
+            return t("suggestionbar.ask_ai_input_only");
+        }
         if (!prompt) return t("suggestionbar.ask_ai");
         const preview = prompt.length > ASK_AI_PREVIEW_MAX
             ? prompt.slice(0, ASK_AI_PREVIEW_MAX) + "…" : prompt;

@@ -600,6 +600,10 @@ impl ConfigKey for UpdateConfig {
 /// **空配置语义（完全显式直连）**：未配置 = 忽略 `HTTP_PROXY`/`HTTPS_PROXY`
 /// 等环境变量、不读 Windows 系统代理、不做升级检测提示。loopback 恒直连。
 /// 存量用户的 `engine:_global_proxy` 值在 app 启动时一次性迁移到本分片。
+///
+/// 0.28.27：`prefer_cn_mirror`——「优先使用国内镜像下载」本机偏好（默认关闭），
+/// 对有可用镜像的受管公开下载优先使用镜像，失败后自动尝试官方源。该分片整体
+/// 不随 WebDAV 同步（config_sync/portable FIXED_SHARDS 不含 `network`）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NetworkConfig {
     /// HTTP 协议出网代理（`http://host:port`）；None = 该协议直连。
@@ -608,6 +612,9 @@ pub struct NetworkConfig {
     /// HTTPS 协议出网代理；None = 该协议直连。
     #[serde(default)]
     pub https: Option<String>,
+    /// 优先使用国内镜像下载（默认关闭 = 官方源在前，镜像/代理兜底）。
+    #[serde(default)]
+    pub prefer_cn_mirror: bool,
 }
 
 impl ConfigKey for NetworkConfig {
@@ -621,6 +628,7 @@ impl NetworkConfig {
         Ok(Self {
             http: policy.http,
             https: policy.https,
+            prefer_cn_mirror: false,
         })
     }
 

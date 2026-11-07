@@ -601,42 +601,18 @@ fn precheck_compat(
 }
 
 /// 流式下载资产到 staging（声明 bytes 是进度分母也是写入上限）。
+///
+/// 0.28.27：接入镜像候选——目录声明的原 URL 为官方主源，按「国内镜像优先」
+/// 偏好展开加速候选（GitHub release 形态自动获得代理候选），逐候选重试；
+/// 复用既有目录声明大小上限与安装事务（摘要/签名校验在安装阶段不变）。
 async fn download_asset(
     app: &tauri::AppHandle,
     asset: &plugin::CatalogAsset,
     kind: &str,
     id: &str,
 ) -> Result<std::path::PathBuf, CommandError> {
-    use futures::StreamExt;
-    use tokio::io::AsyncWriteExt;
-
     let client = crate::infra::net::client(crate::infra::net::RequestCategory::Download);
-    let response = tokio::time::timeout(
-        ASSET_DOWNLOAD_BUDGET,
-        client.get(&asset.url).send(),
-    )
-    .await
-    .map_err(|_| download_failed(app, kind, id, "下载超时"))?
-    .map_err(|e| download_failed(app, kind, id, &format!("下载失败: {e}")))?;
-    if !response.status().is_success() {
-        return Err(download_failed(
-            app,
-            kind,
-            id,
-            &format!("下载失败: HTTP {}", response.status()),
-        ));
-    }
-    if let Some(len) = response.content_length()
-        && len > asset.bytes
-    {
-        return Err(download_failed(
-            app,
-            kind,
-            id,
-            "资产大小超过目录声明（目录可能过期，请刷新后重试）",
-        ));
-    }
-
+    let candidates = crate::infra::utils::mirrors::download_candidates(&asset.url);
     let storage = app.state::<Arc<plugin::PluginInstaller>>().inner();
     let staging = storage.storage().staging_dir(&format!("dl-{}", now_nanos()));
     std::fs::create_dir_all(&staging).map_err(|e| {
@@ -644,47 +620,82 @@ async fn download_asset(
     })?;
     let dest = staging.join("download.zip");
 
-    let mut file = tokio::fs::File::create(&dest).await.map_err(|e| {
-        CommandError::new("io", format!("创建下载文件失败: {e}"), true)
-    })?;
-    let mut stream = response.bytes_stream();
-    let mut written: u64 = 0;
-    let mut last_emit: u64 = 0;
-    let mut write_err: Option<String> = None;
-    loop {
-        match stream.next().await {
-            Some(Ok(bytes)) => {
-                written += bytes.len() as u64;
-                if written > asset.bytes {
-                    write_err = Some(
-                        "下载内容超过目录声明的大小（目录可能过期，请刷新后重试）".into(),
+    let limits = crate::infra::utils::download::StreamLimits {
+        request_timeout: ASSET_DOWNLOAD_BUDGET,
+        stall_timeout: std::time::Duration::from_secs(30),
+        max_bytes: Some(asset.bytes),
+    };
+    let mut last_err: Option<String> = None;
+    for (idx, candidate) in candidates.iter().enumerate() {
+        let has_next = idx + 1 < candidates.len();
+        let mut last_emit: u64 = 0;
+        // 换源后 received 从 0 重新计数，事件里会回跳（前端按最新值渲染，
+        // 与 ORT 入口语义一致）
+        let result = crate::infra::utils::download::stream_to_file(
+            &client,
+            candidate,
+            &dest,
+            &limits,
+            None,
+            |received, _total| {
+                if received - last_emit >= PROGRESS_STEP_BYTES {
+                    last_emit = received;
+                    emit_progress(app, kind, id, "downloading", received, asset.bytes);
+                }
+            },
+            |_: &[u8]| {},
+        )
+        .await;
+        match result {
+            Ok(outcome) => {
+                tracing::info!(
+                    url = %crate::infra::utils::download::sanitize_url_for_log(candidate),
+                    bytes = outcome.bytes,
+                    "{kind} 资产下载完成"
+                );
+                return Ok(dest);
+            }
+            Err(crate::infra::utils::download::AttemptError::Retryable { reason }) => {
+                tracing::warn!(
+                    url = %crate::infra::utils::download::sanitize_url_for_log(candidate),
+                    error = %reason,
+                    has_next,
+                    "{kind} 资产下载失败"
+                );
+                last_err = Some(reason);
+                if has_next {
+                    tracing::debug!(
+                        url = %crate::infra::utils::download::sanitize_url_for_log(candidate),
+                        next = idx + 2,
+                        total = candidates.len(),
+                        "{kind} 资产下载切换下一候选"
                     );
-                    break;
-                }
-                if file.write_all(&bytes).await.is_err() {
-                    write_err = Some("写入下载文件失败（磁盘空间不足？）".into());
-                    break;
-                }
-                if written - last_emit >= PROGRESS_STEP_BYTES {
-                    last_emit = written;
-                    emit_progress(app, kind, id, "downloading", written, asset.bytes);
                 }
             }
-            Some(Err(e)) => {
-                write_err = Some(format!("下载流读取失败: {e}"));
-                break;
+            Err(crate::infra::utils::download::AttemptError::Local { reason }) => {
+                let _ = tokio::fs::remove_file(&dest).await;
+                let _ = std::fs::remove_dir_all(&staging);
+                return Err(CommandError::new("io", reason, true));
             }
-            None => break,
+            Err(crate::infra::utils::download::AttemptError::Cancelled) => {
+                let _ = tokio::fs::remove_file(&dest).await;
+                let _ = std::fs::remove_dir_all(&staging);
+                return Err(download_failed(app, kind, id, "下载已取消"));
+            }
         }
     }
-    let _ = file.flush().await;
-    if let Some(err) = write_err {
-        let _ = tokio::fs::remove_file(&dest).await;
-        let _ = std::fs::remove_dir_all(&staging);
-        return Err(download_failed(app, kind, id, &err));
-    }
-    tracing::info!(url = %asset.url, bytes = written, "{kind} 资产下载完成");
-    Ok(dest)
+    let _ = tokio::fs::remove_file(&dest).await;
+    let _ = std::fs::remove_dir_all(&staging);
+    Err(download_failed(
+        app,
+        kind,
+        id,
+        &format!(
+            "下载失败（全部 {} 个候选源）：{}",
+            candidates.len(),
+            last_err.unwrap_or_else(|| "无可用下载源".into())
+        ),
+    ))
 }
 
 fn download_failed(

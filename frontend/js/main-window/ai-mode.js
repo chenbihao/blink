@@ -66,6 +66,25 @@ let awaitingConfirm = false;
 let unlistenStream = null;
 let unlistenConfirm = null;
 let currentQuestion = ""; // 当前轮用户问题文本（折叠摘要用）
+// 0.28.28：当前轮引用材料（划词组合提问）。问题与材料分开保存：
+// 气泡分体渲染、发送时在模型输入边界组合（材料随消息进会话历史，
+// 后续追问通过历史理解材料，不重复附加）。
+let currentMaterial = null;
+// 0.28.28：会话/发送代次——enter/exit 递增；异步返回（chatPrompt/定时器）
+// 校验代次，退出、取消、提升到 Chat 后旧结果不得复活或污染新会话。
+let sessionGen = 0;
+// 0.28.28：启动中标志——request id 尚未返回的窗口期也能阻止重入；
+// 迟到受理的请求在代次过期时被追认取消。
+let sendInFlight = false;
+// 0.28.28：待发消息（至多一条，可编辑/取消）。生成中 Enter 暂存，
+// 本轮成功完成后（Ready 槽位信号）自动发送一次。
+let pendingFollowup = null;
+// 0.28.28：本轮终态类型（'done' | 'error' | 'max_turns'）。仅成功完成的
+// Ready 才自动发送待发项；失败/取消/等待确认保留待发等待用户处理。
+let lastTerminal = null;
+// 0.28.28：后端请求槽已释放（Ready 到达）。终态事件与槽位释放之间存在时序差，
+// requestId 保留到最后完成请求上以便 Ready 过滤；可续发判定以本标志为准。
+let slotReady = false;
 
 /** 用户是否手动上滚（不在底部）——为 true 时暂停自动滚到底部 */
 let userScrolledUp = false;
@@ -144,20 +163,40 @@ export function confirmCurrentAction() {
     }
 }
 
+/**
+ * 0.28.28：Enter 是否落在确认卡片上（明确聚焦该卡片时才允许键盘确认）。
+ * 输入框的 Enter 遵循输入/待发语义，不能把补充提问误当工具批准。
+ */
+export function isConfirmCardEvent(e) {
+    const card = aiContentEl.querySelector(".ai-confirm-card");
+    if (!card) return false;
+    return card.contains(e?.target) || card.contains(document.activeElement);
+}
+
 // ── 模式切换 ──────────────────────────────────────────────────────────────────
 
 /**
  * 进入 AI 模式。
  * 生成 conversation_id，切换 DOM，调用 chat_prompt 发送首条消息。
+ * 0.28.28：`selectionMaterial` 为可选划词引用材料（组合提问建议采纳）——
+ * 首条消息 = 问题 + 材料在模型输入边界组合，气泡分体渲染。
  * @param {string} queryText 用户输入的查询文本
+ * @param {string|null} [selectionMaterial] 划词引用材料快照
  */
-export async function enterAiMode(queryText) {
+export async function enterAiMode(queryText, selectionMaterial = null) {
     if (active) return;
     active = true;
+    sessionGen++;
     conversationId = crypto.randomUUID();
     streamBuffer = "";
     awaitingConfirm = false;
+    sendInFlight = false;
+    pendingFollowup = null;
+    lastTerminal = null;
+    slotReady = false;
     currentQuestion = queryText;
+    currentMaterial = selectionMaterial || null;
+    renderPendingBar();
 
     // DOM 切换
     searchModeEl.hidden = true;
@@ -184,8 +223,11 @@ export async function enterAiMode(queryText) {
     if (scrollBottomBtn) scrollBottomBtn.classList.remove("visible");
     syncWindowSize();
 
-    // 发送首条消息
-    await sendPrompt(queryText);
+    // 发送首条消息（问题 + 材料在模型输入边界组合）
+    await sendPrompt(composeMessageWithMaterial(queryText, currentMaterial), {
+        question: queryText,
+        material: currentMaterial,
+    });
 }
 
 /**
@@ -202,7 +244,14 @@ export function exitAiMode() {
         );
         requestId = null;
     }
+    // 0.28.28：启动中（request id 尚未返回）——递增代次使在途 chatPrompt 过期，
+    // 受理成功后按旧代次追认取消（迟到请求不得残留）。
+    if (sendInFlight) {
+        sessionGen++;
+        sendInFlight = false;
+    }
     earlyStreamBuffer.clear();
+    clearPendingFollowup();
 
     // 0.18.0: 清除看门狗 AI 活跃标志（即使 request 已 Done 也要清）
     clearMainAiActive().catch((e) =>
@@ -215,6 +264,8 @@ export function exitAiMode() {
     streamBuffer = "";
     awaitingConfirm = false;
     currentQuestion = "";
+    currentMaterial = null;
+    lastTerminal = null;
     if (throttle) {
         throttle.cancel();
         throttle = null;
@@ -249,23 +300,45 @@ export function exitAiMode() {
 // ── 发送消息 ──────────────────────────────────────────────────────────────────
 
 /**
- * 调用 chat_prompt 发送消息。
- * 在 #ai-content 中先渲染用户消息气泡，再创建 AI 回复区放 typing 动画。
- * @param {string} message 用户消息文本
+ * 在模型输入边界组合问题与引用材料（0.28.28）。
+ * 材料以显式标注块随消息进入会话历史——后续追问通过历史理解材料，
+ * 不重复附加原文；不使用附件围栏（围栏会被临时会话历史剥离）。
  */
-async function sendPrompt(message) {
+function composeMessageWithMaterial(question, material) {
+    if (!material) return question;
+    return `${question}\n\n[引用材料]\n${material}\n[/引用材料]`;
+}
+
+/**
+ * 调用 chat_prompt 发送消息。
+ * 在 #ai-content 中先渲染用户消息气泡（问题 + 可展开引用材料），再创建 AI 回复区。
+ * 0.28.28：发送代次校验——退出/取消后迟到的受理结果被追认取消，不复活展示。
+ * @param {string} message 用户消息文本（已组合材料）
+ * @param {{question?: string, material?: string|null}} [split] 分体渲染信息
+ */
+async function sendPrompt(message, split = null) {
+    const gen = sessionGen;
     streamBuffer = "";
     awaitingConfirm = false;
-    currentQuestion = message;
+    lastTerminal = null;
+    slotReady = false;
+    requestId = null;
+    currentQuestion = split?.question ?? message;
+    currentMaterial = split ? (split.material ?? null) : currentMaterial;
+    sendInFlight = true;
     earlyStreamBuffer.begin(conversationId);
 
     // 构建当前轮 DOM：用户消息 + AI 回复区（含 typing 动画）
     aiContentEl.innerHTML = "";
 
-    // 用户消息气泡
+    // 用户消息气泡：问题 + 可展开引用材料（分体渲染，问题始终可见）
     const userMsg = document.createElement("div");
     userMsg.className = "ai-user-message";
-    userMsg.textContent = message;
+    const questionText = split?.question ?? message;
+    userMsg.appendChild(document.createTextNode(questionText));
+    if (currentMaterial) {
+        userMsg.appendChild(buildMaterialExpander(currentMaterial));
+    }
     aiContentEl.appendChild(userMsg);
 
     // AI 回复区
@@ -291,27 +364,67 @@ async function sendPrompt(message) {
             ephemeral: true,
             thinkingEnabled: false,
         });
+        if (gen !== sessionGen) {
+            // 0.28.28：会话已切换/退出——追认取消迟到请求，不接入新会话
+            chatAbort(rid).catch((e) =>
+                console.warn("[ai-mode] 迟到请求追认取消失败:", e),
+            );
+            return;
+        }
         requestId = rid;
+        sendInFlight = false;
         for (const payload of earlyStreamBuffer.resolve(rid)) dispatchStreamPayload(payload);
     } catch (e) {
+        sendInFlight = false;
+        if (gen !== sessionGen || !active) return;  // 过期返回不渲染
         earlyStreamBuffer.clear();
         handlePromptError(e);
     }
 }
 
 /**
- * 发送追问消息（0.17.6a）。
+ * 输入框提交入口（0.28.28，keyboard.js Enter 调用）。
+ *
+ * - 空闲可续发（无启动中、无生成中、无确认卡）→ 直接发送；
+ * - 启动中/生成中/等待确认 → 暂存一条待发消息（已有待发时不覆盖不重复入队，
+ *   输入框内容保留）；本轮成功完成（Ready 槽位信号）后自动发送一次。
+ */
+export function submitInput() {
+    if (!active) return;
+    const text = aiQueryEl.value.trim();
+    if (!text) return;
+    const busy = sendInFlight || (requestId !== null && !slotReady) || awaitingConfirm;
+    if (!busy) {
+        aiQueryEl.value = "";
+        void askFollowup(text, null);
+        return;
+    }
+    if (pendingFollowup !== null) return;  // 已有待发：不覆盖、不重复入队
+    pendingFollowup = text;
+    aiQueryEl.value = "";
+    renderPendingBar();
+}
+
+/**
+ * 发送追问消息（0.17.6a；0.28.28 支持分体材料）。
  * 当前轮收进折叠摘要条后再发送新消息，保持同一 conversation_id。
  * @param {string} text 追问文本
+ * @param {string|null} [material] 追问引用材料（追问默认不重复附加材料，
+ *   由会话历史承载；显式传 null/字符串时按传值组合）
  */
-export async function askFollowup(text) {
+export async function askFollowup(text, material = undefined) {
     if (!active || !text.trim()) return;
     // 当前轮有内容时收进折叠摘要条
     if (streamBuffer) {
         collapseToSummary(currentQuestion, streamBuffer);
     }
+    const splitMaterial = material === undefined ? null : material;
     currentQuestion = text;
-    await sendPrompt(text);
+    currentMaterial = splitMaterial;
+    await sendPrompt(
+        composeMessageWithMaterial(text, splitMaterial),
+        {question: text, material: splitMaterial},
+    );
 }
 
 /**
@@ -387,6 +500,11 @@ function dispatchStreamPayload(payload) {
         case "max_turns_reached":
             handleMaxTurns(chunk.max_turns);
             break;
+        // 0.28.28：后端请求槽已释放（可续发边界）——仅成功完成的 Ready
+        // 自动发送待发项；失败/取消保留待发等待用户处理。
+        case "ready":
+            handleSlotReady();
+            break;
     }
 }
 
@@ -456,17 +574,19 @@ function handleDone(chunk) {
         injectCopyButton();
     }
 
-    // 清理状态
-    requestId = null;
+    // 清理状态（0.28.28：requestId 保留——Ready 槽位信号仍按该 id 过滤；
+    // 可续发判定走 slotReady）
     if (throttle) {
         throttle = null;
     }
     streamRenderer = null;
+    lastTerminal = "done";
 
     // 工具行延迟清空（让用户看到最后工具的结果）。
-    // requestId 判空：防止过期定时器清掉 followup 新一轮的工具行。
+    // requestId/代次判空：防止过期定时器清掉 followup 新一轮的工具行。
+    const gen = sessionGen;
     setTimeout(() => {
-        if (!active || requestId !== null) return;
+        if (!active || gen !== sessionGen || requestId !== null) return;
         aiToolLineEl.innerHTML = "";
         // 工具行消失后窗口可能缩短，用 resync 重新基准高度（syncWindowSize 只增不减）
         resyncWindowSize();
@@ -485,12 +605,12 @@ function handleDone(chunk) {
  * 只 refocus 不 toggle，感知为"窗口唤不起来了"）。
  */
 function handleError(message) {
-    requestId = null;
     if (throttle) {
         throttle.cancel();
         throttle = null;
     }
     streamRenderer = null;
+    lastTerminal = "error";
 
     // 立即清除看门狗 AI 活跃标志——Error 是终态，不应继续阻止 toggle / 失焦隐藏
     clearMainAiActive().catch((e) =>
@@ -511,6 +631,7 @@ function handleError(message) {
  * 0.19.1：MaxTurnsReached 是终态，同 handleError——立即清除 AI 活跃标志。
  */
 function handleMaxTurns(maxTurns) {
+    lastTerminal = "max_turns";
     // 立即清除看门狗 AI 活跃标志——MaxTurnsReached 是终态
     clearMainAiActive().catch((e) =>
         console.warn("[ai-mode] clearMainAiActive 失败 (handleMaxTurns):", e),
@@ -587,6 +708,92 @@ function handleConfirmEvent(event) {
     scrollToBottom();
     syncWindowSize();
 }
+
+// ── 待发消息条与引用材料（0.28.28）─────────────────────────────────────────
+
+/**
+ * 渲染待发消息条：可编辑输入 + 取消按钮。显示「上一条完成后发送」提示。
+ * 至多一条待发；Enter 在条内仅确认编辑（blur），主输入框 Enter 遵循输入语义。
+ */
+function renderPendingBar() {
+    const bar = document.getElementById("ai-pending-bar");
+    const input = document.getElementById("ai-pending-input");
+    if (!bar || !input) return;
+    if (pendingFollowup === null) {
+        bar.classList.add("hidden");
+        input.value = "";
+        return;
+    }
+    input.value = pendingFollowup;
+    bar.classList.remove("hidden");
+    if (!input.dataset.bound) {
+        input.dataset.bound = "1";
+        input.addEventListener("input", () => {
+            pendingFollowup = input.value;
+        });
+        input.addEventListener("keydown", (e) => {
+            if (e.key === "Enter" && !e.isComposing) {
+                e.preventDefault();
+                input.blur();
+                aiQueryEl.focus();
+            }
+        });
+        document.getElementById("ai-pending-cancel")?.addEventListener("click", () => {
+            clearPendingFollowup();
+            aiQueryEl.focus();
+        });
+    }
+}
+
+/** 清除待发消息（取消 / 已发送 / 会话退出）。 */
+function clearPendingFollowup() {
+    pendingFollowup = null;
+    renderPendingBar();
+}
+
+/** 0.28.28：Ready（后端槽位已释放）处理——仅成功完成自动发送待发项。 */
+function handleSlotReady() {
+    if (!active) return;
+    slotReady = true;
+    const hasPending = pendingFollowup !== null;
+    const succeeded = lastTerminal === "done";
+    if (hasPending && succeeded && !awaitingConfirm) {
+        const text = pendingFollowup;
+        clearPendingFollowup();
+        void askFollowup(text, null);
+    }
+}
+
+/**
+ * 构建当前轮用户气泡的引用材料展开区（<details>，原生展开语义）。
+ * 超长材料明确提示可能超出上下文预算，不静默截断。
+ */
+function buildMaterialExpander(material) {
+    const details = document.createElement("details");
+    details.className = "ai-user-material";
+    const summary = document.createElement("summary");
+    const count = material.length;
+    summary.textContent = count > ASK_AI_MATERIAL_WARN_CHARS
+        ? t("ai.material.expander_long", {count})
+        : t("ai.material.expander", {count});
+    if (count > ASK_AI_MATERIAL_WARN_CHARS) {
+        details.classList.add("ai-user-material--long");
+    }
+    const body = document.createElement("pre");
+    body.className = "ai-user-material-body";
+    body.textContent = material;
+    details.appendChild(summary);
+    details.appendChild(body);
+    // 0.28.28：展开/收起后窗口高度贴合实际内容（内容展开必须撑开窗口）
+    details.addEventListener("toggle", () => {
+        resyncWindowSize();
+        scrollToBottom();
+    });
+    return details;
+}
+
+/** 引用材料超长提示阈值（字符数；超出示意提示，不截断）。 */
+const ASK_AI_MATERIAL_WARN_CHARS = 12000;
 
 // ── 折叠摘要 ──────────────────────────────────────────────────────────────────
 

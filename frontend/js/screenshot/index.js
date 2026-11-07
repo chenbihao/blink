@@ -60,9 +60,11 @@ import {
     syncRenderScale
 } from "./ss-selection-geometry.js";
 import {
+    clearLinePreview,
     drawDimmed,
     drawFinalSelection,
     redrawAnnotFull,
+    redrawAnnotLinePreview,
     redrawAnnotPreview,
     redrawBaseRegion,
     syncInteractionCanvasSize
@@ -1595,6 +1597,13 @@ canvas.addEventListener('pointerdown', (e) => {
     if (ss.isAnnotating && ss.selCss && pointInEditableImage(point)) {
         if (tool === 'watermark') return;
         const annotPt = annotationPoint(point);
+        // 0.28.26：铅笔 Shift 点击——提交一段连线（有锚点）或只设起点（无锚点），
+        // 不进入自由拖画；单独设点不写入不可见的空命令。
+        // 临时平移/取色/文本输入保持原入口优先级，不受连线接管。
+        if (tool === 'pencil' && point.shiftKey && !ss._imagePan && !ss.eyedropperActive) {
+            if (annot.commitLineSegment(annotPt)) updateUndoRedoButtons();
+            return;
+        }
         ss.annotStartX = annotPt.x;
         ss.annotStartY = annotPt.y;
         ss.annotCurrentX = ss.annotStartX;
@@ -1762,6 +1771,28 @@ canvas.addEventListener('pointermove', (e) => {
 
     updateStrokeCursor(e.clientX, e.clientY);
 
+    // 0.28.26：Shift 连线预览（铅笔工具、非拖拽态）——锚点到鼠标的任意角度直线。
+    // 预览 rAF 节流与拖动预览共用 _annotRaf，两者互斥（isAnnotDragging 分流）。
+    if (ss.isAnnotating && ss.selCss && annot.getTool() === 'pencil'
+        && !ss.isAnnotDragging && !ss.eyedropperActive && !ss._imagePan?.dragging) {
+        if (point.shiftKey && annot.getLineAnchor()) {
+            annot.setLinePreviewEnd(annotationPoint(point));
+            if (!ss._annotRaf) {
+                ss._annotRaf = requestAnimationFrame(() => {
+                    ss._annotRaf = 0;
+                    redrawAnnotLinePreview();
+                });
+            }
+            return;
+        }
+        if (!point.shiftKey && annot.isLinePreviewActive()) {
+            // Shift 已松开而预览仍激活（keyup 兜底）——结束连线及预览
+            annot.setLineShiftHeld(false);
+            clearLinePreview();
+            return;
+        }
+    }
+
     if (ss.isAnnotDragging && ss.selCss) {
         const annotPt = annotationPoint(point);
         ss.annotCurrentX = annotPt.x;
@@ -1907,9 +1938,24 @@ canvas.addEventListener('pointerup', (e) => {
             return;
         }
 
+        // 0.28.26：铅笔普通点击 = 设置连线起点（"普通点击…可作为起点"），
+        // 不再写入不可见的 1 点空命令；2px 内的抖动仍按点击处理。
+        if (tool === 'pencil' && !point.shiftKey && Math.abs(dx) < 2 && Math.abs(dy) < 2) {
+            annot.discardActiveStroke();
+            annot.setLineAnchor({x: ss.annotCurrentX, y: ss.annotCurrentY});
+            ss._committedSnapshot = null;
+            redrawAnnotFull();
+            releasePointer(canvas, e);
+            return;
+        }
+
         const result = annot.endDraw(ss.annotCurrentX, ss.annotCurrentY);
         if (result && result.needsText) {
             showTextInput(result.x, result.y);
+        }
+        // 0.28.26：上一笔结束位置可作为 Shift 连线起点
+        if (tool === 'pencil') {
+            annot.setLineAnchor({x: ss.annotCurrentX, y: ss.annotCurrentY});
         }
         redrawAnnotFull();
         updateUndoRedoButtons();
@@ -2025,6 +2071,11 @@ canvas.addEventListener('pointercancel', (e) => {
     // 指针被系统或浏览器回收（触屏手势介入、窗口被抢占等）：按取消处理，
     // 不把半程结果变成最终选区
     ss._predragStart = null; // 0.25.14 A1：capture 随 cancel 释放，缓存作废
+    // 0.28.26：指针取消同时清理连线锚点与预览（已提交段保留）
+    if (annot.isLinePreviewActive()) {
+        annot.clearLineState();
+        clearLinePreview();
+    }
     if (!hasActiveDragInteraction(ss)) return;
     console.debug('[screenshot] pointercancel → abort selection interaction');
     abortSelectionInteraction(e);
@@ -2323,6 +2374,13 @@ document.addEventListener('keydown', (e) => {
     }
 
     if (e.key === 'Escape') {
+        // 0.28.26：有连线预览时先结束预览（含锚点），再遵循原退出行为
+        if (ss.isAnnotating && annot.isLinePreviewActive()) {
+            e.preventDefault();
+            annot.clearLineState();
+            clearLinePreview();
+            return;
+        }
         if (!e.isComposing && !e.target?.classList?.contains('text-annot-input') &&
             (closeLayoutEditor() || closeActionMenu({focus: true}) || closeQrPanel({focus: true}))) {
             e.preventDefault(); return;
@@ -2396,6 +2454,14 @@ window.addEventListener('keydown', (e) => {
     if (!document.body.classList.contains('image-editor-mode')) return;
     if (document.getElementById('screenshot-layout-editor') || qrPanelVisible() || ss._actionMenuVisible?.()) return;
     if (imageEditorEscExempt(e)) return;
+    // 0.28.26：编辑器内连线预览优先结束，不整体取消编辑会话
+    if (annot.isLinePreviewActive()) {
+        e.preventDefault();
+        e.stopPropagation();
+        annot.clearLineState();
+        clearLinePreview();
+        return;
+    }
     if (isScrollCaptureActive() || isGifPrepActive()) return;
     e.preventDefault();
     e.stopPropagation();
@@ -2408,6 +2474,24 @@ window.addEventListener('keydown', (e) => {
 
 // 0.11.8-e：矩形/椭圆拖动期间按/松 Shift 实时更新预览
 window.addEventListener('keydown', refreshShapePreviewOnShift);
+
+// 0.28.26：铅笔 Shift 连线——按下激活连线模式（预览随首个指针移动出现），
+// 松开结束当前连续连线及预览（锚点一并清理，不跨 Shift 会话连接）。
+window.addEventListener('keydown', (e) => {
+    if (e.key !== 'Shift' || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (!ss.isAnnotating || !ss.selCss || ss.isAnnotDragging) return;
+    if (annot.getTool() !== 'pencil') return;
+    const tgt = e.target;
+    if (tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable)) return;
+    annot.setLineShiftHeld(true);
+});
+window.addEventListener('keyup', (e) => {
+    if (e.key !== 'Shift') return;
+    if (ss.isAnnotDragging) return;
+    if (annot.setLineShiftHeld(false)) {
+        clearLinePreview();
+    }
+});
 
 // 0.15.7：长截图手动滚动检测——capturing 阶段 wheel 触发截帧
 window.addEventListener('wheel', createCanvasSizeWheel(), {passive: false});

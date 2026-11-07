@@ -250,22 +250,13 @@ export function redrawAnnotPreview() {
             break;
         }
         case 'arrow': {
-            const angle = Math.atan2(annotCurrentY - annotStartY, annotCurrentX - annotStartX);
-            const headLen = 12 * annot.getWidthForTool('arrow') / 2;
-            annotCtx.strokeStyle = annot.getColor();
-            annotCtx.lineWidth = annot.getWidthForTool('arrow');
-            if (annot.getStrokeStyle() === 'dashed') annotCtx.setLineDash([8, 4]);
-            annotCtx.beginPath();
-            annotCtx.moveTo(annotStartX, annotStartY);
-            annotCtx.lineTo(annotCurrentX, annotCurrentY);
-            annotCtx.stroke();
-            annotCtx.setLineDash([]);
-            annotCtx.beginPath();
-            annotCtx.moveTo(annotCurrentX, annotCurrentY);
-            annotCtx.lineTo(annotCurrentX - headLen * Math.cos(angle - 0.4), annotCurrentY - headLen * Math.sin(angle - 0.4));
-            annotCtx.moveTo(annotCurrentX, annotCurrentY);
-            annotCtx.lineTo(annotCurrentX - headLen * Math.cos(angle + 0.4), annotCurrentY - headLen * Math.sin(angle + 0.4));
-            annotCtx.stroke();
+            // 0.28.26：预览与最终命令共用 drawArrowShape（实心三角头部），
+            // 保证拖动预览、松手成品、导出与录制涂画形状一致。
+            annot.drawArrowShape(annotCtx, {x: annotStartX, y: annotStartY}, {x: annotCurrentX, y: annotCurrentY}, {
+                color: annot.getColor(),
+                width: annot.getWidthForTool('arrow'),
+                dashed: annot.getStrokeStyle() === 'dashed',
+            });
             break;
         }
         case 'pencil': {
@@ -474,5 +465,75 @@ export function redrawAnnotFull() {
     if (!selCss || annotCanvas.width === 0) return;
     annotCtx.clearRect(0, 0, annotCanvas.width, annotCanvas.height);
     annot.renderCommandsTo(annot.getCommands(), annotCtx, annotCanvas.width, annotCanvas.height);
+    ss.gifRecHooks?.onDraw?.();
+}
+
+// ── 0.28.26：Shift 连续直线预览（铅笔工具）─────────────────────────────
+//
+// 预览不进入 commands 撤销栈；已提交内容用快照 O(1) 恢复（快照与引擎
+// commitVersion 比对，undo/redo/提交段后自动重拍），避免每帧全量重放。
+
+/** 拍摄已提交内容快照（调用时 annotCanvas 必须只含已提交内容）。 */
+function captureLineSnapshot() {
+    const {annotCanvas} = ss;
+    if (!annotCanvas || annotCanvas.width === 0) {
+        ss._lineSnapshot = null;
+        ss._lineSnapshotVer = annot.getCommitVersion();
+        return;
+    }
+    if (!ss._lineSnapshot) ss._lineSnapshot = document.createElement('canvas');
+    if (ss._lineSnapshot.width !== annotCanvas.width || ss._lineSnapshot.height !== annotCanvas.height) {
+        ss._lineSnapshot.width = annotCanvas.width;
+        ss._lineSnapshot.height = annotCanvas.height;
+    }
+    const snapCtx = ss._lineSnapshot.getContext('2d');
+    snapCtx.clearRect(0, 0, annotCanvas.width, annotCanvas.height);
+    snapCtx.drawImage(annotCanvas, 0, 0);
+    ss._lineSnapshotVer = annot.getCommitVersion();
+}
+
+/**
+ * 重绘 Shift 连线预览：恢复已提交内容后，从锚点到最新鼠标位置画一条
+ * 任意角度直线（复用当前笔画颜色/宽度/虚线样式，与成品 pencil 一致）。
+ * 由 index.js 的 rAF 节流循环调用；无锚点时等价于恢复已提交内容。
+ */
+export function redrawAnnotLinePreview() {
+    const {selCss, annotCanvas, annotCtx} = ss;
+    if (!selCss || !annotCanvas || annotCanvas.width === 0) return;
+    // 快照缺失或版本落后（undo/redo/清空/提交段）时重拍——此刻画布只含已提交内容
+    if (!ss._lineSnapshot || ss._lineSnapshotVer !== annot.getCommitVersion()) {
+        captureLineSnapshot();
+    } else {
+        annotCtx.clearRect(0, 0, annotCanvas.width, annotCanvas.height);
+        annotCtx.drawImage(ss._lineSnapshot, 0, 0);
+    }
+    const anchor = annot.getLineAnchor();
+    const end = annot.getLinePreviewEnd();
+    if (anchor && end) {
+        annotCtx.save();
+        annotCtx.strokeStyle = annot.getColor();
+        annotCtx.lineWidth = annot.getStrokeWidth();
+        annotCtx.lineCap = 'round';
+        annotCtx.lineJoin = 'round';
+        if (annot.getStrokeStyle() === 'dashed') annotCtx.setLineDash([8, 4]);
+        annotCtx.beginPath();
+        annotCtx.moveTo(anchor.x, anchor.y);
+        annotCtx.lineTo(end.x, end.y);
+        annotCtx.stroke();
+        annotCtx.restore();
+    }
+    ss.gifRecHooks?.onDraw?.();
+}
+
+/** 清除连线预览，恢复为已提交内容（Shift 松开 / Esc / 指针取消等）。 */
+export function clearLinePreview() {
+    const {selCss, annotCanvas, annotCtx} = ss;
+    if (!selCss || !annotCanvas || annotCanvas.width === 0) return;
+    if (ss._lineSnapshot && ss._lineSnapshotVer === annot.getCommitVersion()) {
+        annotCtx.clearRect(0, 0, annotCanvas.width, annotCanvas.height);
+        annotCtx.drawImage(ss._lineSnapshot, 0, 0);
+    } else {
+        redrawAnnotFull();
+    }
     ss.gifRecHooks?.onDraw?.();
 }

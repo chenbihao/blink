@@ -1283,6 +1283,9 @@ impl ChatService {
             let Some(service) = weak_service.upgrade() else {
                 return;
             };
+            // 0.28.28：终态后 clear_if 成功时发送 Ready（可续发边界）。clone 一份
+            // 发送端——chunk_tx 本体交给 interceptor，此后仍可发送协议信号。
+            let ready_tx = chunk_tx.clone();
 
             // Provider 构造也放进可 abort 的 task：窗口在冷构造期间关闭时仍能立即中断。
             match service
@@ -1308,6 +1311,7 @@ impl ChatService {
                                     request_id,
                                     "ChatService: 请求失败后 active 已清除"
                                 );
+                                let _ = ready_tx.send(ChatStreamChunk::Ready);
                             }
                             return;
                         }
@@ -1373,6 +1377,8 @@ impl ChatService {
             }
             if service.requests.clear_if(request_id) {
                 tracing::debug!(request_id, "ChatService: 请求自然完成，active 已清除");
+                // 0.28.28：可续发边界——槽位已释放，通知前端（自动发送待发追问）
+                let _ = ready_tx.send(ChatStreamChunk::Ready);
             }
         });
         let abort_handle = task.abort_handle();

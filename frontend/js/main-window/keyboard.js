@@ -125,15 +125,12 @@ function onNavigation(e) {
     if (aiMode.isActive()) {
         if (e.key === "Enter" && !e.isComposing) {
             e.preventDefault();
-            // 确认卡片显示时，Enter 确认操作（不触发追问）
-            if (aiMode.isAwaitingConfirm()) {
+            // 0.28.28：确认卡片的 Enter 仅在明确聚焦该卡片时确认；
+            // 输入框 Enter 遵循输入/待发语义（submitInput），不把补充提问误当工具批准。
+            if (aiMode.isAwaitingConfirm() && aiMode.isConfirmCardEvent(e)) {
                 aiMode.confirmCurrentAction();
             } else {
-                const text = aiQueryEl.value.trim();
-                if (text) {
-                    aiQueryEl.value = "";
-                    aiMode.askFollowup(text);
-                }
+                aiMode.submitInput();
             }
         }
         return;

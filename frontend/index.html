@@ -60,6 +60,12 @@
     <!-- AI 模式（0.17.6: 独立容器，Tab on AI Ghost 进入，ESC 退出）。
          0.24.4: 模式徽章统一走 #mode-header，输入条只留输入框。 -->
     <div hidden id="ai-mode">
+        <!-- 0.28.28：待发消息条（生成中 Enter 暂存，完成后自动发送；可编辑/取消） -->
+        <div class="hidden" id="ai-pending-bar">
+            <input autocomplete="off" data-i18n-placeholder="ai.pending_hint" id="ai-pending-input"
+                   placeholder="上一条完成后发送（Enter 编辑确认）" spellcheck="false" type="text"/>
+            <button class="ai-pending-cancel" id="ai-pending-cancel" title="取消待发" type="button">×</button>
+        </div>
         <div id="ai-input-bar">
             <input autocomplete="off" data-i18n-placeholder="ai.followup_placeholder" id="ai-query" placeholder="追问…"
                    spellcheck="false" type="text"/>

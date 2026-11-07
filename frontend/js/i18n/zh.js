@@ -326,6 +326,8 @@ export const zh = {
     // ── 通用 Tab ──
     "general.auto_start.label": "开机自启",
     "general.auto_start.hint": "开机自动启动",
+    "general.prefer_cn_mirror.label": "优先使用国内镜像下载",
+    "general.prefer_cn_mirror.hint": "对有可用镜像的下载（运行时/模型/插件包/应用更新等）优先使用镜像，失败后自动尝试官方源；仅改变下载顺序，不关闭校验",
     "general.language.label": "语言",
     "general.language.hint": "界面语言，切换后立即生效",
     "general.theme.label": "主题",
@@ -1043,6 +1045,10 @@ export const zh = {
     "voice.overlay.error": "听写发生错误，请返回编辑器重试",
     "ai.lede": "管理 AI 供应商与模型，以及主窗口的 AI 提示。密钥存 Windows Credential Manager，SQLite 只存别名。",
     "ai.followup_placeholder": "追问…",
+    "ai.config.load_failed": "AI 配置读取失败，已保留当前内容：{error}",
+    "ai.pending_hint": "上一条完成后发送（Enter 编辑确认）",
+    "ai.material.expander": "已选 {count} 字 · 引用材料",
+    "ai.material.expander_long": "已选 {count} 字 · 引用材料（较长，可能超出上下文预算）",
     // ── 主窗口 AI 模式（0.17.6）──
     "ai.confirm_title": "需要确认",
     "ai.confirm_reject": "拒绝",
@@ -1758,6 +1764,8 @@ export const zh = {
     // SuggestionBar 行文案：display 之外按 kind 覆盖（AskAi 后端 display 硬编码
     // 键名"按 Tab 问 AI"，ArrowRight 配置用户会看到错误键名；bar 自带键帽 chip）
     "suggestionbar.ask_ai": "问 AI",
+    "suggestionbar.ask_ai_combined": "结合划词问 AI · 已选 {count} 字",
+    "suggestionbar.ask_ai_input_only": "仅用输入问 AI",
     "suggestionbar.ask_ai_with": "问 AI “{text}”",
     "suggestionbar.completion_to": "补全 → {target}",
     // 打开类（0.24.8）：display 是目标文本（URL/路径），按 kind 拼标签 + 截断预览

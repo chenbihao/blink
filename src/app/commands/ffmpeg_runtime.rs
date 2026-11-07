@@ -225,12 +225,24 @@ pub fn begin_ffmpeg_runtime_operation(
             }
         })
         .await;
-        let error = match result {
+        let error = match &result {
             Ok(Ok(())) | Ok(Err(crate::infra::managed_runtime::ManagedRuntimeError::Cancelled)) => {
                 None
             }
             Ok(Err(e)) => Some(e.to_string()),
             Err(e) => Some(format!("媒体运行时任务失败: {e}")),
+        };
+        // 0.28.28：结束日志带结果（done/cancelled/failed）——手动取消可排查
+        let cancelled = matches!(
+            result,
+            Ok(Err(crate::infra::managed_runtime::ManagedRuntimeError::Cancelled))
+        );
+        let result_label = if cancelled {
+            "cancelled"
+        } else if error.is_some() {
+            "failed"
+        } else {
+            "done"
         };
         if let Some(error) = &error {
             tracing::warn!(?action, operation_id = %reporter.id, %error, "媒体运行时操作失败");
@@ -247,7 +259,7 @@ pub fn begin_ffmpeg_runtime_operation(
                 state.revision += 1;
             }
         }
-        tracing::info!(?action, "媒体运行时操作结束");
+        tracing::info!(?action, result = result_label, "媒体运行时操作结束");
         reporter.notify();
     });
     Ok(operation_id)
@@ -261,6 +273,7 @@ pub fn cancel_ffmpeg_runtime_operation(
     ensure_settings(&window)?;
     let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(operation) = state.operation.as_ref().filter(|op| op.id == operation_id) {
+        tracing::info!(operation_id = %operation_id, "媒体运行时操作收到取消请求");
         if !operation.cancellable {
             return Err(CommandError::new(
                 "media_runtime_committing",
