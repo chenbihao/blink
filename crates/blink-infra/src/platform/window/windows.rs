@@ -2817,12 +2817,18 @@ pub fn show_voice_overlay(app: &AppHandle, owner_hwnd: Option<isize>) {
             .skip_taskbar(true)
             .shadow(false)
             .focused(false)
+            .focusable(false)
             .visible(false)
             .build()
     });
     match result {
         Ok((_win, created)) => {
             let ready = activate_window_when_ready(app, LABEL, move |win| {
+                // focused(false) 只控制首次创建；Tao show 会按内部 FOCUSABLE
+                // 标记重写扩展样式，手动 apply_no_activate 会被覆盖。复用也须
+                // 更新框架状态，保证显示、尺寸和置顶更新都保留 NOACTIVATE。
+                win.set_focusable(false)
+                    .map_err(|error| format!("设置 voice-overlay 不可聚焦失败: {error}"))?;
                 // 复用时重置尺寸为默认值（上次可能被 autoResize 撑高）
                 let _ = win.set_size(tauri::LogicalSize::new(VOICE_W, VOICE_H));
                 let _ = win.set_position(tauri::PhysicalPosition::new(mx + 16, my + 16));

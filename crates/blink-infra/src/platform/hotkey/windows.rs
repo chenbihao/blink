@@ -53,6 +53,9 @@ const WND_CLASS: &str = "BlinkInputWindow";
 
 /// 控制消息唤醒用的 WM_APP（与 mod.rs 控制队列配合）。
 const WM_APP_WAKEUP: u32 = 0x8000;
+/// 只排队到 message window；禁止在 LL Hook 回调里直接 SendInput。
+const WM_APP_ALT_MENU_MASK: u32 = 0x8001;
+const ALT_MENU_MASK_TAG: usize = 0x424C4D4B;
 
 /// 会话变化通知消息（WTSRegisterSessionNotification 注册后收到）。
 const WM_WTSSESSION_CHANGE: u32 = 0x02B1;
@@ -613,6 +616,20 @@ fn manage_hold_timer(state: &InputState) {
 ///
 /// 无锁、无 IO——可在 Hook 回调中安全调用。
 fn apply_reduce_result(state: &InputState, result: &state::ReduceResult) {
+    if let Some(gesture_id) = result.alt_menu_mask
+        && let Some(&hwnd_raw) = WND_HWND.get()
+    {
+        // 记录当时的目标，防止消息消费前用户切窗后把占位键发到别的窗口。
+        let target = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+        let _ = unsafe {
+            PostMessageW(
+                Some(HWND(hwnd_raw as *mut _)),
+                WM_APP_ALT_MENU_MASK,
+                WPARAM(gesture_id as usize),
+                LPARAM(target.0 as isize),
+            )
+        };
+    }
     for effect in &result.effects {
         send_effect(effect.clone());
     }
@@ -770,9 +787,7 @@ fn stuck_patrol_tick() {
         if let Some(state) = cell.borrow_mut().as_mut() {
             reduce_and_apply(
                 state,
-                InputEvent::StuckModifiersObserved {
-                    keys: keys.clone(),
-                },
+                InputEvent::StuckModifiersObserved { keys: keys.clone() },
                 Instant::now(),
             );
         }
@@ -1159,6 +1174,45 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
     }
 }
 
+/// PowerToys Keyboard Manager 同款占位键：down + up，不改变 Alt 电平，不产生字符。
+/// vk=0xFF 不被 vk_to_key 映射，所以不会进入 reducer 打断进行中的 hold。
+fn alt_menu_mask_inputs() -> [windows::Win32::UI::Input::KeyboardAndMouse::INPUT; 2] {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP,
+    };
+    [KEYBD_EVENT_FLAGS(0), KEYEVENTF_KEYUP].map(|flags| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(0xFF),
+                dwFlags: flags,
+                dwExtraInfo: ALT_MENU_MASK_TAG,
+                ..Default::default()
+            },
+        },
+    })
+}
+
+/// 运行于 posted-message 分支，不持有 INPUT_STATE 借用，也不在键盘 hook 回调内。
+fn mask_alt_menu(gesture_id: u64, target: isize) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{INPUT, SendInput};
+    let foreground = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() };
+    let alt_down = unsafe { GetAsyncKeyState(VK_MENU.0 as i32) } < 0;
+    if recorder::is_recording() || !alt_down || target == 0 || foreground.0 as isize != target {
+        return;
+    }
+    let inputs = alt_menu_mask_inputs();
+    let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+    if sent != inputs.len() as u32 {
+        tracing::warn!(
+            gesture_id,
+            target_hwnd = target,
+            sent,
+            "Alt 菜单占位事件未完整提交"
+        );
+    }
+}
+
 // ── Message-Only Window Proc ────────────────────────────────────────────────────
 
 unsafe extern "system" fn wnd_proc(
@@ -1168,6 +1222,10 @@ unsafe extern "system" fn wnd_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     match msg {
+        WM_APP_ALT_MENU_MASK => {
+            mask_alt_menu(wparam.0 as u64, lparam.0);
+            LRESULT(0)
+        }
         WM_INPUT => {
             handle_wm_input(lparam);
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
@@ -1726,6 +1784,34 @@ pub fn post_control_wakeup() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn alt_menu_mask_is_a_balanced_unmapped_non_modifier_pair() {
+        use windows::Win32::UI::Input::KeyboardAndMouse::KEYEVENTF_KEYUP;
+        let inputs = alt_menu_mask_inputs();
+        for (index, input) in inputs.iter().enumerate() {
+            let key = unsafe { input.Anonymous.ki };
+            assert_eq!(key.wVk.0, 0xFF);
+            assert_eq!(key.dwExtraInfo, ALT_MENU_MASK_TAG);
+            assert_eq!(key.dwFlags.contains(KEYEVENTF_KEYUP), index == 1);
+            assert!(!is_modifier_key(key.wVk.0 as u32));
+            let hook = KBDLLHOOKSTRUCT {
+                vkCode: key.wVk.0 as u32,
+                flags: LLKHF_INJECTED,
+                dwExtraInfo: key.dwExtraInfo,
+                ..Default::default()
+            };
+            let msg = if index == 0 {
+                WM_SYSKEYDOWN
+            } else {
+                WM_SYSKEYUP
+            };
+            assert!(
+                normalize_hook_event(&hook, msg).is_none(),
+                "占位键不得进入 reducer 中止 hold"
+            );
+        }
+    }
 
     #[test]
     fn mask_for_config_modifier_basic() {

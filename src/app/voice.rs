@@ -387,7 +387,7 @@ struct VoiceSession {
     target: VoiceTarget,
     /// 是否正在录音
     recording: bool,
-    /// G2: 录音开始时的前台窗口 HWND（用于注入前恢复焦点）
+    /// G2: 显示任何浮窗、等待引擎之前冻结的目标 HWND（用于注入前恢复焦点）。
     prev_fg_hwnd: Option<isize>,
     /// Editor 连续听写模式（0.23.3）：录音持续到显式 stop，段式交付。
     continuous: bool,
@@ -529,6 +529,7 @@ impl VoiceService {
 
         // ── G1/G2 判定 + 互斥检查（scoped block：MutexGuard 不跨 await） ──
         let target;
+        let owner_hwnd;
         {
             let mut session = self.session.lock().unwrap();
 
@@ -564,6 +565,14 @@ impl VoiceService {
                 VoiceTarget::ForegroundApp
             };
             session.target = target;
+            // 浮窗显示、引擎就绪检查、音频设备启动均可能改变前台窗口。
+            // G2 必须锁定手势启动时的目标，不能在 begin_recording 后重采样。
+            owner_hwnd = if target == VoiceTarget::ForegroundApp {
+                platform::window::get_foreground_hwnd()
+            } else {
+                None
+            };
+            session.prev_fg_hwnd = owner_hwnd;
         }
 
         // G2: 在服务就绪检查之前立即显示 overlay，让用户瞬间看到反馈。
@@ -572,7 +581,6 @@ impl VoiceService {
         // 定位：此刻前台仍是注入目标，先记下它的窗口句柄——浮窗先按鼠标即时
         // 显示，随后后台精化到该窗口的文本光标处（0.23.x 跟随光标）。
         if target == VoiceTarget::ForegroundApp {
-            let owner_hwnd = platform::window::get_foreground_hwnd();
             platform::window::show_voice_overlay(&self.app, owner_hwnd);
         }
 
@@ -1175,11 +1183,6 @@ impl VoiceService {
                         target = ?session.target,
                         "语音录音开始"
                     );
-
-                    // G2: overlay 已在 start_recording 中提前显示，此处只需保存前台窗口 HWND
-                    if session.target == VoiceTarget::ForegroundApp {
-                        session.prev_fg_hwnd = platform::window::get_foreground_hwnd();
-                    }
 
                     let target = session.target;
                     let target_str = session.target.as_str();
@@ -2235,6 +2238,12 @@ impl G2Runtime {
                     chars = text.chars().count(),
                     "G2 冲刷执行注入"
                 );
+                if hwnd.is_none() || fg_after != hwnd {
+                    // SendInput 成功只表示事件入队，发往错误前台也会返回成功。
+                    // 没恢复到冻结目标时返回失败，让 worker 保留/回传未上屏文本。
+                    tracing::warn!(target_hwnd = ?hwnd, ?fg_after, "G2 焦点未恢复，取消本次注入");
+                    return Err("无法恢复语音目标窗口焦点，文本尚未上屏".to_string());
+                }
                 if unicode_only {
                     // 录音中不降级剪贴板：真实 Ctrl+V keydown 会打断 hold 状态机
                     platform::inject::inject_text_unicode_strict(text).map_err(|e| e.to_string())
@@ -2306,7 +2315,7 @@ async fn run_g2_flush_worker(
         };
         match outcome {
             Ok((Ok(()), _)) => {
-                tracing::debug!(chars, "G2 冲刷上屏完成");
+                tracing::debug!(chars, "G2 输入事件提交完成（未验证目标控件接收）");
                 // 0.23.14：交付确认回传账本——浮窗 confirmed 窗口此刻才
                 // 清退本 job 覆盖的段（终态 job ack 全部已投递段）。
                 let _ = ack_tx.send(G2FlushAck::Delivered {

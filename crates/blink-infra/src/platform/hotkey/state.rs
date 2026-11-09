@@ -498,6 +498,13 @@ pub struct NormalizedHotkey {
 }
 
 impl NormalizedHotkey {
+    /// 只接管主热键的 Alt+Space，不扩大到 Ctrl+Alt+Space 或其他配置。
+    pub(super) fn is_alt_space(&self) -> bool {
+        self.key == " "
+            && self.modifiers.len() == 1
+            && matches!(self.modifiers[0].as_str(), "alt" | "lalt" | "ralt")
+    }
+
     /// 是否为单独修饰键配置。
     pub fn is_standalone(&self) -> bool {
         self.modifiers.is_empty() && is_standalone_modifier_key(&self.key)
@@ -1097,7 +1104,9 @@ pub enum InputEvent {
     /// 「内部 pressed && 物理 Up」才发本事件；reducer 定向清除（含真实 Down）。
     /// 与 [`InputEvent::PhysicalModifiersObserved`] 的区别：巡检事件携带
     /// 跨时间去抖后的结论，单次快照不足以支撑清除真实 Down。
-    StuckModifiersObserved { keys: Vec<ModifierKey> },
+    StuckModifiersObserved {
+        keys: Vec<ModifierKey>,
+    },
 }
 
 /// 单个 chord 全局快捷键的注册状态（0.22.12，投影给设置页）。
@@ -1161,6 +1170,9 @@ pub enum InputEffect {
 #[derive(Clone, Debug)]
 pub struct ReduceResult {
     pub propagation: Propagation,
+    /// 首次接管 Alt+Space 时请求平台标记 Alt 已参与组合，避免松开后进入菜单栏。
+    /// 由 adapter 在 Hook 回调之外执行；不属于 tap/hold 业务 effect。
+    pub alt_menu_mask: Option<u64>,
     pub effects: Vec<InputEffect>,
 }
 
@@ -1168,6 +1180,7 @@ impl ReduceResult {
     fn pass() -> Self {
         Self {
             propagation: Propagation::Pass,
+            alt_menu_mask: None,
             effects: Vec::new(),
         }
     }
@@ -1182,7 +1195,12 @@ impl ReduceResult {
 pub fn reduce(state: &mut InputState, event: InputEvent, now: Instant) -> ReduceResult {
     match event {
         InputEvent::HookKey(e) => reduce_hook_key(state, e, now),
-        InputEvent::RawMainKey(e) => reduce_hook_key(state, e, now),
+        InputEvent::RawMainKey(e) => {
+            let mut result = reduce_hook_key(state, e, now);
+            // Raw 到达时事件已经放行，不是本次 Hook 接管的组合键。
+            result.alt_menu_mask = None;
+            result
+        }
         InputEvent::RawModifier(e) => reduce_raw_modifier(state, e),
         InputEvent::RawDeviceRemoved { device_id } => reduce_raw_device_removed(state, device_id),
         InputEvent::HoldDeadline { gesture_id } => reduce_hold_deadline(state, gesture_id, now),
@@ -1217,6 +1235,7 @@ fn reduce_manual_recovery(state: &mut InputState) -> ReduceResult {
 
     ReduceResult {
         propagation: Propagation::Pass,
+        alt_menu_mask: None,
         effects: finalize(state),
     }
 }
@@ -1236,12 +1255,9 @@ fn finalize(state: &mut InputState) -> Vec<InputEffect> {
 fn reduce_hook_key(state: &mut InputState, e: HookKeyEvent, now: Instant) -> ReduceResult {
     let mut result = ReduceResult::pass();
 
-    // 录制模式：不产生正常动作
+    // 录制由 Raw Input 驱动：必须放行，否则 Space 的 WM_INPUT 可能缺失。
+    // 系统菜单由设置窗口的窗口过程拦截，不在键盘 hook 中处理。
     if let RecorderMode::Recording { .. } = state.recorder {
-        // 录制期间保留 Alt+Space 特殊吞键语义
-        if e.is_down && e.key == " " && state.modifiers.alt_down() {
-            result.propagation = Propagation::Swallow;
-        }
         return result;
     }
 
@@ -1344,6 +1360,20 @@ fn reduce_hook_key(state: &mut InputState, e: HookKeyEvent, now: Instant) -> Red
         if let GestureState::Armed { key: armed_key, .. } = &state.gesture
             && &e.key == armed_key
         {
+            // 首次按下已接管的 Alt+Space，其 autorepeat 也不能漏给前台窗口。
+            // 用 gesture 冻结配置与来源配对：松开 Alt、配置更新或手势被中止
+            // 都不应让同一次被接管的 Space 突然开始向目标窗口重复输入。
+            if let GestureState::Armed {
+                frozen_hotkey,
+                source,
+                ..
+            } = &state.gesture
+                && frozen_hotkey.is_alt_space()
+                && *source == InputSource::Local
+                && e.source == *source
+            {
+                result.propagation = Propagation::Swallow;
+            }
             result.effects.extend(finalize(state));
             return result;
         }
@@ -1448,7 +1478,7 @@ fn try_arm(
     key: &str,
     source: InputSource,
     time_ms: u32,
-    _result: &mut ReduceResult,
+    result: &mut ReduceResult,
 ) {
     let config = &state.config;
     if key != config.hotkey.key {
@@ -1467,10 +1497,21 @@ fn try_arm(
         return;
     }
 
+    // 先完成正常匹配，再接管物理 Alt+Space 的 Space down。不要吞 Alt 或
+    // keyup，也不要拦截普通空格 / 其他主热键 / 注入事件。tap/hold 仍由本
+    // reducer 处理；仅改变向系统传播的决策，阻止首次按下弹出系统菜单。
+    let mask_alt_menu = config.hotkey.is_alt_space() && source == InputSource::Local;
+    if mask_alt_menu {
+        result.propagation = Propagation::Swallow;
+    }
+
     // 克隆配置数据，避免借用冲突
     let frozen_hotkey = config.hotkey.clone();
     let frozen_tap_threshold = config.tap_threshold;
     let gesture_id = state.alloc_gesture_id();
+    if mask_alt_menu {
+        result.alt_menu_mask = Some(gesture_id);
+    }
     state.gesture = GestureState::Armed {
         gesture_id,
         key: key.to_string(),
@@ -1572,6 +1613,7 @@ fn reduce_raw_modifier(state: &mut InputState, e: RawModifierEvent) -> ReduceRes
     let effects = finalize(state);
     ReduceResult {
         propagation: Propagation::Pass,
+        alt_menu_mask: None,
         effects,
     }
 }
@@ -1583,6 +1625,7 @@ fn reduce_raw_device_removed(state: &mut InputState, device_id: usize) -> Reduce
     let effects = finalize(state);
     ReduceResult {
         propagation: Propagation::Pass,
+        alt_menu_mask: None,
         effects,
     }
 }
@@ -1601,6 +1644,7 @@ fn reduce_physical_modifiers(
     let effects = if changed { finalize(state) } else { Vec::new() };
     ReduceResult {
         propagation: Propagation::Pass,
+        alt_menu_mask: None,
         effects,
     }
 }
@@ -1623,6 +1667,7 @@ fn reduce_stuck_modifiers(state: &mut InputState, keys: &[ModifierKey]) -> Reduc
     let effects = if changed { finalize(state) } else { Vec::new() };
     ReduceResult {
         propagation: Propagation::Pass,
+        alt_menu_mask: None,
         effects,
     }
 }
@@ -1695,6 +1740,7 @@ fn reduce_window_changed(
     let effects = finalize(state);
     ReduceResult {
         propagation: Propagation::Pass,
+        alt_menu_mask: None,
         effects,
     }
 }
@@ -1721,6 +1767,7 @@ fn reduce_view_context(state: &mut InputState, ctx: MainViewContext) -> ReduceRe
     let effects = finalize(state);
     ReduceResult {
         propagation: Propagation::Pass,
+        alt_menu_mask: None,
         effects,
     }
 }
@@ -1736,6 +1783,7 @@ fn reduce_voice_phase(
     let effects = finalize(state);
     ReduceResult {
         propagation: Propagation::Pass,
+        alt_menu_mask: None,
         effects,
     }
 }
@@ -1753,6 +1801,7 @@ fn reduce_recorder_mode(state: &mut InputState, mode: RecorderMode) -> ReduceRes
     let effects = finalize(state);
     ReduceResult {
         propagation: Propagation::Pass,
+        alt_menu_mask: None,
         effects,
     }
 }
@@ -1781,6 +1830,7 @@ fn reduce_config_changed(state: &mut InputState, snapshot: InputConfigSnapshot) 
     let effects = finalize(state);
     ReduceResult {
         propagation: Propagation::Pass,
+        alt_menu_mask: None,
         effects,
     }
 }
@@ -1826,6 +1876,7 @@ fn reduce_session_reset(state: &mut InputState, _reason: SessionResetReason) -> 
 
     ReduceResult {
         propagation: Propagation::Pass,
+        alt_menu_mask: None,
         effects,
     }
 }
@@ -2317,7 +2368,7 @@ mod tests {
             Instant::now(),
         );
         // 同一主键 repeat down -> 忽略（仍 armed，不重置）
-        // tap 窗口内（hold_fired=false, voice=Idle）-> 放行
+        // tap 窗口内也接管重复 Space，不能等 hold_fired 才开始拦截。
         let r = reduce(
             &mut s,
             InputEvent::HookKey(hook_key_down(" ", 210)),
@@ -2325,7 +2376,8 @@ mod tests {
         );
         assert!(!has_tap(&r.effects));
         assert!(matches!(s.gesture, GestureState::Armed { .. }));
-        assert_eq!(r.propagation, Propagation::Pass);
+        assert_eq!(r.propagation, Propagation::Swallow);
+        assert_eq!(r.alt_menu_mask, None, "autorepeat 不应反复请求菜单占位");
 
         // keyup -> tap
         let r = reduce(
@@ -2334,6 +2386,261 @@ mod tests {
             Instant::now(),
         );
         assert!(has_tap(&r.effects));
+    }
+
+    #[test]
+    fn alt_space_first_down_is_swallowed_but_tap_and_modifier_edges_are_preserved() {
+        let mut s = InputState {
+            config: alt_space_config(),
+            ..Default::default()
+        };
+        let r = reduce(
+            &mut s,
+            InputEvent::HookKey(hook_modifier_down("lalt", 100)),
+            Instant::now(),
+        );
+        assert_eq!(r.propagation, Propagation::Pass);
+        let r = reduce(
+            &mut s,
+            InputEvent::HookKey(hook_key_down(" ", 200)),
+            Instant::now(),
+        );
+        assert_eq!(r.propagation, Propagation::Swallow);
+        assert!(!has_tap(&r.effects));
+        assert!(!has_hold_started(&r.effects));
+        assert_eq!(r.alt_menu_mask, s.gesture.gesture_id());
+        let r = reduce(
+            &mut s,
+            InputEvent::HookKey(hook_key_up(" ", 250)),
+            Instant::now(),
+        );
+        assert_eq!(r.propagation, Propagation::Pass);
+        assert!(has_tap(&r.effects));
+        let r = reduce(
+            &mut s,
+            InputEvent::HookKey(hook_modifier_up("lalt", 260)),
+            Instant::now(),
+        );
+        assert_eq!(r.propagation, Propagation::Pass);
+        assert!(!s.modifiers.alt_down());
+    }
+
+    #[test]
+    fn ordinary_space_and_extra_modifiers_are_not_intercepted() {
+        let mut s = InputState {
+            config: alt_space_config(),
+            ..Default::default()
+        };
+        for event in [hook_key_down(" ", 10), hook_key_up(" ", 20)] {
+            let r = reduce(&mut s, InputEvent::HookKey(event), Instant::now());
+            assert_eq!(r.propagation, Propagation::Pass);
+            assert!(matches!(s.gesture, GestureState::Idle));
+        }
+        for modifier in ["lalt", "lctrl"] {
+            reduce(
+                &mut s,
+                InputEvent::HookKey(hook_modifier_down(modifier, 30)),
+                Instant::now(),
+            );
+        }
+        let r = reduce(
+            &mut s,
+            InputEvent::HookKey(hook_key_down(" ", 40)),
+            Instant::now(),
+        );
+        assert_eq!(r.propagation, Propagation::Pass);
+        assert!(matches!(s.gesture, GestureState::Idle));
+    }
+
+    #[test]
+    fn configured_other_hotkeys_keep_their_propagation() {
+        for (modifiers, key) in [
+            (vec!["alt".into()], "q"),
+            (vec!["ctrl".into()], " "),
+            (vec!["alt".into(), "ctrl".into()], " "),
+        ] {
+            let mut s = InputState {
+                config: alt_space_config(),
+                ..Default::default()
+            };
+            s.config.hotkey = NormalizedHotkey {
+                modifiers: modifiers.clone(),
+                key: key.into(),
+            };
+            for modifier in modifiers {
+                let physical_key = if modifier == "alt" { "lalt" } else { "lctrl" };
+                reduce(
+                    &mut s,
+                    InputEvent::HookKey(hook_modifier_down(physical_key, 100)),
+                    Instant::now(),
+                );
+            }
+            let r = reduce(
+                &mut s,
+                InputEvent::HookKey(hook_key_down(key, 200)),
+                Instant::now(),
+            );
+            assert_eq!(r.propagation, Propagation::Pass);
+            assert!(matches!(s.gesture, GestureState::Armed { .. }));
+        }
+    }
+
+    #[test]
+    fn alt_space_recording_mode_passes_all_edges_without_actions() {
+        let mut s = armed_state();
+        reduce(
+            &mut s,
+            InputEvent::RecorderModeChanged(RecorderMode::Recording { recorder_id: 1 }),
+            Instant::now(),
+        );
+        for event in [
+            hook_key_down(" ", 200),
+            hook_key_down(" ", 220),
+            hook_key_up(" ", 250),
+            hook_modifier_up("lalt", 260),
+        ] {
+            let r = reduce(&mut s, InputEvent::HookKey(event), Instant::now());
+            assert_eq!(r.propagation, Propagation::Pass);
+            assert!(r.effects.is_empty());
+            assert_eq!(r.alt_menu_mask, None, "录制模式不能注入菜单占位键");
+        }
+        assert!(matches!(s.gesture, GestureState::Idle));
+    }
+
+    #[test]
+    fn alt_space_repeat_remains_intercepted_when_alt_is_released_first() {
+        let mut s = armed_state();
+        reduce(
+            &mut s,
+            InputEvent::HookKey(hook_key_down(" ", 200)),
+            Instant::now(),
+        );
+        let gid = s.gesture.gesture_id();
+        let r = reduce(
+            &mut s,
+            InputEvent::HookKey(hook_modifier_up("lalt", 210)),
+            Instant::now(),
+        );
+        assert_eq!(r.propagation, Propagation::Pass);
+        let r = reduce(
+            &mut s,
+            InputEvent::HookKey(hook_key_down(" ", 220)),
+            Instant::now(),
+        );
+        assert_eq!(r.propagation, Propagation::Swallow);
+        assert_eq!(s.gesture.gesture_id(), gid);
+        let r = reduce(
+            &mut s,
+            InputEvent::HookKey(hook_key_up(" ", 250)),
+            Instant::now(),
+        );
+        assert_eq!(r.propagation, Propagation::Pass);
+        assert!(has_tap(&r.effects));
+    }
+
+    #[test]
+    fn injected_alt_space_is_not_newly_intercepted() {
+        let mut s = armed_state();
+        let r = reduce(
+            &mut s,
+            InputEvent::HookKey(injected_key_down(" ", 200)),
+            Instant::now(),
+        );
+        assert_eq!(r.propagation, Propagation::Pass);
+        let r = reduce(
+            &mut s,
+            InputEvent::HookKey(injected_key_down(" ", 220)),
+            Instant::now(),
+        );
+        assert_eq!(r.propagation, Propagation::Pass);
+    }
+
+    #[test]
+    fn alt_space_interception_supports_left_right_and_generic_alt() {
+        for (configured, physical) in [("alt", "ralt"), ("lalt", "lalt"), ("ralt", "ralt")] {
+            let mut s = InputState {
+                config: alt_space_config(),
+                ..Default::default()
+            };
+            s.config.hotkey.modifiers = vec![configured.into()];
+            reduce(
+                &mut s,
+                InputEvent::HookKey(hook_modifier_down(physical, 100)),
+                Instant::now(),
+            );
+            let r = reduce(
+                &mut s,
+                InputEvent::HookKey(hook_key_down(" ", 200)),
+                Instant::now(),
+            );
+            assert_eq!(r.propagation, Propagation::Swallow, "{configured}");
+        }
+    }
+
+    #[test]
+    fn intercepted_space_repeat_survives_abort_and_config_change_without_action() {
+        let mut s = armed_state();
+        reduce(
+            &mut s,
+            InputEvent::HookKey(hook_key_down(" ", 200)),
+            Instant::now(),
+        );
+        let r = reduce(
+            &mut s,
+            InputEvent::HookKey(hook_key_down("x", 210)),
+            Instant::now(),
+        );
+        assert_eq!(r.propagation, Propagation::Pass);
+        let mut config = alt_space_config();
+        config.revision = 2;
+        config.hotkey.key = "q".into();
+        reduce(&mut s, InputEvent::ConfigChanged(config), Instant::now());
+        let r = reduce(
+            &mut s,
+            InputEvent::HookKey(hook_key_down(" ", 220)),
+            Instant::now(),
+        );
+        assert_eq!(r.propagation, Propagation::Swallow);
+        let r = reduce(
+            &mut s,
+            InputEvent::HookKey(hook_key_up(" ", 250)),
+            Instant::now(),
+        );
+        assert_eq!(r.propagation, Propagation::Pass);
+        assert!(!has_tap(&r.effects));
+        assert!(!has_hold_released(&r.effects));
+    }
+
+    #[test]
+    fn raw_fallback_does_not_request_menu_mask_for_an_unsuppressed_key() {
+        let mut s = armed_state();
+        let r = reduce(
+            &mut s,
+            InputEvent::RawMainKey(hook_key_down(" ", 200)),
+            Instant::now(),
+        );
+        assert_eq!(r.alt_menu_mask, None);
+        assert!(matches!(s.gesture, GestureState::Armed { .. }));
+    }
+
+    #[test]
+    fn other_hotkeys_and_injected_space_do_not_request_alt_menu_mask() {
+        let mut s = armed_state();
+        let r = reduce(
+            &mut s,
+            InputEvent::HookKey(injected_key_down(" ", 200)),
+            Instant::now(),
+        );
+        assert_eq!(r.alt_menu_mask, None);
+        s.gesture = GestureState::Idle;
+        s.config.hotkey.key = "q".into();
+        let r = reduce(
+            &mut s,
+            InputEvent::HookKey(hook_key_down("q", 300)),
+            Instant::now(),
+        );
+        assert_eq!(r.alt_menu_mask, None);
+        assert_eq!(r.propagation, Propagation::Pass);
     }
 
     // ── stale HoldDeadline ──
@@ -4816,7 +5123,10 @@ mod tests {
     #[test]
     fn physical_snapshot_pressed_mask_bits() {
         let snap = physical_snapshot(&[ModifierKey::LAlt, ModifierKey::RShift]);
-        assert_eq!(snap.pressed_mask(), ModifierKey::LAlt.bit() | ModifierKey::RShift.bit());
+        assert_eq!(
+            snap.pressed_mask(),
+            ModifierKey::LAlt.bit() | ModifierKey::RShift.bit()
+        );
         assert_eq!(PhysicalModifierSnapshot::default().pressed_mask(), 0);
     }
 }
