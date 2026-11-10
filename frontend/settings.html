@@ -2037,6 +2037,18 @@
                                     class="label-text" data-i18n="voice.mode.local">本地</span></label>
                         </div>
                     </div>
+                    <!-- 流式识别（0.29.1：本地/云端模式通用——本地=VAD 伪流式，云端=Realtime WS；
+                         紧跟 STT 模式行，切换模式时始终在最前面可见） -->
+                    <div class="setting-row" id="voice-streaming-field">
+                        <label class="setting-label" data-i18n="voice.local.streaming.label">流式识别<span
+                                class="field-hint-icon" data-i18n-title="voice.local.streaming.hint"
+                                title="开启后边说边显示预览，并在检测到切点时形成稳定文本；关闭后松开再一次性识别。">ⓘ</span></label>
+                        <label class="switch switch-sm">
+                            <input checked id="voice-streaming" type="checkbox"/>
+                            <span class="slider"></span>
+                        </label>
+                        <span class="voice-adv-field-hint" id="voice-streaming-hint"></span>
+                    </div>
                 </div>
             </div>
 
@@ -2130,22 +2142,6 @@
                             </div>
                         </div>
                     </div>
-                </div>
-            </div>
-
-            <!-- 流式识别（0.29.1：本地/云端模式通用——本地=VAD 伪流式，云端=Realtime WS） -->
-            <div class="voice-adv-field" id="voice-streaming-field">
-                <div class="voice-adv-field-label">
-                    <span data-i18n="voice.local.streaming.label">流式识别</span><span
-                        class="field-hint-icon" data-i18n-title="voice.local.streaming.hint"
-                        title="开启后边说边显示预览，并在检测到切点时形成稳定文本；关闭后松开再一次性识别。">ⓘ</span>
-                </div>
-                <div class="voice-adv-field-control">
-                    <label class="switch switch-sm">
-                        <input checked id="voice-streaming" type="checkbox"/>
-                        <span class="slider"></span>
-                    </label>
-                    <span class="voice-adv-field-hint" id="voice-streaming-hint"></span>
                 </div>
             </div>
 

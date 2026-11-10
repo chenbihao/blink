@@ -908,52 +908,8 @@
 }
 
 /* Fields */
-#voice .voice-adv-field {
-    display: flex;
-    align-items: flex-start;
-    gap: var(--space-lg, 16px);
-    padding: var(--space-sm, 10px) 0;
-    border-bottom: 1px solid var(--surface);
-}
-
-#voice .voice-adv-field:last-of-type {
-    border-bottom: none;
-}
-
-#voice .voice-adv-field--block {
-    flex-direction: column;
-    align-items: stretch;
-    gap: var(--space-xs, 6px);
-}
-
-#voice .voice-adv-field-label {
-    width: var(--settings-label-width, 180px);
-    flex-shrink: 0;
-    font-size: var(--text-md, 14px);
-    color: var(--text-sub);
-    display: flex;
-    align-items: center;
-    gap: var(--space-xs, 4px);
-    padding-top: 2px;
-}
-
-#voice .voice-adv-field--block .voice-adv-field-label {
-    width: auto;
-}
-
-#voice .voice-adv-field-control {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    align-items: center;
-    gap: var(--space-sm, 10px);
-}
-
-/* block 模式下 control 不需要 flex（只有 textarea 单元素），用 block 让 textarea 自然填充 */
-#voice .voice-adv-field--block .voice-adv-field-control {
-    display: block;
-}
-
+/* 0.29.1：流式识别行迁入基础配置卡（setting-row 结构）后，voice-adv-field 容器族
+   （-label/-control/--block）不再有使用方，仅保留本行内弱化提示 */
 #voice .voice-adv-field-hint {
     font-size: var(--text-sm, 12px);
     color: var(--text-faint);
