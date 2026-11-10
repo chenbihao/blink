@@ -76,6 +76,24 @@ pub async fn test_cloud_stt() -> Result<serde_json::Value, String> {
     }
 }
 
+/// 云端 STT 流式能力探测（0.29.1）。
+///
+/// 报告当前云端端点支持哪种流式：Realtime WebSocket（语音输入真流式）
+/// 与 SSE `stream=true`（Speaches 系整段事件流）。与 `test_cloud_stt`
+/// 一样属于云端诊断路径，不迁移 EngineManager。
+#[tauri::command]
+pub async fn test_cloud_stt_streaming() -> Result<serde_json::Value, String> {
+    let report = crate::domain::stt::realtime_ws::probe_streaming_support().await;
+    tracing::info!(
+        ws_supported = report.ws.supported,
+        ws_detail = %report.ws.detail,
+        sse_supported = report.sse.supported,
+        sse_detail = %report.sse.detail,
+        "云端 STT 流式能力探测"
+    );
+    serde_json::to_value(report).map_err(|e| format!("序列化探测结果失败: {e}"))
+}
+
 // ── Contract 测试 ──────────────────────────────────────────────────────────
 
 #[cfg(test)]

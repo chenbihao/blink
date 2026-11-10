@@ -163,7 +163,8 @@ pub async fn send_stt_request(
 }
 
 /// 获取供应商默认 base_url。
-fn default_base_url(kind: &str) -> &'static str {
+/// 0.29.1 `pub(crate)`：realtime_ws 解析 WS endpoint 时复用（kind → 默认 host）。
+pub(crate) fn default_base_url(kind: &str) -> &'static str {
     match kind {
         "openai" => "https://api.openai.com/v1",
         "groq" => "https://api.groq.com/openai/v1",

@@ -1126,7 +1126,9 @@ impl VoiceService {
                 return false;
             }
 
-            // GGUF 引擎创建 + 伪流式适配器包装（handoff-11 后唯一本地路径）。
+            // 引擎创建 + 流式 port 包装（0.29.1 起统一走 domain 工厂）：
+            // Local = GGUF 伪流式（现行为）；Cloud+流式开 = Realtime WS 真流式
+            // （WS 不可用自动回退整段上传，engine=None）；Cloud+流式关 = 整段上传。
             let (engine_arc, stt_port): (Option<Arc<dyn SttEngine>>, Arc<dyn StreamingSttPort>) = {
                 let profile = if matches!(target, VoiceTarget::ForegroundApp | VoiceTarget::Editor)
                 {
@@ -1134,27 +1136,15 @@ impl VoiceService {
                 } else {
                     RecognitionProfile::Legacy
                 };
-                let engine = match crate::domain::stt::create_engine_with_profile(
-                    connection.clone(),
-                    profile,
-                ) {
-                    Ok(e) => e,
+                match crate::domain::stt::create_streaming_port(connection.clone(), profile) {
+                    Ok(pair) => pair,
                     Err(e) => {
                         tracing::warn!(target = ?session.target, %e, "语音录音中止：引擎创建失败");
                         let msg = e;
                         self.emit_voice_error(session.target, &msg);
                         return false;
                     }
-                };
-                engine.reset();
-                let engine_arc: Arc<dyn SttEngine> = Arc::from(engine);
-                let port: Arc<dyn StreamingSttPort> = Arc::new(
-                    crate::domain::stt::streaming_port::GgufStreamingAdapter::new_with_profile(
-                        engine_arc.clone(),
-                        profile,
-                    ),
-                );
-                (Some(engine_arc), port)
+                }
             };
 
             let mut capture = if let Some(dev_id) = &config.audio_device_id {

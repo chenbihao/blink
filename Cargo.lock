@@ -761,11 +761,14 @@ dependencies = [
  "blink-domain-capability",
  "blink-domain-config",
  "blink-infra",
+ "futures-util",
+ "http",
  "reqwest",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-tungstenite",
  "tracing",
 ]
 

@@ -614,6 +614,7 @@ pub mod local;
 mod mock;
 pub mod postprocess; // 0.25.3 crate 化：pub(crate) → pub（bin 侧 shim re-export 需要）
 pub mod pseudo_streaming;
+pub mod realtime_ws; // 0.29.1：云端 OpenAI Realtime WS 实时流式引擎
 pub mod sentence_state; // 0.25.3 crate 化：pub(crate) → pub（bin 侧 shim re-export 需要）
 pub mod streaming_port;
 pub mod transcribe; // 0.22.16 Handoff 04：一次性文件转写领域契约
@@ -726,6 +727,64 @@ pub fn create_engine_with_profile(
                     }
                 }
             }
+        }
+    }
+}
+
+/// 按 profile 创建流式 port + 可选的旧引擎句柄（0.29.1，VoiceService 唯一入口）。
+///
+/// 返回 `(engine, port)`：
+/// - **Cloud + 流式开（默认）** → `(None, realtime_ws::CloudStreamingPort)`：
+///   WS 真流式优先，连接失败内置回退整段上传。engine 为 None——
+///   回退引擎封装在 port 内部，app 层无需感知。
+/// - **Cloud + 流式关** → `(Some, GgufStreamingAdapter(CloudSttEngine))`：
+///   现行整段上传行为（Legacy 契约）。
+/// - **Local** → `(Some, GgufStreamingAdapter(伪流式/非流式))`：现行行为不变。
+///
+/// mode/streaming 判断全部收敛在 domain 层，voice.rs 不再感知引擎选型。
+pub fn create_streaming_port(
+    connection: Option<SttEngineConnection>,
+    profile: RecognitionProfile,
+) -> Result<(Option<std::sync::Arc<dyn SttEngine>>, std::sync::Arc<dyn StreamingSttPort>), String>
+{
+    let config = blink_domain_config::stt_config::get_stt_config();
+    if !config.enabled {
+        return Err("STT 未启用，请在设置页开启语音输入".to_string());
+    }
+    match config.mode {
+        blink_domain_config::stt_config::SttMode::Cloud => {
+            if !config.is_cloud_configured() {
+                return Err("云端 STT 未配置供应商，请在设置页中配置".to_string());
+            }
+            match config.streaming_mode {
+                blink_domain_config::stt_config::StreamingMode::Pseudo => {
+                    tracing::info!("STT 引擎: cloud realtime-ws（不可用自动回退整段上传）");
+                    Ok((
+                        None,
+                        std::sync::Arc::new(realtime_ws::CloudStreamingPort::new(profile)),
+                    ))
+                }
+                blink_domain_config::stt_config::StreamingMode::Off => {
+                    tracing::info!("STT 引擎: cloud（整段上传，流式已关闭）");
+                    let engine: std::sync::Arc<dyn SttEngine> =
+                        std::sync::Arc::new(cloud::CloudSttEngine::new());
+                    let port = std::sync::Arc::new(
+                        streaming_port::GgufStreamingAdapter::new_with_profile(
+                            engine.clone(),
+                            profile,
+                        ),
+                    );
+                    Ok((Some(engine), port))
+                }
+            }
+        }
+        blink_domain_config::stt_config::SttMode::Local => {
+            let engine = create_engine_with_profile(connection, profile)?;
+            let engine: std::sync::Arc<dyn SttEngine> = std::sync::Arc::from(engine);
+            let port = std::sync::Arc::new(
+                streaming_port::GgufStreamingAdapter::new_with_profile(engine.clone(), profile),
+            );
+            Ok((Some(engine), port))
         }
     }
 }

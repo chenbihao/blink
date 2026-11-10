@@ -904,16 +904,16 @@ export const zh = {
     "voice.mode.label": "STT 模式",
     "voice.mode.cloud": "云端",
     "voice.mode.local": "本地",
-    "voice.mode.local_only_hint": "仅本地模式生效",
     // 云端配置
     "voice.cloud.title": "云端供应商",
-    "voice.cloud.desc": "Whisper 接口 · 独立 API Key",
-    "voice.cloud.hint_standalone": "配置支持 Whisper 接口的云端 STT 供应商。API Key 独立存储，不与 AI 供应商共用。",
+    "voice.cloud.desc": "Whisper 接口 · 实时流式 · 独立 API Key",
+    "voice.cloud.hint_standalone": "配置 OpenAI 兼容的云端 STT 供应商；支持 Realtime 流式的端点可边说边出字，不支持的自动整段上传。API Key 独立存储，不与 AI 供应商共用。",
     "voice.cloud.preset.label": "供应商预设",
     "voice.cloud.preset.custom": "自定义",
     "voice.cloud.preset.openai": "OpenAI",
     "voice.cloud.preset.groq": "Groq",
     "voice.cloud.preset.mimo": "小米 MiMo",
+    "voice.cloud.preset.mimo_plan": "小米 MiMo（Token Plan）",
     "voice.cloud.kind.label": "协议类型",
     "voice.cloud.kind.openai": "OpenAI Whisper",
     "voice.cloud.kind.groq": "Groq Whisper",
@@ -934,6 +934,13 @@ export const zh = {
     "voice.cloud.test.testing": "测试中…",
     "voice.cloud.test.success": "识别成功：\"{text}\"",
     "voice.cloud.test.fail": "失败：{err}",
+    "voice.cloud.stream_test.label": "流式能力测试",
+    "voice.cloud.stream_test.btn": "测试",
+    "voice.cloud.stream_test.testing": "测试中…",
+    "voice.cloud.stream_test.result": "实时流式（WS）：{ws}；SSE：{sse}",
+    "voice.cloud.stream_test.supported": "支持（{detail}）",
+    "voice.cloud.stream_test.unsupported": "不支持（{detail}）",
+    "voice.cloud.streaming.hint": "云端：说话期间实时上屏；端点不支持时自动整段上传",
 
     // 模型
     "voice.local.model.label": "模型",
@@ -942,7 +949,7 @@ export const zh = {
     "voice.local.model.switching": "切换中 · {model}",
     // 高级选项
     "voice.local.advanced.title": "高级选项",
-    "voice.local.advanced.desc": "流式识别 · 切分时钟 · 双层识别 · 渐进上屏",
+    "voice.local.advanced.desc": "切分时钟 · 双层识别 · 渐进上屏",
     // 流式识别
     "voice.local.streaming.label": "流式识别",
     "voice.local.streaming.hint": "开启后边说边显示预览，并在检测到切点时形成稳定文本；关闭后松开再一次性识别。",

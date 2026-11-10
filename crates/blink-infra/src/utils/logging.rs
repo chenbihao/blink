@@ -203,8 +203,19 @@ fn parse_level(level: &str) -> String {
     // 而 oar-ocr 的这几行是**唯一**能看到"模型真实输入尺寸 + 每 batch 原始识别文本"的
     // 窗口，错字 / 漏字 / 字符框错位排查需要它。深挖 OCR 质量时把设置页级别切到 trace
     // 即可拿回全部细节。
-    let transport_noise =
-        "hyper=warn,reqwest=warn,hyper_util=warn,h2=warn,rustls=warn,tower=warn,hpack=warn";
+    // **tungstenite / tokio_tungstenite 压到 warn**（0.29.1 修复）：WS 协议库在
+    // TRACE 下逐帧打日志——poll_next/with_context/WouldBlock 每帧 6-10 行，且
+    // `tungstenite::protocol` 会**不受控地 dump 完整帧 payload**：同一内容 hex 与
+    // JSON 各打一份，其中 base64 音频（单帧数 KB）毫无诊断价值。协议帧细节对
+    // 本项目无诊断价值，与 hyper/h2 同类恒压。连接失败（ERROR/WARN）仍可见。
+    //
+    // 注意压制理由是"不受控的整帧 dump + 噪音"，**不是**"TRACE 不得记转写正文"
+    // ——spec-backend §3.2 对同类用户内容（剪贴板）明确留了 trace 级谨慎使用的
+    // 例外。转写内容的诊断需求改由 blink 自身结构化日志受控承载（与 AI 对话
+    // 同模式）：`blink_domain_stt::realtime_ws` 仅在 TRACE 档记录 delta 预览 /
+    // completed 定稿 / Final 最终正文（不含音频），供排查错字断句；
+    // debug/info 档不输出正文（见 `transcript_content_is_trace_only` 测试）。
+    let transport_noise = "hyper=warn,reqwest=warn,hyper_util=warn,h2=warn,rustls=warn,tower=warn,hpack=warn,tungstenite=warn,tokio_tungstenite=warn";
     let ai_noise = "rig=warn,rig_core=warn,rig_agent=warn";
     let keyring_noise = "keyring=warn,keyring_core=warn";
     let ort_noise = "ort=warn";
@@ -340,5 +351,147 @@ mod tests {
         assert!(!t.contains("oar_ocr"), "{t}");
         assert_eq!(parse_level("error"), "error");
         assert_eq!(parse_level("bogus"), "error");
+    }
+
+    /// 0.29.1：WS 协议库在 TRACE 下逐帧打印完整 payload（云端语音转写正文、
+    /// base64 音频）。行为级验证——用真实 EnvFilter 过滤实际事件，而不是只断言
+    /// 指令字符串：`parse_level` 的所有可调档位下这些 target 的 TRACE 不得输出，
+    /// 其 WARN 与 blink 自身 TRACE 不受影响。target 取自实机日志。
+    #[test]
+    fn websocket_frame_logs_are_suppressed_at_every_level() {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::filter::EnvFilter;
+
+        #[derive(Clone, Default)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
+            type Writer = Capture;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        fn emit_and_capture(directives: &str) -> String {
+            let capture = Capture::default();
+            let subscriber = tracing_subscriber::fmt()
+                .with_env_filter(EnvFilter::new(directives))
+                .with_writer(capture.clone())
+                .with_ansi(false)
+                .finish();
+            tracing::subscriber::with_default(subscriber, || {
+                tracing::trace!(target: "tungstenite::protocol", "Received message TRANSCRIPT_MARK");
+                tracing::trace!(target: "tungstenite::protocol::frame", "writing frame AUDIO_MARK");
+                tracing::trace!(target: "tungstenite::protocol::frame::frame", "Parsed headers HEADER_MARK");
+                tracing::trace!(target: "tokio_tungstenite", "Stream.poll_next POLL_MARK");
+                tracing::trace!(target: "tokio_tungstenite::compat", "WouldBlock COMPAT_MARK");
+                tracing::warn!(target: "tungstenite::protocol", "WS_WARN_MARK");
+                tracing::trace!(target: "blink::app::voice", "APP_TRACE_MARK");
+            });
+            let bytes = capture.0.lock().unwrap().clone();
+            String::from_utf8(bytes).unwrap()
+        }
+
+        const FRAME_MARKS: [&str; 5] = [
+            "TRANSCRIPT_MARK",
+            "AUDIO_MARK",
+            "HEADER_MARK",
+            "POLL_MARK",
+            "COMPAT_MARK",
+        ];
+
+        // 对照组：不带压制指令的裸 trace 下这些行确实会输出——证明本测试有检出力。
+        let unfiltered = emit_and_capture("trace");
+        for mark in FRAME_MARKS {
+            assert!(unfiltered.contains(mark), "对照组应输出 {mark}：{unfiltered}");
+        }
+
+        // trace 档：帧级日志全部拦住；WS 的 WARN 与 blink 自身 TRACE 仍可见。
+        let trace = emit_and_capture(&parse_level("trace"));
+        for mark in FRAME_MARKS {
+            assert!(!trace.contains(mark), "trace 档不得输出 {mark}：{trace}");
+        }
+        assert!(trace.contains("WS_WARN_MARK"), "WS 告警必须保留：{trace}");
+        assert!(trace.contains("APP_TRACE_MARK"), "blink 自身 TRACE 必须保留：{trace}");
+
+        // 其余可调档位同样不得泄露帧内容。
+        for lvl in ["debug", "info"] {
+            let out = emit_and_capture(&parse_level(lvl));
+            for mark in FRAME_MARKS {
+                assert!(!out.contains(mark), "{lvl} 档不得输出 {mark}：{out}");
+            }
+            assert!(out.contains("WS_WARN_MARK"), "{lvl} 档 WS 告警必须保留：{out}");
+        }
+    }
+
+    /// 0.29.1：转写正文（预览/定稿/最终文本）由 blink 自身在 TRACE 档受控记录
+    /// ——trace 档可见（用户显式开深挖档排查错字断句），debug/info 不泄露。
+    /// 这是 spec-backend §3.2 铁则 5 对用户内容"trace 级谨慎使用"例外的应用
+    /// （与剪贴板内容同模式），与 tungstenite 不受控的整帧 dump 不同。
+    #[test]
+    fn transcript_content_is_trace_only() {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::filter::EnvFilter;
+
+        #[derive(Clone, Default)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
+            type Writer = Capture;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        fn emit_and_capture(directives: &str) -> String {
+            let capture = Capture::default();
+            let subscriber = tracing_subscriber::fmt()
+                .with_env_filter(EnvFilter::new(directives))
+                .with_writer(capture.clone())
+                .with_ansi(false)
+                .finish();
+            tracing::subscriber::with_default(subscriber, || {
+                tracing::trace!(
+                    target: "blink_domain_stt::realtime_ws",
+                    preview = "语音预览正文 MARK",
+                    "云端流式 delta（预览）"
+                );
+                tracing::trace!(
+                    target: "blink_domain_stt::realtime_ws",
+                    final_text = "最终正文 MARK",
+                    "云端流式 Final（最终正文）"
+                );
+            });
+            String::from_utf8(capture.0.lock().unwrap().clone()).unwrap()
+        }
+
+        let trace = emit_and_capture(&parse_level("trace"));
+        assert!(trace.contains("语音预览正文 MARK"), "trace 档必须可见：{trace}");
+        assert!(trace.contains("最终正文 MARK"), "trace 档必须可见：{trace}");
+        for lvl in ["debug", "info"] {
+            let out = emit_and_capture(&parse_level(lvl));
+            assert!(
+                !out.contains("正文 MARK") && !out.contains("预览正文 MARK"),
+                "{lvl} 档不得泄露转写正文：{out}"
+            );
+        }
     }
 }

@@ -2051,7 +2051,7 @@
                     <div class="voice-section-card-body">
                         <p class="setting-hint" data-i18n-html="voice.cloud.hint_standalone">配置支持 Whisper 接口的云端
                             STT 供应商。API Key 独立存储，不与 AI 供应商共用。</p>
-                        <!-- 供应商预设 -->
+                        <!-- 供应商预设（0.29.1：预设决定协议；协议下拉仅自定义时露出） -->
                         <div class="setting-row">
                             <label class="setting-label" data-i18n="voice.cloud.preset.label">供应商预设</label>
                             <select class="input-wide" id="voice-cloud-preset">
@@ -2059,10 +2059,13 @@
                                 <option data-i18n="voice.cloud.preset.openai" value="openai">OpenAI</option>
                                 <option data-i18n="voice.cloud.preset.groq" value="groq">Groq</option>
                                 <option data-i18n="voice.cloud.preset.mimo" value="mimo">小米 MiMo</option>
+                                <option data-i18n="voice.cloud.preset.mimo_plan" value="mimo_plan">小米 MiMo（Token
+                                    Plan）
+                                </option>
                             </select>
                         </div>
-                        <!-- 协议类型 -->
-                        <div class="setting-row">
+                        <!-- 协议类型（仅自定义预设可见） -->
+                        <div class="setting-row hidden" id="voice-cloud-kind-row">
                             <label class="setting-label" data-i18n="voice.cloud.kind.label">协议类型</label>
                             <select class="input-wide" id="voice-cloud-kind">
                                 <option data-i18n="voice.cloud.kind.openai" value="openai">OpenAI Whisper</option>
@@ -2115,7 +2118,34 @@
                                 <span class="voice-cloud-test-result" id="voice-cloud-test-result"></span>
                             </div>
                         </div>
+                        <!-- 流式能力测试（0.29.1：Realtime WS / SSE 探测） -->
+                        <div class="setting-row">
+                            <label class="setting-label" data-i18n="voice.cloud.stream_test.label">流式能力测试</label>
+                            <div class="voice-cloud-test-wrap">
+                                <button class="voice-cloud-key-btn" data-i18n="voice.cloud.stream_test.btn"
+                                        id="voice-cloud-stream-test-btn"
+                                        type="button">测试
+                                </button>
+                                <span class="voice-cloud-test-result" id="voice-cloud-stream-test-result"></span>
+                            </div>
+                        </div>
                     </div>
+                </div>
+            </div>
+
+            <!-- 流式识别（0.29.1：本地/云端模式通用——本地=VAD 伪流式，云端=Realtime WS） -->
+            <div class="voice-adv-field" id="voice-streaming-field">
+                <div class="voice-adv-field-label">
+                    <span data-i18n="voice.local.streaming.label">流式识别</span><span
+                        class="field-hint-icon" data-i18n-title="voice.local.streaming.hint"
+                        title="开启后边说边显示预览，并在检测到切点时形成稳定文本；关闭后松开再一次性识别。">ⓘ</span>
+                </div>
+                <div class="voice-adv-field-control">
+                    <label class="switch switch-sm">
+                        <input checked id="voice-streaming" type="checkbox"/>
+                        <span class="slider"></span>
+                    </label>
+                    <span class="voice-adv-field-hint" id="voice-streaming-hint"></span>
                 </div>
             </div>
 
@@ -2263,24 +2293,9 @@
                         <span class="voice-advanced-chevron"></span>
                         <span class="voice-advanced-title" data-i18n="voice.local.advanced.title">高级选项</span>
                         <span class="voice-advanced-desc"
-                              data-i18n="voice.local.advanced.desc">流式识别 · VAD · Preview / Draft</span>
+                              data-i18n="voice.local.advanced.desc">VAD 切句 · Preview / Draft 参数</span>
                     </summary>
                     <div class="voice-advanced-body">
-                        <!-- 流式识别（仅本地模式生效） -->
-                        <div class="voice-adv-field" id="voice-streaming-field">
-                            <div class="voice-adv-field-label">
-                                <span data-i18n="voice.local.streaming.label">流式识别</span><span
-                                    class="field-hint-icon" data-i18n-title="voice.local.streaming.hint"
-                                    title="开启后边说边显示预览，并在检测到切点时形成稳定文本；关闭后松开再一次性识别。">ⓘ</span>
-                            </div>
-                            <div class="voice-adv-field-control">
-                                <label class="switch switch-sm">
-                                    <input checked id="voice-streaming" type="checkbox"/>
-                                    <span class="slider"></span>
-                                </label>
-                                <span class="voice-adv-field-hint" id="voice-streaming-hint"></span>
-                            </div>
-                        </div>
 
                         <!-- 策略预设：覆盖两张参数卡的全部字段，因此放在两卡之前。
                              0.23.17 修正：此前挂在「切分时钟」卡内部，容易让人以为

@@ -904,16 +904,16 @@ export const en = {
     "voice.mode.label": "STT mode",
     "voice.mode.cloud": "Cloud",
     "voice.mode.local": "Local",
-    "voice.mode.local_only_hint": "Local mode only",
 // Cloud config
     "voice.cloud.title": "Cloud Provider",
-    "voice.cloud.desc": "Whisper API · Independent Key",
-    "voice.cloud.hint_standalone": "Configure a cloud STT provider with Whisper-compatible API. API key is stored independently, not shared with AI providers.",
+    "voice.cloud.desc": "Whisper API · Realtime streaming · Independent Key",
+    "voice.cloud.hint_standalone": "Configure an OpenAI-compatible cloud STT provider. Endpoints with Realtime streaming show text as you speak; others fall back to whole-clip upload. API key is stored independently, not shared with AI providers.",
     "voice.cloud.preset.label": "Provider Preset",
     "voice.cloud.preset.custom": "Custom",
     "voice.cloud.preset.openai": "OpenAI",
     "voice.cloud.preset.groq": "Groq",
     "voice.cloud.preset.mimo": "Xiaomi MiMo",
+    "voice.cloud.preset.mimo_plan": "Xiaomi MiMo (Token Plan)",
     "voice.cloud.kind.label": "Protocol",
     "voice.cloud.kind.openai": "OpenAI Whisper",
     "voice.cloud.kind.groq": "Groq Whisper",
@@ -934,6 +934,13 @@ export const en = {
     "voice.cloud.test.testing": "Testing…",
     "voice.cloud.test.success": "Recognized: \"{text}\"",
     "voice.cloud.test.fail": "Failed: {err}",
+    "voice.cloud.stream_test.label": "Streaming test",
+    "voice.cloud.stream_test.btn": "Test",
+    "voice.cloud.stream_test.testing": "Testing…",
+    "voice.cloud.stream_test.result": "Realtime (WS): {ws}; SSE: {sse}",
+    "voice.cloud.stream_test.supported": "supported ({detail})",
+    "voice.cloud.stream_test.unsupported": "not supported ({detail})",
+    "voice.cloud.streaming.hint": "Cloud: realtime text while speaking; falls back to whole-clip upload when unsupported",
 
     // Local - Python environment
     // Local - FunASR service
@@ -947,7 +954,7 @@ export const en = {
     // Diagnostics
     // Advanced options
     "voice.local.advanced.title": "Advanced",
-    "voice.local.advanced.desc": "Streaming · segmentation clock · two-layer recognition · progressive input",
+    "voice.local.advanced.desc": "Segmentation clock · two-layer recognition · progressive input",
     // Streaming
     "voice.local.streaming.label": "Streaming recognition",
     "voice.local.streaming.hint": "When on, speech appears as a live preview and becomes stable text at detected cut points. When off, recognition runs once after release.",

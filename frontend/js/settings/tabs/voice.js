@@ -24,6 +24,7 @@ import {buildVadDebugCopyText, renderVadDebugResult, vadDebugProgressState, rend
 import {VAD_DEFAULTS, ensureVadWindowFields} from "./voice-vad.js";
 import {RECOGNITION_DEFAULTS, ensureRecognitionFields} from "./voice-recognition.js";
 import {initAdvancedVoiceControls} from "./voice-advanced-ui.js";
+import {CLOUD_STT_PRESETS, matchCloudPreset} from "./voice-cloud-presets.js";
 
 /**
  * 顺序化保存队列——确保 set_stt_config 请求严格按发起顺序到达后端，
@@ -142,21 +143,22 @@ export async function initVoiceTab() {
     // 云端供应商（独立模式：直接配置 kind/base_url/model_id/api_key）
     const testBtn = document.getElementById("voice-cloud-test-btn");
     const testResult = document.getElementById("voice-cloud-test-result");
+    const streamTestBtn = document.getElementById("voice-cloud-stream-test-btn");
+    const streamTestResult = document.getElementById("voice-cloud-stream-test-result");
     const presetSelect = document.getElementById("voice-cloud-preset");
     const kindSelect = document.getElementById("voice-cloud-kind");
+    const kindRow = document.getElementById("voice-cloud-kind-row");
     const baseUrlInput = document.getElementById("voice-cloud-base-url");
     const modelIdInput = document.getElementById("voice-cloud-model-id");
     const apiKeyInput = document.getElementById("voice-cloud-api-key");
     const keySaveBtn = document.getElementById("voice-cloud-key-save-btn");
     const keyClearBtn = document.getElementById("voice-cloud-key-clear-btn");
 
-    // 供应商预设 → 默认值映射
-    const STT_PRESETS = {
-        openai: {kind: "openai", base_url: "https://api.openai.com/v1", model_id: "whisper-1"},
-        groq: {kind: "groq", base_url: "https://api.groq.com/openai/v1", model_id: "whisper-large-v3"},
-        mimo: {kind: "mimo", base_url: "https://api.xiaomimimo.com/v1", model_id: ""},
-        custom: {kind: "openai", base_url: "", model_id: ""},
-    };
+    // 0.29.1：协议下拉仅自定义预设露出——协议由预设决定，不再并列两个维度
+    function updateKindRowVisibility() {
+        if (!kindRow || !presetSelect) return;
+        kindRow.classList.toggle("hidden", presetSelect.value !== "custom");
+    }
 
     // 回显当前配置
     if (config.cloud_provider) {
@@ -164,17 +166,13 @@ export async function initVoiceTab() {
         if (kindSelect) kindSelect.value = cp.kind || "openai";
         if (baseUrlInput) baseUrlInput.value = cp.base_url || "";
         if (modelIdInput) modelIdInput.value = cp.model_id || "";
-        // 自动匹配预设
-        if (presetSelect) {
-            const matchedPreset = Object.entries(STT_PRESETS).find(([_, v]) =>
-                v.kind === cp.kind && (!v.base_url || v.base_url === cp.base_url)
-            );
-            presetSelect.value = matchedPreset ? matchedPreset[0] : "custom";
-        }
+        // 自动匹配预设（effective base_url 缺省回退 kind 默认值——voice-cloud-presets.js）
+        if (presetSelect) presetSelect.value = matchCloudPreset(cp);
     } else {
         if (presetSelect) presetSelect.value = "custom";
         if (kindSelect) kindSelect.value = "openai";
     }
+    updateKindRowVisibility();
 
     // 加载 API Key 掩码 → 回显到输入框 placeholder（与 AI 供应商一致）
     async function refreshKeyHint() {
@@ -208,15 +206,17 @@ export async function initVoiceTab() {
         saveSttConfig(config, "cloud");
     }
 
-    // 预设切换 → 自动填充 kind/base_url/model_id
+    // 预设切换 → 自动填充 kind/base_url/model_id；自定义不动现有字段
     if (presetSelect) {
         presetSelect.addEventListener("change", () => {
-            const preset = STT_PRESETS[presetSelect.value];
-            if (!preset) return;
-            if (kindSelect) kindSelect.value = preset.kind;
-            if (baseUrlInput) baseUrlInput.value = preset.base_url;
-            if (modelIdInput) modelIdInput.value = preset.model_id;
-            saveCloudProvider();
+            const preset = CLOUD_STT_PRESETS[presetSelect.value];
+            if (preset) {
+                if (kindSelect) kindSelect.value = preset.kind;
+                if (baseUrlInput) baseUrlInput.value = preset.base_url;
+                if (modelIdInput) modelIdInput.value = preset.model_id;
+                saveCloudProvider();
+            }
+            updateKindRowVisibility();
         });
     }
 
@@ -301,6 +301,46 @@ export async function initVoiceTab() {
         });
     }
 
+    // 0.29.1 流式能力测试：探测 Realtime WS 与 SSE stream=true
+    if (streamTestBtn) {
+        streamTestBtn.addEventListener("click", async () => {
+            streamTestBtn.textContent = t("voice.cloud.stream_test.testing");
+            streamTestBtn.disabled = true;
+            if (streamTestResult) {
+                streamTestResult.textContent = "";
+                streamTestResult.className = "voice-cloud-test-result";
+            }
+            try {
+                const report = await invoke("test_cloud_stt_streaming");
+                if (streamTestResult) {
+                    const wsOk = report?.ws?.supported === true;
+                    const sseOk = report?.sse?.supported === true;
+                    const wsDetail = wsOk
+                        ? [report.ws.detail, report.ws.latency_ms != null ? `${report.ws.latency_ms}ms` : null]
+                            .filter(Boolean).join(" · ")
+                        : report?.ws?.detail || "";
+                    const sseDetail = report?.sse?.detail || "";
+                    streamTestResult.textContent = t("voice.cloud.stream_test.result", {
+                        ws: t(wsOk ? "voice.cloud.stream_test.supported" : "voice.cloud.stream_test.unsupported",
+                            {detail: wsDetail}),
+                        sse: t(sseOk ? "voice.cloud.stream_test.supported" : "voice.cloud.stream_test.unsupported",
+                            {detail: sseDetail}),
+                    });
+                    // 任一通道可用即算 success 配色；全不可用 error
+                    streamTestResult.className = `voice-cloud-test-result ${wsOk || sseOk ? "success" : "error"}`;
+                }
+            } catch (e) {
+                if (streamTestResult) {
+                    streamTestResult.textContent = t("voice.cloud.test.fail", {err: e});
+                    streamTestResult.className = "voice-cloud-test-result error";
+                }
+            } finally {
+                streamTestBtn.textContent = t("voice.cloud.stream_test.btn");
+                streamTestBtn.disabled = false;
+            }
+        });
+    }
+
     // 0.10.3 高级选项（轻量，不跑探测）——流式识别开关也在此初始化
     initAdvancedOptions(config);
 
@@ -354,18 +394,20 @@ export async function initVoiceTab() {
             cloudSection.classList.toggle('hidden', isLocal);
             localSection.classList.toggle('hidden', !isLocal);
         }
-        // 高级选项卡内的流式识别字段：仅本地模式生效
+        // 0.29.1 流式识别字段：本地/云端均生效——
+        // 本地 = VAD 伪流式（模型能力可禁用开关）；云端 = Realtime WS 真流式
+        //（端点不支持自动回退整段上传，不受本地模型能力约束）。
         const streamingField = document.getElementById("voice-streaming-field");
         const streamingCheckbox = document.getElementById("voice-streaming");
         const streamingHint = document.getElementById("voice-streaming-hint");
         if (streamingField) {
-            streamingField.classList.toggle("setting-row-dimmed", !isLocal);
+            streamingField.classList.remove("setting-row-dimmed");
         }
-        if (streamingCheckbox) {
-            streamingCheckbox.disabled = !isLocal;
+        if (streamingCheckbox && !isLocal) {
+            streamingCheckbox.disabled = false;
         }
         if (streamingHint) {
-            streamingHint.textContent = isLocal ? "" : t("voice.mode.local_only_hint");
+            streamingHint.textContent = isLocal ? "" : t("voice.cloud.streaming.hint");
         }
         const recognitionCard = document.getElementById("voice-recognition-card");
         if (recognitionCard) {

@@ -73,7 +73,7 @@ struct ObservedState {
     preview: String,
 }
 
-struct EventStats {
+pub(crate) struct EventStats {
     partials_emitted: Arc<AtomicU64>,
     partials_coalesced: Arc<AtomicU64>,
     partials_dropped_closed: Arc<AtomicU64>,
@@ -86,7 +86,22 @@ struct ReliableEvent {
     delivered: Option<oneshot::Sender<bool>>,
 }
 
-struct EventBus {
+impl EventStats {
+    /// 0.29.1：realtime_ws 模块构造事件总线时的零值起点。
+    pub(crate) fn fresh() -> Arc<Self> {
+        Arc::new(Self {
+            partials_emitted: Arc::new(AtomicU64::new(0)),
+            partials_coalesced: Arc::new(AtomicU64::new(0)),
+            partials_dropped_closed: Arc::new(AtomicU64::new(0)),
+            confirmed_backpressure: Arc::new(AtomicU64::new(0)),
+            max_queue_depth: Arc::new(AtomicUsize::new(0)),
+        })
+    }
+}
+
+/// 0.29.1 `pub(crate)`：realtime_ws 模块的 WS reader task 需要同一套
+/// "reliable 队列 + preview latest-slot + generation 墙"事件总线。
+pub(crate) struct EventBus {
     reliable_tx: mpsc::Sender<ReliableEvent>,
     preview_slot: std::sync::Mutex<Option<SttEvent>>,
     notify: Notify,
@@ -259,7 +274,7 @@ fn parse_preview_spans(
 }
 
 impl EventBus {
-    fn new(
+    pub(crate) fn new(
         active_generation: Arc<AtomicU64>,
         stats: Arc<EventStats>,
     ) -> (Arc<Self>, mpsc::Receiver<SttEvent>) {
@@ -332,15 +347,58 @@ impl EventBus {
             .fetch_max(depth, Ordering::Relaxed);
     }
 
-    fn clear_preview(&self) {
+    /// 0.29.1：设置最新预览事件（latest-value 语义），并唤醒投递任务。
+    /// realtime_ws 的 delta 预览走这里——与适配器的 preview 路径同语义。
+    pub(crate) fn set_preview(&self, event: SttEvent) {
+        match self.preview_slot.lock() {
+            Ok(mut slot) => *slot = Some(event),
+            Err(poison) => *poison.into_inner() = Some(event),
+        }
+        self.notify.notify_one();
+    }
+
+    /// 0.29.1：发送可靠事件（Draft / Final / Error / 带 confirmed 的
+    /// Partial）。有界通道，消费端停滞时背压等待；消费端已关闭则丢弃。
+    pub(crate) async fn send_reliable(&self, event: SttEvent) {
+        if self
+            .reliable_tx
+            .send(ReliableEvent {
+                event,
+                delivered: None,
+            })
+            .await
+            .is_err()
+        {
+            self.stats
+                .partials_dropped_closed
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub(crate) fn clear_preview(&self) {
         match self.preview_slot.lock() {
             Ok(mut slot) => *slot = None,
             Err(poison) => *poison.into_inner() = None,
         }
     }
 
-    fn queue_depth(&self) -> usize {
+    pub(crate) fn queue_depth(&self) -> usize {
         self.queue_depth.load(Ordering::Relaxed)
+    }
+
+    /// 0.29.1：事件队列容量（诊断快照 `queue_capacity` 口径用）。
+    pub(crate) fn capacity() -> usize {
+        EVENT_CHANNEL_CAPACITY
+    }
+
+    /// 0.29.1：事件投递计数快照（`partials_emitted` / `partials_dropped_closed`
+    /// / `max_queue_depth`）——`CloudStreamingPort::stream_stats` 与适配器同口径。
+    pub(crate) fn delivery_stats(&self) -> (u64, u64, usize) {
+        (
+            self.stats.partials_emitted.load(Ordering::Relaxed),
+            self.stats.partials_dropped_closed.load(Ordering::Relaxed),
+            self.stats.max_queue_depth.load(Ordering::Relaxed),
+        )
     }
 }
 

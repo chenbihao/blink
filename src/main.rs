@@ -2431,6 +2431,8 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
         //   get_stt_space_usage/cleanup_stt_space/open_stt_folder），
         // 统一走通用 local_engine 命令；test_cloud_stt（云端诊断）保留。
         app::commands::test_cloud_stt,
+        // 0.29.1：云端流式能力探测（Realtime WS / SSE）
+        app::commands::test_cloud_stt_streaming,
         app::commands::save_stt_secret,
         app::commands::delete_stt_secret,
         app::commands::has_stt_secret,
