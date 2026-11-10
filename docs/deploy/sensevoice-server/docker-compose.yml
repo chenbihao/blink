@@ -1,0 +1,60 @@
+name: sensevoice-server
+
+# 本文件按国内 NAS 环境预设下载镜像（apt 清华源 + hf-mirror）。
+# 外网直连环境删掉 build.args 即走 Dockerfile 默认官方源。
+
+services:
+  # 一次性初始化：把 builder 层里的模型导出到挂载卷（已存在则跳过）
+  model-init:
+    build:
+      context: .
+      target: builder
+      args:
+        HF_BASE: https://hf-mirror.com
+        APT_MIRROR: http://mirrors.tuna.tsinghua.edu.cn/ubuntu
+    image: sensevoice-builder
+    # 注意：compose 会插值 $var，shell 变量必须写成 $$var；set -e 保证拷贝失败即非零退出
+    entrypoint: ["/bin/sh", "-c",
+      "set -e; mkdir -p /models; for f in /src/model/*.gguf; do b=$$(basename \"$$f\"); [ -f \"/models/$$b\" ] || cp \"$$f\" /models/; done; ls -la /models"]
+    volumes:
+      # 模型目录（绝对路径；NAS 部署时改成 NAS 上的对应路径）
+      - /path/docker_v/sensevoice-server/models:/models
+    restart: "no"
+
+  # 主服务：仅监听内网直连用（无鉴权，不要暴露公网）
+  sensevoice:
+    build:
+      context: .
+      args:
+        HF_BASE: https://hf-mirror.com
+        APT_MIRROR: http://mirrors.tuna.tsinghua.edu.cn/ubuntu
+    depends_on:
+      model-init:
+        condition: service_completed_successfully
+    ports:
+      - "38040:8040"
+    environment:
+      # 0.29.1 流式调优（默认值与依据见 Dockerfile 注释；结论记录在
+      # docs/phases/0.29 §3.6）。NAS 调参只改这里，无需重建镜像。
+      SV_VAD_MAXSEG: "8000"   # 强制切段上限 ms——长语音按 ≤8s 分段识别，防积压
+      SV_PARTIAL_MS: "600"    # 预览节流 ms（默认 400 略费 CPU）
+      SV_THREADS: "4"         # 按宿主机物理核数调
+    volumes:
+      # 模型目录（绝对路径；NAS 部署时改成 NAS 上的对应路径）
+      - /path/docker_v/sensevoice-server/models:/models
+    restart: unless-stopped
+
+  # 鉴权网关：对外 38041，校验 Authorization: Bearer <SV_API_KEY>；
+  # 对外只暴露这个端口，38040 仅内网用。
+  # 密钥在 .env 里维护；nginx 镜像启动时自动把 template 渲染成配置
+  gateway:
+    image: nginx:alpine
+    depends_on:
+      - sensevoice
+    environment:
+      SV_API_KEY: ${SV_API_KEY:?请在 .env 中设置 SV_API_KEY}
+    ports:
+      - "38041:8041"
+    volumes:
+      - ./nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
+    restart: unless-stopped

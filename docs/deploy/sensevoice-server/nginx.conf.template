@@ -1,0 +1,42 @@
+# sensevoice-server 鉴权网关（防刷：Bearer 校验 + 限流 + 并发限制）
+# 密钥经 ${SV_API_KEY} 注入，来源：.env 文件（compose 自动读取）
+# 客户端把 api_key 设为密钥即可（OpenAI SDK 自动带 Authorization: Bearer <key>）
+
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+# 每 IP 请求限速 1 r/s（转写天然低频），突发容忍 5
+limit_req_zone  $binary_remote_addr zone=sv_req:10m  rate=1r/s;
+# 每 IP 并发连接上限（含 /v1/realtime 长连接）
+limit_conn_zone $binary_remote_addr zone=sv_conn:10m;
+
+server {
+    listen 8041;
+
+    # 鉴权：Bearer 不匹配一律 401。密钥在 .env 的 SV_API_KEY 里维护
+    if ($http_authorization != "Bearer ${SV_API_KEY}") {
+        return 401;
+    }
+
+    # 音频上传上限
+    client_max_body_size 50m;
+
+    location / {
+        # 防刷：超限返回 429
+        limit_req zone=sv_req burst=5 nodelay;
+        limit_conn sv_conn 8;
+        limit_req_status 429;
+        limit_conn_status 429;
+
+        proxy_pass http://sensevoice:8040;
+        proxy_http_version 1.1;
+        # WebSocket 透传（/v1/realtime 流式听写需要）
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        # 长听写会话
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}
