@@ -226,10 +226,10 @@ export function positionToolbar(rect, immediate = false) {
         // 确定目标屏（选区右下角内侧点，默认语义工具栏靠选区右侧）
         const mon = findDisplayCssAt(anchorX, anchorY);
 
-        // 水平：优先右对齐，clamp 到目标屏
+        // 水平：选区宽于工具栏 → 右对齐；窄于 → 与选区居中（0.29.2），再 clamp 到目标屏
         const minLeft = mon.x + MARGIN;
         const maxLeft = mon.x + mon.w - tw - MARGIN;
-        let left = rect.x + rect.w - tw;
+        let left = rect.w >= tw ? rect.x + rect.w - tw : rect.x + (rect.w - tw) / 2;
         left = Math.max(minLeft, Math.min(left, maxLeft));
 
         // 垂直：选区下方 → 上方 → 浮动选区内部

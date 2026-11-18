@@ -388,6 +388,42 @@ export function updateCropData(cropImageDataRef, cropW, cropH) {
     }
 }
 
+/**
+ * 0.29.2：平移全部标注命令坐标（选区移动/缩放后由 index.js 调用）。
+ * 所有命令类型统一以 `points` 数组承载坐标（两点工具取首尾、笔刷工具取完整
+ * 轨迹），平移即遍历加法；撤销/重做栈随 commands 原地平移，undoIndex 不变。
+ * 幂等：dx=dy=0 直接返回。commitVersion 递增使 0.15.10 预览快照失效。
+ */
+export function translateCommands(dx, dy) {
+    if (!dx && !dy) return;
+    for (const cmd of commands) {
+        if (!Array.isArray(cmd.points)) continue;
+        for (const p of cmd.points) {
+            p.x += dx;
+            p.y += dy;
+        }
+    }
+    clearLineState();  // 0.28.26 连线锚点坐标已过期，防止跨选区画连线
+    commitVersion++;
+}
+
+/**
+ * 0.29.2：选区移动/缩放后重设画布几何与裁剪数据，保留标注命令并重放。
+ * 与 reset 的区别：commands/undoIndex/水印配置全部保留（命令坐标已由调用方
+ * translateCommands 平移到新裁剪区坐标系，即"钉住屏幕内容"语义）；出界部分
+ * 由画布边界自然裁掉。OCR 嵌图图层不在此处理（invalidateSelectionContent 已清）。
+ */
+export function rebase(cropW, cropH, cropImageDataRef) {
+    currentPoints = [];
+    commitVersion++;
+    updateCropData(cropImageDataRef, cropW, cropH);
+    if (canvas) {
+        canvas.width = cropW;
+        canvas.height = cropH;
+    }
+    redrawAll();
+}
+
 // ── 工具切换 ──────────────────────────────────────────
 
 export function setTool(tool) {

@@ -175,7 +175,7 @@ fn map_executor_result_with_char_boxes(
         source_words = result.words.len(),
         char_boxes = result.char_boxes.len(),
         output_text_chars = result.text.chars().count(),
-        "OCR 三层契约映射完成（不走红级 grouping）"
+        "OCR 结果后处理完成"
     );
 
     Ok(result)

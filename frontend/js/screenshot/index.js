@@ -56,6 +56,7 @@ import {
     cssRectToBitmap,
     getRenderScale,
     pointNearWindowEdge,
+    preserveCommandDelta,
     shouldStartFreeSelection,
     syncRenderScale
 } from "./ss-selection-geometry.js";
@@ -1130,8 +1131,16 @@ function loadEditorImage(source) {
     img.src = `http://blink-screenshot.localhost/editor?t=${Date.now()}`;
 }
 
-/** 进入标注模式：显示工具栏 + 定位标注 canvas + 通知后端 */
-function enterAnnotationMode(rect) {
+/**
+ * 进入标注模式：显示工具栏 + 定位标注 canvas + 通知后端。
+ * 0.29.2：`opts.preserveFrom` 传移动/缩放前的原选区（CSS 矩形）时保留标注，
+ * 语义按交互类型分派（preserveCommandDelta）：纯移动 → 命令不平移、画布随
+ * 新原点移动，标注跟随选区整体转移；缩放 → 命令按原点差平移（钉住屏幕内容，
+ * 底图不缩放故无需缩放坐标），出界部分由画布边界自然裁掉。撤销栈与水印一并
+ * 保留。不传（新框选/窗口吸附）则维持清空语义。OCR 嵌字/划词仍由
+ * invalidateSelectionContent 失效，不受影响。
+ */
+function enterAnnotationMode(rect, opts = {}) {
     focusScreenshotCanvas();
     const _t0 = performance.now();
     console.debug('[screenshot] enterAnnotationMode', rect);
@@ -1158,6 +1167,9 @@ function enterAnnotationMode(rect) {
     annotCanvas.style.top = rect.y + 'px';
     annotCanvas.style.width = rect.w + 'px';
     annotCanvas.style.height = rect.h + 'px';
+    // 0.29.2：清掉 resize 拖动期间实时层的 clip-path 裁剪预览
+    // （提交后可见边界由画布 backing 尺寸接管，两处不得叠加）
+    annotCanvas.style.clipPath = '';
     const pw = Math.max(1, bmpRect.w);
     const ph = Math.max(1, bmpRect.h);
 
@@ -1184,14 +1196,27 @@ function enterAnnotationMode(rect) {
     }
 
     const _tResetStart = performance.now();
-    annot.reset(pw, ph, cropData);
+    if (opts.preserveFrom) {
+        // 0.29.2：移动/缩放选区保留标注，语义按交互类型分派（preserveCommandDelta）：
+        // 纯移动（尺寸不变）→ 命令不平移、画布随新原点移动，标注跟随选区整体转移
+        // （与拖动期间的实时跟随预览一致，松手无回跳）；缩放（尺寸变化）→ 命令按
+        // 原点差平移，标注钉在屏幕内容原位、出界由画布边界裁掉。
+        const delta = preserveCommandDelta(opts.preserveFrom, rect, meta);
+        if (delta) annot.translateCommands(delta.dx, delta.dy);
+        annot.rebase(pw, ph, cropData);
+    } else {
+        annot.reset(pw, ph, cropData);
+    }
     updateUndoRedoButtons();
     console.debug('[screenshot] enterAnnotationMode: annot.reset', {ms: Math.round(performance.now() - _tResetStart)});
     screenshotSetAnnotationMode(true).catch((e) => console.error('[screenshot] setAnnotationMode(true) 失败', e));
     const _tDrawStart = performance.now();
     drawFinalSelection();
     console.debug('[screenshot] enterAnnotationMode: drawFinalSelection', {ms: Math.round(performance.now() - _tDrawStart)});
-    positionToolbar(rect);
+    // 0.29.2：preserveFrom 重入（移动/缩放/中断恢复）时工具栏在拖动期间保持
+    // 可见且结构未变，immediate 同步定位即可；非 immediate 的「-9999 移出 + rAF
+    // 测量」流程会把可见工具栏闪走一帧。
+    positionToolbar(rect, !!opts.preserveFrom);
     const _tOcrStart = performance.now();
     triggerOcrPrewarm(pw, ph);
     console.debug('[screenshot] enterAnnotationMode: triggerOcrPrewarm (sync part)', {ms: Math.round(performance.now() - _tOcrStart)});
@@ -1379,6 +1404,7 @@ function exitAnnotationMode() {
     ss.translationRevision++;
     canvas.style.cursor = 'crosshair';
     annotCanvas.classList.add('hidden');
+    annotCanvas.style.clipPath = '';
     annotCanvas.width = 0;
     annotCanvas.height = 0;
     toolbar.classList.add('hidden');
@@ -1416,7 +1442,8 @@ function invalidateSelectionContent({preservePresentation = false} = {}) {
     exitReadingMode();
     annot.clearOverlay();
     updateOverlayButtonsActive();
-    // 录制区域平移只使 OCR/译文失效，继续使用同一工具栏和标注画布。
+    // preservePresentation（录制区域平移 / 0.29.2 移动/缩放/方向键微移）只使
+    // OCR/译文/划词等内容态失效，继续使用同一工具栏和标注画布，标注层连续交互。
     if (preservePresentation) return;
     annotCanvas.classList.add('hidden');
     toolbar.classList.add('hidden');
@@ -2079,8 +2106,9 @@ function isSessionTearingDown() {
  *
  * 与 finish 的区别是**不提交**本次拖拽，恢复到进入交互前的可用状态：
  * - 移动 / 缩放：回到交互开始前的 original 矩形。激活时已执行
- *   invalidateSelectionContent（标注层与工具栏被清），因此需要重新进入标注模式，
- *   否则用户会看到"有选区但没有工具栏"的半残状态
+ *   invalidateSelectionContent（0.29.2 起为 preservePresentation：标注层与工具栏
+ *   保持可见，仅内容态被清），仍需重新进入标注模式恢复裁剪底图与命令坐标
+ *   （拖动中途标注层 left/top 已被实时层改写）
  * - 新建拖选：丢弃半程矩形（`kind === 'new'` 目前只有 ss-interaction.test.mjs 构造，
  *   生产的新建拖选由 `ss.isDragging` 路径承载，因此这里的 selCss 归位实际只作用于
  *   move / resize）
@@ -2116,7 +2144,8 @@ function abortSelectionInteraction(e = null) {
     ss.canvas.style.cursor = annot.getTool() === 'select' ? 'default' : 'crosshair';
     if (ss.isAnnotating && ss.selCss) {
         try {
-            enterAnnotationMode({...ss.selCss});
+            // 0.29.2：move/resize 中断恢复原矩形时保留标注（新旧全等 → 不平移，等效未动过）
+            enterAnnotationMode({...ss.selCss}, {preserveFrom: interaction?.original});
         } catch (err) {
             console.error('[screenshot] abort 后重建标注模式失败', err);
         }
@@ -2250,6 +2279,7 @@ function flushSelectionNudge() {
     ss.annotCanvas.style.left = newSelCss.x + 'px';
     ss.annotCanvas.style.top = newSelCss.y + 'px';
     // 重新裁剪底图（选区移动后裁剪区域改变）
+    let cropData = null;
     if (ss.screenshot) {
         try {
             const tempCanvas = document.createElement('canvas');
@@ -2257,12 +2287,15 @@ function flushSelectionNudge() {
             tempCanvas.height = ph;
             const tempCtx = tempCanvas.getContext('2d');
             tempCtx.drawImage(ss.screenshot, bmpRect.x, bmpRect.y, pw, ph, 0, 0, pw, ph);
-            const cropData = tempCtx.getImageData(0, 0, pw, ph);
-            annot.updateCropData(cropData, pw, ph);
+            cropData = tempCtx.getImageData(0, 0, pw, ph);
         } catch (err) {
             console.warn('[screenshot] 方向键移动选区后裁剪失败', err);
         }
     }
+    // 0.29.2：纯移动 = 跟随语义——命令坐标不平移，画布随新原点移动（标注跟随
+    // 选区整体转移，与拖动移动的提交语义/实时预览一致）；rebase 只刷新裁剪底图
+    // （马赛克/模糊在新窗口内容上取样）。
+    annot.rebase(pw, ph, cropData);
     resetQrPanel();
     ss.selectionRevision++;
     // P1-4 fix：移动后更新 nudgeSelectionRevision 为最新值。
@@ -2273,10 +2306,14 @@ function flushSelectionNudge() {
     nudgeSelectionRevision = ss.selectionRevision;
     ss.ocrPrewarm = null;
     ss.ocrResultCache = null;
+    // 0.29.2：preservePresentation——标注层随上面 translateCommands/rebase 连续
+    // 平移展示，工具栏不隐藏（此前无此参数时工具栏被清且无人再显示，方向键
+    // 移动一次工具栏就永久消失）；移动后同步重定位（用户手动拖过则保持原位）。
     if (typeof ss._invalidateSelectionContent === 'function') {
-        ss._invalidateSelectionContent();
+        ss._invalidateSelectionContent({preservePresentation: true});
     }
     drawFinalSelection();
+    positionToolbar(ss.selCss, true);
     // 刷新 OCR 预热（debounce：连续按键只在停下后触发一次）
     clearTimeout(nudgeOcrPrewarmTimer);
     nudgeOcrPrewarmTimer = setTimeout(() => {

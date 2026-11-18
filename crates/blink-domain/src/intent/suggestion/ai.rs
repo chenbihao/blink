@@ -91,7 +91,7 @@ impl SuggestionProducer for AiProducer {
         // 0.28.28：本次唤起的有效划词快照（组合提问候选的材料）
         let selection_text = snapshot
             .find_text(AwarenessSource::Selection)
-            .map(|v| v.text.clone())
+            .map(|v| v.text)
             .filter(|t| !t.trim().is_empty());
         if !q.is_empty() {
             // AskAi 候选过 should_invoke_ai 总门禁（enabled + 结构性筛子）；

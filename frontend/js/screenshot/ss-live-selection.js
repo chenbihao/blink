@@ -180,6 +180,43 @@ function clearInteractionCanvasOnce() {
     interactionCtx.clearRect(0, 0, interactionCanvas.width, interactionCanvas.height);
 }
 
+/**
+ * 0.29.2：选区调整拖动期间，标注层与实线框同步的实时预览（同一 rAF 帧写入，
+ * 不与实线框错帧抖动），且与提交语义一一对齐（所见即所得）：
+ * - move：标注层随选区整体平移（提交时命令不平移、画布随新原点走——
+ *   松手停在跟随位，无回跳）。
+ * - resize：内容钉在屏幕原位不动，用 clip-path 把选区外部分逐帧裁掉
+ *   （提交时 translateCommands + rebase 落定同一边界，松手无"刷新定位"跳变）；
+ *   扩边时 inset 各项自然钳到 0（旧画布本就小于新选区，无可裁）。
+ * 标注层隐藏（尚未进入标注模式）或交互未过激活阈值时为无操作。
+ * clip 的清理由 enterAnnotationMode / exitAnnotationMode 负责（提交/中断都
+ * 必经），本模块不拥有标注层状态。
+ */
+function syncAnnotationLayer(rect) {
+    const {annotCanvas, selectionInteraction} = ss;
+    if (!annotCanvas || annotCanvas.classList.contains('hidden')) return;
+    if (!selectionInteraction || !selectionInteraction.activated) return;
+    if (selectionInteraction.kind === 'move') {
+        annotCanvas.style.left = rect.x + 'px';
+        annotCanvas.style.top = rect.y + 'px';
+        annotCanvas.style.clipPath = '';
+        return;
+    }
+    if (selectionInteraction.kind === 'resize') {
+        // 标注层 CSS 盒 = 交互前选区（enterAnnotationMode 定位），读自身样式
+        // 不触发布局；clip-path inset 相对元素自身边框盒，恰好 = 与实时选区的交集
+        const cx = parseFloat(annotCanvas.style.left) || 0;
+        const cy = parseFloat(annotCanvas.style.top) || 0;
+        const cw = parseFloat(annotCanvas.style.width) || 0;
+        const ch = parseFloat(annotCanvas.style.height) || 0;
+        const top = Math.max(0, rect.y - cy);
+        const left = Math.max(0, rect.x - cx);
+        const right = Math.max(0, cx + cw - rect.x - rect.w);
+        const bottom = Math.max(0, cy + ch - rect.y - rect.h);
+        annotCanvas.style.clipPath = `inset(${top}px ${right}px ${bottom}px ${left}px)`;
+    }
+}
+
 /** rAF 回调：只消费最新矩形，落 DOM 几何 + 尺寸提示 */
 function flushLiveSelection() {
     liveRaf = null;
@@ -190,6 +227,7 @@ function flushLiveSelection() {
     const els = liveElements();
     if (!els) return;
     writeGeometry(rect, els);
+    syncAnnotationLayer(rect);
     updateSizeHint(rect);
 }
 
@@ -219,6 +257,7 @@ function activateLiveSelection(rect) {
     clearInteractionCanvasOnce();
     els.liveSelectionEl.classList.remove('hidden');
     writeGeometry(rect, els);
+    syncAnnotationLayer(rect);
     updateSizeHint(rect);
     return true;
 }

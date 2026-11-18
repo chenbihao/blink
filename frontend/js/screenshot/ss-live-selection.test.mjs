@@ -14,6 +14,9 @@
 //! 10. DOM 层缺失时降级：不激活、不重复告警
 //! 11. 混合 DPI 小数坐标：全部几何从唯一整数格点推导，四遮罩拼满全屏
 //!     无 1px 空缝/叠色（多屏"跟随鼠标的横线"回归）
+//! 12. 0.29.2：选区调整拖动期间标注层与实线框同步（所见即所得预览）：
+//!     move 整体平移跟随；resize 钉原位 + clip-path 实时裁剪；
+//!     未激活 / 标注层隐藏 / 无交互时不介入；复位不负责恢复其状态
 
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
@@ -493,6 +496,92 @@ function frameStyleWrites() {
     assert.match(warned[0], /DOM 层缺失/, '告警内容指出契约破坏');
     installDoubles();
     console.log('✓ DOM 缺失降级（告警一次）');
+}
+
+// ── 12：0.29.2 选区调整拖动期间标注层与实线框同步（所见即所得预览） ────────
+
+{
+    installDoubles();
+    ss.annotCanvas = fakeElement('annot-canvas');
+    ss.selectionInteraction = {kind: 'move', activated: true};
+
+    // 首帧同步激活：标注层位置与首帧矩形同帧落地（与边框不错帧）
+    live.updateLiveSelection({x: 110, y: 120, w: 200, h: 150});
+    assert.equal(ss.annotCanvas.style.left, '110px', 'move 激活首帧标注层跟随 x');
+    assert.equal(ss.annotCanvas.style.top, '120px', 'move 激活首帧标注层跟随 y');
+
+    // 后续帧走单飞 rAF：事件侧不直接落 DOM，冲刷时消费最新矩形；
+    // move 顺带清 stale clip（上一次 resize 预览残留的防御性复位）
+    ss.annotCanvas.style.clipPath = 'inset(10px 0px 0px 20px)';
+    live.updateLiveSelection({x: 130, y: 140, w: 200, h: 150});
+    live.updateLiveSelection({x: 150, y: 160, w: 200, h: 150});
+    assert.equal(ss.annotCanvas.style.left, '110px', 'rAF 冲刷前事件侧不直接落 DOM');
+    runFrame();
+    assert.equal(ss.annotCanvas.style.left, '150px', 'move 后续帧标注层跟随最新矩形');
+    assert.equal(ss.annotCanvas.style.top, '160px', 'move 后续帧标注层跟随 y');
+    assert.equal(ss.annotCanvas.style.clipPath, '', 'move 清掉 stale clip-path');
+
+    // 复位（提交/中断路径）不负责恢复标注层状态——由 enterAnnotationMode 重设
+    live.resetLiveSelection();
+    assert.equal(ss.annotCanvas.style.left, '150px', '复位不改写标注层位置');
+    console.log('✓ move 拖动期间标注层逐帧跟随');
+}
+
+{
+    installDoubles();
+    ss.annotCanvas = fakeElement('annot-canvas');
+    ss.annotCanvas.style.left = '100px';
+    ss.annotCanvas.style.top = '100px';
+    ss.annotCanvas.style.width = '200px';
+    ss.annotCanvas.style.height = '150px';
+    ss.selectionInteraction = {kind: 'resize', handle: 'se', activated: true};
+
+    // 扩边：新选区罩住整块旧画布 → inset 各项全 0（无可裁）
+    live.updateLiveSelection({x: 100, y: 100, w: 300, h: 250});
+    live.updateLiveSelection({x: 100, y: 100, w: 280, h: 220});
+    runFrame();
+    assert.equal(ss.annotCanvas.style.clipPath, 'inset(0px 0px 0px 0px)', '扩边无可裁');
+    assert.equal(ss.annotCanvas.style.left, '100px', 'resize 内容钉在原位不动');
+    assert.equal(ss.annotCanvas.style.top, '100px');
+
+    // 缩边：实时选区 = 旧画布的交集子矩形 → 对应 inset 逐帧裁掉选区外部分
+    live.updateLiveSelection({x: 120, y: 110, w: 200, h: 150});
+    runFrame();
+    assert.equal(ss.annotCanvas.style.clipPath, 'inset(10px 0px 0px 20px)',
+        'top=110-100, left=120-100（与提交时 rebase 裁剪同边界）');
+    // 选区整体移出旧画布之外的极端情形：inset 超过画布尺寸 → 完全裁掉
+    // （top=400-100=300 ≥ 画布高 150、left=300 ≥ 画布宽 200，CSS 自然全裁）
+    live.updateLiveSelection({x: 400, y: 400, w: 100, h: 80});
+    runFrame();
+    assert.equal(ss.annotCanvas.style.clipPath, 'inset(300px 0px 0px 300px)',
+        '选区移出旧画布 → inset 超尺寸，交集为空（标注完全不可见）');
+
+    // 复位不清 clip：清理由 enterAnnotationMode / exitAnnotationMode 负责
+    live.resetLiveSelection();
+    assert.notEqual(ss.annotCanvas.style.clipPath, '', '复位不拥有标注层状态（clip 留给提交路径清）');
+
+    // move 但未过 3px 激活阈值（单击语义）：不介入
+    ss.selectionInteraction = {kind: 'move', activated: false};
+    live.updateLiveSelection({x: 180, y: 180, w: 200, h: 150});
+    assert.equal(ss.annotCanvas.style.left, '100px', '未激活交互不介入');
+    live.resetLiveSelection();
+
+    // 新建拖选（无 selectionInteraction）：不牵动标注层
+    ss.selectionInteraction = null;
+    live.updateLiveSelection({x: 10, y: 10, w: 50, h: 40});
+    live.updateLiveSelection({x: 12, y: 12, w: 60, h: 50});
+    runFrame();
+    assert.equal(ss.annotCanvas.style.left, '100px', '新建拖选不牵动标注层');
+    live.resetLiveSelection();
+
+    // 标注层隐藏（尚未进入标注模式）：同步为无操作
+    ss.selectionInteraction = {kind: 'move', activated: true};
+    ss.annotCanvas._classes.add('hidden');
+    live.updateLiveSelection({x: 60, y: 70, w: 100, h: 80});
+    assert.equal(ss.annotCanvas.style.left, '100px', '隐藏的标注层不写位置');
+    live.resetLiveSelection();
+    ss.selectionInteraction = null;
+    console.log('✓ resize 实时裁剪 / 非激活路径不介入');
 }
 
 console.log('\nss-live-selection tests all passed');

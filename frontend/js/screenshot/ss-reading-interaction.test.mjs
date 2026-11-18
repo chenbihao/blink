@@ -135,15 +135,40 @@ for (const charBoxes of [true, false]) {
     }
 }
 
-test('双击已有文字选择仍确认截图，不扩大为整行', () => {
+test('已有文字选择时：单击先收起选区，双击仍只确认截图一次', () => {
     ss.reading.selectionStart = 1;
     ss.reading.selectionEnd = 1;
-    click(25, 25);
-    click(25, 25);
-    ss.hitCanvas.fire('dblclick', 25, 25);
-    assert.equal(confirmed.length, 1);
     assert.equal(getReadingSelectionText(), 'b');
+    click(25, 25);
+    assert.equal(getReadingSelectionText(), '');
+    click(25, 25);
+    const event = ss.hitCanvas.fire('dblclick', 25, 25);
+    assert.deepEqual(confirmed, [event]);
     assert.equal(opened, 0);
+});
+
+test('单击收起已有划词选中；拖动、取消与重新划选不受影响', () => {
+    ss.hitCanvas.fire('pointerdown', 25, 25);
+    ss.hitCanvas.fire('pointermove', 45, 25);
+    ss.hitCanvas.fire('pointerup', 45, 25);
+    assert.equal(getReadingSelectionText(), 'abc');
+    // pointercancel 只清理候选拖动，不视为用户单击
+    ss.hitCanvas.fire('pointerdown', 45, 25);
+    ss.hitCanvas.fire('pointercancel', 45, 25);
+    assert.equal(getReadingSelectionText(), 'abc');
+    // 文字上单击（未跨 3px 拖动阈值）→ 收起
+    click(45, 25);
+    assert.equal(getReadingSelectionText(), '');
+    assert.equal(ss.reading.selectionStart, null);
+    // 收起后仍可重新拖选
+    ss.hitCanvas.fire('pointerdown', 25, 25);
+    ss.hitCanvas.fire('pointermove', 45, 55);
+    ss.hitCanvas.fire('pointerup', 45, 55);
+    assert.equal(getReadingSelectionText(), 'abc\ndef');
+    // 真空白静止单击同样收起
+    click(200, 150);
+    assert.equal(getReadingSelectionText(), '');
+    assert.equal(ss.selectionInteraction, null);
 });
 
 for (const scale of [1, 2]) {

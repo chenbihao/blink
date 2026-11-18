@@ -152,9 +152,12 @@ export function updateSelectionInteraction(e) {
     if (!ss.selectionInteraction.activated) {
         if (Math.hypot(totalDx, totalDy) < 3) return;
         ss.selectionInteraction.activated = true;
-        // invalidateSelectionContent 是协调函数，由主文件提供的回调执行
+        // invalidateSelectionContent 是协调函数，由主文件提供的回调执行。
+        // 0.29.2：preservePresentation——移动/缩放期间标注层与工具栏保持可见
+        // （连续交互：移动时标注层由实时层逐帧跟随，缩放时钉在屏幕内容原位、
+        // 出界部分待提交时由 rebase 裁剪），仅失效 OCR/翻译/划词等内容态。
         if (typeof ss._invalidateSelectionContent === 'function') {
-            ss._invalidateSelectionContent();
+            ss._invalidateSelectionContent({preservePresentation: true});
         }
         if (ss.selectionInteraction.kind === 'new') {
             ss.isDragging = true;
@@ -199,7 +202,7 @@ export function finishSelectionInteraction(e) {
     // JS task 内紧跟 drawFinalSelection()/drawDimmed() 完成——两者同帧生效，因此不会
     // 出现闪白、双边框或短暂无蒙版。
     resetLiveSelection();
-    const {kind, activated} = ss.selectionInteraction;
+    const {kind, activated, original} = ss.selectionInteraction;
     if (!activated) {
         ss.selectionInteraction = null;
         ss.canvas.style.cursor = annot.getTool() === 'select' ? 'default' : 'crosshair';
@@ -228,8 +231,15 @@ export function finishSelectionInteraction(e) {
         if (typeof ss._exitAnnotationMode === 'function') ss._exitAnnotationMode();
         return true;
     }
-    // enterAnnotationMode 由主文件提供的回调执行（内部完成 canvas 单次提交）
-    if (typeof ss._enterAnnotationMode === 'function') ss._enterAnnotationMode({...ss.selCss});
+    // enterAnnotationMode 由主文件提供的回调执行（内部完成 canvas 单次提交）。
+    // 0.29.2：移动/缩放保留标注（preserveFrom=交互前原选区，标注钉住屏幕内容）；
+    // 新框选（kind==='new'）维持清空语义。
+    if (typeof ss._enterAnnotationMode === 'function') {
+        ss._enterAnnotationMode(
+            {...ss.selCss},
+            kind === 'new' ? undefined : {preserveFrom: original},
+        );
+    }
     return true;
 }
 

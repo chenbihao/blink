@@ -198,11 +198,12 @@ fn parse_level(level: &str) -> String {
     // 日常排查 OCR 是否"识别到东西"够用；WARN/ERROR（下载失败、resize 尺寸非法、
     // 字符数不一致、解码失败）不受影响。
     //
-    // **例外：TRACE 档不压**（见下方 match 的 trace 分支）。这里的其它噪音组在 trace 下
-    // 也一律压掉，因为协议帧 / IME 内部消息 / 密钥库调用对本项目永远没有诊断价值；
-    // 而 oar-ocr 的这几行是**唯一**能看到"模型真实输入尺寸 + 每 batch 原始识别文本"的
-    // 窗口，错字 / 漏字 / 字符框错位排查需要它。深挖 OCR 质量时把设置页级别切到 trace
-    // 即可拿回全部细节。
+    // **TRACE 档也压**（0.29.2 收敛，取代 0.23.15 的"trace 放开"例外）。逐 batch
+    // 4 条（forward / 首图尺寸 / 张量形状 / 解码文本）× batch 数在 trace 档同样
+    // 刷屏，张量形状对应用侧排查也无行动价值；识别正文改由 blink 自身受控记录
+    // （onnx_ocr/pipeline.rs `OCR 识别正文`，TRACE 档、换行转义保单行），与 STT
+    // 转写正文（realtime_ws）同模式。错字 / 漏字排查看这条即可；WARN/ERROR
+    // （下载失败 / resize 非法 / 字符数不一致 / 解码失败）不受影响。
     // **tungstenite / tokio_tungstenite 压到 warn**（0.29.1 修复）：WS 协议库在
     // TRACE 下逐帧打日志——poll_next/with_context/WouldBlock 每帧 6-10 行，且
     // `tungstenite::protocol` 会**不受控地 dump 完整帧 payload**：同一内容 hex 与
@@ -221,9 +222,9 @@ fn parse_level(level: &str) -> String {
     let ort_noise = "ort=warn";
     let ocr_noise = "oar_ocr_core=warn,oar_ocr=warn";
     match level {
-        // trace：唯一放开 oar_ocr_core 的档位（OCR 内部细节只在深挖时可见）
+        // trace：oar_ocr 也恒压——识别正文由 pipeline.rs 受控 trace 记录（0.29.2）
         "trace" => format!(
-            "trace,sqlx=warn,tauri=warn,tao=warn,rmcp=warn,{ort_noise},{transport_noise},{ai_noise},{keyring_noise}"
+            "trace,sqlx=warn,tauri=warn,tao=warn,rmcp=warn,{ort_noise},{ocr_noise},{transport_noise},{ai_noise},{keyring_noise}"
         ),
         "debug" => format!(
             "debug,sqlx=warn,tauri=warn,rmcp=warn,{ort_noise},{ocr_noise},{transport_noise},{ai_noise},{keyring_noise}"
@@ -280,6 +281,40 @@ pub fn cleanup_old_logs(dir: &std::path::Path) -> usize {
 mod tests {
     use super::{parse_level, write_panic_report};
 
+    /// 测试用 writer：把 fmt 层输出捕获到内存（行为级日志验证测试共用）。
+    #[derive(Clone, Default)]
+    struct CaptureWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+        type Writer = CaptureWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// 用指定 EnvFilter 指令执行 emit 并捕获全部日志输出。行为级验证——
+    /// 用真实过滤器跑真实事件，而不是只断言指令字符串。
+    fn capture_with(directives: &str, emit: &impl Fn()) -> String {
+        let capture = CaptureWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::filter::EnvFilter::new(directives))
+            .with_writer(capture.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, emit);
+        String::from_utf8(capture.0.lock().unwrap().clone()).unwrap()
+    }
+
     #[test]
     fn cleanup_keeps_current_recent_and_unrelated_logs_and_removes_legacy_names() {
         use std::{
@@ -333,22 +368,17 @@ mod tests {
 
     #[test]
     fn parse_level_caps_third_party_noise() {
-        for lvl in ["debug", "info"] {
+        for lvl in ["debug", "info", "trace"] {
             let f = parse_level(lvl);
             assert!(f.starts_with(lvl), "{f}");
             // 0.22.9：ort 内部细节恒压 warn（Env 硬编码 VERBOSE 的兜底）
             assert!(f.contains("ort=warn"), "{f}");
             assert!(f.contains("sqlx=warn"), "{f}");
-            // 0.23.15：oar-ocr（PP-OCRv6）逐 batch 内部细节在 debug/info 下压掉
+            // 0.23.15 起 debug/info 压掉；0.29.2 起 trace 也压——识别正文由
+            // pipeline.rs 受控记录，不再依赖引擎逐 batch 日志
             assert!(f.contains("oar_ocr_core=warn"), "{f}");
             assert!(f.contains("oar_ocr=warn"), "{f}");
         }
-        // trace 是唯一放开 oar_ocr_core 的档位：OCR 错字/漏框排查需要原始 batch 细节，
-        // 其余噪音组（协议帧 / IME / 密钥库）在 trace 下仍然压掉。
-        let t = parse_level("trace");
-        assert!(t.starts_with("trace"), "{t}");
-        assert!(t.contains("ort=warn"), "{t}");
-        assert!(!t.contains("oar_ocr"), "{t}");
         assert_eq!(parse_level("error"), "error");
         assert_eq!(parse_level("bogus"), "error");
     }
@@ -359,36 +389,8 @@ mod tests {
     /// 其 WARN 与 blink 自身 TRACE 不受影响。target 取自实机日志。
     #[test]
     fn websocket_frame_logs_are_suppressed_at_every_level() {
-        use std::io::Write;
-        use std::sync::{Arc, Mutex};
-        use tracing_subscriber::filter::EnvFilter;
-
-        #[derive(Clone, Default)]
-        struct Capture(Arc<Mutex<Vec<u8>>>);
-        impl Write for Capture {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(buf);
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
-            type Writer = Capture;
-            fn make_writer(&'a self) -> Self::Writer {
-                self.clone()
-            }
-        }
-
         fn emit_and_capture(directives: &str) -> String {
-            let capture = Capture::default();
-            let subscriber = tracing_subscriber::fmt()
-                .with_env_filter(EnvFilter::new(directives))
-                .with_writer(capture.clone())
-                .with_ansi(false)
-                .finish();
-            tracing::subscriber::with_default(subscriber, || {
+            capture_with(directives, &|| {
                 tracing::trace!(target: "tungstenite::protocol", "Received message TRANSCRIPT_MARK");
                 tracing::trace!(target: "tungstenite::protocol::frame", "writing frame AUDIO_MARK");
                 tracing::trace!(target: "tungstenite::protocol::frame::frame", "Parsed headers HEADER_MARK");
@@ -396,9 +398,7 @@ mod tests {
                 tracing::trace!(target: "tokio_tungstenite::compat", "WouldBlock COMPAT_MARK");
                 tracing::warn!(target: "tungstenite::protocol", "WS_WARN_MARK");
                 tracing::trace!(target: "blink::app::voice", "APP_TRACE_MARK");
-            });
-            let bytes = capture.0.lock().unwrap().clone();
-            String::from_utf8(bytes).unwrap()
+            })
         }
 
         const FRAME_MARKS: [&str; 5] = [
@@ -439,36 +439,8 @@ mod tests {
     /// （与剪贴板内容同模式），与 tungstenite 不受控的整帧 dump 不同。
     #[test]
     fn transcript_content_is_trace_only() {
-        use std::io::Write;
-        use std::sync::{Arc, Mutex};
-        use tracing_subscriber::filter::EnvFilter;
-
-        #[derive(Clone, Default)]
-        struct Capture(Arc<Mutex<Vec<u8>>>);
-        impl Write for Capture {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(buf);
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
-            type Writer = Capture;
-            fn make_writer(&'a self) -> Self::Writer {
-                self.clone()
-            }
-        }
-
         fn emit_and_capture(directives: &str) -> String {
-            let capture = Capture::default();
-            let subscriber = tracing_subscriber::fmt()
-                .with_env_filter(EnvFilter::new(directives))
-                .with_writer(capture.clone())
-                .with_ansi(false)
-                .finish();
-            tracing::subscriber::with_default(subscriber, || {
+            capture_with(directives, &|| {
                 tracing::trace!(
                     target: "blink_domain_stt::realtime_ws",
                     preview = "语音预览正文 MARK",
@@ -479,8 +451,7 @@ mod tests {
                     final_text = "最终正文 MARK",
                     "云端流式 Final（最终正文）"
                 );
-            });
-            String::from_utf8(capture.0.lock().unwrap().clone()).unwrap()
+            })
         }
 
         let trace = emit_and_capture(&parse_level("trace"));
@@ -492,6 +463,56 @@ mod tests {
                 !out.contains("正文 MARK") && !out.contains("预览正文 MARK"),
                 "{lvl} 档不得泄露转写正文：{out}"
             );
+        }
+    }
+
+    /// 0.29.2：oar-ocr（PP-OCRv6）逐 batch 内部日志（DBPostProcess / CRNN
+    /// forward·首图尺寸·张量形状·解码文本）在所有可调档位恒压——trace 档不再
+    /// 放开（0.23.15 例外的收敛）。识别正文由 blink 自身受控记录（与转写正文
+    /// 同模式）。target 取自实机日志，行为级验证真实过滤器拦得住。
+    #[test]
+    fn oar_ocr_batch_logs_are_suppressed_at_every_level() {
+        fn emit() {
+            tracing::debug!(
+                target: "oar_ocr_core::processors::db_postprocess",
+                "DBPostProcess: pred 704x960 DET_MARK"
+            );
+            tracing::debug!(
+                target: "oar_ocr_core::models::recognition::crnn",
+                "CRNN forward: 16 images FWD_MARK"
+            );
+            tracing::debug!(
+                target: "oar_ocr_core::models::recognition::crnn",
+                "CRNN postprocess REC_MARK"
+            );
+            tracing::warn!(target: "oar_ocr_core", "OCR_WARN_MARK");
+            tracing::trace!(
+                target: "blink_infra::local_engine::onnx_ocr",
+                "PIPELINE_TRACE_MARK"
+            );
+        }
+
+        // 对照组：不带压制指令的裸 trace 下引擎 DEBUG 确实会输出——证明本测试有检出力。
+        let unfiltered = capture_with("trace", &emit);
+        for mark in ["DET_MARK", "FWD_MARK", "REC_MARK"] {
+            assert!(unfiltered.contains(mark), "对照组应输出 {mark}：{unfiltered}");
+        }
+
+        // trace 档：引擎 batch 日志全部拦住；引擎 WARN 与 blink 自身 TRACE 仍可见。
+        let trace = capture_with(&parse_level("trace"), &emit);
+        for mark in ["DET_MARK", "FWD_MARK", "REC_MARK"] {
+            assert!(!trace.contains(mark), "trace 档不得输出 {mark}：{trace}");
+        }
+        assert!(trace.contains("OCR_WARN_MARK"), "引擎告警必须保留：{trace}");
+        assert!(trace.contains("PIPELINE_TRACE_MARK"), "blink 自身 TRACE 必须保留：{trace}");
+
+        // 其余可调档位同样不得泄露；引擎 WARN 仍可见。
+        for lvl in ["debug", "info"] {
+            let out = capture_with(&parse_level(lvl), &emit);
+            for mark in ["DET_MARK", "FWD_MARK", "REC_MARK"] {
+                assert!(!out.contains(mark), "{lvl} 档不得输出 {mark}：{out}");
+            }
+            assert!(out.contains("OCR_WARN_MARK"), "{lvl} 档引擎告警必须保留：{out}");
         }
     }
 }

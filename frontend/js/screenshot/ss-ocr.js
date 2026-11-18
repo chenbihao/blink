@@ -153,14 +153,17 @@ export function updateOutputButtonsDisabled() {
     updateOcrButtonBusy();
 }
 
-/** 工具栏「识别」/「翻译」按钮高亮态：跟随面板当前 tab。 */
+/** 工具栏「识别」/「翻译」按钮高亮态：有面板跟随 tab；无面板跟随 overlay mode
+ *  （0.29.2 起翻译按钮只挂译文图层，仅图层模式下也要有激活反馈）。 */
 export function updateToolbarButtonActive() {
     const panel = document.getElementById('ocr-panel');
     const btnOcr = document.getElementById('btn-ocr');
     const btnTr = document.getElementById('btn-translate');
     if (!panel) {
+        const overlay = annot.getOverlay();
+        const translated = !!(overlay && overlay.mode === 'translated');
         if (btnOcr) btnOcr.classList.remove('active');
-        if (btnTr) btnTr.classList.remove('active');
+        if (btnTr) btnTr.classList.toggle('active', translated);
         return;
     }
     const tabTranslated = panel.querySelector('.ocr-tab[data-tab="translated"]');
@@ -309,29 +312,27 @@ export function doIdentifySelection() {
 }
 
 /**
- * 点[翻译]——OCR + 翻译 → 面板（译文 tab）+ overlay 嵌译文。
+ * 点[翻译]——OCR + 翻译 → overlay 嵌译文图层。0.29.2 起只管图层：不开/不关面板，
+ * 面板归[识别]按钮（doPanelToggle）与面板自身 X。
+ * toggle 语义按 overlay mode：译文图层显示中再点 → 关图层（面板不动）；
+ * 已有识别结果 → 直接挂图层、缺译文补翻译，不重跑 OCR。
  */
 export function doOverlayTranslate() {
     ss.resultPanel = 'ocr';
     ss._closeQrPanel?.();
     if (!ss.selCss) return;
-    const existingPanel = document.getElementById('ocr-panel');
-    if (existingPanel && ss.ocrResultCache) {
-        const tabTranslated = existingPanel.querySelector('.ocr-tab[data-tab="translated"]');
-        const isTranslatedActive = tabTranslated && tabTranslated.classList.contains('active');
-        if (isTranslatedActive) {
-            existingPanel.remove();
-            updateToolbarButtonActive();
-        } else {
-            const overlay = annot.getOverlay();
-            if (overlay && overlay.mode !== 'translated') {
-                annot.setOverlayMode('translated');
-                redrawAnnotFull();
-            }
-            const adv = existingPanel.querySelector('.ocr-panel-adv');
-            if (adv) adv.classList.remove('hidden');
-            if (tabTranslated) tabTranslated.click();
-        }
+    const overlay = annot.getOverlay();
+    if (overlay && overlay.mode === 'translated') {
+        annot.setOverlayMode(null);
+        redrawAnnotFull();
+        updateToolbarButtonActive();
+        return;
+    }
+    if (overlay && overlay.lines.length > 0 && ss.ocrResultCache) {
+        annot.setOverlayMode('translated');
+        redrawAnnotFull();
+        updateToolbarButtonActive();
+        if (overlay.lines.some((l) => !hasText(l.dstText))) requestOverlayTranslation();
         return;
     }
     ss.ocrBusy = true;
@@ -343,7 +344,7 @@ export function doOverlayTranslate() {
         activateOverlay(result, {
             showOverlay: true,
             panelTab: 'translated',
-            openPanel: true,
+            openPanel: false,
             autoTranslate: true,
         });
         ss.ocrBusy = false;
@@ -581,7 +582,11 @@ export function doPanelToggle() {
         return;
     }
     if (ss.ocrResultCache) {
-        showOcrResult(ss.ocrResultCache);
+        // 0.29.2：译文图层显示中开面板 → 落译文 tab（与屏上内容一致，译文区由
+        // showOcrResult 从 overlay 回填）；否则原文 tab。均不重跑 OCR。
+        const overlay = annot.getOverlay();
+        showOcrResult(ss.ocrResultCache, {tab: overlay && overlay.mode === 'translated' ? 'translated' : 'source'});
+        updateToolbarButtonActive();
     } else {
         doIdentifySelection();
     }
@@ -614,7 +619,7 @@ function _runOcrFresh(opts = {}) {
                     activateOverlay(result, {
                         showOverlay: true,
                         panelTab: 'translated',
-                        openPanel: true,
+                        openPanel: false,
                         autoTranslate: true,
                     });
                 } else {
@@ -749,53 +754,81 @@ function requestOverlayTranslation(targetLang) {
         });
 }
 
+/** 分批翻译的批大小：每批一次插件请求（命令侧批内去重 + tag 合并）。大选区单次
+ *  巨批会撞插件 manifest 超时后回退逐行 N 次请求；分批后每批预算独立、批间可
+ *  中断、逐批渐进上屏（0.29.2）。 */
+const TRANSLATE_CHUNK_SIZE = 20;
+
 async function translateOverlayLines(targetLang, revision = ++ss.translationRevision) {
     const selectionAtStart = ss.selectionRevision;
     const current = annot.getOverlay();
     if (!current || current.lines.length === 0) return;
     const srcs = current.lines.map((l) => hasText(l.dstText) ? '' : (l.srcText || ''));
-    const needCount = srcs.filter((s) => hasText(s)).length;
+    const needIdxs = srcs.map((s, i) => hasText(s) ? i : -1).filter((i) => i >= 0);
+    const needCount = needIdxs.length;
     if (needCount === 0) return;
 
+    // 0.29.2：每个 await 之后都校验版本号（ESC/重选/新任务都会递增），过期立即中止。
+    // 旧实现的逐行回退只在全部结束后校验，取消后仍逐行占用插件唯一并发槽，
+    // 导致后续新翻译被"插件忙"拒绝。
+    const stale = () => selectionAtStart !== ss.selectionRevision || revision !== ss.translationRevision;
+    const abortIfStale = () => {
+        if (!stale()) return false;
+        console.debug('[screenshot] 翻译中止：任务已过期', {revision, current: ss.translationRevision});
+        return true;
+    };
+
     const started = performance.now();
-    let dsts;
+    const dstByIndex = new Array(srcs.length).fill('');
     let failedCount = 0;
-    try {
-        const res = await translateLines(srcs, targetLang || null);
-        dsts = res.lines;
-        if (res.engine) ss.translateEngine = res.engine;
-        failedCount = res.failed || 0;
-    } catch (e) {
-        const err = normalizeError(e);
-        console.warn(`[screenshot] translateLines 失败 [${err.code}],降级到逐行单调`);
-        dsts = [];
-        let lineFailed = 0;
-        for (let i = 0; i < srcs.length; i++) {
-            if (!hasText(srcs[i])) {
-                dsts.push('');
-                continue;
-            }
-            try {
-                dsts.push(await translateText(srcs[i], targetLang || null));
-            } catch (_) {
-                lineFailed++;
-                dsts.push(srcs[i]);
+    let firstError = null;
+    let done = 0;
+
+    /** 已翻好的行渐进回填 overlay（未翻行保持原状）；overlay 被替换则放弃。 */
+    const applyProgressive = () => {
+        const latest = annot.getOverlay();
+        if (!latest || latest.lines.length !== current.lines.length) return false;
+        const merged = latest.lines.map((l, i) =>
+            hasText(dstByIndex[i]) ? dstByIndex[i] : (l.dstText || l.srcText));
+        annot.setOverlayTranslations(merged, targetLang || null);
+        redrawAnnotFull();
+        updateOverlayButtonsActive();
+        return true;
+    };
+
+    for (let c = 0; c < needCount; c += TRANSLATE_CHUNK_SIZE) {
+        if (abortIfStale()) return;
+        const chunk = needIdxs.slice(c, c + TRANSLATE_CHUNK_SIZE);
+        const texts = chunk.map((i) => srcs[i]);
+        try {
+            const res = await translateLines(texts, targetLang || null);
+            if (res.engine) ss.translateEngine = res.engine;
+            failedCount += res.failed || 0;
+            chunk.forEach((lineIdx, j) => {
+                dstByIndex[lineIdx] = res.lines && res.lines[j] !== undefined ? res.lines[j] : texts[j];
+            });
+        } catch (e) {
+            if (!firstError) firstError = e;
+            const err = normalizeError(e);
+            console.warn(`[screenshot] translateLines 批次失败 [${err.code}],降级到逐行单调`, {lines: texts.length});
+            for (let j = 0; j < texts.length; j++) {
+                if (abortIfStale()) return;
+                try {
+                    dstByIndex[chunk[j]] = await translateText(texts[j], targetLang || null);
+                } catch (_) {
+                    failedCount++;
+                    dstByIndex[chunk[j]] = texts[j];
+                }
             }
         }
-        // 全部行失败 → 上抛让调用方展示失败原因，不再拿原文冒充译文
-        if (lineFailed >= needCount) throw e;
-        failedCount = lineFailed;
+        if (abortIfStale()) return;
+        if (!applyProgressive()) return;
+        done += chunk.length;
+        if (done < needCount && !annot.isOverlayLoading()) showSelLoading(`翻译中 ${done}/${needCount}…`);
     }
-    if (selectionAtStart !== ss.selectionRevision || revision !== ss.translationRevision) {
-        console.debug('[screenshot] 丢弃过期翻译结果', {revision, current: ss.translationRevision});
-        return;
-    }
-    const latest = annot.getOverlay();
-    if (!latest || latest.lines.length !== current.lines.length) return;
-    const merged = latest.lines.map((l, i) => hasText(l.dstText) ? l.dstText : (dsts[i] || l.srcText));
-    annot.setOverlayTranslations(merged, targetLang || null);
-    redrawAnnotFull();
-    updateOverlayButtonsActive();
+
+    // 全部行失败 → 上抛让调用方展示失败原因，不再拿原文冒充译文
+    if (failedCount >= needCount && firstError) throw firstError;
     if (failedCount > 0) {
         showTransientHint(`部分行翻译失败（${failedCount}/${needCount}），已保留原文`, {isError: true, duration: 2500});
     }

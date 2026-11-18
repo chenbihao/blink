@@ -52,3 +52,50 @@ test('recording tool changes retain the grip even after the one-shot anchor flag
     assert.equal(ss.toolbar.style.left,'60px');
     assert.equal(ss.toolbar.style.top,'370px');
 });
+
+// ── 0.29.2 默认落位水平对齐：宽选区右对齐，窄选区与选区居中 ────────────────
+
+function freeToolbar(width) {
+    const t = toolbar(width, 0, 0);
+    delete t.dataset.keepAnchor;
+    return t;
+}
+
+test('default placement right-aligns when the selection is wider than the toolbar', () => {
+    window.__blinkScreenMeta={vx:0,vy:0,renderScaleX:1,renderScaleY:1,
+        physicalDisplays:[{x:0,y:0,w:1920,h:1080,dpi:96}]};
+    invalidateDisplaysCache();
+    ss.toolbar=freeToolbar(360);
+    positionToolbar({x:100,y:500,w:640,h:200},true);
+    assert.equal(ss.toolbar.style.left,'380px');   // 100+640-360
+    assert.equal(ss.toolbar.style.top,'708px');    // 选区下方
+});
+
+test('default placement centers when the selection is narrower than the toolbar', () => {
+    window.__blinkScreenMeta={vx:0,vy:0,renderScaleX:1,renderScaleY:1,
+        physicalDisplays:[{x:0,y:0,w:1920,h:1080,dpi:96}]};
+    invalidateDisplaysCache();
+    ss.toolbar=freeToolbar(360);
+    positionToolbar({x:100,y:500,w:200,h:80},true);
+    assert.equal(ss.toolbar.style.left,'20px');    // 100+(200-360)/2
+});
+
+test('centered placement still clamps to the monitor edge', () => {
+    window.__blinkScreenMeta={vx:0,vy:0,renderScaleX:1,renderScaleY:1,
+        physicalDisplays:[{x:0,y:0,w:1920,h:1080,dpi:96}]};
+    invalidateDisplaysCache();
+    ss.toolbar=freeToolbar(360);
+    positionToolbar({x:2,y:500,w:100,h:80},true);
+    assert.equal(ss.toolbar.style.left,'8px');     // 原始 -128 → 屏边距 8
+});
+
+test('centering uses the visual width under high DPI', () => {
+    window.__blinkScreenMeta={vx:0,vy:0,renderScaleX:1,renderScaleY:1,
+        physicalDisplays:[{x:0,y:0,w:1920,h:1080,dpi:144}]};
+    invalidateDisplaysCache();
+    ss.toolbar=freeToolbar(300);
+    positionToolbar({x:200,y:500,w:300,h:100},true);
+    assert.equal(Number(ss.toolbar.dataset.uiScale),1.5);
+    // 视觉宽 300*1.5=450 > 选区 300 → 居中：200+(300-450)/2
+    assert.equal(ss.toolbar.style.left,'125px');
+});

@@ -238,4 +238,64 @@ const {computeInteractionRect, beginSelectionInteraction, updateSelectionInterac
     console.log('✓ precision hint DPI 视觉补偿');
 }
 
+// ── 0.29.2：move/resize 完成传 preserveFrom（保留标注）；new 框选不传 ────────
+{
+    const entered = [];
+    ss._enterAnnotationMode = (rect, opts) => entered.push({rect, opts});
+    ss.canvas = {style: {}};
+
+    ss.isAnnotating = true;
+    ss.selCss = {x: 100, y: 100, w: 200, h: 150};
+    beginSelectionInteraction('move', {offsetX: 150, offsetY: 150});
+    updateSelectionInteraction({offsetX: 200, offsetY: 400, shiftKey: false});
+    finishSelectionInteraction({offsetX: 250, offsetY: 500, shiftKey: false});
+    assert.deepEqual(entered.at(-1).rect, {x: 200, y: 450, w: 200, h: 150});
+    assert.deepEqual(entered.at(-1).opts, {preserveFrom: {x: 100, y: 100, w: 200, h: 150}},
+        'move 完成携带交互前原选区（标注按原点差平移保留）');
+
+    ss.isAnnotating = true;
+    ss.selCss = {x: 100, y: 100, w: 200, h: 150};
+    beginSelectionInteraction('resize', {offsetX: 300, offsetY: 250}, 'se');
+    updateSelectionInteraction({offsetX: 400, offsetY: 400, shiftKey: false});
+    finishSelectionInteraction({offsetX: 450, offsetY: 500, shiftKey: false});
+    assert.deepEqual(entered.at(-1).opts, {preserveFrom: {x: 100, y: 100, w: 200, h: 150}},
+        'resize 完成同样携带原选区');
+
+    ss.isAnnotating = false;
+    ss.selCss = {x: 0, y: 0, w: 0, h: 0};
+    beginSelectionInteraction('new', {offsetX: 300, offsetY: 300});
+    updateSelectionInteraction({offsetX: 400, offsetY: 350, shiftKey: false});
+    finishSelectionInteraction({offsetX: 420, offsetY: 380, shiftKey: false});
+    assert.equal(entered.at(-1).opts, undefined, '新框选不传 preserveFrom（清空语义）');
+
+    console.log('✓ preserveFrom 传递语义');
+}
+
+// ── 0.29.2：拖动激活时 invalidateSelectionContent 传 preservePresentation ──
+// 标注层与工具栏在移动/缩放期间保持可见（连续交互），仅清 OCR/翻译/划词内容态。
+{
+    const calls = [];
+    ss._invalidateSelectionContent = (opts) => calls.push(opts);
+    ss.canvas = {style: {}};
+
+    ss.isAnnotating = true;
+    ss.selCss = {x: 100, y: 100, w: 200, h: 150};
+    beginSelectionInteraction('move', {offsetX: 150, offsetY: 150});
+    updateSelectionInteraction({offsetX: 200, offsetY: 400, shiftKey: false});
+    assert.deepEqual(calls, [{preservePresentation: true}],
+        '激活阈值达到时保留工具栏与标注层（连续交互），仅清内容态');
+    finishSelectionInteraction({offsetX: 250, offsetY: 500, shiftKey: false});
+
+    // 阈值内（未激活）不触发内容失效
+    calls.length = 0;
+    ss.selCss = {x: 100, y: 100, w: 200, h: 150};
+    beginSelectionInteraction('move', {offsetX: 150, offsetY: 150});
+    updateSelectionInteraction({offsetX: 151, offsetY: 151, shiftKey: false});
+    assert.equal(calls.length, 0, '未激活不触发内容失效');
+    finishSelectionInteraction({offsetX: 151, offsetY: 151, shiftKey: false});
+
+    delete ss._invalidateSelectionContent;
+    console.log('✓ 拖动激活保留标注层与工具栏（preservePresentation）');
+}
+
 console.log('ss-interaction tests passed');

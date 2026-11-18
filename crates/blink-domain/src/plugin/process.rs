@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::time::Duration;
 
@@ -116,6 +116,15 @@ impl<T> Drop for PendingGuard<T> {
         if self.requests.lock().unwrap().remove(&self.id).is_some() {
             let _ = self.cancel.try_send(self.id.clone());
         }
+    }
+}
+
+/// tool-call 等待者计数守卫：任何退出路径（获得槽位/超时/调用方取消）都递减
+/// 排队计数，防止取消泄漏导致后续调用误判"等待者已满"。
+struct ToolWaiterGuard<'a>(&'a AtomicUsize);
+impl Drop for ToolWaiterGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -653,6 +662,10 @@ struct CrashState {
 
 /// 触发冷却的连续崩溃次数。
 const CRASH_LIMIT: u32 = 3;
+
+/// tool-call 并发槽满时的等待者上限（§4.4：并发与等待者须有上限，超限返回 busy）。
+/// 槽内排队计入调用方同一总期限（execute_tool_raw 的 deadline 包住排队+执行）。
+const TOOL_WAITER_CAP: usize = 8;
 /// 冷却时长。
 const CRASH_COOLDOWN: Duration = Duration::from_secs(30);
 
@@ -665,6 +678,8 @@ pub struct PluginHandle {
     /// 全局代理配置(进程启动时 env 注入),ureq/reqwest 原生读取。运行时可更新。
     proxy: std::sync::Mutex<Option<(String, String)>>,
     query_slots: Arc<Semaphore>,
+    /// 正在排队等 tool-call 槽位的等待者数（有界，见 TOOL_WAITER_CAP）。
+    tool_waiters: AtomicUsize,
     /// v2 握手下发给插件的宿主分配目录（0.28.1；wiring 层注入）。
     dirs: std::sync::Mutex<Option<super::protocol::PluginDirs>>,
     /// 连续崩溃计数/冷却。
@@ -688,6 +703,7 @@ impl PluginHandle {
             process: Mutex::new(None),
             proxy: std::sync::Mutex::new(proxy),
             query_slots: Arc::new(Semaphore::new(concurrency)),
+            tool_waiters: AtomicUsize::new(0),
             dirs: std::sync::Mutex::new(None),
             crash: std::sync::Mutex::new(CrashState::default()),
             bootstrap_tx: std::sync::Mutex::new(None),
@@ -894,6 +910,26 @@ impl PluginHandle {
         }
     }
 
+    /// §4.4：tool-call 并发槽满时在剩余预算内排队等待（0.29.2），而不是立即报
+    /// busy——翻译等用户直发动作短暂排队优于立刻失败。排队计入调用方同一总期限
+    /// （外层 `timeout_at(deadline)` 包住排队+执行，超时统一裁决 Timeout）；
+    /// 等待者超过 `TOOL_WAITER_CAP` 仍立即 Busy。query 路径（搜索 keyword）保持
+    /// 快速失败——占位→错误项的即时反馈语义不变。
+    async fn acquire_tool_slot(&self) -> Result<tokio::sync::OwnedSemaphorePermit, PluginError> {
+        if let Ok(permit) = Arc::clone(&self.query_slots).try_acquire_owned() {
+            return Ok(permit);
+        }
+        if self.tool_waiters.fetch_add(1, Ordering::AcqRel) >= TOOL_WAITER_CAP {
+            self.tool_waiters.fetch_sub(1, Ordering::AcqRel);
+            return Err(PluginError::Busy);
+        }
+        let _guard = ToolWaiterGuard(&self.tool_waiters);
+        Arc::clone(&self.query_slots)
+            .acquire_owned()
+            .await
+            .map_err(|_| PluginError::ProcessClosed)
+    }
+
     /// Tool-call 使用 manifest 与调用方剩余预算中更小的值。
     pub async fn execute_tool_raw(
         &self,
@@ -904,9 +940,7 @@ impl PluginHandle {
     ) -> Result<RawToolResult, PluginError> {
         let deadline = self.deadline(caller_deadline);
         let call = async {
-            let _permit = Arc::clone(&self.query_slots)
-                .try_acquire_owned()
-                .map_err(|_| PluginError::Busy)?;
+            let _permit = self.acquire_tool_slot().await?;
             remaining_budget(deadline)?;
             let proc = self.ensure_process().await?;
             let result = proc
@@ -1715,7 +1749,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn excess_work_returns_busy_without_starting_a_process() {
+    async fn slot_contention_waits_until_deadline_without_starting_a_process() {
         let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
             "schema_version":1,"id":"test.weather","name":"test","version":"1",
             "runtime":{"exec":"never-start.exe","concurrency":1},"triggers":[],"capabilities":[]
@@ -1723,11 +1757,52 @@ mod tests {
         .unwrap();
         let handle = PluginHandle::new(Arc::new(manifest), PathBuf::new(), None);
         let _permit = handle.query_slots.acquire().await.unwrap();
+        // 0.29.2：槽满不再立即 Busy，而是在剩余预算内排队；预算耗尽 → Timeout。
         let result = handle
+            .execute_tool_raw(
+                "get_weather",
+                &serde_json::json!({}),
+                None,
+                Some((tokio::time::Instant::now() + Duration::from_millis(20)).into_std()),
+            )
+            .await;
+        assert!(matches!(result, Err(PluginError::Timeout)));
+        assert_eq!(handle.query_slots.available_permits(), 0);
+        assert_eq!(handle.tool_waiters.load(Ordering::Acquire), 0);
+        assert!(handle.process.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn tool_waiter_overflow_returns_busy() {
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"id":"test.weather","name":"test","version":"1",
+            "runtime":{"exec":"never-start.exe","concurrency":1,"timeout_ms":60000},
+            "triggers":[],"capabilities":[]
+        }))
+        .unwrap();
+        let handle = Arc::new(PluginHandle::new(Arc::new(manifest), PathBuf::new(), None));
+        let _permit = handle.query_slots.acquire().await.unwrap();
+        let mut waiters = Vec::new();
+        for _ in 0..TOOL_WAITER_CAP {
+            let h = Arc::clone(&handle);
+            waiters.push(tokio::spawn(async move {
+                let _ = h
+                    .execute_tool_raw("get_weather", &serde_json::json!({}), None, None)
+                    .await;
+            }));
+        }
+        // 让等待者先登记排队
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let overflow = handle
             .execute_tool_raw("get_weather", &serde_json::json!({}), None, None)
             .await;
-        assert!(matches!(result, Err(PluginError::Busy)));
+        assert!(matches!(overflow, Err(PluginError::Busy)));
+        assert_eq!(handle.tool_waiters.load(Ordering::Acquire), TOOL_WAITER_CAP);
         assert!(handle.process.lock().await.is_none());
+        drop(_permit);
+        for w in waiters {
+            w.abort();
+        }
     }
 
     #[test]

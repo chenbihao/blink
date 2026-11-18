@@ -314,7 +314,6 @@ impl ResourceTransport for HttpResourceTransport {
                 // 可能无限等待"缺口），按网络失败换下一候选。
                 const BODY_STALL_SECS: u64 = 60;
                 // 0.28.28：速度诊断 5s 节流（与其他下载入口口径一致）
-                let attempt_started = std::time::Instant::now();
                 let mut last_speed_log = std::time::Instant::now();
                 let mut last_speed_log_bytes: u64 = 0;
                 loop {

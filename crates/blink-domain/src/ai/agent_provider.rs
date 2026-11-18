@@ -1574,7 +1574,7 @@ mod tests {
     #[tokio::test]
     async fn agent_invalid_effort_for_known_capability_rejected_locally() {
         use crate::ai::factory::wire_tests::spawn_capture_server;
-        let (addr, captured) =
+        let (_addr, captured) =
             spawn_capture_server(vec![crate::ai::factory::wire_tests::sse_stream_response()]);
         let entry = ProviderEntry {
             id: "oai-official".into(),

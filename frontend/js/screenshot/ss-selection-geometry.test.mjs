@@ -26,6 +26,7 @@ import {
     overlayDpr,
     pointInRect,
     pointNearWindowEdge,
+    preserveCommandDelta,
     rectBitmapToScreen,
     rectScreenToBitmap,
     rgbToHsl,
@@ -393,6 +394,24 @@ function testDistanceCss() {
     assertFloatEqual(distanceCss(0, 0, 3, 4), 5, '距离 (0,0) → (3,4) = 5');
 }
 
+function testPreserveCommandDelta() {
+    console.log('\n=== 0.29.2 选区调整保留标注的语义分派 ===');
+    const meta = {renderScaleX: 2, renderScaleY: 2, vx: 0, vy: 0};
+    // 纯移动（尺寸不变，含原样矩形）：null → 命令不平移，标注跟随选区整体转移
+    assertEqual(preserveCommandDelta({x: 100, y: 50, w: 200, h: 100}, {x: 140, y: 80, w: 200, h: 100}, meta),
+        null, '纯移动返回 null（命令不平移，画布随新原点走）');
+    assertEqual(preserveCommandDelta({x: 100, y: 50, w: 200, h: 100}, {x: 100, y: 50, w: 200, h: 100}, meta),
+        null, '原样矩形（中断恢复路径）同样返回 null');
+    // 缩放（尺寸变化）：原点差（bitmap px）→ 命令平移钉屏幕原位、出界裁掉
+    assertEqual(preserveCommandDelta({x: 100, y: 50, w: 200, h: 100}, {x: 120, y: 50, w: 150, h: 100}, meta),
+        {dx: -40, dy: 0}, '拖左缘缩放：dx = oldBmp.x - newBmp.x（renderScale 2）');
+    assertEqual(preserveCommandDelta({x: 0, y: 0, w: 100, h: 100}, {x: 20, y: 30, w: 80, h: 70}, meta),
+        {dx: -40, dy: -60}, 'nw 双向缩放：原点差两轴');
+    // 仅一维变化也是缩放语义
+    assertEqual(preserveCommandDelta({x: 0, y: 0, w: 100, h: 100}, {x: 0, y: 10, w: 100, h: 120}, meta),
+        {dx: 0, dy: -20}, '仅高度变化：仍按原点差平移');
+}
+
 function testFormatSelectionInfo() {
     console.log('\n=== 统一格式化 ===');
     const info = formatSelectionInfo(100, 200, 300, 150);
@@ -446,6 +465,7 @@ function runAllTests() {
         testPointInRect();
         testPointNearWindowEdge();
         testDistanceCss();
+        testPreserveCommandDelta();
         testFormatSelectionInfo();
         testFormatColor();
         testRgbToHsl();

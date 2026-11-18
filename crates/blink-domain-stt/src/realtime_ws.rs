@@ -686,18 +686,14 @@ impl CloudStreamingPort {
     }
 
     /// 测试注入：缩短 finish 等待预算。
+    #[cfg(test)]
     pub(crate) fn with_finalize_wait(self, wait: std::time::Duration) -> Self {
         *self.finalize_wait.lock().unwrap() = wait;
         self
     }
 
     /// 启动 WS 会话（生产连接或测试注入的 conn 共用此路径）。
-    fn start_ws_session(
-        &self,
-        generation: u64,
-        conn: Box<dyn WsConn>,
-        endpoint: &RealtimeEndpoint,
-    ) -> ActiveSession {
+    fn start_ws_session(&self, generation: u64, conn: Box<dyn WsConn>) -> ActiveSession {
         let ledger = Arc::new(StdMutex::new(SpanLedger::new()));
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let settled = Arc::new(Notify::new());
@@ -728,12 +724,12 @@ impl CloudStreamingPort {
         })
     }
 
-    /// 测试注入 fake 连接启动会话（跳过网络）。
+    /// 测试注入 fake 连接启动会话（跳过网络）。endpoint 仅保持与生产入口同构。
     #[cfg(test)]
     pub(crate) async fn begin_session_with_conn(
         &self,
         conn: Box<dyn WsConn>,
-        endpoint: &RealtimeEndpoint,
+        _endpoint: &RealtimeEndpoint,
     ) -> Result<u64, SttError> {
         let mut active = self.inner.lock().await;
         if active.is_some() {
@@ -742,7 +738,7 @@ impl CloudStreamingPort {
         let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
         self.active_event_generation
             .store(generation, Ordering::Release);
-        *active = Some(self.start_ws_session(generation, conn, endpoint));
+        *active = Some(self.start_ws_session(generation, conn));
         Ok(generation)
     }
 
@@ -791,7 +787,7 @@ impl StreamingSttPort for CloudStreamingPort {
             .store(generation, Ordering::Release);
 
         let session = match connect_realtime(&endpoint.ws_url, endpoint.api_key.as_deref()).await {
-            Ok(conn) => self.start_ws_session(generation, conn, &endpoint),
+            Ok(conn) => self.start_ws_session(generation, conn),
             Err(e) => {
                 // 回退：整段上传（CloudSttEngine 累积 + finalize）。
                 tracing::info!(

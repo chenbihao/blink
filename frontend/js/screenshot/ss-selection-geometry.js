@@ -225,6 +225,25 @@ export function cssRectToBitmap(rect, meta) {
 }
 
 /**
+ * 0.29.2：选区调整保留标注的语义分派（纯函数）。
+ *
+ * - 尺寸不变（纯移动）→ 返回 null：命令坐标**不平移**，标注画布随新原点
+ *   移动 → 标注跟随选区整体转移（与拖动期间的实时跟随预览一致，松手无回跳；
+ *   也是"移动选区不应把标注留在原地、移出即被裁掉"的观感修正）。
+ * - 尺寸变化（缩放）→ 返回原点差（bitmap px）：命令平移后钉在屏幕内容原位，
+ *   出界部分由画布边界自然裁掉（"变小了则裁剪"）。
+ *
+ * CSS 宽高浮点精确比较：纯移动路径（computeInteractionRect move 分支）原样
+ * 返回 original.w/h，比较恒等；缩放按定义至少改变一维。
+ */
+export function preserveCommandDelta(oldRect, newRect, meta) {
+    if (oldRect.w === newRect.w && oldRect.h === newRect.h) return null;
+    const a = cssRectToBitmap(oldRect, meta);
+    const b = cssRectToBitmap(newRect, meta);
+    return {dx: a.x - b.x, dy: a.y - b.y};
+}
+
+/**
  * bitmap 矩形 → overlay CSS 矩形
  */
 export function bitmapRectToCss(rect, meta) {

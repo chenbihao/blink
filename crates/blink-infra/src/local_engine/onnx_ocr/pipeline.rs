@@ -283,6 +283,15 @@ pub(super) fn map_oarocr_to_ocr_result(
         "map_oarocr_to_ocr_result 完成"
     );
 
+    // oar_ocr 逐 batch 内部日志已恒压（logging.rs），识别正文改由 blink 自身在
+    // TRACE 档受控记录——与 STT 转写正文（realtime_ws）同模式；换行走 Debug
+    // 转义保单行，错字/漏字排查看这一条即可，无需放开引擎日志。
+    tracing::trace!(
+        chars = full_text.chars().count(),
+        text = ?full_text,
+        "OCR 识别正文（trace）"
+    );
+
     Ok(OcrResult {
         backend_used: None,
         backend_fallback_reason: None,

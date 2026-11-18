@@ -349,6 +349,8 @@ export function exitReadingMode() {
  * 0.23.19：清除划词选中的文本（保留阅读层与词框，可继续重新划选）。
  * 切到非选取工具（画笔等标注工具）时由 selectTool 调用——选中文本属于
  * 选取工具的交互态，残留的蓝色高亮会与标注绘制视觉混在一起。幂等。
+ * 0.29.2：图上清除时同步收起面板 textarea 选区（guard 与 syncSelectionToPanel
+ * 一致），避免图上高亮已消失而面板仍残留选中。
  */
 export function clearReadingSelection() {
     if (!ss.reading) return;
@@ -357,6 +359,11 @@ export function clearReadingSelection() {
     ss.reading.dragStart = null;
     ss.reading.dragOrigin = null;
     redrawHitLayer();
+    const panel = document.getElementById('ocr-panel');
+    const ta = panel?.querySelector('#ocr-textarea-source');
+    if (ta && !ta.hidden && !ss.reading.panelDirty) {
+        ta.setSelectionRange(ta.selectionEnd, ta.selectionEnd);
+    }
 }
 
 // ── hit-canvas 事件（幂等绑定，模块生命周期只装一次） ──
@@ -453,15 +460,23 @@ function bindHitCanvasEvents() {
     const finishHitPointer = (e, cancelled = false) => {
         if (ss.reading?.dragOrigin && ss.reading.dragOrigin.pointerId !== e.pointerId) return;
         if (ss.selectionInteraction) {
+            // 未跨 3px 阈值的空白按压 = 静止单击（move 手势未激活）
+            const stationaryMove = ss.selectionInteraction.kind === 'move' && !ss.selectionInteraction.activated;
             hitCanvas.removeAttribute('data-resizing');
             hitCanvas.removeAttribute('data-interacting');
             hitCanvas.style.cursor = 'text';
             finishSelectionInteraction({offsetX: e.clientX, offsetY: e.clientY});
+            // 0.29.2：真空白处的静止单击同样收起划词选区（与文字上单击语义一致）
+            if (!cancelled && stationaryMove) clearReadingSelection();
         } else if (ss.reading) {
             // 松手使用最终坐标；取消事件只清理，不能把候选点击提交成文字选择。
             if (!cancelled) updateReadingDrag(e);
+            // 0.29.2：单击（未跨拖动阈值）收起已有划词选中——与文本编辑器
+            // "点击收起选区"一致；拖动形成/更新选区、pointercancel 不受影响。
+            const clickNoDrag = !cancelled && ss.reading.dragOrigin !== null && ss.reading.dragStart === null;
             ss.reading.dragStart = null;
             ss.reading.dragOrigin = null;
+            if (clickNoDrag) clearReadingSelection();
         }
         releasePointer(hitCanvas, e);
     };

@@ -41,4 +41,4 @@ compose 的 `environment` 覆盖，改完 `docker compose up -d` 重建容器即
 | `SV_THREADS` | `4` | 推理线程，按宿主机物理核数调 |
 | `SV_MAX_CONN` | `4` | 并发连接上限 |
 
-调参依据（源码审查 + 真实语料实测）见 [docs/phases/0.29-cloud-stt-realtime-streaming.md §3.6 / §六](../../phases/0.29-cloud-stt-realtime-streaming.md)。
+调参依据（源码审查 + 真实语料实测）见 [docs/phases/0.29-cloud-stt-and-detail-polish.md §3.6 / §六](../../phases/0.29-cloud-stt-and-detail-polish.md)。
