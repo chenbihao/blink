@@ -75,6 +75,9 @@ body.image-editor-mode #canvas.long-image-editing {
     cursor: crosshair;
     /* 画布承接截图快捷键，不在整张截图上绘制浏览器焦点框。 */
     outline: none;
+    /* 0.29.x：数位笔/触摸拖拽不允许被浏览器手势（平移/缩放）接管——否则笔尖拖画
+       中途会收到 pointercancel，表现为"选区出现一瞬又消失"。 */
+    touch-action: none;
 }
 
 /* 选取工具由 JS 根据热区切换 move/resize/crosshair；标注工具统一回到准星。 */
@@ -264,6 +267,15 @@ body.image-editor-mode #canvas.long-image-editing {
 /* 错误语义由 .ss-toast-error 修饰类承载（初始化失败/翻译失败等路径切换） */
 #error-hint.ss-toast-error {
     border-color: rgba(220, 80, 80, 0.8);
+}
+
+/* 0.29.3：紧凑信息态（无选区场景——选区前取色按 C 复制等）。#error-hint 基础
+   大号（text-lg / 12px 20px）是"初始化失败"类严重错误样式；短信息提示对齐
+   .ss-toast 基类视觉（text-sm / 6px 14px / 不换行） */
+#error-hint.ss-toast-compact {
+    padding: 6px 14px;
+    font-size: var(--text-sm);
+    white-space: nowrap;
 }
 
 /* 0.20.6：精调状态提示 */

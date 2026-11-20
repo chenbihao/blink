@@ -2866,6 +2866,7 @@
                 <label class="setting-label" data-i18n="log.action.label">操作</label>
                 <button class="btn-small" data-i18n="log.open_file" id="open-log-file">打开日志</button>
                 <button class="btn-small" data-i18n="log.open_dir" id="open-log-dir">打开文件夹</button>
+                <button class="btn-small" data-i18n="log.clean_old" id="clean-old-logs">清理旧日志</button>
             </div>
 
             <div class="setting-row" data-developer-only>
@@ -2886,9 +2887,9 @@
                 </button>
             </div>
 
-            <!-- 性能统计区 -->
-            <div class="section-label" data-i18n="debug.section.perf">性能统计 · 最近采样</div>
-            <div class="perf-section">
+            <!-- 性能统计区（0.29.3：开发者模式才显示，与主题调试台同一机制） -->
+            <div class="section-label" data-developer-only data-i18n="debug.section.perf">性能统计 · 最近采样</div>
+            <div class="perf-section" data-developer-only>
                 <div class="debug-toolbar">
                     <div class="debug-actions">
                         <button class="btn-small" data-i18n="debug.perf.refresh" id="perf-refresh">刷新</button>

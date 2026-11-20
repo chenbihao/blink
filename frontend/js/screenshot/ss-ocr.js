@@ -97,19 +97,22 @@ export function hideSelLoading() {
 
 /** 简易临时提示(选区附近,自动消失)。0.19.16：DPI 适配。
  *  0.22.10：视觉走 #error-hint toast 基类，错误态切 .ss-toast-error class，不再 inline 硬色。
- *  duration 可自定义（长文案的降级提示等需要更长停留时间）。 */
+ *  duration 可自定义（长文案的降级提示等需要更长停留时间）。
+ *  0.29.3：无选区时（选区前取色按 C 复制等）切 .ss-toast-compact 紧凑样式，
+ *  并锚定最后指针位置所在屏定位（此前固定弹在 overlay 视口正中且无 DPI 补偿）。 */
 export function showTransientHint(msg, {isError = false, duration = 2000} = {}) {
     const {errorHint, selCss} = ss;
     errorHint.textContent = msg;
     errorHint.classList.remove('hidden');
     errorHint.classList.toggle('ss-toast-error', isError);
+    errorHint.classList.toggle('ss-toast-compact', !selCss);
     errorHint.style.left = '-9999px';
     errorHint.style.top = '-9999px';
     errorHint.style.transform = 'none';
 
     requestAnimationFrame(() => {
+        const MARGIN = 8;
         if (selCss) {
-            const MARGIN = 8;
             // 0.19.16：按选区中心所在屏计算 uiScale，保证提示文字物理尺寸跨屏一致
             const meta = window.__blinkScreenMeta || {vx: 0, vy: 0};
             const cx = selCss.x + selCss.w / 2;
@@ -129,15 +132,34 @@ export function showTransientHint(msg, {isError = false, duration = 2000} = {}) 
             errorHint.style.left = left + 'px';
             errorHint.style.top = top + 'px';
         } else {
-            errorHint.style.left = '50%';
-            errorHint.style.top = '50%';
-            errorHint.style.transform = 'translate(-50%, -50%)';
+            // 0.29.3：无选区（选区前取色 / 取色器跟随）——此前固定 50%/50% 是整个
+            // overlay 视口（多屏拼接）的中心且无 scale 补偿，混合 DPI 下会弹错屏、
+            // 物理尺寸跨屏不一致。改为锚定最后指针位置（_lastMagnifierPos 由
+            // mousemove 维护），按所在屏做视觉补偿（spec-frontend §5.6，与 selCss
+            // 分支同一契约）；水平居中于指针，垂直放指针上方（放大镜固定在右下，
+            // 避免遮挡），空间不足时 clamp 在该屏内。
+            const anchor = ss._lastMagnifierPos
+                || {x: window.innerWidth / 2, y: window.innerHeight / 2};
+            const meta = window.__blinkScreenMeta || {vx: 0, vy: 0};
+            const uiScale = uiScaleAtCss(anchor.x, anchor.y, meta);
+            errorHint.style.transformOrigin = 'top left';
+            errorHint.style.transform = `scale(${uiScale})`;
+            const ew = errorHint.offsetWidth * uiScale;
+            const eh = errorHint.offsetHeight * uiScale;
+            const mon = findDisplayCssAt(anchor.x, anchor.y);
+            let left = anchor.x - ew / 2;
+            left = Math.max(mon.x + MARGIN, Math.min(left, mon.x + mon.w - ew - MARGIN));
+            let top = anchor.y - eh - MARGIN;
+            if (top < mon.y + MARGIN) top = mon.y + MARGIN;
+            errorHint.style.left = left + 'px';
+            errorHint.style.top = top + 'px';
         }
     });
 
     setTimeout(() => {
         errorHint.classList.add('hidden');
         errorHint.classList.remove('ss-toast-error');
+        errorHint.classList.remove('ss-toast-compact');
         errorHint.style.transform = '';
     }, duration);
 }

@@ -2212,6 +2212,7 @@ fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + 
         app::commands::retry_global_hotkey,
         app::commands::open_log_file,
         app::commands::open_log_dir,
+        app::commands::clean_old_logs,
         app::commands::get_log_info,
         app::commands::get_start_menu_config,
         app::commands::get_system_entry_status,

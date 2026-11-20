@@ -95,6 +95,28 @@ function initLogSettings() {
         }
     });
 
+    // 清理旧日志（保留当天；后端按 UTC 判定当天，不会删到正在写入的活跃文件）
+    document.getElementById("clean-old-logs")?.addEventListener("click", async () => {
+        const ok = await confirmDialog(t("log.clean_old.confirm"), {
+            title: t("common.confirm"),
+            kind: "warning",
+        });
+        if (!ok) return;
+        try {
+            const removed = await invoke("clean_old_logs");
+            const btn = document.getElementById("clean-old-logs");
+            if (btn) {
+                const original = btn.textContent;
+                btn.textContent = t("log.clean_old.done", {count: removed});
+                setTimeout(() => {
+                    btn.textContent = original;
+                }, 2000);
+            }
+        } catch (e) {
+            console.error("clean_old_logs failed:", e);
+        }
+    });
+
     loadLogInfo();
     loadHttpBodyLogState();
 }

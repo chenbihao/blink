@@ -1390,6 +1390,10 @@ function exitAnnotationMode() {
         cancelAnimationFrame(ss._annotRaf);
         ss._annotRaf = 0;
     }
+    // 0.29.x：ESC 中断在途笔画时同步清笔画态——否则 isAnnotDragging 悬挂到下一轮
+    // pointerdown/pointerup 触发无选区的收口路径
+    ss.isAnnotDragging = false;
+    ss._annotPointerId = null;
     // 0.23.15：退出标注模式时复位实时选区层（含在途预览 rAF）
     resetLiveSelection();
     // 0.15.10：清除快照
@@ -1536,12 +1540,41 @@ function endLongImagePan() {
 // - dblclick / contextmenu 等非拖选语义保持 MouseEvent 不变
 // - WebView2 提供 getCoalescedEvents() 时只取最后一个采样点，不重放历史点
 //
-// capture 的**适用范围**：只有拖选（pending-snap / move / resize / 新建自由拖选）与
-// 长图平移起 capture。标注笔画（`ss.isAnnotDragging`）仍走非 capture 路径，"拖出窗口
-// 再松手也送达"的保证**不适用于笔画**——这是刻意保持改造前行为，避免扩大改动面；
-// 同理 `ss-pointer.hasActiveDragInteraction` 也不含笔画态。
+// capture 的**适用范围**（0.29.x 数位笔修复修订）：拖选（pending-snap / move / resize /
+// 新建自由拖选）、长图平移**与标注笔画**都起 capture。0.23.15 曾让笔画刻意走非 capture
+// 路径（保持改造前行为），但数位笔实测提笔的 pointerup 可能丢失（驱动「接触=切换」
+// 语义或 WebView2 笔事件异常），无 capture 时事件送达更不可靠；笔画收口已改为
+// pointerup / pointercancel / move buttons 守卫 / 重入守卫多路兜底，capture 不再是
+// 唯一保障。`ss-pointer.hasActiveDragInteraction` 仍不含笔画态（笔画中断走
+// finishAnnotationStroke 收口，不走 abortSelectionInteraction）。
 //
 // capture / 采样 / 中断判定的实现见 ss-pointer.js（纯逻辑，可单测）。
+
+// ── 0.29.3：数位笔提笔判定辅助（临时诊断日志已于收口时移除）──────────────
+//
+// 数位笔提笔的 pointerup 可能整体丢失（实测：提笔后选区/笔画需靠兜底收口），
+// buttons 与 pressure 双信号判定见下方各守卫。本节是纯功能件：
+//
+// - penReportsPressure：自校准压力闩锁——本会话见过 pen 真实压力（>0）后，
+//   pressure === 0 才可作为「悬停提笔」信号；无压感驱动接触时也恒报 0（未按
+//   规范报 0.5），闩锁不闭合即禁用该信号，避免第一笔 move 就被误收口。
+// - lastStrokeEndAt：最近一次笔画收口时刻（contextmenu 刚收笔守卫用）。
+let penReportsPressure = false;
+let lastStrokeEndAt = 0;
+
+/** 数位笔当前事件是否应按「提笔悬停」处理（pressure 信号）。 */
+function penLiftByPressure(e) {
+    if (e.pointerType !== 'pen' || typeof e.pressure !== 'number') return false;
+    if (e.pressure > 0) return false;
+    return penReportsPressure;
+}
+
+// 闩锁更新：被动捕获 pen 指针事件（无日志副作用，仅布尔置位）
+for (const type of ['pointerdown', 'pointermove']) {
+    window.addEventListener(type, (e) => {
+        if (e.pointerType === 'pen' && e.pressure > 0) penReportsPressure = true;
+    }, {capture: true, passive: true});
+}
 
 canvas.addEventListener('pointerdown', (e) => {
     if (!_firstMousedownLogged) {
@@ -1576,6 +1609,26 @@ canvas.addEventListener('pointerdown', (e) => {
     }
 
     if (e.button !== 0) return;
+
+    // 0.29.x：数位笔防悬挂——上一轮拖选/笔画未收到 pointerup（提笔事件丢失、驱动
+    // 「接触=切换左键」语义）时，新按下会先把在途交互重置（选区塌缩 0×0 / 笔画状态
+    // 悬挂后被悬停 move 续画）。这里先把上一轮收口再开新一轮。
+    // 0.29.3-r2：收口一律用**最后已知点**（笔画 annotCurrentX/Y、拖选 endX/endY）——
+    // 实测反馈证明新按下点是下一笔的意图，不是上一笔的"松手点"，用新按下点收口会把
+    // 两笔连成一条直线。
+    if (ss.isAnnotDragging || ss.isDragging) {
+        if (ss.isAnnotDragging) {
+            finishAnnotationStroke(pointerPoint(e), {
+                isPen: e.pointerType === 'pen', shiftKey: e.shiftKey, reason: 'reentry', atCurrent: true,
+            });
+            releasePointer(canvas, e);
+        }
+        if (ss.isDragging) {
+            finishSelectionDrag({offsetX: ss.endX, offsetY: ss.endY}, {reason: 'reentry'});
+            releasePointer(canvas, e);
+        }
+        ss.pendingSnap = null;
+    }
 
     const point = pointerPoint(e);
 
@@ -1659,6 +1712,11 @@ canvas.addEventListener('pointerdown', (e) => {
         ss.annotCurrentY = ss.annotStartY;
         annot.startDraw(ss.annotStartX, ss.annotStartY);
         ss.isAnnotDragging = true;
+        // 0.29.x：记录笔画指针 id（pointermove 的 buttons 守卫按 id 匹配，避免
+        // 另一只指针的悬停 move 误杀在画笔画）
+        ss._annotPointerId = e.pointerId ?? null;
+        // 0.29.x：笔画也起 capture（见文件头「capture 的适用范围」修订说明）
+        capturePointer(canvas, e);
         // 0.15.10：拍快照——预览时用 drawImage 恢复，避免每帧全量重放命令
         try {
             const snap = document.createElement('canvas');
@@ -1851,6 +1909,24 @@ canvas.addEventListener('pointermove', (e) => {
     }
 
     if (ss.isAnnotDragging && ss.selCss) {
+        // 0.29.3-r2：提笔判定（实测反馈：抬笔后笔触仍连着、下次压下被连成一笔）。
+        // 两种提笔信号，命中即按**最后接触点**收口本笔（atCurrent，悬停路径不进笔迹）：
+        //  a) buttons 丢 1——悬停 move 的 buttons=0；
+        //  b) penLiftByPressure——本会话已见过真实压力（>0）后，pen 的 pressure===0
+        //     即悬停（Ink 悬停压力恒 0），可识别"谎报 buttons=1"或换了 pointerId 的
+        //     悬停流；无压感驱动（恒 0 上报）自动禁用该信号。
+        // 豁免：另一只**鼠标**的悬停 move（pointerType=mouse 且 id 不匹配）不算提笔——
+        // 笔在画时鼠标 idle 移动不应误杀；pen/touch 任意 id 的提笔信号都收口。
+        const idMatches = ss._annotPointerId == null || e.pointerId === ss._annotPointerId;
+        const otherMouseIdle = e.pointerType === 'mouse' && !idMatches;
+        const liftSignal = (!(e.buttons & 1)) || penLiftByPressure(e);
+        if (liftSignal && !otherMouseIdle) {
+            finishAnnotationStroke(point, {
+                isPen: e.pointerType === 'pen', shiftKey: e.shiftKey, reason: 'lift', atCurrent: true,
+            });
+            releasePointer(canvas, e);
+            return;
+        }
         const annotPt = annotationPoint(point);
         ss.annotCurrentX = annotPt.x;
         ss.annotCurrentY = annotPt.y;
@@ -1875,6 +1951,14 @@ canvas.addEventListener('pointermove', (e) => {
     }
 
     if (ss.isDragging) {
+        // 0.29.3-r2：拖选提笔守卫（与笔画分支同判定）——数位笔提笔丢 up 后悬停流
+        // 到达时，按当前位置（≈提笔点）收口拖选；选区不再跟随悬停漂移，也不等下次
+        // 按下才补收口。过小矩形静默丢弃（不走 200ms 隐藏定时器）。
+        if ((!(e.buttons & 1)) || penLiftByPressure(e)) {
+            finishSelectionDrag(point, {reason: 'lift'});
+            releasePointer(canvas, e);
+            return;
+        }
         // 0.19.15：移除跨 DPR clamp——canvas backing store = 虚拟桌面物理像素（1:1），
         // renderScale 全局一致，cssRectToBitmap 对任意屏的 CSS 坐标都能正确映射到
         // SESSION 物理像素坐标。跨 DPR 选区的裁剪/复制/pin 均由后端 crop_bgra_virtual
@@ -1902,11 +1986,167 @@ canvas.addEventListener('pointerleave', () => {
     // 0.25.14 A1：就绪前缓存拖选同样随离场作废（capture 抑制期外才可能到达）
     ss._predragStart = null;
     if (!ss.selectionInteraction) {
-        ss.canvas.style.cursor = ss._imagePan && annot.getTool() === 'select'
+        // 0.29.x：非标注态一律 crosshair（与 updateSelectionCursor 一致）。数位笔每次
+        // 提笔出感应范围都会触发 pointerleave，旧逻辑在 select 工具下设 default（箭头），
+        // 造成"笔一提光标变回鼠标"的失灵观感。
+        ss.canvas.style.cursor = (ss._imagePan && annot.getTool() === 'select')
             ? 'grab'
-            : (annot.getTool() === 'select' ? 'default' : 'crosshair');
+            : ((ss.isAnnotating && annot.getTool() === 'select') ? 'default' : 'crosshair');
     }
 });
+
+/**
+ * 0.29.x：笔画收口（多路兜底共用）。
+ *
+ * 调用方：pointerup（正常松手）/ pointercancel（系统回收指针，0.29.x 前不收口导致
+ * isAnnotDragging 悬挂）/ pointermove 的提笔守卫（buttons 丢失或 pen 悬停压力为 0）/
+ * pointerdown 重入守卫（上一轮悬挂）。提交语义与原 pointerup 分支一致：minDrag 以下
+ * 丢弃；铅笔小位移按点击设连线锚点（数位笔放宽阈值）；否则 endDraw 提交。
+ *
+ * `atCurrent: true`（提笔兜底/重入收口用）：终点沿用最近一次**接触采样点**
+ * （`ss.annotCurrentX/Y`），不采纳传入事件坐标——提笔后的悬停 move 与新按下点
+ * 都不是上一笔的真实笔迹（0.29.3-r2 实测反馈：抬笔后下一笔被直线连到新按下点）。
+ *
+ * @param {{offsetX:number, offsetY:number, shiftKey?:boolean}} point pointerPoint 归一后的采样点
+ * @param {{isPen?:boolean, shiftKey?:boolean, reason?:'up'|'cancel'|'lift'|'reentry',
+ *          atCurrent?:boolean}} [opts]
+ * @returns {boolean} 是否提交了笔画
+ */
+function finishAnnotationStroke(point, opts = {}) {
+    if (!ss.isAnnotDragging) return false;
+    const {isPen = false, reason = 'up', atCurrent = false} = opts;
+    const shiftKey = opts.shiftKey ?? point.shiftKey ?? false;
+    ss.isAnnotDragging = false;
+    ss._annotPointerId = null;
+    // 0.15.9：取消待执行的 rAF，确保最终重绘是最新的
+    if (ss._annotRaf) {
+        cancelAnimationFrame(ss._annotRaf);
+        ss._annotRaf = 0;
+    }
+    // 0.15.10：清除快照
+    ss._committedSnapshot = null;
+    // 0.28.26 补充：释放荧光笔预览分层（落笔后 redrawAll 走成品合成）
+    endHighlightLivePreview();
+    // 0.29.x：标注模式已退出（ESC 中断等）时 selCss 已清空，无从换算选区局部
+    // 坐标——直接丢弃笔画，避免 annotationPoint 空引用炸掉整个收口路径
+    if (!ss.selCss) {
+        annot.discardActiveStroke();
+        lastStrokeEndAt = performance.now();
+        return false;
+    }
+    let annotPt;
+    if (atCurrent) {
+        // 0.29.3-r2：提笔兜底/重入收口——终点沿用最近一次接触采样点（annotCurrentX/Y
+        // 由 pointermove 逐事件维护），悬停坐标/新按下点不得连进上一笔
+        annotPt = {x: ss.annotCurrentX, y: ss.annotCurrentY};
+    } else {
+        annotPt = annotationPoint(point);
+        if (shiftKey) {
+            const constrained = applySquareConstraint(
+                ss.annotStartX, ss.annotStartY, annotPt.x, annotPt.y, annot.getTool()
+            );
+            if (constrained) annotPt = constrained;
+        }
+    }
+    ss.annotCurrentX = annotPt.x;
+    ss.annotCurrentY = annotPt.y;
+
+    const tool = annot.getTool();
+    const dx = ss.annotCurrentX - ss.annotStartX;
+    const dy = ss.annotCurrentY - ss.annotStartY;
+    // 0.15.1：用 TOOL_CAPS 替代硬编码 minDrag 列表；0.29.x：数位笔放宽——笔尖精度
+    // 下 3px 阈值会吃掉短笔触（用户反馈"按下没反应"）
+    const baseMinDrag = (TOOL_CAPS[tool] || TOOL_CAPS.select).minDrag;
+    const minDrag = isPen ? Math.min(baseMinDrag, 1) : baseMinDrag;
+    if (Math.abs(dx) < minDrag && Math.abs(dy) < minDrag) {
+        console.debug('[screenshot] annotation drag too small, skip', {tool, dx, dy, isPen, reason});
+        redrawAnnotFull();
+        lastStrokeEndAt = performance.now();
+        return false;
+    }
+
+    // 0.28.26：铅笔普通点击 = 设置连线起点（"普通点击…可作为起点"），
+    // 不再写入不可见的 1 点空命令；2px 内的抖动仍按点击处理。
+    // 0.29.x：数位笔点击阈值放宽到 0.5px——笔尖轻点/短笔触天然小位移，2px 会整笔吞掉。
+    const clickEps = isPen ? 0.5 : 2;
+    if (tool === 'pencil' && !shiftKey && Math.abs(dx) < clickEps && Math.abs(dy) < clickEps) {
+        annot.discardActiveStroke();
+        annot.setLineAnchor({x: ss.annotCurrentX, y: ss.annotCurrentY});
+        redrawAnnotFull();
+        lastStrokeEndAt = performance.now();
+        return false;
+    }
+
+    const result = annot.endDraw(ss.annotCurrentX, ss.annotCurrentY);
+    if (result && result.needsText) {
+        showTextInput(result.x, result.y);
+    }
+    // 0.28.26：上一笔结束位置可作为 Shift 连线起点
+    if (tool === 'pencil') {
+        annot.setLineAnchor({x: ss.annotCurrentX, y: ss.annotCurrentY});
+    }
+    redrawAnnotFull();
+    updateUndoRedoButtons();
+    lastStrokeEndAt = performance.now();
+    return true;
+}
+
+/**
+ * 0.29.x：拖选收口（多路兜底共用）。
+ *
+ * 调用方：pointerup（reason='up' 正常结束）/ pointerdown 重入守卫（'reentry'，按
+ * 最后已知点 endX/endY 收口）/ pointercancel 与 lostpointercapture（'cancel'，按
+ * 最后已知点）/ pointermove 提笔守卫（'lift'，按当前事件点 ≈ 提笔点）。
+ *
+ * 小于 5×5 的拖选：reason==='up' 保持原「单击 200ms 后隐藏 overlay」路径；其余
+ * reason 跳过该定时器静默丢弃——新交互已开始或提笔收尾，迟到的隐藏定时器会把
+ * overlay 整个关掉，重现为"选区出现一瞬又消失"的加重版。
+ *
+ * @returns {boolean} 是否提交为选区（进入标注模式）
+ */
+function finishSelectionDrag(point, {shiftKey = false, reason = 'up'} = {}) {
+    if (!ss.isDragging) return false;
+    ss.isDragging = false;
+    ss.endX = point.offsetX;
+    ss.endY = point.offsetY;
+    // 0.20.6：Shift 按下时强制 1:1 正方形约束（release 路径与拖动共用同一纯函数）
+    const rect = computeDragRect(ss.startX, ss.startY, point.offsetX, point.offsetY, !!shiftKey);
+    if (rect.w < 5 || rect.h < 5) {
+        console.debug('[screenshot] rect too small, wait for dblclick', rect, reason);
+        if (reason === 'up') {
+            if (ss.singleClickTimeout) clearTimeout(ss.singleClickTimeout);
+            ss.singleClickTimeout = setTimeout(() => {
+                ss.singleClickTimeout = null;
+                if (!ss.isAnnotating && !ss.sent) {
+                    console.debug('[screenshot] single click → hide overlay');
+                    // 0.23.12：此路径原先不做清理，是旧图层残留闪现的出口之一
+                    cleanupCanvasVisuals();
+                    hideScreenshotOverlay().catch((err) => console.error('hideScreenshotOverlay 失败', err));
+                }
+            }, 200);
+        }
+        return false;
+    }
+
+    // ⚠️ 临时诊断日志（跨 DPR 排查用），收尾时清理
+    const _meta = window.__blinkScreenMeta || {};
+    const _bmp = cssRectToBitmap(rect, _meta);
+    console.debug('[screenshot] selection confirmed', {
+        cssRect: rect,
+        bmpRect: _bmp,
+        renderScale: _meta.renderScaleX,
+        dpr: window.devicePixelRatio,
+        physicalDisplays: _meta.physicalDisplays,
+    });
+    // 0.15.8 R2：自由框选不关联窗口 HWND
+    ss.snappedHwnd = null;
+    try {
+        enterAnnotationMode(rect);
+    } catch (err) {
+        console.error('[screenshot] enterAnnotationMode threw', err);
+    }
+    return true;
+}
 
 canvas.addEventListener('pointerup', (e) => {
     // 0.23.15：先取消未落地的实时预览 rAF 并复位实时层；canvas 提交由下面各条路径
@@ -1961,63 +2201,11 @@ canvas.addEventListener('pointerup', (e) => {
     }
 
     if (ss.isAnnotDragging) {
-        ss.isAnnotDragging = false;
-        // 0.15.9：取消待执行的 rAF，确保最终重绘是最新的
-        if (ss._annotRaf) {
-            cancelAnimationFrame(ss._annotRaf);
-            ss._annotRaf = 0;
-        }
-        // 0.15.10：清除快照
-        ss._committedSnapshot = null;
-        // 0.28.26 补充：释放荧光笔预览分层（落笔后 redrawAll 走成品合成）
-        endHighlightLivePreview();
-        const annotPt = annotationPoint(point);
-        ss.annotCurrentX = annotPt.x;
-        ss.annotCurrentY = annotPt.y;
-        if (point.shiftKey) {
-            const constrained = applySquareConstraint(
-                ss.annotStartX, ss.annotStartY, ss.annotCurrentX, ss.annotCurrentY, annot.getTool()
-            );
-            if (constrained) {
-                ss.annotCurrentX = constrained.x;
-                ss.annotCurrentY = constrained.y;
-            }
-        }
-
-        const tool = annot.getTool();
-        const dx = ss.annotCurrentX - ss.annotStartX;
-        const dy = ss.annotCurrentY - ss.annotStartY;
-        // 0.15.1：用 TOOL_CAPS 替代硬编码 minDrag 列表
-        const minDrag = (TOOL_CAPS[tool] || TOOL_CAPS.select).minDrag;
-        if (Math.abs(dx) < minDrag && Math.abs(dy) < minDrag) {
-            console.debug('[screenshot] annotation drag too small, skip', {tool, dx, dy});
-            ss._committedSnapshot = null;
-            redrawAnnotFull();
-            releasePointer(canvas, e);
-            return;
-        }
-
-        // 0.28.26：铅笔普通点击 = 设置连线起点（"普通点击…可作为起点"），
-        // 不再写入不可见的 1 点空命令；2px 内的抖动仍按点击处理。
-        if (tool === 'pencil' && !point.shiftKey && Math.abs(dx) < 2 && Math.abs(dy) < 2) {
-            annot.discardActiveStroke();
-            annot.setLineAnchor({x: ss.annotCurrentX, y: ss.annotCurrentY});
-            ss._committedSnapshot = null;
-            redrawAnnotFull();
-            releasePointer(canvas, e);
-            return;
-        }
-
-        const result = annot.endDraw(ss.annotCurrentX, ss.annotCurrentY);
-        if (result && result.needsText) {
-            showTextInput(result.x, result.y);
-        }
-        // 0.28.26：上一笔结束位置可作为 Shift 连线起点
-        if (tool === 'pencil') {
-            annot.setLineAnchor({x: ss.annotCurrentX, y: ss.annotCurrentY});
-        }
-        redrawAnnotFull();
-        updateUndoRedoButtons();
+        // 0.29.x：收口逻辑提取为 finishAnnotationStroke（与 pointercancel / buttons
+        // 守卫 / 重入守卫共用），本分支只负责正常松手路径
+        finishAnnotationStroke(point, {
+            isPen: e.pointerType === 'pen', shiftKey: e.shiftKey, reason: 'up',
+        });
         releasePointer(canvas, e);
         return;
     }
@@ -2052,44 +2240,8 @@ canvas.addEventListener('pointerup', (e) => {
         releasePointer(canvas, e);
         return;
     }
-    ss.isDragging = false;
-    ss.endX = point.offsetX;
-    ss.endY = point.offsetY;
-    // 0.20.6：Shift 按下时强制 1:1 正方形约束（release 路径与拖动共用同一纯函数）
-    const rect = computeDragRect(ss.startX, ss.startY, point.offsetX, point.offsetY, !!point.shiftKey);
-    if (rect.w < 5 || rect.h < 5) {
-        console.debug('[screenshot] rect too small, wait for dblclick', rect);
-        if (ss.singleClickTimeout) clearTimeout(ss.singleClickTimeout);
-        ss.singleClickTimeout = setTimeout(() => {
-            ss.singleClickTimeout = null;
-            if (!ss.isAnnotating && !ss.sent) {
-                console.debug('[screenshot] single click → hide overlay');
-                // 0.23.12：此路径原先不做清理，是旧图层残留闪现的出口之一
-                cleanupCanvasVisuals();
-                hideScreenshotOverlay().catch((err) => console.error('hideScreenshotOverlay 失败', err));
-            }
-        }, 200);
-        releasePointer(canvas, e);
-        return;
-    }
-
-    // ⚠️ 临时诊断日志（跨 DPR 排查用），收尾时清理
-    const _meta = window.__blinkScreenMeta || {};
-    const _bmp = cssRectToBitmap(rect, _meta);
-    console.debug('[screenshot] selection confirmed', {
-        cssRect: rect,
-        bmpRect: _bmp,
-        renderScale: _meta.renderScaleX,
-        dpr: window.devicePixelRatio,
-        physicalDisplays: _meta.physicalDisplays,
-    });
-    // 0.15.8 R2：自由框选不关联窗口 HWND
-    ss.snappedHwnd = null;
-    try {
-        enterAnnotationMode(rect);
-    } catch (e) {
-        console.error('[screenshot] enterAnnotationMode threw', e);
-    }
+    // 0.29.x：收口逻辑提取为 finishSelectionDrag（与 pointerdown 重入守卫共用）
+    finishSelectionDrag(point, {shiftKey: !!point.shiftKey, reason: 'up'});
     releasePointer(canvas, e);
 });
 
@@ -2168,6 +2320,26 @@ canvas.addEventListener('pointercancel', (e) => {
     ss._linePressSetAnchor = false;
     // 0.28.26 补充：指针取消释放荧光笔预览分层（半程笔画不提交）
     endHighlightLivePreview();
+    // 0.29.x：笔画态收口——此前 hasActiveDragInteraction 不含 isAnnotDragging，
+    // pointercancel 时笔画状态无人清理而悬挂，数位笔提笔后悬停 move 继续鬼画。
+    // 笔的长按右键（Windows press-and-hold）与手势接管都会走 pointercancel。
+    if (ss.isAnnotDragging) {
+        finishAnnotationStroke(pointerPoint(e), {
+            isPen: e.pointerType === 'pen', shiftKey: e.shiftKey, reason: 'cancel', atCurrent: true,
+        });
+        releasePointer(canvas, e);
+        return;
+    }
+    // 0.29.3-r2：新建拖选中的 cancel 按最后位置收口（≥5×5 提交为选区，过小静默丢弃，
+    // 不走 200ms 单击隐藏定时器）——数位笔提笔丢 up 时常由 cancel / lostpointercapture
+    // 收尾，此前两条都走 abort 整段丢弃选区，即实测"选区一闪即逝"。
+    // move/resize 交互（selectionInteraction）仍走 abort 恢复交互前矩形。
+    if (ss.isDragging) {
+        resetLiveSelection();
+        finishSelectionDrag({offsetX: ss.endX, offsetY: ss.endY}, {reason: 'cancel'});
+        releasePointer(canvas, e);
+        return;
+    }
     if (!hasActiveDragInteraction(ss)) return;
     console.debug('[screenshot] pointercancel → abort selection interaction');
     abortSelectionInteraction(e);
@@ -2177,6 +2349,14 @@ canvas.addEventListener('lostpointercapture', (e) => {
     // capture 被隐式释放（正常 pointerup 之后也会触发）。只有仍存在未结束的拖选时
     // 才视为异常中断，避免把正常提交二次处理成取消。
     ss._predragStart = null; // 0.25.14 A1：pointerup 未清到此处仍持有 = 异常中断
+    // 0.29.3-r2：新建拖选同 pointercancel——数位笔提笔出感应范围会以 lostpointercapture
+    // 收尾（无 pointerup），按最后位置提交/丢弃，不再 abort 整段选区
+    if (ss.isDragging) {
+        resetLiveSelection();
+        finishSelectionDrag({offsetX: ss.endX, offsetY: ss.endY}, {reason: 'cancel'});
+        releasePointer(canvas, e);
+        return;
+    }
     if (!hasActiveDragInteraction(ss)) return;
     console.debug('[screenshot] lostpointercapture with active drag → abort');
     abortSelectionInteraction(e);
@@ -2206,6 +2386,9 @@ canvas.addEventListener('dblclick', handleScreenshotDoubleClick);
 
 canvas.addEventListener('contextmenu', (e) => {
     e.preventDefault();
+    // 0.29.x：数位笔长按右键（Windows press-and-hold）会紧跟笔画结束触发
+    // contextmenu——刚收笔的右键不是用户意图，吞掉，避免标注态误复制选区/非标注态误取消截图
+    if (performance.now() - lastStrokeEndAt < 400) return;
     if (ss.reading) {
         const selText = getReadingSelectionText();
         showReadingContextMenu(selText || null, e);

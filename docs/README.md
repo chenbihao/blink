@@ -64,7 +64,7 @@
 | **0.26** | [0.26-plugin-system-upgrade.md](./phases/0.26-plugin-system-upgrade.md) | 插件系统升级：天气/IP 与公共交互、剪贴板文件与预览、超链/书签与浏览器导入、托管 Everything、更新提醒；0.26.22 长截图连续采集重构与技术债清理 | ✅ 0.26.0–0.26.23 本版范围收尾；长截图用户实测流畅，未覆盖的实机验证边界见 phase §六 |
 | **0.27** | [0.27-ai-interaction-enhancement.md](./phases/0.27-ai-interaction-enhancement.md) | AI 交互增强（提示词库、编辑器预设、斜杠命令、附件/Vision、文件感知、代理与路由、IME 隔离）；补充 rig 0.45 升级、方言适配与跨 Provider 思考语义 | 🚧 0.27.1–0.27.15 实现完成（13/14/15 自动化回归通过，真实厂商实发/GUI 待手动）；收尾清单见 phase §六 |
 | **0.28** | [0.28-plugin-platform-and-tools.md](./phases/0.28-plugin-platform-and-tools.md) | 官方插件/语言工具与同步、GIF/MP4；截图/录制增强；下载治理、主窗口 AI 交互与供应商同步修复；0.28.29 Alt+Space 菜单误触发治理 | ✅ 0.28.1–0.28.29 全部收口 |
-| **0.29** | [0.29-cloud-stt-and-detail-polish.md](./phases/0.29-cloud-stt-and-detail-polish.md) | 云端 STT Realtime WS 流式引擎与整段上传回退、流式能力探测、设置页云端卡片整理、WS 日志治理、sensevoice-server 部署与调优；0.29.2 项目细节打磨（截图翻译仅图层、工具栏居中对齐、大内容翻译分批与插件忙治理、划词单击收起、选区调整保留标注图层） | ✅ 0.29.1–0.29.2 收口 |
+| **0.29** | [0.29-cloud-stt-and-detail-polish.md](./phases/0.29-cloud-stt-and-detail-polish.md) | 云端 STT Realtime WS 流式引擎与整段上传回退、流式能力探测、设置页云端卡片整理、WS 日志治理、sensevoice-server 部署与调优；0.29.2 项目细节打磨（截图翻译仅图层、工具栏居中对齐、大内容翻译分批与插件忙治理、划词单击收起、选区调整保留标注图层）；0.29.3 截图数位笔输入修复 | ✅ 0.29.1–0.29.3 收口 |
 
 > **非版本档案**：[roadmap.md](./roadmap.md)（近期优先、条件候选与远期观察；不预占版本号）；ADR-001（Agent 后端策略）已并入 [spec-architecture §A10](./specs/spec-architecture.md)。
 
@@ -99,7 +99,7 @@
 | 0.26.x | 插件系统与公共交互升级；0.26.22 长截图连续采集重构与技术债清理 | ✅ 0.26.0–0.26.23 本版范围收尾；长截图用户实测流畅，未覆盖的实机验证边界见 phase §六（见 [phase 文档](phases/0.26-plugin-system-upgrade.md)） |
 | 0.27.x | AI 交互增强；0.27.13 rig 0.45 升级、0.27.14 方言接线、0.27.15 跨 Provider 思考语义 | 🚧 0.27.1–0.27.15 已实现并过自动化回归；真实厂商实发、GUI 复验、完整 IME/资源矩阵与文档收尾待做（见 [phase 文档 §六](phases/0.27-ai-interaction-enhancement.md)） |
 | 0.28 | 插件/语言工具、同步与 GIF/MP4；截图/录制增强；下载治理、主窗口 AI 交互与供应商同步修复 | ✅ 0.28.1–0.28.29 完成 |
-| 0.29.x | 云端 STT Realtime WS 流式引擎与整段上传回退、流式能力探测、设置页云端卡片整理、WS 日志治理、sensevoice-server 部署调优；截图细节打磨（翻译仅图层、工具栏居中对齐、大内容翻译分批与插件忙治理、划词单击收起、选区调整保留标注图层） | ✅ 0.29.1–0.29.2 收口 |
+| 0.29.x | 云端 STT Realtime WS 流式引擎与整段上传回退、流式能力探测、设置页云端卡片整理、WS 日志治理、sensevoice-server 部署调优；截图细节打磨（翻译仅图层、工具栏居中对齐、大内容翻译分批与插件忙治理、划词单击收起、选区调整保留标注图层）；0.29.3 截图数位笔输入修复 | ✅ 0.29.1–0.29.3 收口 |
 | 未立项 | 见 roadmap：subagent / proactivity / 词汇学习（记忆曲线与四六级等词包）/ 多类型 API（生图/TTS）/ 远期向量与 RAG 观察 | 🔮 候选池 |
 
 ---

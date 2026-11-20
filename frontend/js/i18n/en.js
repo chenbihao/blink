@@ -527,6 +527,9 @@ export const en = {
     "log.action.label": "Actions",
     "log.open_file": "Open log",
     "log.open_dir": "Open folder",
+    "log.clean_old": "Clean old logs",
+    "log.clean_old.confirm": "Delete all log files except today's? (The log being written is kept)",
+    "log.clean_old.done": "Cleaned {count}",
 
     // ── Debug tab: performance ──
     "debug.perf.title": "Performance Stats",

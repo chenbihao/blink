@@ -45,13 +45,10 @@ pub fn init(level: &str) {
     let dir = log_dir();
     std::fs::create_dir_all(&dir).ok();
 
-    // 每日轮转文件 appender（文件名 blink.YYYY-MM-DD.log，.log 后缀方便软件打开）
-    let file_appender = tracing_appender::rolling::Builder::new()
-        .rotation(tracing_appender::rolling::Rotation::DAILY)
-        .filename_prefix("blink")
-        .filename_suffix("log")
-        .build(&dir)
-        .expect("failed to build log appender");
+    // 0.29.3：自愈 appender（替代 tracing_appender::rolling）——UTC 翻日轮转，
+    // 且当天文件被删除/截短后下一条写入即重开，不再"凭空消失"到下一个翻日。
+    // 文件名与原 rolling appender 保持一致（blink.YYYY-MM-DD.log，UTC 日期）。
+    let file_appender = SelfHealingAppender::new(&dir);
     let (writer, guard) = tracing_appender::non_blocking(file_appender);
     let _ = GUARD.set(guard);
 
@@ -84,6 +81,117 @@ pub fn init(level: &str) {
 
     cleanup_old_logs(&dir);
     install_panic_hook(dir);
+}
+
+/// 0.29.3：自愈文件 appender，替代 `tracing_appender::rolling`（DAILY）。
+///
+/// 动机：rolling appender 只在 UTC 翻日时重开文件，其余写入复用同一句柄。
+/// 运行中当天日志被用户删除（Windows 下 Rust std 句柄共享 delete，目录项
+/// 立即进入 delete-pending）或被工具截短/替换后，后续日志全部写入不可见的
+/// 孤儿流，直到下一个 UTC 翻日（本地 +8 下最长约一天）才恢复——表现为
+/// "日志凭空消失"。
+///
+/// 每次写入前检查（一次日期计算 + 一次 stat，相对写盘开销可忽略）：
+/// - UTC 日期翻越 → 轮转到新文件（命名 `blink.YYYY-MM-DD.log`，与原
+///   rolling appender 一致，UTC 日期）
+/// - 文件不存在（被删/目录被删）→ 重建（含 create_dir_all）
+/// - 磁盘长度小于本会话累计写入（被截短/被编辑器保存替换）→ 重开续写
+/// - 重开失败（文件被外部占用等）→ 本条丢弃并返回错误，下一条写前重试
+///
+/// append 模式（Windows FILE_APPEND_DATA）保证写入总落在当前 EOF，外部
+/// truncate 后续写不会产生零填充空洞。重开前先 drop 旧句柄：delete-pending
+/// 需要最后一个句柄关闭才完成删除，期间同名 create 会失败。
+struct SelfHealingAppender {
+    dir: PathBuf,
+    state: Mutex<AppenderState>,
+    /// 当前 UTC 日期（可注入以便测试轮转）
+    now: Box<dyn Fn() -> chrono::NaiveDate + Send + Sync>,
+}
+
+struct AppenderState {
+    date: chrono::NaiveDate,
+    file: Option<std::fs::File>,
+    /// 当前文件本会话累计写入字节数（磁盘长度小于它 = 被外部截短/替换）
+    written: u64,
+}
+
+impl SelfHealingAppender {
+    fn new(dir: &std::path::Path) -> Self {
+        Self::with_now(dir, Box::new(|| chrono::Utc::now().date_naive()))
+    }
+
+    fn with_now(
+        dir: &std::path::Path,
+        now: Box<dyn Fn() -> chrono::NaiveDate + Send + Sync>,
+    ) -> Self {
+        Self {
+            dir: dir.to_path_buf(),
+            state: Mutex::new(AppenderState {
+                date: now(),
+                file: None,
+                written: 0,
+            }),
+            now,
+        }
+    }
+
+    fn file_name(date: chrono::NaiveDate) -> String {
+        format!("blink.{}.log", date.format("%Y-%m-%d"))
+    }
+
+    fn open(dir: &std::path::Path, date: chrono::NaiveDate) -> std::io::Result<std::fs::File> {
+        std::fs::create_dir_all(dir)?;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join(Self::file_name(date)))
+    }
+
+    /// 确保句柄指向"今天（UTC）的文件"且文件未被外部移除/截短；需要时重开。
+    fn ensure_current_file(&self, state: &mut AppenderState, today: chrono::NaiveDate) {
+        let damaged = state.file.is_none()
+            || state.date != today
+            || match std::fs::metadata(self.dir.join(Self::file_name(today))) {
+                // 不存在（delete-pending 目录项已消失）或长度小于累计写入（被截短/替换）
+                Ok(meta) => meta.len() < state.written,
+                Err(_) => true,
+            };
+        if !damaged {
+            return;
+        }
+        state.file = None;
+        state.written = 0;
+        match Self::open(&self.dir, today) {
+            Ok(file) => {
+                state.date = today;
+                state.file = Some(file);
+            }
+            Err(_) => {
+                // 打开失败：本条丢弃，下一条写前重试
+                state.file = None;
+            }
+        }
+    }
+}
+
+impl std::io::Write for SelfHealingAppender {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let today = (self.now)();
+        let mut state = self.state.lock().unwrap();
+        self.ensure_current_file(&mut state, today);
+        match state.file.as_mut() {
+            Some(file) => file.write(buf).inspect(|&n| state.written += n as u64),
+            None => Err(std::io::Error::other("日志文件暂不可用（重开失败），本条丢弃")),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let mut state = self.state.lock().unwrap();
+        match state.file.as_mut() {
+            Some(file) => file.flush(),
+            None => Ok(()),
+        }
+    }
 }
 
 /// release 使用 panic=abort，非阻塞日志队列来不及排空。
@@ -131,9 +239,14 @@ pub fn log_dir() -> PathBuf {
     crate::utils::paths::logs_dir()
 }
 
-/// 当天日志文件路径（tracing-appender daily 格式：blink.log.YYYY-MM-DD）。
+/// 当天日志文件路径（tracing-appender daily 格式：blink.YYYY-MM-DD.log）。
+/// 0.29.3：tracing-appender 0.2 的 DAILY 轮转按 **UTC 日期**命名文件
+/// （rolling.rs 用 `OffsetDateTime::now_utc`），此前这里用 Local 拼名，
+/// UTC+8 下每天 00:00–08:00 指向一个不存在的文件——「打开日志」定位失败
+/// 退化成打开文件夹、设置页展示的文件名与磁盘不符（用户反馈"文件夹空白"）。
+/// 必须用 UTC 对齐 appender 的实际命名。
 pub fn current_log_file() -> PathBuf {
-    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
     log_dir().join(format!("blink.{today}.log"))
 }
 
@@ -236,14 +349,30 @@ fn parse_level(level: &str) -> String {
     }
 }
 
-/// 启动与定期清理共用：只处理 Blink 的日期日志（含 panic 与旧命名）。
+/// 启动与定期清理共用：删除保留期（`RETAIN_DAYS`）之前的 Blink 日期日志。
 pub fn cleanup_old_logs(dir: &std::path::Path) -> usize {
-    let cutoff = SystemTime::now() - Duration::from_secs(60 * 60 * 24 * RETAIN_DAYS);
+    cleanup_logs(dir, Some(Duration::from_secs(60 * 60 * 24 * RETAIN_DAYS)))
+}
+
+/// 手动清理（设置页按钮）：保留当天，删除其余 Blink 日期日志。
+/// 不会触碰无关文件（非 `blink.*日期*.log` 模式一律保留）。
+pub fn cleanup_all_but_today(dir: &std::path::Path) -> usize {
+    cleanup_logs(dir, None)
+}
+
+/// 只处理 Blink 的日期日志（含 panic 与旧命名）。
+/// `max_age`：Some = 同时要求文件修改时间早于该保留期（定期任务的 7 天窗口）；
+/// None = 只按文件名日期，当天之外全删（手动清理）。
+/// 日期按 **UTC** 判断，与 tracing-appender 的文件命名一致——本地 00:00–08:00
+/// 期间正在写入的活跃文件名是"UTC 昨天"，若按本地日期判断，手动清理会把
+/// 活跃文件删掉，appender 长期持有的句柄后续全部写入已删除的孤儿流，
+/// 直到下一个 UTC 翻日轮转才恢复（表现为"日志凭空消失一整天"）。
+fn cleanup_logs(dir: &std::path::Path, max_age: Option<Duration>) -> usize {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;
     };
     let mut removed = 0;
-    let today = chrono::Local::now().date_naive();
+    let today = chrono::Utc::now().date_naive();
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
@@ -261,10 +390,15 @@ pub fn cleanup_old_logs(dir: &std::path::Path) -> usize {
         {
             continue;
         }
-        if let Ok(meta) = entry.metadata()
-            && let Ok(modified) = meta.modified()
-            && modified < cutoff
-        {
+        let expired = match max_age {
+            Some(max_age) => entry
+                .metadata()
+                .ok()
+                .and_then(|meta| meta.modified().ok())
+                .is_some_and(|modified| modified < SystemTime::now() - max_age),
+            None => true,
+        };
+        if expired {
             match std::fs::remove_file(entry.path()) {
                 Ok(()) => removed += 1,
                 Err(error) => tracing::warn!(%error, "过期日志清理失败"),
@@ -272,7 +406,7 @@ pub fn cleanup_old_logs(dir: &std::path::Path) -> usize {
         }
     }
     if removed > 0 {
-        tracing::info!(removed, "过期日志清理完成");
+        tracing::info!(removed, "日志清理完成");
     }
     removed
 }
@@ -345,6 +479,106 @@ mod tests {
         assert!(paths[..3].iter().all(|path| !path.exists()));
         assert!(paths[3..].iter().all(|path| path.exists()));
         assert!(recent.exists());
+    }
+
+    /// 手动清理（cleanup_all_but_today）：UTC 当天文件保留（含 00:00–08:00 活跃
+    /// 文件是"UTC 昨天"名的场景由 UTC 判定兜住），其余日期日志全删（不看修改
+    /// 时间），无关文件即使带 blink 前缀也不动。
+    #[test]
+    fn manual_cleanup_keeps_only_utc_today_and_never_touches_unrelated() {
+        let root = tempfile::tempdir().unwrap();
+        let utc_today = chrono::Utc::now().date_naive();
+        let keep = root.path().join(format!("blink.{utc_today}.log"));
+        let drop1 = root.path().join(format!("blink.{}.log", utc_today - chrono::Days::new(1)));
+        let drop2 = root
+            .path()
+            .join(format!("blink.panic.{}.log", utc_today - chrono::Days::new(2)));
+        let drop3 = root
+            .path()
+            .join(format!("blink.log.{}", utc_today - chrono::Days::new(3)));
+        let unrelated = root.path().join("blink-notes.txt");
+        let other = root.path().join("other.log");
+        for path in [&keep, &drop1, &drop2, &drop3, &unrelated, &other] {
+            std::fs::File::create(path).unwrap();
+        }
+        assert_eq!(super::cleanup_all_but_today(root.path()), 3);
+        assert!(keep.exists());
+        assert!(unrelated.exists());
+        assert!(other.exists());
+        assert!(!drop1.exists());
+        assert!(!drop2.exists());
+        assert!(!drop3.exists());
+    }
+
+    /// 自愈 appender：当天文件被删除后，下一条写入重建文件继续写。
+    #[test]
+    fn self_healing_appender_recovers_after_file_delete() {
+        use std::io::Write;
+        let root = tempfile::tempdir().unwrap();
+        let today = chrono::Utc::now().date_naive();
+        let path = root.path().join(super::SelfHealingAppender::file_name(today));
+
+        let mut appender = super::SelfHealingAppender::new(root.path());
+        appender.write_all(b"first\n").unwrap();
+        appender.flush().unwrap();
+        assert!(path.exists());
+
+        std::fs::remove_file(&path).unwrap();
+        appender.write_all(b"second\n").unwrap();
+        appender.flush().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second\n");
+    }
+
+    /// 自愈 appender：UTC 翻日轮转（注入日期函数模拟跨天，两条日志两个文件）。
+    #[test]
+    fn self_healing_appender_rotates_across_utc_days() {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicU8, Ordering};
+        let root = tempfile::tempdir().unwrap();
+        let day = std::sync::Arc::new(AtomicU8::new(0));
+        let day2 = day.clone();
+        let mut appender = super::SelfHealingAppender::with_now(
+            root.path(),
+            Box::new(move || {
+                chrono::NaiveDate::from_ymd_opt(
+                    2026,
+                    11,
+                    20 + day2.load(Ordering::Relaxed) as u32,
+                )
+                .unwrap()
+            }),
+        );
+        appender.write_all(b"day0\n").unwrap();
+        day.store(1, Ordering::Relaxed);
+        appender.write_all(b"day1\n").unwrap();
+        appender.flush().unwrap();
+        assert!(root.path().join("blink.2026-11-20.log").exists());
+        assert!(root.path().join("blink.2026-11-21.log").exists());
+    }
+
+    /// 自愈 appender：文件被外部截短后重开，续写追加到新 EOF（无零填充空洞）。
+    #[test]
+    fn self_healing_appender_reopens_after_truncate() {
+        use std::io::Write;
+        let root = tempfile::tempdir().unwrap();
+        let today = chrono::Utc::now().date_naive();
+        let path = root.path().join(super::SelfHealingAppender::file_name(today));
+
+        let mut appender = super::SelfHealingAppender::new(root.path());
+        appender.write_all(b"0123456789\n").unwrap();
+        appender.flush().unwrap();
+
+        // 外部截短到 4 字节（磁盘长度 < 累计写入 → 下一条写入触发重开）
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap();
+        file.set_len(4).unwrap();
+        drop(file);
+
+        appender.write_all(b"tail\n").unwrap();
+        appender.flush().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "0123tail\n");
     }
 
     #[test]

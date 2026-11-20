@@ -894,6 +894,16 @@ pub fn open_log_dir() -> Result<(), String> {
     Ok(())
 }
 
+/// 手动清理旧日志文件（保留当天，日期按 UTC 与 appender 命名对齐）。
+/// 返回删除的文件数；单个文件删除失败只记 warn 不中断。
+#[tauri::command]
+pub fn clean_old_logs() -> Result<usize, String> {
+    let dir = crate::infra::utils::logging::log_dir();
+    let removed = crate::infra::utils::logging::cleanup_all_but_today(&dir);
+    tracing::info!(removed, "手动清理旧日志完成");
+    Ok(removed)
+}
+
 /// 获取日志路径信息（供设置页显示）。
 #[tauri::command]
 pub fn get_log_info() -> serde_json::Value {

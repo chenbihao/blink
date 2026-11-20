@@ -527,6 +527,9 @@ export const zh = {
     "log.action.label": "操作",
     "log.open_file": "打开日志",
     "log.open_dir": "打开文件夹",
+    "log.clean_old": "清理旧日志",
+    "log.clean_old.confirm": "确定删除今天以外的所有日志文件？（保留正在写入的当天日志）",
+    "log.clean_old.done": "已清理 {count} 个",
 
     // ── 调试 Tab：性能统计 ──
     "debug.perf.title": "性能统计",
