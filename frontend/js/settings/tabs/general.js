@@ -58,7 +58,10 @@ async function refreshMirrorPreference() {
     if (!checkbox || checkbox.disabled) return;
     try {
         const network = await invoke("get_config_section", {key: "network"});
-        mirrorPreferenceValue = network?.preferCnMirror === true;
+        // network 分片落库为 snake_case（NetworkConfig 无 camelCase rename，与
+        // about.js 读 app.update 的 auto_check_enabled 同约定），读错键名会导致
+        // 每次重启后开关显示回退（0.28.27 遗留 bug，实际持久化一直是好的）。
+        mirrorPreferenceValue = network?.prefer_cn_mirror === true;
         checkbox.checked = mirrorPreferenceValue;
     } catch (err) {
         // 读取失败保留现有内容，不打断页面（后端缺失 = 默认关闭）

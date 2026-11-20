@@ -381,9 +381,18 @@ struct ClipboardSnapshot {
     file_list: Option<Vec<String>>,
 }
 
+/// 读取快照（0.29.3 起含空快照重试）。
+///
+/// **空快照重试**：打开成功但三类格式全空不再是终态。自写入
+/// Open→Empty→Set→Close 事务进行中（或事务首事件早到）时，监听线程可能
+/// 观察到「可打开但无格式」的空剪贴板——直接跳过会导致截图/取色复制漏入
+/// 历史（表现为部分机器上除首次外全部不记）。短退避重读即可命中写入完成
+/// 后的真实内容；真空剪贴板（外部 EmptyClipboard 不回填）最多多耗 ~32ms
+/// 后照旧走跳过路径。
 fn read_clipboard_snapshot(capture_images: bool, capture_files: bool) -> ClipboardSnapshot {
     const MAX_ATTEMPTS: u32 = 5;
     const BACKOFF_MS: u64 = 8;
+    let mut rescued_after_empty = false;
     for attempt in 0..MAX_ATTEMPTS {
         unsafe {
             if OpenClipboard(None).is_ok() {
@@ -405,17 +414,33 @@ fn read_clipboard_snapshot(capture_images: bool, capture_files: bool) -> Clipboa
                     snap.file_list = read_hdrop_file_list_inner();
                 }
                 let _ = CloseClipboard();
-                if attempt > 0 {
-                    tracing::debug!(attempt, "剪贴板快照读取重试成功");
+                // 打开成功但零格式：可能是写入方事务中段（Empty 已生效、Set 未落地），
+                // 退避后重读；读到任一格式即返回。空白文本（Some）视为格式存在，不重试。
+                let all_empty =
+                    snap.text.is_none() && snap.dib.is_none() && snap.file_list.is_none();
+                if !all_empty {
+                    if rescued_after_empty {
+                        tracing::debug!(attempt, "剪贴板快照空读后重试命中内容");
+                    } else if attempt > 0 {
+                        tracing::debug!(attempt, "剪贴板快照读取重试成功");
+                    }
+                    return snap;
                 }
-                return snap;
+                rescued_after_empty = true;
+                if attempt + 1 == MAX_ATTEMPTS {
+                    break;
+                }
             }
         }
         if attempt + 1 < MAX_ATTEMPTS {
             std::thread::sleep(std::time::Duration::from_millis(BACKOFF_MS));
         }
     }
-    tracing::debug!("剪贴板快照 OpenClipboard 重试仍失败,放弃");
+    if rescued_after_empty {
+        tracing::debug!("剪贴板快照重试后仍为空,按真空跳过");
+    } else {
+        tracing::debug!("剪贴板快照 OpenClipboard 重试仍失败,放弃");
+    }
     ClipboardSnapshot {
         text: None,
         dib: None,

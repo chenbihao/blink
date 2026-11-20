@@ -56,7 +56,7 @@ test('discard stays behind explicit confirmation and finish only stops and keeps
 
 test('entering preparation clears only the displayed still image and opens desktop input without starting capture',async()=>{
     const state=createRecordingSession();state.reset('ready');
-    let cleared=0;const calls=[],styles={},crops=[];
+    let cleared=0;const calls=[],crops=[];const styles={setProperty:(k,v)=>{styles[k]=v;}};
     const base={width:1920,height:1080,getContext:()=>({clearRect(){cleared++;}})};
     const frame={style:styles,classList:{remove(){}}};
     const original={};
@@ -64,7 +64,7 @@ test('entering preparation clears only the displayed still image and opens deskt
     const context=vm.createContext({createPreparationLease,state,ss,
         window:{__blinkScreenMeta:{}},document:{getElementById:id=>id==='canvas'?base:id==='gif-region-frame'?frame:null,querySelectorAll:()=>[]},
         retainToolbarAnchor(){},renderRecordingUi(){},selectTool(){},annot:{updateCropData:(...args)=>crops.push(args)},
-        cssPointToScreen:(x,y)=>({x,y}),cssRectToBitmap:r=>r,screenRectToCss:r=>r,getRenderScale:()=>({scaleX:1,scaleY:1}),
+        cssPointToScreen:(x,y)=>({x,y}),cssRectToBitmap:r=>r,screenRectToCss:r=>r,getRenderScale:()=>({scaleX:1,scaleY:1}),uiScaleAtCss:()=>1,
         clearInterval(){},setInterval:()=>1,
         invoke:async(command,args)=>{calls.push({command,args});return command==='gif_overlay_prepare'?17:null;},
     });
@@ -96,6 +96,7 @@ test('entering preparation clears only the displayed still image and opens deskt
     context.changePreparationSelection({x:0,y:0,w:900,h:600},true);
     assert.deepEqual({...state.regionPhys},{...resized},'开始录制后不能再提交准备态尺寸');
     assert.ok(styles.width,'实时范围框仍可见');
+    assert.equal(styles['--rec-ui-scale'],'1','手柄/边缘随所在屏 uiScale 缩放（跨屏视觉补偿）');
 });
 
 test('preparation text focus waits for its lease and cannot focus or release a reused overlay', async () => {

@@ -2668,10 +2668,14 @@ html.eyedropper-picking * {
 .audio-overload { outline: 1px solid var(--red); outline-offset: 1px; }
 /* 范围框的外矩形由物理坐标生成，边框完整位于采集区域外。 */
 .gif-region-frame { position: fixed; border: solid var(--accent); pointer-events: none; z-index: 3; }
+/* 0.29.3：录制选区浮层跨屏视觉补偿（spec-frontend §5.6）。--rec-ui-scale 由
+   ss-gif-rec.js syncRegionVisual 按区域所在屏写入（uiScale = monitorDpr / renderScale），
+   手柄基准 6px 与截图选区手柄（canvas 6×monitorDpr）同等物理观感，边缘命中带
+   ±8px 与尺寸标签同步缩放；transformOrigin 由 JS 按摆放位置写入。 */
 .gif-prep-handle, .gif-prep-edge, .gif-prep-size { display: none; }
-.gif-region-frame[data-resizable="true"] > .gif-prep-size { display: block; position: absolute; left: 4px; padding: 2px 4px; white-space: nowrap; background: var(--screenshot-panel-bg); color: var(--screenshot-text); font-size: 11px; line-height: 16px; }
+.gif-region-frame[data-resizable="true"] > .gif-prep-size { display: block; position: absolute; left: 4px; padding: 2px 4px; white-space: nowrap; background: var(--screenshot-panel-bg); color: var(--screenshot-text); font-size: 11px; line-height: 16px; transform: scale(var(--rec-ui-scale, 1)); }
 .gif-region-frame[data-resizable="true"] > :is(.gif-prep-handle, .gif-prep-edge) { display: block; position: absolute; pointer-events: auto; touch-action: none; }
-.gif-prep-handle { width: 8px; height: 8px; border: 1px solid var(--accent); background: var(--screenshot-text); transform: translate(-50%, -50%); z-index: 1; }
+.gif-prep-handle { width: calc(6px * var(--rec-ui-scale, 1)); height: calc(6px * var(--rec-ui-scale, 1)); border: calc(1px * var(--rec-ui-scale, 1)) solid var(--accent); background: var(--screenshot-text); transform: translate(-50%, -50%); z-index: 1; }
 .gif-prep-handle:is([data-recording-resize="nw"], [data-recording-resize="n"], [data-recording-resize="ne"]) { top: 0; }
 .gif-prep-handle:is([data-recording-resize="w"], [data-recording-resize="e"]) { top: 50%; }
 .gif-prep-handle:is([data-recording-resize="sw"], [data-recording-resize="s"], [data-recording-resize="se"]) { top: 100%; }
@@ -2682,11 +2686,11 @@ html.eyedropper-picking * {
 .gif-prep-handle:is([data-recording-resize="nw"], [data-recording-resize="se"]) { cursor: nwse-resize; }
 .gif-prep-handle:is([data-recording-resize="ne"], [data-recording-resize="sw"]) { cursor: nesw-resize; }
 .gif-prep-edge { cursor: move; }
-.gif-prep-edge:is([data-recording-edge="n"], [data-recording-edge="s"]) { left: 8px; right: 8px; height: 8px; }
-.gif-prep-edge:is([data-recording-edge="w"], [data-recording-edge="e"]) { top: 8px; bottom: 8px; width: 8px; }
-.gif-prep-edge[data-recording-edge="n"] { top: -4px; }
-.gif-prep-edge[data-recording-edge="s"] { bottom: -4px; }
-.gif-prep-edge[data-recording-edge="w"] { left: -4px; }
-.gif-prep-edge[data-recording-edge="e"] { right: -4px; }
+.gif-prep-edge:is([data-recording-edge="n"], [data-recording-edge="s"]) { left: calc(8px * var(--rec-ui-scale, 1)); right: calc(8px * var(--rec-ui-scale, 1)); height: calc(8px * var(--rec-ui-scale, 1)); }
+.gif-prep-edge:is([data-recording-edge="w"], [data-recording-edge="e"]) { top: calc(8px * var(--rec-ui-scale, 1)); bottom: calc(8px * var(--rec-ui-scale, 1)); width: calc(8px * var(--rec-ui-scale, 1)); }
+.gif-prep-edge[data-recording-edge="n"] { top: calc(-4px * var(--rec-ui-scale, 1)); }
+.gif-prep-edge[data-recording-edge="s"] { bottom: calc(-4px * var(--rec-ui-scale, 1)); }
+.gif-prep-edge[data-recording-edge="w"] { left: calc(-4px * var(--rec-ui-scale, 1)); }
+.gif-prep-edge[data-recording-edge="e"] { right: calc(-4px * var(--rec-ui-scale, 1)); }
 body.gif-recording, html.gif-recording, html.gif-recording body { background: transparent; }
 body.gif-recording :is(#interaction-canvas, #preselection-mask, #live-selection, #ocr-hit-canvas, #stroke-cursor, #pixel-magnifier, #precision-hint, #sel-loading, #size-hint) { visibility: hidden !important; }

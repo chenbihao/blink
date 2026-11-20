@@ -17,7 +17,7 @@ import {t} from '../i18n/index.js';
 import {createAnnotationUploader} from './recording-annotation.js';
 import {ss} from './ss-state.js';
 import {recordingSession as state} from './recording-session.js';
-import {cssPointToScreen, cssRectToBitmap, getRenderScale, screenRectToCss, syncRenderScale} from './ss-selection-geometry.js';
+import {cssPointToScreen, cssRectToBitmap, getRenderScale, screenRectToCss, syncRenderScale, uiScaleAtCss} from './ss-selection-geometry.js';
 import {drawFinalSelection} from './ss-draw.js';
 import {updateLiveSelection} from './ss-live-selection.js';
 import {positionToolbar} from './ss-display.js';
@@ -451,10 +451,16 @@ function syncRegionVisual() {
         const {scaleX, scaleY} = getRenderScale(meta);
         const geometry = recordingFrameGeometry(state.regionPhys, meta, scaleX, scaleY);
         Object.assign(frame.style, geometry);
+        // 0.29.3：手柄/边缘/尺寸标签随区域所在屏做跨屏视觉补偿（spec-frontend §5.6），
+        // 与截图选区手柄（canvas 6×monitorDpr）、范围框边框（dpi/96）同一套规则。
+        frame.style.setProperty('--rec-ui-scale', String(uiScaleAtCss(ss.selCss.x, ss.selCss.y, meta)));
         const size = el('gif-prep-size');
         if (size && state.regionPhys) {
             size.textContent = `${state.regionPhys.w} × ${state.regionPhys.h}`;
-            size.style.top = ss.selCss.y < 24 ? '4px' : '-24px';
+            const above = ss.selCss.y >= 24;
+            size.style.top = above ? '-24px' : '4px';
+            // 缩放锚点随摆放位置取铆边：框上方锚底边、框内锚顶边，放大后不遮边框
+            size.style.transformOrigin = above ? 'left bottom' : 'left top';
         }
     }
 }
